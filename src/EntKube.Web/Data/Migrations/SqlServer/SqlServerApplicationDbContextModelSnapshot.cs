@@ -1000,6 +1000,106 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("AppServicePorts");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationContract", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int?>("Criticality")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DevelopedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("GuaranteeEndsAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("ManagementEndedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<decimal?>("MonthlyWorkCapHours")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("OnboardedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<decimal?>("OnboardingFee")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<int>("Origin")
+                        .HasColumnType("int");
+
+                    b.Property<Guid?>("ParentAppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("SlaStartsAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId")
+                        .IsUnique();
+
+                    b.HasIndex("ParentAppId");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("ApplicationContracts");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationServiceLevel", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ApplicationContractId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("EffectiveFrom")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Level")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("RecordedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RecordedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("SupportWindow")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ApplicationContractId", "EffectiveFrom");
+
+                    b.ToTable("ApplicationServiceLevels");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ApplicationUser", b =>
                 {
                     b.Property<string>("Id")
@@ -2098,6 +2198,63 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("AppId", "EnvironmentId");
 
                     b.ToTable("ConnectivityRules");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ContractContact", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Email")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Party")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Phone")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("int");
+
+                    b.Property<string>("TeamsHandle")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("CustomerId", "Party", "Role");
+
+                    b.ToTable("ContractContacts");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CostLedgerCoverage", b =>
@@ -4968,6 +5125,118 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("OutboundMtlsCredentials");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.PortfolioAgreement", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("EffectiveFrom")
+                        .HasColumnType("datetime2");
+
+                    b.Property<decimal?>("HourBankHoursPerMonth")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("PricingModel")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("RecordedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RecordedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("CustomerId", "EffectiveFrom");
+
+                    b.ToTable("PortfolioAgreements");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceList", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("EffectiveFrom")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("TenantId", "CustomerId", "EffectiveFrom");
+
+                    b.ToTable("PriceLists");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceListEntry", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<decimal>("Amount")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<decimal?>("Hours")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("PriceListId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PriceListId", "Kind", "Key")
+                        .IsUnique();
+
+                    b.ToTable("PriceListEntries");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQBackup", b =>
                 {
                     b.Property<Guid>("Id")
@@ -7058,6 +7327,43 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Environment");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationContract", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.App", "ParentApp")
+                        .WithMany()
+                        .HasForeignKey("ParentAppId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("ParentApp");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationServiceLevel", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ApplicationContract", "Contract")
+                        .WithMany("ServiceLevels")
+                        .HasForeignKey("ApplicationContractId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Contract");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.AuditEvent", b =>
                 {
                     b.HasOne("EntKube.Web.Data.AppDeployment", "Deployment")
@@ -7302,6 +7608,32 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Environment");
 
                     b.Navigation("PeerApp");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ContractContact", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CostLedgerCoverage", b =>
@@ -8300,6 +8632,54 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.PortfolioAgreement", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceList", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceListEntry", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.PriceList", "PriceList")
+                        .WithMany("Entries")
+                        .HasForeignKey("PriceListId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("PriceList");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQBackup", b =>
                 {
                     b.HasOne("EntKube.Web.Data.RabbitMQCluster", "Cluster")
@@ -8987,6 +9367,11 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("DeploymentRoutes");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationContract", b =>
+                {
+                    b.Navigation("ServiceLevels");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
                 {
                     b.Navigation("Targets");
@@ -9147,6 +9532,11 @@ namespace EntKube.Web.Data.Migrations.SqlServer
             modelBuilder.Entity("EntKube.Web.Data.OpenStackConnection", b =>
                 {
                     b.Navigation("StorageLinks");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceList", b =>
+                {
+                    b.Navigation("Entries");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQCluster", b =>

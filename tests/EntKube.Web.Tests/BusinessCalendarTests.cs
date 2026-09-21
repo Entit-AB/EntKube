@@ -1,3 +1,4 @@
+using EntKube.Web.Data;
 using EntKube.Web.Services.Support;
 using FluentAssertions;
 

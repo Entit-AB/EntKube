@@ -1,0 +1,297 @@
+using EntKube.Web.Data;
+using Microsoft.EntityFrameworkCore;
+
+namespace EntKube.Web.Services.Contracts;
+
+/// <summary>
+/// The classification in force for an application on a date.
+/// </summary>
+/// <param name="Level">The förvaltningsnivå.</param>
+/// <param name="Window">
+/// The support window, after inheritance. Null when nothing has been agreed — an instance
+/// whose moderapplikation has no window either, or an application classified but never
+/// given one. Null is reported rather than defaulted, because guessing S1 would quietly
+/// understate both the fönsteravgift and the hours the SLA clock runs.
+/// </param>
+/// <param name="WindowInherited">True when the window came from the moderapplikation (§10.2.1).</param>
+/// <param name="EffectiveFrom">When this classification took effect.</param>
+public readonly record struct ResolvedServiceLevel(
+    ManagementLevel Level,
+    SupportWindow? Window,
+    bool WindowInherited,
+    DateTime EffectiveFrom);
+
+/// <summary>
+/// Reads the agreement: which terms applied to an application or a portfolio on a given
+/// date, and what the grundavgift comes to.
+///
+/// <para>Everything here takes an <c>asOf</c> instant rather than reading the clock. A
+/// statement for March is produced in April and must answer as March — the same discipline
+/// the cost ledger keeps, for the same reason.</para>
+/// </summary>
+public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
+{
+    /// <summary>
+    /// How deep an instance chain may be followed when inheriting a support window. An
+    /// instance of an instance is not something §10.2.1 contemplates, but data can always
+    /// say otherwise, and a cycle must not hang a page.
+    /// </summary>
+    private const int MaxParentDepth = 8;
+
+    public async Task<ApplicationContract?> GetContractAsync(Guid appId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.ApplicationContracts
+            .Include(c => c.ServiceLevels)
+            .AsNoTracking()
+            .FirstOrDefaultAsync(c => c.AppId == appId, ct);
+    }
+
+    /// <summary>
+    /// The förvaltningsnivå and support window in force for an application on a date, with
+    /// an instance inheriting its moderapplikation's window when it has none of its own.
+    /// Null when the application has no contract or nothing had taken effect by then.
+    /// </summary>
+    public async Task<ResolvedServiceLevel?> ResolveServiceLevelAsync(
+        Guid appId, DateTime asOf, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<ApplicationContract> contracts = await db.ApplicationContracts
+            .Include(c => c.ServiceLevels)
+            .AsNoTracking()
+            .ToListAsync(ct);
+
+        return Resolve(appId, asOf, contracts.ToDictionary(c => c.AppId));
+    }
+
+    /// <summary>
+    /// The Bilaga B terms in force for a customer on a date — the latest agreement that had
+    /// taken effect by then.
+    /// </summary>
+    public async Task<PortfolioAgreement?> GetPortfolioAgreementAsync(
+        Guid customerId, DateTime asOf, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.PortfolioAgreements
+            .AsNoTracking()
+            .Where(a => a.CustomerId == customerId && a.EffectiveFrom <= asOf)
+            .OrderByDescending(a => a.EffectiveFrom)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    /// <summary>
+    /// The price list in force on a date: the customer's own if one has been negotiated,
+    /// otherwise the tenant's standard list.
+    /// </summary>
+    public async Task<PriceList?> GetPriceListAsync(
+        Guid tenantId, Guid? customerId, DateTime asOf, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        IQueryable<PriceList> lists = db.PriceLists
+            .Include(p => p.Entries)
+            .AsNoTracking()
+            .Where(p => p.TenantId == tenantId && p.EffectiveFrom <= asOf);
+
+        if (customerId is not null)
+        {
+            PriceList? negotiated = await lists
+                .Where(p => p.CustomerId == customerId)
+                .OrderByDescending(p => p.EffectiveFrom)
+                .FirstOrDefaultAsync(ct);
+
+            if (negotiated is not null)
+            {
+                return negotiated;
+            }
+        }
+
+        return await lists
+            .Where(p => p.CustomerId == null)
+            .OrderByDescending(p => p.EffectiveFrom)
+            .FirstOrDefaultAsync(ct);
+    }
+
+    /// <summary>
+    /// The grundavgift of §10 for a customer on a date: one fönsteravgift priced on the most
+    /// extensive window in the portfolio, plus one kännedomsavgift per application.
+    ///
+    /// <para>Applications that cannot be priced are listed rather than charged at zero, so a
+    /// missing classification shows up as a gap instead of as a discount.</para>
+    /// </summary>
+    public async Task<BaseFeeBreakdown> CalculateBaseFeeAsync(
+        Guid customerId, DateTime asOf, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        Customer? customer = await db.Customers.AsNoTracking()
+            .FirstOrDefaultAsync(c => c.Id == customerId, ct);
+
+        if (customer is null)
+        {
+            return new BaseFeeBreakdown(null, 0m, [], []);
+        }
+
+        // Every contract in the tenant, because resolving an instance's inherited window may
+        // walk to a moderapplikation that belongs to another customer.
+        List<ApplicationContract> allContracts = await db.ApplicationContracts
+            .Include(c => c.ServiceLevels)
+            .AsNoTracking()
+            .Where(c => c.TenantId == customer.TenantId)
+            .ToListAsync(ct);
+
+        Dictionary<Guid, ApplicationContract> byApp = allContracts.ToDictionary(c => c.AppId);
+
+        Dictionary<Guid, string> appNames = await db.Apps.AsNoTracking()
+            .Where(a => a.CustomerId == customerId)
+            .ToDictionaryAsync(a => a.Id, a => a.Name, ct);
+
+        PriceList? prices = await GetPriceListAsync(customer.TenantId, customerId, asOf, ct);
+
+        List<ApplicationContract> active = [.. allContracts
+            .Where(c => appNames.ContainsKey(c.AppId) && IsUnderManagement(c, asOf))];
+
+        Dictionary<Guid, int> ordinals = InstanceOrdinals(allContracts);
+
+        List<ApplicationFee> fees = [];
+        List<string> unpriced = [];
+
+        foreach (ApplicationContract contract in active.OrderBy(c => appNames[c.AppId]))
+        {
+            string name = appNames[contract.AppId];
+            ResolvedServiceLevel? resolved = Resolve(contract.AppId, asOf, byApp);
+
+            if (resolved is null || resolved.Value.Window is null)
+            {
+                unpriced.Add($"{name}: no förvaltningsnivå or support window in force");
+                continue;
+            }
+
+            string key = ContractPricing.KnowledgeFeeKey(
+                resolved.Value.Level, ordinals.GetValueOrDefault(contract.AppId));
+
+            decimal? fee = Lookup(prices, PriceKind.KnowledgeFee, key);
+
+            if (fee is null)
+            {
+                unpriced.Add($"{name}: no kännedomsavgift in the price list for {key}");
+                continue;
+            }
+
+            fees.Add(new ApplicationFee(
+                contract.AppId, name, resolved.Value.Level, resolved.Value.Window.Value, key, fee.Value));
+        }
+
+        SupportWindow? widest = ContractPricing.MostExtensiveWindow(fees.Select(f => f.Window));
+        decimal windowFee = 0m;
+
+        if (widest is not null)
+        {
+            decimal? amount = Lookup(prices, PriceKind.WindowFee, widest.Value.ToString());
+            if (amount is null)
+            {
+                unpriced.Add($"No fönsteravgift in the price list for {widest}");
+            }
+            else
+            {
+                windowFee = amount.Value;
+            }
+        }
+
+        return new BaseFeeBreakdown(widest, windowFee, fees, unpriced);
+    }
+
+    /// <summary>One amount from a price list, or null when the list does not carry it.</summary>
+    public static decimal? Lookup(PriceList? list, PriceKind kind, string key) =>
+        list?.Entries.FirstOrDefault(e => e.Kind == kind && e.Key == key)?.Amount;
+
+    /// <summary>
+    /// Whether the application was under förvaltning at that instant — on-boarded by then
+    /// and not yet taken out under §19. A contract with no on-boarding date has not started.
+    /// </summary>
+    private static bool IsUnderManagement(ApplicationContract contract, DateTime asOf) =>
+        contract.OnboardedAt is not null
+        && contract.OnboardedAt <= asOf
+        && (contract.ManagementEndedAt is null || contract.ManagementEndedAt > asOf);
+
+    /// <summary>
+    /// Each instance's position among the instances of its moderapplikation, counted from
+    /// one, so §10.2.1's reduced rate from the twenty-first can be applied.
+    /// </summary>
+    private static Dictionary<Guid, int> InstanceOrdinals(IEnumerable<ApplicationContract> contracts)
+    {
+        Dictionary<Guid, int> ordinals = [];
+
+        IEnumerable<IGrouping<Guid, ApplicationContract>> families = contracts
+            .Where(c => c.ParentAppId is not null)
+            .GroupBy(c => c.ParentAppId!.Value);
+
+        foreach (IGrouping<Guid, ApplicationContract> family in families)
+        {
+            IReadOnlyList<ApplicationContract> ordered =
+                ContractPricing.InOrdinalOrder(family, c => c.OnboardedAt, c => c.AppId);
+
+            for (int i = 0; i < ordered.Count; i++)
+            {
+                ordinals[ordered[i].AppId] = i + 1;
+            }
+        }
+
+        return ordinals;
+    }
+
+    private static ResolvedServiceLevel? Resolve(
+        Guid appId, DateTime asOf, IReadOnlyDictionary<Guid, ApplicationContract> byApp)
+    {
+        if (!byApp.TryGetValue(appId, out ApplicationContract? contract))
+        {
+            return null;
+        }
+
+        ApplicationServiceLevel? level = contract.ServiceLevels
+            .Where(l => l.EffectiveFrom <= asOf)
+            .OrderByDescending(l => l.EffectiveFrom)
+            .ThenByDescending(l => l.RecordedAt)
+            .FirstOrDefault();
+
+        if (level is null)
+        {
+            return null;
+        }
+
+        if (level.SupportWindow is not null)
+        {
+            return new ResolvedServiceLevel(level.Level, level.SupportWindow, false, level.EffectiveFrom);
+        }
+
+        // §10.2.1: an instance inherits its moderapplikation's window unless it states one.
+        Guid? parentAppId = contract.ParentAppId;
+
+        for (int depth = 0; depth < MaxParentDepth && parentAppId is not null; depth++)
+        {
+            if (!byApp.TryGetValue(parentAppId.Value, out ApplicationContract? parent))
+            {
+                break;
+            }
+
+            ApplicationServiceLevel? parentLevel = parent.ServiceLevels
+                .Where(l => l.EffectiveFrom <= asOf)
+                .OrderByDescending(l => l.EffectiveFrom)
+                .ThenByDescending(l => l.RecordedAt)
+                .FirstOrDefault();
+
+            if (parentLevel?.SupportWindow is not null)
+            {
+                return new ResolvedServiceLevel(
+                    level.Level, parentLevel.SupportWindow, true, level.EffectiveFrom);
+            }
+
+            parentAppId = parent.ParentAppId == parentAppId ? null : parent.ParentAppId;
+        }
+
+        return new ResolvedServiceLevel(level.Level, null, false, level.EffectiveFrom);
+    }
+}

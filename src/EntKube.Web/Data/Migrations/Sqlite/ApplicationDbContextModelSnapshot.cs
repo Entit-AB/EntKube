@@ -995,6 +995,106 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("AppServicePorts");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationContract", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("Criticality")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("DevelopedBy")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("GuaranteeEndsAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("ManagementEndedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<decimal?>("MonthlyWorkCapHours")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("OnboardedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<decimal?>("OnboardingFee")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Origin")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("ParentAppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("SlaStartsAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId")
+                        .IsUnique();
+
+                    b.HasIndex("ParentAppId");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("ApplicationContracts");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationServiceLevel", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ApplicationContractId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("EffectiveFrom")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Level")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("RecordedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RecordedBy")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("SupportWindow")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ApplicationContractId", "EffectiveFrom");
+
+                    b.ToTable("ApplicationServiceLevels");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ApplicationUser", b =>
                 {
                     b.Property<string>("Id")
@@ -2092,6 +2192,63 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("AppId", "EnvironmentId");
 
                     b.ToTable("ConnectivityRules");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ContractContact", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Email")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Party")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Phone")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("TeamsHandle")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("CustomerId", "Party", "Role");
+
+                    b.ToTable("ContractContacts");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CostLedgerCoverage", b =>
@@ -4961,6 +5118,118 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("OutboundMtlsCredentials");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.PortfolioAgreement", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("EffectiveFrom")
+                        .HasColumnType("TEXT");
+
+                    b.Property<decimal?>("HourBankHoursPerMonth")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("PricingModel")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("RecordedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RecordedBy")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("CustomerId", "EffectiveFrom");
+
+                    b.ToTable("PortfolioAgreements");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceList", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("EffectiveFrom")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("TenantId", "CustomerId", "EffectiveFrom");
+
+                    b.ToTable("PriceLists");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceListEntry", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<decimal>("Amount")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("TEXT");
+
+                    b.Property<decimal?>("Hours")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("PriceListId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PriceListId", "Kind", "Key")
+                        .IsUnique();
+
+                    b.ToTable("PriceListEntries");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQBackup", b =>
                 {
                     b.Property<Guid>("Id")
@@ -7045,6 +7314,43 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Environment");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationContract", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.App", "ParentApp")
+                        .WithMany()
+                        .HasForeignKey("ParentAppId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("ParentApp");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationServiceLevel", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ApplicationContract", "Contract")
+                        .WithMany("ServiceLevels")
+                        .HasForeignKey("ApplicationContractId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Contract");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.AuditEvent", b =>
                 {
                     b.HasOne("EntKube.Web.Data.AppDeployment", "Deployment")
@@ -7289,6 +7595,32 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Environment");
 
                     b.Navigation("PeerApp");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ContractContact", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CostLedgerCoverage", b =>
@@ -8287,6 +8619,54 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.PortfolioAgreement", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceList", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceListEntry", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.PriceList", "PriceList")
+                        .WithMany("Entries")
+                        .HasForeignKey("PriceListId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("PriceList");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQBackup", b =>
                 {
                     b.HasOne("EntKube.Web.Data.RabbitMQCluster", "Cluster")
@@ -8974,6 +9354,11 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("DeploymentRoutes");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationContract", b =>
+                {
+                    b.Navigation("ServiceLevels");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
                 {
                     b.Navigation("Targets");
@@ -9134,6 +9519,11 @@ namespace EntKube.Web.Data.Migrations.Sqlite
             modelBuilder.Entity("EntKube.Web.Data.OpenStackConnection", b =>
                 {
                     b.Navigation("StorageLinks");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceList", b =>
+                {
+                    b.Navigation("Entries");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQCluster", b =>

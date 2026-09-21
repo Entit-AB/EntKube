@@ -1,3 +1,5 @@
+using EntKube.Web.Data;
+
 namespace EntKube.Web.Services.Support;
 
 /// <summary>

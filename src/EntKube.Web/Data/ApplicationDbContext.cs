@@ -27,6 +27,12 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<ApiToken> ApiTokens => Set<ApiToken>();
     public DbSet<JitGrant> JitGrants => Set<JitGrant>();
     public DbSet<ClusterCostRate> ClusterCostRates => Set<ClusterCostRate>();
+    public DbSet<ApplicationContract> ApplicationContracts => Set<ApplicationContract>();
+    public DbSet<ApplicationServiceLevel> ApplicationServiceLevels => Set<ApplicationServiceLevel>();
+    public DbSet<PortfolioAgreement> PortfolioAgreements => Set<PortfolioAgreement>();
+    public DbSet<ContractContact> ContractContacts => Set<ContractContact>();
+    public DbSet<PriceList> PriceLists => Set<PriceList>();
+    public DbSet<PriceListEntry> PriceListEntries => Set<PriceListEntry>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
     public DbSet<CostLedgerCoverage> CostLedgerCoverages => Set<CostLedgerCoverage>();
     public DbSet<CostLedgerCursor> CostLedgerCursors => Set<CostLedgerCursor>();
@@ -307,6 +313,139 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(e => e.Tenant)
                   .WithMany()
                   .HasForeignKey(e => e.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ---- The förvaltningsavtal: Bilaga A, B and C as data -------------------------
+
+        builder.Entity<ApplicationContract>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+
+            // One set of terms per application. Bilaga A is signed per application, and two
+            // live contracts for the same one would make "what was agreed" unanswerable.
+            entity.HasIndex(c => c.AppId).IsUnique();
+            entity.HasIndex(c => c.TenantId);
+
+            // Instances are found by their moderapplikation often enough to index: the
+            // reduced fee from the twenty-first instance and §14.3's collapsing of one
+            // incident across many instances both count them.
+            entity.HasIndex(c => c.ParentAppId);
+
+            entity.Property(c => c.MonthlyWorkCapHours).HasPrecision(18, 2);
+            entity.Property(c => c.OnboardingFee).HasPrecision(18, 2);
+
+            entity.HasOne(c => c.Tenant)
+                  .WithMany()
+                  .HasForeignKey(c => c.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // A plain FK plus the unique index above, deliberately not a required one-to-one.
+            // EF treats a second dependent on a required 1:1 as replacing the first and
+            // silently marks the old row deleted; for a signed Bilaga A that is the wrong
+            // failure mode. As a normal reference, a duplicate hits the unique index and
+            // fails loudly instead.
+            entity.HasOne(c => c.App)
+                  .WithMany()
+                  .HasForeignKey(c => c.AppId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict, not cascade: removing a moderapplikation from EntKube must not
+            // silently delete the terms of every instance that was built on it. §10.2.1
+            // makes the instances depend on it, so the dependency has to be dealt with
+            // deliberately rather than by a delete rule.
+            entity.HasOne(c => c.ParentApp)
+                  .WithMany()
+                  .HasForeignKey(c => c.ParentAppId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<ApplicationServiceLevel>(entity =>
+        {
+            entity.HasKey(l => l.Id);
+
+            // Resolving the level in force on a date reads exactly this shape.
+            entity.HasIndex(l => new { l.ApplicationContractId, l.EffectiveFrom });
+
+            entity.HasOne(l => l.Contract)
+                  .WithMany(c => c.ServiceLevels)
+                  .HasForeignKey(l => l.ApplicationContractId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<PortfolioAgreement>(entity =>
+        {
+            entity.HasKey(a => a.Id);
+            entity.HasIndex(a => new { a.CustomerId, a.EffectiveFrom });
+
+            entity.Property(a => a.HourBankHoursPerMonth).HasPrecision(18, 2);
+
+            entity.HasOne(a => a.Tenant)
+                  .WithMany()
+                  .HasForeignKey(a => a.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(a => a.Customer)
+                  .WithMany()
+                  .HasForeignKey(a => a.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ContractContact>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.HasIndex(c => new { c.CustomerId, c.Party, c.Role });
+            entity.HasIndex(c => c.AppId);
+
+            entity.HasOne(c => c.Tenant)
+                  .WithMany()
+                  .HasForeignKey(c => c.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(c => c.Customer)
+                  .WithMany()
+                  .HasForeignKey(c => c.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // An application-specific contact outlives the application only as a row to be
+            // tidied up; cascading would be fine, but Restrict keeps the delete explicit and
+            // matches how the contract itself treats a moderapplikation.
+            entity.HasOne(c => c.App)
+                  .WithMany()
+                  .HasForeignKey(c => c.AppId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<PriceList>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => new { p.TenantId, p.CustomerId, p.EffectiveFrom });
+
+            entity.HasOne(p => p.Tenant)
+                  .WithMany()
+                  .HasForeignKey(p => p.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(p => p.Customer)
+                  .WithMany()
+                  .HasForeignKey(p => p.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<PriceListEntry>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+
+            // One amount per key within a list — a second row for the same fee would make
+            // the price ambiguous, which is the one thing a price list may not be.
+            entity.HasIndex(e => new { e.PriceListId, e.Kind, e.Key }).IsUnique();
+
+            entity.Property(e => e.Amount).HasPrecision(18, 2);
+            entity.Property(e => e.Hours).HasPrecision(18, 2);
+
+            entity.HasOne(e => e.PriceList)
+                  .WithMany(p => p.Entries)
+                  .HasForeignKey(e => e.PriceListId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
 
