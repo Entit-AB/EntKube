@@ -38,6 +38,10 @@ else if (selectedCustomer is not null)
             </div>
         </div>
         <div class="d-flex gap-2">
+            <button class="btn btn-sm @(customerView == "tickets" ? "btn-primary" : "btn-outline-secondary")"
+                    @onclick="OpenCustomerTickets">
+                <i class="bi bi-life-preserver me-1"></i>Tickets
+            </button>
             <button class="btn btn-sm @(customerView == "contract" ? "btn-primary" : "btn-outline-secondary")"
                     @onclick="OpenCustomerContract">
                 <i class="bi bi-file-earmark-ruled me-1"></i>Contract
@@ -49,7 +53,15 @@ else if (selectedCustomer is not null)
         </div>
     </div>
 
-    @if (customerView == "contract")
+    @if (customerView == "tickets")
+    {
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <TicketQueue CustomerId="selectedCustomer.Id" />
+            </div>
+        </div>
+    }
+    else if (customerView == "contract")
     {
         <div class="card shadow-sm mb-4">
             <div class="card-body">
@@ -382,7 +394,7 @@ else
     private bool showImportWizard;
     private string newAppName = "";
     private string? appError;
-    private string customerView = "apps"; // "apps" | "metrics" | "contract"
+    private string customerView = "apps"; // "apps" | "metrics" | "contract" | "tickets"
 
     // Customer metrics
     private DeploymentMetricsSummary? customerMetrics;
@@ -476,6 +488,10 @@ else
         await LoadApps();
         await LoadAccesses();
     }
+
+    /// <summary>The §14 queue for this customer — what is open and which clock runs out first.</summary>
+    private void OpenCustomerTickets() =>
+        customerView = customerView == "tickets" ? "apps" : "tickets";
 
     /// <summary>Bilaga B and C for this customer's portfolio, plus the people the agreement names.</summary>
     private void OpenCustomerContract() =>

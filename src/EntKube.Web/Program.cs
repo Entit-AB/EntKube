@@ -546,6 +546,7 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.Cost.CostLedgerService>();
         builder.Services.AddScoped<EntKube.Web.Services.Contracts.ContractService>();
         builder.Services.AddScoped<EntKube.Web.Services.Tickets.TicketService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Tickets.AlertTicketBridge>();
         builder.Services.AddSingleton<EntKube.Web.Services.Cost.CostScanCache>();
         builder.Services.AddHostedService<EntKube.Web.Services.Cost.CostScanService>();
         builder.Services.AddScoped<EntKube.Web.Services.Rollouts.RolloutService>();
