@@ -306,6 +306,14 @@ else
             {
                 <PortalAppRoutesPanel App="selectedRoutesApp" AccessRole="currentAccessRole" />
             }
+            else if (selectedCustomerOp == "hours" && currentAccessRole >= CustomerAccessRole.Operator)
+            {
+                <div class="d-flex align-items-center mb-3">
+                    <span class="bi bi-stopwatch fs-4 me-2 text-primary"></span>
+                    <h4 class="mb-0">Hours — @selectedCustomer.Name</h4>
+                </div>
+                <CustomerHoursPanel Customer="selectedCustomer" AccessRole="currentAccessRole" />
+            }
             else if (selectedCustomerOp == "tickets")
             {
                 <div class="d-flex align-items-center mb-3">
@@ -581,7 +589,7 @@ else
     private KeycloakRealm? selectedIdentityRealm;
     private HarborProject? selectedRegistryProject;
     private Data.App? selectedRoutesApp;
-    private string? selectedCustomerOp;             // "tickets" | "monitoring" | "logs" | "observability" | "notifications" | "cost"
+    private string? selectedCustomerOp;             // "tickets" | "hours" | "monitoring" | "logs" | "observability" | "notifications" | "cost"
     private Guid? activeAppId;                       // app whose service leaf is active (for tree highlight)
     private string? activeAppServiceKey;
 
@@ -987,6 +995,10 @@ else
             // Cost is commercial information, so it follows the same role gate as the
             // other operator-only views rather than being visible to every viewer.
             items.Add(("cost", "Consumption", "bi-cash-coin"));
+
+            // Hours and the timbank are commercial information, and approving work beyond
+            // the bank commits money — the same gate as the other operator-only views.
+            items.Add(("hours", "Hours", "bi-stopwatch"));
         }
         items.Add(("notifications", "Notifications", "bi-bell"));
 

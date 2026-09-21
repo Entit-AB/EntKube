@@ -1,0 +1,199 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Time
+@using Microsoft.EntityFrameworkCore
+@inject TimeService Time
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   Time logged against one ticket, with what §13 will actually bill for
+   it shown beside what was worked — the two are not the same number and
+   the difference is the part people argue about.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="d-flex justify-content-between align-items-center mb-2">
+    <div>
+        <h6 class="mb-0">Time</h6>
+        <div class="text-muted small">
+            Logged as worked; §13 bills it per started hour, per arbetspass.
+        </div>
+    </div>
+    <button class="btn btn-sm btn-outline-primary" @onclick="() => logging = !logging">
+        <i class="bi bi-stopwatch me-1"></i>Log time
+    </button>
+</div>
+
+@if (logging)
+{
+    <div class="border rounded p-3 mb-3">
+        <div class="row g-2 align-items-end">
+            <div class="col-md-3">
+                <label class="form-label small text-muted">From</label>
+                <input type="datetime-local" class="form-control form-control-sm" @bind="from" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small text-muted">To</label>
+                <input type="datetime-local" class="form-control form-control-sm" @bind="to" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small text-muted">Kind</label>
+                <select class="form-select form-select-sm" @bind="kind">
+                    <option value="@WorkKind.Management">Förvaltning</option>
+                    <option value="@WorkKind.IncidentAssessment">First assessment (first 30 min free)</option>
+                    <option value="@WorkKind.Development">Utveckling (§15)</option>
+                    <option value="@WorkKind.Travel">Restid (50%)</option>
+                </select>
+            </div>
+            <div class="col-md-3 text-end">
+                <AsyncButton CssClass="btn-sm btn-primary" OnClick="LogAsync">Log</AsyncButton>
+            </div>
+            <div class="col-12">
+                <label class="form-label small text-muted">What was done</label>
+                <input class="form-control form-control-sm" @bind="description"
+                       placeholder="Appears on the specification the customer validates (§20)" />
+            </div>
+        </div>
+    </div>
+}
+
+@if (entries.Count == 0)
+{
+    <div class="text-muted small">No time logged yet.</div>
+}
+else
+{
+    <div class="table-responsive">
+        <table class="table table-sm align-middle mb-2">
+            <thead class="table-light">
+                <tr>
+                    <th>When</th>
+                    <th>Worked</th>
+                    <th>Kind</th>
+                    <th>What</th>
+                    <th>By</th>
+                    <th></th>
+                </tr>
+            </thead>
+            <tbody>
+                @foreach (TimeEntry entry in entries)
+                {
+                    <tr>
+                        <td class="small">
+                            @entry.StartedAt.ToLocalTime().ToString("MMM d HH:mm")
+                            –
+                            @entry.EndedAt.ToLocalTime().ToString("HH:mm")
+                        </td>
+                        <td class="small">@Hours((decimal)(entry.EndedAt - entry.StartedAt).TotalHours)</td>
+                        <td class="small text-muted">@entry.Kind</td>
+                        <td class="small">@entry.Description</td>
+                        <td class="small text-muted">@entry.PerformedBy</td>
+                        <td class="text-end">
+                            <button class="btn btn-sm btn-outline-danger"
+                                    aria-label="Delete this time entry"
+                                    @onclick="() => DeleteAsync(entry.Id)">
+                                <span class="bi bi-trash"></span>
+                            </button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+
+    <div class="d-flex gap-4 small">
+        <div><span class="text-muted">Worked</span> <strong>@Hours(workedHours)</strong></div>
+        <div><span class="text-muted">Billed (§13)</span> <strong>@Hours(billedHours)</strong></div>
+        <div><span class="text-muted">From the timbank</span> <strong>@Hours(bankHours)</strong></div>
+        @if (freeHours > 0m)
+        {
+            <div class="text-success">
+                <span class="text-muted">Included in the grundavgift</span> <strong>@Hours(freeHours)</strong>
+            </div>
+        }
+    </div>
+}
+
+@code {
+    [Parameter, EditorRequired] public Ticket Ticket { get; set; } = null!;
+    [Parameter] public string? ActorName { get; set; }
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private List<TimeEntry> entries = [];
+    private bool logging;
+
+    private DateTime? from = DateTime.Now.AddHours(-1);
+    private DateTime? to = DateTime.Now;
+    private WorkKind kind = WorkKind.Management;
+    private string description = "";
+
+    private decimal workedHours;
+    private decimal billedHours;
+    private decimal bankHours;
+    private decimal freeHours;
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+
+        entries = await db.TimeEntries.AsNoTracking()
+            .Where(e => e.TicketId == Ticket.Id)
+            .OrderBy(e => e.StartedAt)
+            .ToListAsync();
+
+        IReadOnlySet<Guid> callout = Ticket.IsCallout ? new HashSet<Guid> { Ticket.Id } : new HashSet<Guid>();
+        IReadOnlyList<WorkPass> passes = WorkPassCalculator.BuildPasses(entries, callout);
+
+        workedHours = passes.Sum(p => p.WorkedHours);
+        billedHours = passes.Sum(p => p.BilledHours);
+        freeHours = passes.Sum(p => p.FreeHours);
+        bankHours = passes
+            .Where(p => WorkPassCalculator.DrawsOnTimebank(p.Kind))
+            .Sum(p => p.BankHours);
+    }
+
+    private async Task LogAsync()
+    {
+        if (from is null || to is null || to <= from)
+        {
+            Toasts.Error("The end has to be after the start.");
+            return;
+        }
+
+        if (string.IsNullOrWhiteSpace(description))
+        {
+            Toasts.Error("§20 wants the activities described so the customer can validate them.");
+            return;
+        }
+
+        try
+        {
+            await Time.LogAsync(
+                Ticket.TenantId, Ticket.CustomerId, Ticket.AppId, Ticket.Id,
+                from.Value.ToUniversalTime(), to.Value.ToUniversalTime(),
+                kind, description, ActorName);
+
+            logging = false;
+            description = "";
+            Toasts.Success("Time logged.");
+
+            await LoadAsync();
+            await OnChanged.InvokeAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not log: {ex.Message}");
+        }
+    }
+
+    private async Task DeleteAsync(Guid entryId)
+    {
+        await Time.DeleteAsync(entryId);
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+    }
+
+    private static string Hours(decimal hours) => $"{hours:0.##} h";
+}

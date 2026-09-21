@@ -1,0 +1,270 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Time
+@inject TimeService Time
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   The customer's own view of their hours, and the one decision §11.1
+   leaves to them: whether work may continue once the timbank is spent.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h6 class="mb-0">Hours — @month.ToString("MMMM yyyy")</h6>
+            <div class="text-muted small">
+                Every hour we have booked, with what it drew from your timbank.
+            </div>
+        </div>
+        <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-secondary" @onclick="() => ShiftMonth(-1)">
+                <i class="bi bi-chevron-left"></i>
+            </button>
+            <button class="btn btn-outline-secondary" @onclick="() => ShiftMonth(1)"
+                    disabled="@(month >= ThisMonth)">
+                <i class="bi bi-chevron-right"></i>
+            </button>
+        </div>
+    </div>
+
+    @if (bank.EntitledHours is not null)
+    {
+        <div class="row g-3 mb-3">
+            <div class="col-sm-4">
+                <div class="border rounded text-center p-3">
+                    <div class="fs-3 fw-bold text-primary">@Hours(bank.DrawnHours)</div>
+                    <div class="small text-muted">Used of @Hours(bank.EntitledHours.Value)</div>
+                </div>
+            </div>
+            <div class="col-sm-4">
+                <div class="border rounded text-center p-3">
+                    <div class="fs-3 fw-bold @(bank.IsExhausted ? "text-danger" : "text-success")">
+                        @Hours(bank.RemainingHours)
+                    </div>
+                    <div class="small text-muted">Remaining this month</div>
+                </div>
+            </div>
+            <div class="col-sm-4">
+                <div class="border rounded text-center p-3">
+                    <div class="fs-3 fw-bold">@Hours(bank.OverspillHours)</div>
+                    <div class="small text-muted">Beyond the timbank</div>
+                </div>
+            </div>
+        </div>
+
+        @if (IsCurrentMonth && !bank.IsExhausted)
+        {
+            <div class="alert alert-light border py-2 small">
+                <i class="bi bi-hourglass-split me-1"></i>
+                Unused hours do not carry over — §11.1 expires them at the end of the month, and next
+                month starts again at @Hours(bank.EntitledHours.Value).
+            </div>
+        }
+
+        @if (bank.IsExhausted)
+        {
+            <div class="alert alert-warning">
+                <div class="d-flex justify-content-between align-items-start">
+                    <div class="small">
+                        <strong>The timbank for this month is spent.</strong>
+                        §11.1 means further work waits for your go-ahead — except P1 and P2 incidents,
+                        which we handle immediately and bill without asking.
+                    </div>
+                    @if (CanApprove && !alreadyApproved)
+                    {
+                        <button class="btn btn-sm btn-primary ms-3 text-nowrap"
+                                @onclick="() => approving = !approving">
+                            Approve further work
+                        </button>
+                    }
+                </div>
+
+                @if (alreadyApproved)
+                {
+                    <div class="small mt-2 text-success">
+                        <i class="bi bi-check2 me-1"></i>Further work for this month is approved.
+                    </div>
+                }
+
+                @if (approving)
+                {
+                    <div class="mt-3">
+                        <label class="form-label small">
+                            Up to how many more hours? Leave blank for no ceiling.
+                        </label>
+                        <div class="row g-2 align-items-end">
+                            <div class="col-sm-3">
+                                <input type="number" step="1" class="form-control form-control-sm"
+                                       @bind="approvalHours" />
+                            </div>
+                            <div class="col-sm-6">
+                                <input class="form-control form-control-sm" @bind="approvalNote"
+                                       placeholder="A note for the record" />
+                            </div>
+                            <div class="col-sm-3 text-end">
+                                <AsyncButton CssClass="btn-sm btn-primary" OnClick="ApproveAsync">
+                                    Approve
+                                </AsyncButton>
+                            </div>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+    }
+    else
+    {
+        <div class="alert alert-light border py-2 small mb-3">
+            <i class="bi bi-info-circle me-1"></i>
+            Löpande räkning — work is billed per started hour as it is done.
+        </div>
+    }
+
+    @if (committed.Lines.Count == 0)
+    {
+        <EmptyState Icon="bi-stopwatch" Title="No hours this month" Message="Nothing has been booked." />
+    }
+    else
+    {
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Day</th>
+                        <th>Application</th>
+                        <th>Ärende</th>
+                        <th>Rate</th>
+                        <th class="text-end">Hours</th>
+                        <th>What was done</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (BillingLine line in committed.Lines.OrderBy(l => l.Day).ThenBy(l => l.TicketNumber))
+                    {
+                        <tr>
+                            <td class="small text-nowrap">@line.Day.ToString("MMM d")</td>
+                            <td class="small">@(line.AppName ?? "—")</td>
+                            <td class="small text-muted">@(line.TicketNumber is int n ? $"#{n}" : "—")</td>
+                            <td class="small">@CategoryName(line.Category)</td>
+                            <td class="text-end small fw-semibold">@Hours(line.BilledHours)</td>
+                            <td class="small text-muted">@line.Description</td>
+                        </tr>
+                    }
+                </tbody>
+                <tfoot class="table-light">
+                    <tr>
+                        <th colspan="4" class="text-end small">Total</th>
+                        <th class="text-end small">@Hours(committed.TotalHours)</th>
+                        <th></th>
+                    </tr>
+                </tfoot>
+            </table>
+        </div>
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
+
+    /// <summary>
+    /// Approving work beyond the timbank commits money, so it follows the same role gate as
+    /// the portal's other write actions rather than being open to every viewer.
+    /// </summary>
+    [Parameter] public CustomerAccessRole AccessRole { get; set; } = CustomerAccessRole.Viewer;
+
+    [Parameter] public string? ActorName { get; set; }
+
+    private static DateTime ThisMonth =>
+        new(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    private bool loading = true;
+    private string? error;
+
+    private DateTime month = ThisMonth;
+    private TimebankStatement bank;
+    private CommittedHoursStatement committed;
+    private bool alreadyApproved;
+
+    private bool approving;
+    private decimal? approvalHours;
+    private string? approvalNote;
+
+    private bool CanApprove => AccessRole >= CustomerAccessRole.Operator;
+
+    private bool IsCurrentMonth => month == ThisMonth;
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task ShiftMonth(int months)
+    {
+        month = month.AddMonths(months);
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            bank = await Time.GetTimebankAsync(Customer.Id, month);
+
+            (DateTime from, DateTime to) = TimeService.MonthBounds(month);
+            committed = await Time.GetCommittedHoursAsync(Customer.Id, from, to);
+
+            // A blanket approval for the month is what clears the gate; the service treats
+            // it the same way when it decides which hours went ahead unauthorised.
+            alreadyApproved = committed.UnauthorisedHours == 0m && bank.OverspillHours > 0m;
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task ApproveAsync()
+    {
+        try
+        {
+            await Time.AuthoriseAsync(new WorkAuthorisation
+            {
+                TenantId = Customer.TenantId,
+                CustomerId = Customer.Id,
+                Month = TimeService.MonthBounds(month).From,
+                Hours = approvalHours,
+                ApprovedBy = ActorName ?? Customer.Name,
+                Note = approvalNote,
+            });
+
+            approving = false;
+            approvalNote = null;
+            Toasts.Success("Approved — thank you. Work can continue.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not record the approval: {ex.Message}");
+        }
+    }
+
+    private static string Hours(decimal hours) => $"{hours:0.##} h";
+
+    private static string CategoryName(SupportTimeCategory category) => category switch
+    {
+        SupportTimeCategory.Ordinary => "Ordinarie",
+        SupportTimeCategory.EveningMorning => "Kväll/morgon (+25%)",
+        SupportTimeCategory.WeekendOrRedDay => "Helg/röd dag (+50%)",
+        SupportTimeCategory.Night => "Natt (+100%)",
+        SupportTimeCategory.Callout => "Utryckning (+100%)",
+        _ => category.ToString(),
+    };
+}
