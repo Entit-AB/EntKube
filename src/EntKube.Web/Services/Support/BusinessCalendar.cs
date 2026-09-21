@@ -234,6 +234,91 @@ public static class BusinessCalendar
             : CategoryAt(instantUtc);
 
     /// <summary>
+    /// A stretch of worked time that fell entirely in one §13 time category.
+    /// </summary>
+    /// <param name="Category">The category, and so the rate and the timbank factor.</param>
+    /// <param name="From">Start of the stretch.</param>
+    /// <param name="To">End of the stretch.</param>
+    public readonly record struct CategorySpan(SupportTimeCategory Category, DateTime From, DateTime To)
+    {
+        /// <summary>
+        /// Length of the stretch. Exact: callers that add several of these together work in
+        /// ticks and convert once at the end, because a sum of hours-as-fractions drifts —
+        /// three ten-minute stretches came to 0.500000000000001 hours before this existed.
+        /// </summary>
+        public TimeSpan Duration => To - From;
+
+        /// <summary>Length of the stretch in hours, for display.</summary>
+        public decimal Hours => (decimal)Duration.Ticks / TimeSpan.TicksPerHour;
+    }
+
+    /// <summary>
+    /// Splits a worked period into the §13 time categories it crossed.
+    ///
+    /// <para>An evening's work that starts at 16:30 and runs to 18:00 is half an hour of
+    /// ordinary time and an hour of kväll — not ninety minutes of whichever one you looked
+    /// at first. The boundaries are 05:00, 08:00, 17:00, 22:00 and midnight in Swedish time,
+    /// plus the change from a working day to a red day or a weekend.</para>
+    /// </summary>
+    public static IReadOnlyList<CategorySpan> SplitByCategory(DateTime fromUtc, DateTime toUtc)
+    {
+        if (toUtc <= fromUtc)
+        {
+            return [];
+        }
+
+        List<CategorySpan> spans = [];
+        DateTime cursor = fromUtc;
+
+        // One iteration per boundary crossed. A year of continuous work would be about 1,800
+        // of them; the guard is only here so a bad input cannot spin forever.
+        for (int i = 0; i < 100_000 && cursor < toUtc; i++)
+        {
+            SupportTimeCategory category = CategoryAt(cursor);
+            DateTime next = NextCategoryBoundary(cursor);
+            DateTime end = next < toUtc ? next : toUtc;
+
+            // Merge with the previous span when the boundary did not actually change the
+            // category — midnight inside a night shift, or 08:00 on a Saturday.
+            if (spans.Count > 0 && spans[^1].Category == category && spans[^1].To == cursor)
+            {
+                spans[^1] = spans[^1] with { To = end };
+            }
+            else
+            {
+                spans.Add(new CategorySpan(category, cursor, end));
+            }
+
+            cursor = end;
+        }
+
+        return spans;
+    }
+
+    /// <summary>
+    /// The next instant at which the §13 category could change: the next of 05:00, 08:00,
+    /// 17:00 and 22:00 in Swedish time, or the next midnight, whichever comes first.
+    /// </summary>
+    private static DateTime NextCategoryBoundary(DateTime instantUtc)
+    {
+        DateTime local = ToLocal(instantUtc);
+        DateOnly date = DateOnly.FromDateTime(local);
+        TimeSpan timeOfDay = local.TimeOfDay;
+
+        foreach (TimeOnly boundary in (ReadOnlySpan<TimeOnly>)[FiveAm, EightAm, FivePm, TenPm])
+        {
+            if (timeOfDay < boundary.ToTimeSpan())
+            {
+                return ToUtc(date, boundary.ToTimeSpan());
+            }
+        }
+
+        // Past 22:00: the next boundary is midnight, where the day — and with it the
+        // working-day test — changes.
+        return ToUtc(date.AddDays(1), TimeSpan.Zero);
+    }
+
+    /// <summary>
     /// The close of the working day <paramref name="workingDays"/> arbetsdagar after an
     /// instant — the deadline shape behind "inom fem (5) arbetsdagar" (§14.6 incident
     /// report), "tio (10) arbetsdagar" (§23 test acceptance, §18 subconsultant approval) and
@@ -268,10 +353,28 @@ public static class BusinessCalendar
         };
     }
 
-    private static DateTime ToLocal(DateTime instantUtc) =>
-        TimeZoneInfo.ConvertTimeFromUtc(
-            instantUtc.Kind == DateTimeKind.Utc ? instantUtc : instantUtc.ToUniversalTime(),
-            SwedishTime);
+    /// <summary>
+    /// The Swedish wall-clock time of an instant.
+    ///
+    /// <para><b>An unspecified Kind is treated as UTC, deliberately.</b> Every DateTime read
+    /// back from the database arrives as <see cref="DateTimeKind.Unspecified"/> — that is
+    /// what SQLite, <c>timestamp without time zone</c> and <c>datetime2</c> all return — and
+    /// everything in EntKube stores UTC. Calling <c>ToUniversalTime()</c> on such a value
+    /// would reinterpret it in the <em>server's</em> time zone and shift it by that offset,
+    /// which on a machine set to Swedish time silently moved every stored instant two hours
+    /// and produced negative worked time.</para>
+    /// </summary>
+    private static DateTime ToLocal(DateTime instant)
+    {
+        DateTime utc = instant.Kind switch
+        {
+            DateTimeKind.Utc => instant,
+            DateTimeKind.Local => instant.ToUniversalTime(),
+            _ => DateTime.SpecifyKind(instant, DateTimeKind.Utc),
+        };
+
+        return TimeZoneInfo.ConvertTimeFromUtc(utc, SwedishTime);
+    }
 
     /// <summary>
     /// A local date plus an offset from its midnight, as a UTC instant. The offset may reach

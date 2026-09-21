@@ -37,6 +37,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<TicketEvent> TicketEvents => Set<TicketEvent>();
     public DbSet<TicketPause> TicketPauses => Set<TicketPause>();
     public DbSet<TicketAffectedApp> TicketAffectedApps => Set<TicketAffectedApp>();
+    public DbSet<TimeEntry> TimeEntries => Set<TimeEntry>();
+    public DbSet<WorkAuthorisation> WorkAuthorisations => Set<WorkAuthorisation>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
     public DbSet<CostLedgerCoverage> CostLedgerCoverages => Set<CostLedgerCoverage>();
     public DbSet<CostLedgerCursor> CostLedgerCursors => Set<CostLedgerCursor>();
@@ -523,6 +525,73 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                   .WithMany()
                   .HasForeignKey(a => a.AppId)
                   .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ---- Worked time (§11, §13) -------------------------------------------------------
+
+        builder.Entity<TimeEntry>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+
+            // The shape both reports read: a customer's entries over a period.
+            entity.HasIndex(e => new { e.CustomerId, e.StartedAt });
+            entity.HasIndex(e => e.TicketId);
+            entity.HasIndex(e => e.AppId);
+
+            entity.HasOne(e => e.Tenant)
+                  .WithMany()
+                  .HasForeignKey(e => e.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.Customer)
+                  .WithMany()
+                  .HasForeignKey(e => e.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict on both: removing an application or a ticket must not quietly delete
+            // the record of hours that were worked and may already have been invoiced.
+            entity.HasOne(e => e.App)
+                  .WithMany()
+                  .HasForeignKey(e => e.AppId)
+                  .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Ticket)
+                  .WithMany()
+                  .HasForeignKey(e => e.TicketId)
+                  .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Authorisation)
+                  .WithMany(a => a.Entries)
+                  .HasForeignKey(e => e.AuthorisationId)
+                  .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<WorkAuthorisation>(entity =>
+        {
+            entity.HasKey(a => a.Id);
+            entity.HasIndex(a => new { a.CustomerId, a.Month });
+
+            entity.Property(a => a.Hours).HasPrecision(18, 2);
+
+            entity.HasOne(a => a.Tenant)
+                  .WithMany()
+                  .HasForeignKey(a => a.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(a => a.Customer)
+                  .WithMany()
+                  .HasForeignKey(a => a.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(a => a.Ticket)
+                  .WithMany()
+                  .HasForeignKey(a => a.TicketId)
+                  .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(a => a.App)
+                  .WithMany()
+                  .HasForeignKey(a => a.AppId)
+                  .OnDelete(DeleteBehavior.Restrict);
         });
 
         builder.Entity<CostLedgerCoverage>(entity =>
