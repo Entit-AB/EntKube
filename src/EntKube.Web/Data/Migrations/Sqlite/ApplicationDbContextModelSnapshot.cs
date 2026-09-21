@@ -4857,6 +4857,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<int?>("Covers")
+                        .HasColumnType("INTEGER");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("TEXT");
 
@@ -4889,6 +4892,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("Affiliation")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("AssigneeEmail")
                         .HasMaxLength(256)
                         .HasColumnType("TEXT");
@@ -4898,7 +4904,19 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(256)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("AssigneePhone")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AssigneeTeamsHandle")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
                     b.Property<DateTime>("EndsAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("HandoverNotes")
+                        .HasMaxLength(2000)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Notes")
@@ -4911,11 +4929,16 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<DateTime>("StartsAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid?>("SubconsultantId")
+                        .HasColumnType("TEXT");
+
                     b.HasKey("Id");
 
                     b.HasIndex("ScheduleId");
 
                     b.HasIndex("StartsAt");
+
+                    b.HasIndex("SubconsultantId");
 
                     b.ToTable("OnCallShifts");
                 });
@@ -6478,6 +6501,73 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("TenantId");
 
                     b.ToTable("StorageLinks");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.Subconsultant", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("ApprovedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Company")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("ConfidentialitySignedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("DataProcessingBoundAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Email")
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("NotifiedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("ObjectedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ObjectionReason")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OrganisationNumber")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Phone")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("TenantId", "IsActive");
+
+                    b.ToTable("Subconsultants");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TelemetryAlertRule", b =>
@@ -9149,7 +9239,14 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("EntKube.Web.Data.Subconsultant", "Subconsultant")
+                        .WithMany()
+                        .HasForeignKey("SubconsultantId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.Navigation("Schedule");
+
+                    b.Navigation("Subconsultant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OpenLdapComponentConfig", b =>
@@ -9585,6 +9682,24 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Environment");
 
                     b.Navigation("OpenStackConnection");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.Subconsultant", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
 
                     b.Navigation("Tenant");
                 });

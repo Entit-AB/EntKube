@@ -44,6 +44,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<AppKnowledgeProfile> AppKnowledgeProfiles => Set<AppKnowledgeProfile>();
     public DbSet<AppServiceDependency> AppServiceDependencies => Set<AppServiceDependency>();
     public DbSet<EndOfLifeNotice> EndOfLifeNotices => Set<EndOfLifeNotice>();
+    public DbSet<Subconsultant> Subconsultants => Set<Subconsultant>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
     public DbSet<CostLedgerCoverage> CostLedgerCoverages => Set<CostLedgerCoverage>();
     public DbSet<CostLedgerCursor> CostLedgerCursors => Set<CostLedgerCursor>();
@@ -2919,6 +2920,33 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(sh => sh.AssigneeName).HasMaxLength(256).IsRequired();
             entity.Property(sh => sh.AssigneeEmail).HasMaxLength(256);
             entity.Property(sh => sh.Notes).HasMaxLength(1000);
+            entity.Property(sh => sh.AssigneePhone).HasMaxLength(64);
+            entity.Property(sh => sh.AssigneeTeamsHandle).HasMaxLength(256);
+            entity.Property(sh => sh.HandoverNotes).HasMaxLength(2000);
+
+            // Restrict: removing somebody from the §18 register must not erase the record of
+            // the shifts they covered, which is part of what that register is for.
+            entity.HasOne(sh => sh.Subconsultant)
+                  .WithMany()
+                  .HasForeignKey(sh => sh.SubconsultantId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<Subconsultant>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.HasIndex(c => new { c.TenantId, c.IsActive });
+            entity.HasIndex(c => c.CustomerId);
+
+            entity.HasOne(c => c.Tenant)
+                  .WithMany()
+                  .HasForeignKey(c => c.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(c => c.Customer)
+                  .WithMany()
+                  .HasForeignKey(c => c.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
         });
 
         // AlertRoutingRule — tenant-specific rules that map alert criteria to a notification channel.

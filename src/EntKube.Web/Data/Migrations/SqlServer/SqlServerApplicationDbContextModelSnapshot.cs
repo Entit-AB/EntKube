@@ -4864,6 +4864,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<int?>("Covers")
+                        .HasColumnType("int");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
 
@@ -4896,6 +4899,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<int>("Affiliation")
+                        .HasColumnType("int");
+
                     b.Property<string>("AssigneeEmail")
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
@@ -4905,8 +4911,20 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
 
+                    b.Property<string>("AssigneePhone")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("AssigneeTeamsHandle")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
                     b.Property<DateTime>("EndsAt")
                         .HasColumnType("datetime2");
+
+                    b.Property<string>("HandoverNotes")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
 
                     b.Property<string>("Notes")
                         .HasMaxLength(1000)
@@ -4918,11 +4936,16 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<DateTime>("StartsAt")
                         .HasColumnType("datetime2");
 
+                    b.Property<Guid?>("SubconsultantId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.HasKey("Id");
 
                     b.HasIndex("ScheduleId");
 
                     b.HasIndex("StartsAt");
+
+                    b.HasIndex("SubconsultantId");
 
                     b.ToTable("OnCallShifts");
                 });
@@ -6486,6 +6509,73 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId");
 
                     b.ToTable("StorageLinks");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.Subconsultant", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("ApprovedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Company")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("ConfidentialitySignedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("DataProcessingBoundAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Email")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("NotifiedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("ObjectedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("ObjectionReason")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("OrganisationNumber")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Phone")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("TenantId", "IsActive");
+
+                    b.ToTable("Subconsultants");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TelemetryAlertRule", b =>
@@ -9162,7 +9252,14 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("EntKube.Web.Data.Subconsultant", "Subconsultant")
+                        .WithMany()
+                        .HasForeignKey("SubconsultantId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.Navigation("Schedule");
+
+                    b.Navigation("Subconsultant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OpenLdapComponentConfig", b =>
@@ -9598,6 +9695,24 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Environment");
 
                     b.Navigation("OpenStackConnection");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.Subconsultant", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
 
                     b.Navigation("Tenant");
                 });

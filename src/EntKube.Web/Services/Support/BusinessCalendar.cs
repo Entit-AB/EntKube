@@ -147,6 +147,53 @@ public static class BusinessCalendar
     }
 
     /// <summary>
+    /// The stretches during which the window was open between two instants.
+    ///
+    /// <para>What <see cref="OpenTimeBetween"/> measures, as intervals rather than a total —
+    /// so a roster can be laid against them and asked whether anybody was there.</para>
+    /// </summary>
+    public static IReadOnlyList<(DateTime From, DateTime To)> OpenSpansBetween(
+        DateTime fromUtc, DateTime toUtc, SupportWindow window)
+    {
+        if (toUtc <= fromUtc)
+        {
+            return [];
+        }
+
+        if (window == SupportWindow.S4)
+        {
+            return [(fromUtc, toUtc)];
+        }
+
+        List<(DateTime From, DateTime To)> spans = [];
+        DateOnly date = DateOnly.FromDateTime(ToLocal(fromUtc));
+        DateOnly last = DateOnly.FromDateTime(ToLocal(toUtc));
+
+        while (date <= last)
+        {
+            DaySpan? span = OpenSpanOn(date, window);
+
+            if (span is not null)
+            {
+                DateTime openStart = ToUtc(date, span.Value.Start);
+                DateTime openEnd = ToUtc(date, span.Value.End);
+
+                DateTime start = openStart > fromUtc ? openStart : fromUtc;
+                DateTime end = openEnd < toUtc ? openEnd : toUtc;
+
+                if (end > start)
+                {
+                    spans.Add((start, end));
+                }
+            }
+
+            date = date.AddDays(1);
+        }
+
+        return spans;
+    }
+
+    /// <summary>
     /// The instant by which a target expires, counting only time inside the support window.
     /// A P1 response target of two hours raised at 16:00 on a Friday under S1 falls at 09:00
     /// on the following Monday — or later still, if that Monday is a röd dag.

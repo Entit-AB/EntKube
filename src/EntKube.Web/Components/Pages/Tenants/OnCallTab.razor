@@ -19,9 +19,26 @@
         <span class="bi bi-person-check-fill fs-5"></span>
         <div>
             <strong>@currentShift.AssigneeName</strong> is currently on call
+            @if (currentShift.Affiliation != OnCallAffiliation.Employee)
+            {
+                <span class="badge bg-secondary ms-1"
+                      title="Covered under §18 — the register records their approval and undertakings">
+                    @currentShift.Affiliation
+                </span>
+            }
             @if (!string.IsNullOrEmpty(currentShift.AssigneeEmail))
             {
                 <span class="text-muted ms-1">— <a href="mailto:@currentShift.AssigneeEmail">@currentShift.AssigneeEmail</a></span>
+            }
+            @if (!string.IsNullOrEmpty(currentShift.AssigneePhone))
+            {
+                <span class="ms-2"><a href="tel:@currentShift.AssigneePhone">@currentShift.AssigneePhone</a></span>
+            }
+            @if (!string.IsNullOrEmpty(currentShift.AssigneeTeamsHandle))
+            {
+                <span class="text-muted ms-2" title="§14.3 requires Teams contact for P1 and P2">
+                    <i class="bi bi-microsoft-teams me-1"></i>@currentShift.AssigneeTeamsHandle
+                </span>
             }
             <span class="text-muted ms-2 small">until @currentShift.EndsAt.ToLocalTime().ToString("MMM d HH:mm")</span>
             <span class="badge bg-success ms-2 small">@currentShift.Schedule.Name</span>
@@ -145,7 +162,25 @@ else
                                         bool past = shift.EndsAt < DateTime.UtcNow;
                                         <tr class="@(active ? "table-success" : past ? "text-muted" : "")">
                                             <td>
-                                                <div class="fw-semibold small">@shift.AssigneeName</div>
+                                                <div class="fw-semibold small">
+                                                    @shift.AssigneeName
+                                                    @if (shift.Affiliation != OnCallAffiliation.Employee)
+                                                    {
+                                                        <span class="badge bg-light text-dark border ms-1"
+                                                              style="font-size:.65rem">@shift.Affiliation</span>
+                                                    }
+                                                </div>
+                                                @if (!string.IsNullOrEmpty(shift.AssigneePhone))
+                                                {
+                                                    <div class="text-muted" style="font-size:.77rem">@shift.AssigneePhone</div>
+                                                }
+                                                @if (!string.IsNullOrEmpty(shift.HandoverNotes))
+                                                {
+                                                    <div class="text-warning" style="font-size:.77rem"
+                                                         title="Handover note">
+                                                        <i class="bi bi-arrow-left-right me-1"></i>@shift.HandoverNotes
+                                                    </div>
+                                                }
                                                 @if (!string.IsNullOrEmpty(shift.AssigneeEmail))
                                                 {
                                                     <div class="text-muted" style="font-size:.77rem">@shift.AssigneeEmail</div>

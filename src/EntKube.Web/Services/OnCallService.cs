@@ -1,10 +1,216 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Services.Support;
 
 namespace EntKube.Web.Services;
 
+/// <summary>A stretch of a support window that no shift covers.</summary>
+/// <param name="From">Start of the uncovered stretch.</param>
+/// <param name="To">End of it.</param>
+public readonly record struct CoverageGap(DateTime From, DateTime To)
+{
+    public TimeSpan Duration => To - From;
+}
+
+/// <summary>Where a subconsultant stands against §18's approval process.</summary>
+public enum SubconsultantApproval
+{
+    /// <summary>Not yet notified to the customer, so not usable.</summary>
+    NotNotified = 0,
+
+    /// <summary>Notified, and the ten working days have not run out.</summary>
+    AwaitingResponse = 1,
+
+    /// <summary>Approved — either explicitly, or by the customer not objecting in time.</summary>
+    Approved = 2,
+
+    /// <summary>The customer objected. §18 says approval may not be unreasonably withheld.</summary>
+    Objected = 3,
+}
+
 public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
 {
+    /// <summary>
+    /// The working days §18 gives the customer to object to a subconsultant before the
+    /// notification counts as accepted.
+    /// </summary>
+    public const int SubconsultantObjectionWorkingDays = 10;
+
+    /// <summary>
+    /// Whoever is on call at a given instant, across every enabled schedule in the tenant.
+    /// More than one is normal: a rotation per window, or a handover overlap.
+    /// </summary>
+    public async Task<List<OnCallShift>> WhoIsOnCallAsync(
+        Guid tenantId, DateTime at, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.OnCallShifts
+            .Include(sh => sh.Schedule)
+            .Include(sh => sh.Subconsultant)
+            .AsNoTracking()
+            .Where(sh => sh.Schedule.TenantId == tenantId
+                         && sh.Schedule.IsEnabled
+                         && sh.StartsAt <= at
+                         && sh.EndsAt > at)
+            .OrderBy(sh => sh.Schedule.Name)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Stretches of a schedule's support window that nobody is rostered for.
+    ///
+    /// <para>§10.1.1 sells S3 and S4 as a staffed jourrotation, and the fönsteravgift for S4
+    /// is 95 000 kr a month for availability rather than output. Discovering a hole in the
+    /// roster when an incident lands in it is the expensive way to find out.</para>
+    ///
+    /// <para>A schedule with no <see cref="OnCallSchedule.Covers"/> has nothing to be
+    /// measured against and reports no gaps.</para>
+    /// </summary>
+    public async Task<List<CoverageGap>> GetCoverageGapsAsync(
+        Guid scheduleId, DateTime from, DateTime to, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        OnCallSchedule? schedule = await db.OnCallSchedules
+            .Include(s => s.Shifts)
+            .AsNoTracking()
+            .FirstOrDefaultAsync(s => s.Id == scheduleId, ct);
+
+        if (schedule?.Covers is not SupportWindow window)
+        {
+            return [];
+        }
+
+        List<(DateTime From, DateTime To)> shifts = [.. schedule.Shifts
+            .Where(sh => sh.EndsAt > from && sh.StartsAt < to)
+            .Select(sh => (sh.StartsAt, sh.EndsAt))
+            .OrderBy(sh => sh.StartsAt)];
+
+        List<CoverageGap> gaps = [];
+
+        foreach ((DateTime openFrom, DateTime openTo) in
+                 BusinessCalendar.OpenSpansBetween(from, to, window))
+        {
+            DateTime cursor = openFrom;
+
+            foreach ((DateTime shiftFrom, DateTime shiftTo) in shifts)
+            {
+                if (shiftTo <= cursor)
+                {
+                    continue;
+                }
+
+                if (shiftFrom >= openTo)
+                {
+                    break;
+                }
+
+                if (shiftFrom > cursor)
+                {
+                    gaps.Add(new CoverageGap(cursor, shiftFrom < openTo ? shiftFrom : openTo));
+                }
+
+                if (shiftTo > cursor)
+                {
+                    cursor = shiftTo;
+                }
+
+                if (cursor >= openTo)
+                {
+                    break;
+                }
+            }
+
+            if (cursor < openTo)
+            {
+                gaps.Add(new CoverageGap(cursor, openTo));
+            }
+        }
+
+        return gaps;
+    }
+
+    // ---- The §18 register ----------------------------------------------------------------
+
+    public async Task<List<Subconsultant>> GetSubconsultantsAsync(
+        Guid tenantId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.Subconsultants.AsNoTracking()
+            .Where(c => c.TenantId == tenantId)
+            .OrderByDescending(c => c.IsActive)
+            .ThenBy(c => c.Name)
+            .ToListAsync(ct);
+    }
+
+    public async Task<Subconsultant> SaveSubconsultantAsync(
+        Subconsultant subconsultant, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        subconsultant.UpdatedAt = DateTime.UtcNow;
+
+        if (subconsultant.Id == Guid.Empty)
+        {
+            subconsultant.Id = Guid.NewGuid();
+            db.Subconsultants.Add(subconsultant);
+        }
+        else
+        {
+            db.Subconsultants.Update(subconsultant);
+        }
+
+        await db.SaveChangesAsync(ct);
+        return subconsultant;
+    }
+
+    /// <summary>
+    /// When §18's objection period runs out — ten working days after the customer was
+    /// notified. Null when no notification has been sent.
+    /// </summary>
+    public static DateTime? ObjectionDeadline(Subconsultant subconsultant) =>
+        subconsultant.NotifiedAt is DateTime notified
+            ? BusinessCalendar.WorkingDaysDeadline(notified, SubconsultantObjectionWorkingDays)
+            : null;
+
+    /// <summary>
+    /// Where a subconsultant stands under §18. Approval is tacit: once ten working days
+    /// have passed without an objection, they count as approved.
+    /// </summary>
+    public static SubconsultantApproval ApprovalStatus(Subconsultant subconsultant, DateTime asOf)
+    {
+        if (subconsultant.ObjectedAt is not null)
+        {
+            return SubconsultantApproval.Objected;
+        }
+
+        if (subconsultant.ApprovedAt is not null)
+        {
+            return SubconsultantApproval.Approved;
+        }
+
+        if (subconsultant.NotifiedAt is null)
+        {
+            return SubconsultantApproval.NotNotified;
+        }
+
+        return ObjectionDeadline(subconsultant) <= asOf
+            ? SubconsultantApproval.Approved
+            : SubconsultantApproval.AwaitingResponse;
+    }
+
+    /// <summary>
+    /// Whether §18 and §24 both allow this person into the customer's environments: bound
+    /// by confidentiality, bound by data-processing terms, and approved.
+    /// </summary>
+    public static bool MayAccessCustomerEnvironments(Subconsultant subconsultant, DateTime asOf) =>
+        subconsultant.IsActive
+        && subconsultant.ConfidentialitySignedAt is not null
+        && subconsultant.DataProcessingBoundAt is not null
+        && ApprovalStatus(subconsultant, asOf) == SubconsultantApproval.Approved;
+
     public async Task<List<OnCallSchedule>> GetSchedulesAsync(Guid tenantId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
