@@ -46,6 +46,10 @@ else if (selectedCustomer is not null)
                     @onclick="OpenCustomerHours">
                 <i class="bi bi-stopwatch me-1"></i>Hours
             </button>
+            <button class="btn btn-sm @(customerView == "report" ? "btn-primary" : "btn-outline-secondary")"
+                    @onclick="OpenCustomerReport">
+                <i class="bi bi-file-earmark-bar-graph me-1"></i>Report
+            </button>
             <button class="btn btn-sm @(customerView == "contract" ? "btn-primary" : "btn-outline-secondary")"
                     @onclick="OpenCustomerContract">
                 <i class="bi bi-file-earmark-ruled me-1"></i>Contract
@@ -57,7 +61,15 @@ else if (selectedCustomer is not null)
         </div>
     </div>
 
-    @if (customerView == "hours")
+    @if (customerView == "report")
+    {
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <MonthlyReportPanel CustomerId="selectedCustomer.Id" />
+            </div>
+        </div>
+    }
+    else if (customerView == "hours")
     {
         <div class="card shadow-sm mb-4">
             <div class="card-body">
@@ -406,7 +418,7 @@ else
     private bool showImportWizard;
     private string newAppName = "";
     private string? appError;
-    private string customerView = "apps"; // "apps" | "metrics" | "contract" | "tickets" | "hours"
+    private string customerView = "apps"; // "apps" | "metrics" | "contract" | "tickets" | "hours" | "report"
 
     // Customer metrics
     private DeploymentMetricsSummary? customerMetrics;
@@ -500,6 +512,10 @@ else
         await LoadApps();
         await LoadAccesses();
     }
+
+    /// <summary>The §16.1 monthly report, as the customer will receive it.</summary>
+    private void OpenCustomerReport() =>
+        customerView = customerView == "report" ? "apps" : "report";
 
     /// <summary>The month's timbank and committed hours (§11, §13, §20).</summary>
     private void OpenCustomerHours() =>

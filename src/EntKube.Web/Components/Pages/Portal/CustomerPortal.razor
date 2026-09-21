@@ -340,6 +340,10 @@ else
                     }
                     else { <div class="text-muted small">No deployments yet.</div> }
                 </div>
+                <div class="mb-4">
+                    <h6 class="text-muted small mb-2"><span class="bi bi-file-earmark-bar-graph me-1"></span>Monthly report</h6>
+                    <MonthlyReportPanel CustomerId="selectedCustomer.Id" Customer="true" />
+                </div>
                 <div>
                     <h6 class="text-muted small mb-2"><span class="bi bi-clock-history me-1"></span>Incident History (30 days)</h6>
                     @if (AllCustomerDeployments.Count > 0)
