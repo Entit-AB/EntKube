@@ -6,7 +6,7 @@
 
 @* ═══════════════════════════════════════════════════════════════════
    The customer's own view of their hours, and the one decision §11.1
-   leaves to them: whether work may continue once the timbank is spent.
+   leaves to them: whether work may continue once the hour bank is spent.
    ═══════════════════════════════════════════════════════════════════ *@
 
 <LoadingPanel Loading="@loading" Error="@error">
@@ -16,7 +16,7 @@
         <div>
             <h6 class="mb-0">Hours — @month.ToString("MMMM yyyy")</h6>
             <div class="text-muted small">
-                Every hour we have booked, with what it drew from your timbank.
+                Every hour we have booked, with what it drew from your hour bank.
             </div>
         </div>
         <div class="btn-group btn-group-sm">
@@ -50,7 +50,7 @@
             <div class="col-sm-4">
                 <div class="border rounded text-center p-3">
                     <div class="fs-3 fw-bold">@Hours(bank.OverspillHours)</div>
-                    <div class="small text-muted">Beyond the timbank</div>
+                    <div class="small text-muted">Beyond the hour bank</div>
                 </div>
             </div>
         </div>
@@ -69,7 +69,7 @@
             <div class="alert alert-warning">
                 <div class="d-flex justify-content-between align-items-start">
                     <div class="small">
-                        <strong>The timbank for this month is spent.</strong>
+                        <strong>The hour bank for this month is spent.</strong>
                         §11.1 means further work waits for your go-ahead — except P1 and P2 incidents,
                         which we handle immediately and bill without asking.
                     </div>
@@ -119,7 +119,7 @@
     {
         <div class="alert alert-light border py-2 small mb-3">
             <i class="bi bi-info-circle me-1"></i>
-            Löpande räkning — work is billed per started hour as it is done.
+            Time and materials — work is billed per started hour as it is done.
         </div>
     }
 
@@ -135,7 +135,7 @@
                     <tr>
                         <th>Day</th>
                         <th>Application</th>
-                        <th>Ärende</th>
+                        <th>Ticket</th>
                         <th>Rate</th>
                         <th class="text-end">Hours</th>
                         <th>What was done</th>
@@ -171,7 +171,7 @@
     [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
 
     /// <summary>
-    /// Approving work beyond the timbank commits money, so it follows the same role gate as
+    /// Approving work beyond the hour bank commits money, so it follows the same role gate as
     /// the portal's other write actions rather than being open to every viewer.
     /// </summary>
     [Parameter] public CustomerAccessRole AccessRole { get; set; } = CustomerAccessRole.Viewer;
@@ -260,11 +260,11 @@
 
     private static string CategoryName(SupportTimeCategory category) => category switch
     {
-        SupportTimeCategory.Ordinary => "Ordinarie",
-        SupportTimeCategory.EveningMorning => "Kväll/morgon (+25%)",
-        SupportTimeCategory.WeekendOrRedDay => "Helg/röd dag (+50%)",
+        SupportTimeCategory.Ordinary => "Ordinary",
+        SupportTimeCategory.EveningMorning => "Evening/morning (+25%)",
+        SupportTimeCategory.WeekendOrRedDay => "Weekend/public holiday (+50%)",
         SupportTimeCategory.Night => "Natt (+100%)",
-        SupportTimeCategory.Callout => "Utryckning (+100%)",
+        SupportTimeCategory.Callout => "Call-out (+100%)",
         _ => category.ToString(),
     };
 }

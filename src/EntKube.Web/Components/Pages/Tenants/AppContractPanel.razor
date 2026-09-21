@@ -7,11 +7,11 @@
 @inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
-   Bilaga A for one application — the terms it is managed on.
+   Annex A for one application — the terms it is managed on.
 
    The classification is deliberately not editable in place: §4.1 and
    §16.2 both change it over the life of the agreement and the
-   kännedomsavgift follows, so a change is a new dated entry and the
+   knowledge fee follows, so a change is a new dated entry and the
    history stays readable.
    ═══════════════════════════════════════════════════════════════════ *@
 
@@ -27,7 +27,7 @@
 {
     <div class="d-flex justify-content-between align-items-center mb-3">
         <div>
-            <h6 class="mb-0">Bilaga A — förvaltningsavtal</h6>
+            <h6 class="mb-0">Annex A — management agreement</h6>
             <div class="text-muted small">The terms this application is managed on.</div>
         </div>
         @if (contract is not null && current is not null)
@@ -40,7 +40,7 @@
                         @current.Value.Window
                         @if (current.Value.WindowInherited)
                         {
-                            <span class="ms-1" title="Inherited from the moderapplikation (§10.2.1)">↑</span>
+                            <span class="ms-1" title="Inherited from the parent application (§10.2.1)">↑</span>
                         }
                     </span>
                 }
@@ -55,11 +55,11 @@
     @if (contract is null)
     {
         <EmptyState Icon="bi-file-earmark-text"
-                    Title="Not under förvaltning"
-                    Message="This application has no Bilaga A. Record one to bring it under the agreement." />
+                    Title="Not under management"
+                    Message="This application has no Annex A. Record one to bring it under the agreement." />
         <div class="text-center mb-4">
             <button class="btn btn-sm btn-primary" @onclick="StartNewContract">
-                <span class="bi bi-plus-lg me-1"></span>Record Bilaga A
+                <span class="bi bi-plus-lg me-1"></span>Record Annex A
             </button>
         </div>
     }
@@ -69,7 +69,7 @@
             <div class="card-body">
                 <div class="row g-3">
                     <div class="col-md-4">
-                        <label class="form-label small text-muted">Ursprung</label>
+                        <label class="form-label small text-muted">Origin</label>
                         <select class="form-select form-select-sm" @bind="form.Origin">
                             <option value="@ContractOrigin.ExternallyDeveloped">Del 2 — externally developed</option>
                             <option value="@ContractOrigin.SupplierDeveloped">Del 3 — developed by us</option>
@@ -105,18 +105,18 @@
                     </div>
 
                     <div class="col-md-4">
-                        <label class="form-label small text-muted">SLA starts (startprotokoll)</label>
+                        <label class="form-label small text-muted">SLA starts (start protocol)</label>
                         <input type="date" class="form-control form-control-sm" @bind="form.SlaStartsAt" />
                         <div class="form-text small">Before this, §4.1 promises no response times.</div>
                     </div>
 
                     <div class="col-md-4">
-                        <label class="form-label small text-muted">Left förvaltning (§19)</label>
+                        <label class="form-label small text-muted">Left management (§19)</label>
                         <input type="date" class="form-control form-control-sm" @bind="form.ManagementEndedAt" />
                     </div>
 
                     <div class="col-md-4">
-                        <label class="form-label small text-muted">Moderapplikation</label>
+                        <label class="form-label small text-muted">Parent application</label>
                         <select class="form-select form-select-sm" @bind="form.ParentAppId">
                             <option value="">— none (not an instance) —</option>
                             @foreach (Data.App candidate in siblingApps)
@@ -124,14 +124,14 @@
                                 <option value="@candidate.Id">@candidate.Name</option>
                             }
                         </select>
-                        <div class="form-text small">Required at level Instans (§10.2.1).</div>
+                        <div class="form-text small">Required at level Instance (§10.2.1).</div>
                     </div>
 
                     <div class="col-md-4">
                         <label class="form-label small text-muted">Monthly work cap (hours)</label>
                         <input type="number" step="0.5" class="form-control form-control-sm"
                                @bind="form.MonthlyWorkCapHours" />
-                        <div class="form-text small">Modell B only (§12). Blank = no cap.</div>
+                        <div class="form-text small">Model B only (§12). Blank = no cap.</div>
                     </div>
 
                     <div class="col-md-4">
@@ -148,7 +148,7 @@
 
                 <div class="text-end mt-3">
                     <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveContractAsync">
-                        <span class="bi bi-save me-1"></span>Save Bilaga A
+                        <span class="bi bi-save me-1"></span>Save Annex A
                     </AsyncButton>
                 </div>
             </div>
@@ -157,7 +157,7 @@
         @* ───────────── Classification history ───────────── *@
         <div class="d-flex justify-content-between align-items-center mb-2">
             <div>
-                <h6 class="mb-0">Förvaltningsnivå och supportfönster</h6>
+                <h6 class="mb-0">Service level and support window</h6>
                 <div class="text-muted small">
                     A dated series, so an invoice from an earlier month still explains itself.
                 </div>
@@ -173,7 +173,7 @@
                 <div class="card-body">
                     <div class="row g-3">
                         <div class="col-md-3">
-                            <label class="form-label small text-muted">Förvaltningsnivå</label>
+                            <label class="form-label small text-muted">Service level</label>
                             <select class="form-select form-select-sm" @bind="newLevel">
                                 @foreach (ManagementLevel level in Enum.GetValues<ManagementLevel>())
                                 {
@@ -182,9 +182,9 @@
                             </select>
                         </div>
                         <div class="col-md-3">
-                            <label class="form-label small text-muted">Supportfönster</label>
+                            <label class="form-label small text-muted">Support window</label>
                             <select class="form-select form-select-sm" @bind="newWindow">
-                                <option value="">— inherit from moderapplikation —</option>
+                                <option value="">— inherit from the parent application —</option>
                                 @foreach (SupportWindow window in Enum.GetValues<SupportWindow>())
                                 {
                                     <option value="@window">@WindowName(window)</option>
@@ -225,8 +225,8 @@
                     <thead class="table-light">
                         <tr>
                             <th>Effective from</th>
-                            <th>Nivå</th>
-                            <th>Fönster</th>
+                            <th>Level</th>
+                            <th>Window</th>
                             <th>Reason</th>
                             <th>Recorded</th>
                             <th></th>
@@ -373,7 +373,7 @@
         {
             form.ApplyTo(contract);
             contract = await Contracts.SaveContractAsync(contract);
-            Toasts.Success("Bilaga A saved.");
+            Toasts.Success("Annex A saved.");
             await LoadAsync();
         }
         catch (Exception ex)
@@ -441,25 +441,25 @@
 
     private static string LevelName(ManagementLevel level) => level switch
     {
-        ManagementLevel.Simple => "Enkel",
+        ManagementLevel.Simple => "Simple",
         ManagementLevel.Standard => "Standard",
-        ManagementLevel.Complex => "Komplex",
-        ManagementLevel.Instance => "Instans",
-        ManagementLevel.NeedsInvestigation => "Behöver undersökas",
+        ManagementLevel.Complex => "Complex",
+        ManagementLevel.Instance => "Instance",
+        ManagementLevel.NeedsInvestigation => "Needs investigation",
         _ => level.ToString(),
     };
 
     private static string WindowName(SupportWindow window) => window switch
     {
-        SupportWindow.S1 => "S1 — kontorstid (08–17)",
-        SupportWindow.S2 => "S2 — utökad (05–22 vardagar)",
-        SupportWindow.S3 => "S3 — utökad inkl. helger (05–22)",
-        SupportWindow.S4 => "S4 — dygnet runt",
+        SupportWindow.S1 => "S1 — office hours (08–17)",
+        SupportWindow.S2 => "S2 — extended, weekdays (05–22)",
+        SupportWindow.S3 => "S3 — extended, incl. weekends (05–22)",
+        SupportWindow.S4 => "S4 — around the clock",
         _ => window.ToString(),
     };
 
     /// <summary>
-    /// The editable shape of Bilaga A. Dates bind as local <c>DateTime?</c> because that is
+    /// The editable shape of Annex A. Dates bind as local <c>DateTime?</c> because that is
     /// what an <c>input type="date"</c> produces; they are stamped back to UTC on save so a
     /// date typed in Sweden does not drift a day.
     /// </summary>

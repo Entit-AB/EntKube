@@ -45,7 +45,7 @@ else
                 <span class="bi bi-exclamation-octagon me-1"></span>
                 <strong>@breaching.Count</strong>
                 @(breaching.Count == 1 ? "ticket has" : "tickets have") missed a response time that
-                carries §14.6's penalty — 10% of the fönsteravgift each, up to three a year.
+                carries §14.6's penalty — 10% of the window fee each, up to three a year.
             </div>
         }
 
@@ -91,7 +91,7 @@ else
                                     @if (row.Ticket.IsCallout)
                                     {
                                         <span class="badge bg-warning text-dark ms-1"
-                                              title="P1 outside the bought window — utryckning (§13)">utryckning</span>
+                                              title="P1 outside the bought window — call-out (§13)">call-out</span>
                                     }
                                 </div>
                             </td>

@@ -16,7 +16,7 @@
     <div>
         <h6 class="mb-0">Time</h6>
         <div class="text-muted small">
-            Logged as worked; §13 bills it per started hour, per arbetspass.
+            Logged as worked; §13 bills it per started hour, per work pass.
         </div>
     </div>
     <button class="btn btn-sm btn-outline-primary" @onclick="() => logging = !logging">
@@ -39,10 +39,10 @@
             <div class="col-md-3">
                 <label class="form-label small text-muted">Kind</label>
                 <select class="form-select form-select-sm" @bind="kind">
-                    <option value="@WorkKind.Management">Förvaltning</option>
+                    <option value="@WorkKind.Management">Management</option>
                     <option value="@WorkKind.IncidentAssessment">First assessment (first 30 min free)</option>
-                    <option value="@WorkKind.Development">Utveckling (§15)</option>
-                    <option value="@WorkKind.Travel">Restid (50%)</option>
+                    <option value="@WorkKind.Development">Development (§15)</option>
+                    <option value="@WorkKind.Travel">Travel time (50%)</option>
                 </select>
             </div>
             <div class="col-md-3 text-end">
@@ -104,11 +104,11 @@ else
     <div class="d-flex gap-4 small">
         <div><span class="text-muted">Worked</span> <strong>@Hours(workedHours)</strong></div>
         <div><span class="text-muted">Billed (§13)</span> <strong>@Hours(billedHours)</strong></div>
-        <div><span class="text-muted">From the timbank</span> <strong>@Hours(bankHours)</strong></div>
+        <div><span class="text-muted">From the hour bank</span> <strong>@Hours(bankHours)</strong></div>
         @if (freeHours > 0m)
         {
             <div class="text-success">
-                <span class="text-muted">Included in the grundavgift</span> <strong>@Hours(freeHours)</strong>
+                <span class="text-muted">Included in the base fee</span> <strong>@Hours(freeHours)</strong>
             </div>
         }
     </div>

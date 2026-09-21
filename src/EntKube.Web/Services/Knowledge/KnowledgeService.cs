@@ -32,8 +32,8 @@ public readonly record struct KnowledgeGap(
 /// <summary>
 /// What we know about an application, and what we do not.
 ///
-/// <para>§10.2 charges a kännedomsavgift per application for keeping its monitoring,
-/// alarms, certificates and drifthandbok current and the support team insatt in it. That
+/// <para>§10.2 charges a knowledge fee per application for keeping its monitoring,
+/// alarms, certificates and runbook current and the support team insatt in it. That
 /// fee is defensible at a quarterly review only if someone can show the knowledge exists
 /// and is current — so this both holds it and reports where it has lapsed.</para>
 /// </summary>
@@ -42,7 +42,7 @@ public class KnowledgeService(
     ContractService contracts)
 {
     /// <summary>
-    /// The sections §10.2 and §19 both assume exist. A drifthandbok is named twice in the
+    /// The sections §10.2 and §19 both assume exist. A runbook is named twice in the
     /// agreement; an architecture narrative is what makes the rest readable.
     /// </summary>
     public static readonly KnowledgeSectionKind[] ExpectedSections =
@@ -74,7 +74,7 @@ public class KnowledgeService(
     /// Saves a section, keeping what it said before.
     ///
     /// <para>The previous body becomes a revision rather than being overwritten. A
-    /// drifthandbok that changed and cannot say when or why is not evidence of anything at
+    /// runbook that changed and cannot say when or why is not evidence of anything at
     /// the next review — and §19 hands this material over at off-boarding, where its
     /// history is part of what is handed over.</para>
     /// </summary>
@@ -302,7 +302,7 @@ public class KnowledgeService(
     ///
     /// <para>These are the things the agreement assumes are true and nobody checks until
     /// they are needed — usually at 03:00, or at a quarterly review where the
-    /// kännedomsavgift is being questioned.</para>
+    /// knowledge fee is being questioned.</para>
     /// </summary>
     public async Task<List<KnowledgeGap>> GetGapsAsync(
         Guid appId, DateTime asOf, CancellationToken ct = default)
@@ -325,7 +325,7 @@ public class KnowledgeService(
                         : KnowledgeGapSeverity.Warning,
                     $"No {expected} written",
                     expected == KnowledgeSectionKind.Runbook
-                        ? "A drifthandbok is a deliverable of on-boarding and of off-boarding, and it "
+                        ? "A runbook is a deliverable of on-boarding and of off-boarding, and it "
                           + "is what a jourhavande who has never seen this application reads first."
                         : "Without it, everything else here is harder to read than it needs to be.",
                     expected == KnowledgeSectionKind.Runbook ? "§5.2, §19" : "§10.2"));
@@ -342,7 +342,7 @@ public class KnowledgeService(
                     KnowledgeGapSeverity.Warning,
                     $"{section.Title} has not been reviewed since "
                     + $"{(section.ReviewedAt ?? section.CreatedAt):yyyy-MM-dd}",
-                    "The kännedomsavgift is charged for keeping this current. A section nobody has "
+                    "The knowledge fee is charged for keeping this current. A section nobody has "
                     + "confirmed in months is the first thing to be questioned at a quarterly review.",
                     "§10.2, §16.2"));
             }
@@ -363,7 +363,7 @@ public class KnowledgeService(
                     KnowledgeGapSeverity.Critical,
                     $"{dependency.Name} is office-hours only, but this application is on {window}",
                     "§23 says that where the customer chooses a wider window than their own "
-                    + "dependencies can be reached in, no lösningstid can be guaranteed — and §14.4 "
+                    + "dependencies can be reached in, no resolution time can be guaranteed — and §14.4 "
                     + "pauses the clock while we wait for them. Worth saying out loud before an "
                     + "incident, not after.",
                     "§23, §14.4"));
@@ -384,7 +384,7 @@ public class KnowledgeService(
                     $"{notice.Component} is out of support and the notice period has run out",
                     "Three months have passed since written notice and no upgrade has been ordered. "
                     + "§14.7 lets us exempt this application from the SLA times and from liability "
-                    + "for security faults in this component until it is done — the grundavgift is "
+                    + "for security faults in this component until it is done — the base fee is "
                     + "unaffected.",
                     "§14.7"));
             }

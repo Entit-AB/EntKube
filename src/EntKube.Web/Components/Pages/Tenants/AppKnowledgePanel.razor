@@ -6,7 +6,7 @@
 
 @* ═══════════════════════════════════════════════════════════════════
    What we know about an application: the half of §10.2 that is not
-   monitoring, and the half the kännedomsavgift is hardest to justify
+   monitoring, and the half the knowledge fee is hardest to justify
    without.
    ═══════════════════════════════════════════════════════════════════ *@
 
@@ -74,7 +74,7 @@
                     <label class="form-label small text-muted">Backup owned by</label>
                     <select class="form-select form-select-sm" @bind="profile.BackupResponsibility">
                         <option value="@BackupResponsibility.Customer">The customer (§23 default)</option>
-                        <option value="@BackupResponsibility.Supplier">Us, per Bilaga A</option>
+                        <option value="@BackupResponsibility.Supplier">Us, per Annex A</option>
                         <option value="@BackupResponsibility.ThirdParty">A third party</option>
                     </select>
                 </div>
@@ -102,9 +102,9 @@
     @* ───────────── Sections ───────────── *@
     <div class="d-flex justify-content-between align-items-center mb-2">
         <div>
-            <h6 class="mb-0">Kännedom</h6>
+            <h6 class="mb-0">Knowledge</h6>
             <div class="text-muted small">
-                Architecture, drifthandbok, decisions, known defects — kept current, with history.
+                Architecture, runbook, decisions, known defects — kept current, with history.
             </div>
         </div>
         <button class="btn btn-sm btn-outline-primary" @onclick="StartNewSection">
@@ -155,7 +155,7 @@
     {
         <EmptyState Icon="bi-journal-text"
                     Title="Nothing written down"
-                    Message="This is what the kännedomsavgift pays for. Start with the drifthandbok." />
+                    Message="This is what the knowledge fee pays for. Start with the runbook." />
     }
     else
     {
@@ -219,7 +219,7 @@
         <div>
             <h6 class="mb-0">External dependencies</h6>
             <div class="text-muted small">
-                Bilaga A.1: system, leverantör, supporttider, kontaktväg — what §14.4 pauses the
+                Annex A.1: system, supplier, support hours, contact route — what §14.4 pauses the
                 clock for.
             </div>
         </div>
@@ -505,7 +505,7 @@
             TenantId = TenantId,
             AppId = App.Id,
             Kind = KnowledgeSectionKind.Runbook,
-            Title = "Drifthandbok",
+            Title = "Runbook",
         };
 
     private void StartEdit(KnowledgeSection section) =>

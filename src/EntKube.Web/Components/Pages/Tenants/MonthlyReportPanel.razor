@@ -40,7 +40,7 @@
     {
         <div class="alert alert-danger py-2 small">
             <i class="bi bi-exclamation-octagon me-1"></i>
-            <strong>An åtgärdsplan is owed.</strong>
+            <strong>An action plan is owed.</strong>
             More than @TicketSla.DeviationsBeforeActionPlan P1–P2 deviations in this quarter.
             §14.6 requires a written plan at the next quarterly meeting — and if the next quarter
             goes the same way, the customer may force the support window down to S1 on a month's
@@ -49,7 +49,7 @@
     }
 
     @* ───────────── Availability ───────────── *@
-    <h6 class="small text-muted mt-3 mb-2">Tillgänglighet</h6>
+    <h6 class="small text-muted mt-3 mb-2">Availability</h6>
     @if (report.Availability.Count == 0)
     {
         <div class="text-muted small mb-3">No deployments to measure.</div>
@@ -101,7 +101,7 @@
     }
 
     @* ───────────── Tickets ───────────── *@
-    <h6 class="small text-muted mb-2">Ärenden</h6>
+    <h6 class="small text-muted mb-2">Tickets</h6>
     @if (report.ByPriority.Count == 0)
     {
         <div class="text-muted small mb-3">Nothing was reported this month.</div>
@@ -164,7 +164,7 @@
                 on P1/P2 — @report.PenaltyAmount.ToString("N0") kr.
             </strong>
             §14.6 sets this at @((int)(TicketSla.PenaltyFractionOfWindowFee * 100))% of the month's
-            fönsteravgift (@report.WindowFee.ToString("N0") kr) per deviation, up to
+            window fee (@report.WindowFee.ToString("N0") kr) per deviation, up to
             @TicketSla.MaxPenaltiesPerYear a calendar year.
             @if (Customer)
             {
@@ -191,14 +191,14 @@
     }
 
     @* ───────────── Hours ───────────── *@
-    <h6 class="small text-muted mb-2">Förbrukade timmar</h6>
+    <h6 class="small text-muted mb-2">Hours consumed</h6>
     <div class="row g-3 mb-2">
         @if (report.Timebank.EntitledHours is decimal entitled)
         {
             <div class="col-sm-3">
                 <div class="border rounded text-center p-2">
                     <div class="fs-5 fw-bold">@Hours(entitled)</div>
-                    <div class="small text-muted">Timbank</div>
+                    <div class="small text-muted">Hour bank</div>
                 </div>
             </div>
             <div class="col-sm-3">
@@ -225,7 +225,7 @@
             <div class="col-sm-4">
                 <div class="border rounded text-center p-2">
                     <div class="fs-5 fw-bold text-primary">@Hours(report.Hours.TotalHours)</div>
-                    <div class="small text-muted">Billed this month (löpande räkning)</div>
+                    <div class="small text-muted">Billed this month (time and materials)</div>
                 </div>
             </div>
         }

@@ -46,18 +46,18 @@
             @if (ticket.IsCallout)
             {
                 <div class="badge bg-warning text-dark mt-1"
-                     title="P1 outside the bought window — utryckning (§13), minimum two hours">utryckning</div>
+                     title="P1 outside the bought window — call-out (§13), minimum two hours">call-out</div>
             }
         </div>
     </div>
 
     @* ───────────── Clocks ───────────── *@
     <div class="row g-3 mb-4">
-        <div class="col-md-4">@ClockCard("Responstid", status.Response, "§14.6 pays 10% of the fönsteravgift for a missed P1/P2 response")</div>
-        <div class="col-md-4">@ClockCard("Lösningstid", status.Resolution, "§14.4 calls this a goal — overrunning it is not a penalty")</div>
+        <div class="col-md-4">@ClockCard("Response time", status.Response, "§14.6 pays 10% of the window fee for a missed P1/P2 response")</div>
+        <div class="col-md-4">@ClockCard("Resolution time", status.Resolution, "§14.4 calls this a goal — overrunning it is not a penalty")</div>
         <div class="col-md-4">
             <div class="border rounded p-3 h-100">
-                <div class="small text-muted">Eskalering (§14.5)</div>
+                <div class="small text-muted">Escalation (§14.5)</div>
                 @if (status.EscalationDue is not null)
                 {
                     <div class="fs-6 fw-semibold @(status.EscalationDue <= now ? "text-danger" : "")">

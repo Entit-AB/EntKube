@@ -5,8 +5,8 @@
 @inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
-   Bilaga B and C for a customer's portfolio, plus the people the
-   agreement requires by name and the grundavgift that falls out of it.
+   Annex B and C for a customer's portfolio, plus the people the
+   agreement requires by name and the base fee that falls out of it.
    ═══════════════════════════════════════════════════════════════════ *@
 
 <ConfirmDialog Visible="@(pendingDeleteContactId is not null)"
@@ -19,12 +19,12 @@
 <LoadingPanel Loading="@loading" Error="@error">
 @if (!loading)
 {
-    @* ───────────── Grundavgift ───────────── *@
+    @* ───────────── Base fee ───────────── *@
     <div class="card shadow-sm mb-4">
         <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
             <div>
                 <i class="bi bi-receipt me-2 text-primary"></i>
-                <strong>Grundavgift</strong>
+                <strong>Base fee</strong>
                 <span class="text-muted small ms-2">charged every month under §10, whether or not work is done</span>
             </div>
             <div class="d-flex align-items-center gap-2">
@@ -39,14 +39,14 @@
                     <div class="border rounded text-center p-3">
                         <div class="fs-4 fw-bold text-primary">@Money(fee.WindowFee)</div>
                         <div class="small text-muted">
-                            Fönsteravgift @(fee.Window is null ? "" : $"({fee.Window})")
+                            Window fee @(fee.Window is null ? "" : $"({fee.Window})")
                         </div>
                     </div>
                 </div>
                 <div class="col-sm-4">
                     <div class="border rounded text-center p-3">
                         <div class="fs-4 fw-bold text-primary">@Money(fee.KnowledgeFees)</div>
-                        <div class="small text-muted">Kännedomsavgifter (@fee.Applications.Count apps)</div>
+                        <div class="small text-muted">Knowledge fees (@fee.Applications.Count apps)</div>
                     </div>
                 </div>
                 <div class="col-sm-4">
@@ -79,9 +79,9 @@
                         <thead class="table-light">
                             <tr>
                                 <th>Application</th>
-                                <th>Nivå</th>
-                                <th>Fönster</th>
-                                <th class="text-end">Kännedomsavgift</th>
+                                <th>Level</th>
+                                <th>Window</th>
+                                <th class="text-end">Knowledge fee</th>
                             </tr>
                         </thead>
                         <tbody>
@@ -108,10 +108,10 @@
         </div>
     </div>
 
-    @* ───────────── Bilaga B ───────────── *@
+    @* ───────────── Annex B ───────────── *@
     <div class="d-flex justify-content-between align-items-center mb-2">
         <div>
-            <h6 class="mb-0">Bilaga B — portföljval</h6>
+            <h6 class="mb-0">Annex B — portfolio choices</h6>
             <div class="text-muted small">
                 §2 allows a change at a calendar-quarter boundary, and no sooner than three months
                 after the last one.
@@ -128,14 +128,14 @@
             <div class="card-body">
                 <div class="row g-3">
                     <div class="col-md-4">
-                        <label class="form-label small text-muted">Prismodell</label>
+                        <label class="form-label small text-muted">Pricing model</label>
                         <select class="form-select form-select-sm" @bind="newPricingModel">
-                            <option value="@PricingModel.HourBank">Modell A — timbank</option>
-                            <option value="@PricingModel.TimeAndMaterials">Modell B — löpande räkning</option>
+                            <option value="@PricingModel.HourBank">Model A — hour bank</option>
+                            <option value="@PricingModel.TimeAndMaterials">Model B — time and materials</option>
                         </select>
                     </div>
                     <div class="col-md-4">
-                        <label class="form-label small text-muted">Timbank (hours / month)</label>
+                        <label class="form-label small text-muted">Hour bank (hours / month)</label>
                         <input type="number" step="1" class="form-control form-control-sm"
                                @bind="newHourBank" disabled="@(newPricingModel != PricingModel.HourBank)" />
                         <div class="form-text small">§11.1: unused hours expire at month end.</div>
@@ -160,7 +160,7 @@
     @if (agreements.Count == 0)
     {
         <EmptyState Icon="bi-file-earmark-ruled"
-                    Title="No Bilaga B recorded"
+                    Title="No Annex B recorded"
                     Message="Until a pricing model is recorded, work cannot be billed against this portfolio." />
     }
     else
@@ -170,8 +170,8 @@
                 <thead class="table-light">
                     <tr>
                         <th>Effective from</th>
-                        <th>Prismodell</th>
-                        <th>Timbank</th>
+                        <th>Pricing model</th>
+                        <th>Hour bank</th>
                         <th>Notes</th>
                     </tr>
                 </thead>
@@ -187,7 +187,7 @@
                                     <span class="badge bg-primary ms-2">In force</span>
                                 }
                             </td>
-                            <td>@(agreement.PricingModel == PricingModel.HourBank ? "Modell A — timbank" : "Modell B — löpande räkning")</td>
+                            <td>@(agreement.PricingModel == PricingModel.HourBank ? "Model A — hour bank" : "Model B — time and materials")</td>
                             <td>@(agreement.HourBankHoursPerMonth is null ? "—" : $"{agreement.HourBankHoursPerMonth:0.##} h")</td>
                             <td class="small text-muted">@agreement.Notes</td>
                         </tr>
@@ -200,7 +200,7 @@
     @* ───────────── Contacts ───────────── *@
     <div class="d-flex justify-content-between align-items-center mb-2">
         <div>
-            <h6 class="mb-0">Kontaktvägar och eskalering</h6>
+            <h6 class="mb-0">Contacts and escalation</h6>
             <div class="text-muted small">
                 §23 wants a contact with a mandate plus a deputy; §14.5 wants levels 2 and 3 named on
                 both sides.
@@ -315,10 +315,10 @@
         </div>
     }
 
-    @* ───────────── Bilaga C ───────────── *@
+    @* ───────────── Annex C ───────────── *@
     <div class="d-flex justify-content-between align-items-center mb-2">
         <div>
-            <h6 class="mb-0">Bilaga C — prisbilaga</h6>
+            <h6 class="mb-0">Annex C — price annex</h6>
             <div class="text-muted small">
                 Versioned, never edited: §19 indexes prices every January, and an earlier month has to
                 keep pricing at the list that was in force then.
@@ -353,7 +353,7 @@
                         <label class="form-label small text-muted">Increase (%)</label>
                         <input type="number" step="0.01" class="form-control form-control-sm" @bind="indexPercent" />
                         <div class="form-text small">
-                            §19 applies SCB AKI (näringsgren J), with a floor of
+                            §19 applies SCB's labour cost index for salaried employees, with a floor of
                             @ContractService.MinimumIndexationPercent%.
                         </div>
                     </div>
@@ -380,8 +380,8 @@
                     <tr>
                         <th>Effective from</th>
                         <th>Entries</th>
-                        <th>S1 / S4 fönsteravgift</th>
-                        <th>Ordinarie timme</th>
+                        <th>S1 / S4 window fee</th>
+                        <th>Ordinary timme</th>
                         <th>Notes</th>
                     </tr>
                 </thead>
@@ -511,7 +511,7 @@
 
             addingAgreement = false;
             newAgreementNotes = null;
-            Toasts.Success("Bilaga B recorded.");
+            Toasts.Success("Annex B recorded.");
             await LoadAsync();
         }
         catch (Exception ex)
@@ -647,12 +647,12 @@
 
     private static string RoleName(ContractContactRole role) => role switch
     {
-        ContractContactRole.TechnicalContact => "Teknisk kontakt (§23)",
-        ContractContactRole.Deputy => "Ersättare (§23)",
-        ContractContactRole.ApplicationOwner => "Applikationsansvarig (nivå 2)",
-        ContractContactRole.EscalationLevel2 => "Eskalering nivå 2",
-        ContractContactRole.EscalationLevel3 => "Eskalering nivå 3",
-        ContractContactRole.Billing => "Fakturering",
+        ContractContactRole.TechnicalContact => "Technical contact (§23)",
+        ContractContactRole.Deputy => "Deputy (§23)",
+        ContractContactRole.ApplicationOwner => "Application owner (level 2)",
+        ContractContactRole.EscalationLevel2 => "Escalation level 2",
+        ContractContactRole.EscalationLevel3 => "Escalation level 3",
+        ContractContactRole.Billing => "Billing",
         _ => role.ToString(),
     };
 }

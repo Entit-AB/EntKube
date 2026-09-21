@@ -6,12 +6,12 @@ namespace EntKube.Web.Services.Contracts;
 /// <summary>
 /// The classification in force for an application on a date.
 /// </summary>
-/// <param name="Level">The förvaltningsnivå.</param>
+/// <param name="Level">The service level.</param>
 /// <param name="Window">
 /// The support window, after inheritance. Null when nothing has been agreed — an instance
 /// whose moderapplikation has no window either, or an application classified but never
 /// given one. Null is reported rather than defaulted, because guessing S1 would quietly
-/// understate both the fönsteravgift and the hours the SLA clock runs.
+/// understate both the window fee and the hours the SLA clock runs.
 /// </param>
 /// <param name="WindowInherited">True when the window came from the moderapplikation (§10.2.1).</param>
 /// <param name="EffectiveFrom">When this classification took effect.</param>
@@ -23,7 +23,7 @@ public readonly record struct ResolvedServiceLevel(
 
 /// <summary>
 /// Reads the agreement: which terms applied to an application or a portfolio on a given
-/// date, and what the grundavgift comes to.
+/// date, and what the base fee comes to.
 ///
 /// <para>Everything here takes an <c>asOf</c> instant rather than reading the clock. A
 /// statement for March is produced in April and must answer as March — the same discipline
@@ -49,7 +49,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     }
 
     /// <summary>
-    /// The förvaltningsnivå and support window in force for an application on a date, with
+    /// The service level and support window in force for an application on a date, with
     /// an instance inheriting its moderapplikation's window when it has none of its own.
     /// Null when the application has no contract or nothing had taken effect by then.
     /// </summary>
@@ -67,7 +67,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     }
 
     /// <summary>
-    /// The Bilaga B terms in force for a customer on a date — the latest agreement that had
+    /// The Annex B terms in force for a customer on a date — the latest agreement that had
     /// taken effect by then.
     /// </summary>
     public async Task<PortfolioAgreement?> GetPortfolioAgreementAsync(
@@ -116,8 +116,8 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     }
 
     /// <summary>
-    /// The grundavgift of §10 for a customer on a date: one fönsteravgift priced on the most
-    /// extensive window in the portfolio, plus one kännedomsavgift per application.
+    /// The base fee of §10 for a customer on a date: one window fee priced on the most
+    /// extensive window in the portfolio, plus one knowledge fee per application.
     ///
     /// <para>Applications that cannot be priced are listed rather than charged at zero, so a
     /// missing classification shows up as a gap instead of as a discount.</para>
@@ -166,7 +166,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
             if (resolved is null || resolved.Value.Window is null)
             {
-                unpriced.Add($"{name}: no förvaltningsnivå or support window in force");
+                unpriced.Add($"{name}: no service level or support window in force");
                 continue;
             }
 
@@ -177,7 +177,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
             if (fee is null)
             {
-                unpriced.Add($"{name}: no kännedomsavgift in the price list for {key}");
+                unpriced.Add($"{name}: no knowledge fee in the price list for {key}");
                 continue;
             }
 
@@ -193,7 +193,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
             decimal? amount = Lookup(prices, PriceKind.WindowFee, widest.Value.ToString());
             if (amount is null)
             {
-                unpriced.Add($"No fönsteravgift in the price list for {widest}");
+                unpriced.Add($"No window fee in the price list for {widest}");
             }
             else
             {
@@ -207,7 +207,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     // ---- Writes ------------------------------------------------------------------------
 
     /// <summary>
-    /// Creates or updates an application's Bilaga A. The classification is not touched here
+    /// Creates or updates an application's Annex A. The classification is not touched here
     /// — it moves through <see cref="RecordServiceLevelAsync"/>, which keeps its history.
     /// </summary>
     public async Task<ApplicationContract> SaveContractAsync(
@@ -294,7 +294,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         }
     }
 
-    /// <summary>Records a Bilaga B taking effect from a date.</summary>
+    /// <summary>Records a Annex B taking effect from a date.</summary>
     public async Task<PortfolioAgreement> RecordPortfolioAgreementAsync(
         PortfolioAgreement agreement, CancellationToken ct = default)
     {
@@ -465,7 +465,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         list?.Entries.FirstOrDefault(e => e.Kind == kind && e.Key == key)?.Amount;
 
     /// <summary>
-    /// Whether the application was under förvaltning at that instant — on-boarded by then
+    /// Whether the application was under management at that instant — on-boarded by then
     /// and not yet taken out under §19. A contract with no on-boarding date has not started.
     /// </summary>
     private static bool IsUnderManagement(ApplicationContract contract, DateTime asOf) =>
