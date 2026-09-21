@@ -371,6 +371,37 @@ public class TicketService(
         return ticket;
     }
 
+    /// <summary>
+    /// Reopens a ticket the customer does not accept as resolved.
+    ///
+    /// <para>§14.4 resolves a P1 or P2 only when service is restored <em>or the customer has
+    /// accepted a workaround</em>, so the customer saying otherwise has to be able to undo
+    /// it. The resolution clock resumes from where it stopped rather than restarting: the
+    /// time already spent was still spent.</para>
+    /// </summary>
+    public async Task<Ticket?> ReopenAsync(
+        Guid ticketId, string reason, string? actor, DateTime at, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+        if (ticket is null)
+        {
+            return null;
+        }
+
+        ticket.Status = TicketStatus.InProgress;
+        ticket.ResolvedAt = null;
+        ticket.ClosedAt = null;
+        ticket.UpdatedAt = at;
+
+        db.TicketEvents.Add(Event(ticket.Id, TicketEventKind.Note, at, actor,
+            $"Reopened — the customer does not accept this as resolved. {reason}"));
+
+        await db.SaveChangesAsync(ct);
+        return ticket;
+    }
+
     /// <summary>Adds a note or a status update to the record.</summary>
     public async Task AddEventAsync(
         Guid ticketId, TicketEventKind kind, string detail, string? actor, DateTime at,

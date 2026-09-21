@@ -1,0 +1,509 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@inject TicketService Tickets
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   One ticket, with the actions §14 actually defines and the history
+   that §14.6 makes the record between the parties.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading && ticket is not null)
+{
+    <nav class="mb-3">
+        <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="OnBack">
+            <i class="bi bi-arrow-left me-1"></i>Back to the queue
+        </button>
+    </nav>
+
+    <div class="d-flex justify-content-between align-items-start mb-3">
+        <div>
+            <h5 class="mb-1">
+                <span class="text-muted">#@ticket.Number</span>
+                @ticket.Title
+            </h5>
+            <div class="small text-muted">
+                Reported @ticket.ReportedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+                via @ticket.Channel
+                @if (ticket.RequestedBy is not null)
+                {
+                    <span>by @ticket.RequestedBy</span>
+                }
+                · window @ticket.SupportWindow
+                @if (ticket.ClockStartsAt != ticket.ReportedAt)
+                {
+                    <span title="§9.1: arrived outside the window, so the clock starts at the next opening">
+                        · clock from @ticket.ClockStartsAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+                    </span>
+                }
+            </div>
+        </div>
+        <div class="text-end">
+            <span class="badge @PriorityClass(ticket.Priority) fs-6">@ticket.Priority</span>
+            <span class="badge bg-light text-dark border ms-1">@ticket.Status</span>
+            @if (ticket.IsCallout)
+            {
+                <div class="badge bg-warning text-dark mt-1"
+                     title="P1 outside the bought window — utryckning (§13), minimum two hours">utryckning</div>
+            }
+        </div>
+    </div>
+
+    @* ───────────── Clocks ───────────── *@
+    <div class="row g-3 mb-4">
+        <div class="col-md-4">@ClockCard("Responstid", status.Response, "§14.6 pays 10% of the fönsteravgift for a missed P1/P2 response")</div>
+        <div class="col-md-4">@ClockCard("Lösningstid", status.Resolution, "§14.4 calls this a goal — overrunning it is not a penalty")</div>
+        <div class="col-md-4">
+            <div class="border rounded p-3 h-100">
+                <div class="small text-muted">Eskalering (§14.5)</div>
+                @if (status.EscalationDue is not null)
+                {
+                    <div class="fs-6 fw-semibold @(status.EscalationDue <= now ? "text-danger" : "")">
+                        @status.EscalationDue.Value.ToLocalTime().ToString("MMM d HH:mm")
+                    </div>
+                    <div class="small text-muted">to level 2</div>
+                }
+                else
+                {
+                    <div class="fs-6 text-muted">—</div>
+                }
+                @if (status.IncidentReportDue is not null)
+                {
+                    <div class="small mt-2 @(ticket.IncidentReportDeliveredAt is null ? "text-warning" : "text-success")">
+                        <i class="bi bi-file-earmark-text me-1"></i>
+                        P1 report due @status.IncidentReportDue.Value.ToLocalTime().ToString("MMM d")
+                    </div>
+                }
+            </div>
+        </div>
+    </div>
+
+    @if (ticket.ExcludedFromSla)
+    {
+        <div class="alert alert-secondary py-2 small">
+            <i class="bi bi-shield-slash me-1"></i>
+            <strong>Not counted as a deviation.</strong> @ticket.SlaExclusionReason
+        </div>
+    }
+
+    @if (!string.IsNullOrWhiteSpace(ticket.Description))
+    {
+        <div class="card mb-3">
+            <div class="card-body">
+                <div class="small text-muted mb-1">Description</div>
+                <div style="white-space: pre-wrap">@ticket.Description</div>
+            </div>
+        </div>
+    }
+
+    @* ───────────── Actions ───────────── *@
+    <div class="card mb-4">
+        <div class="card-header bg-white py-2"><strong class="small">Actions</strong></div>
+        <div class="card-body">
+            <div class="d-flex flex-wrap gap-2 mb-3">
+                @if (ticket.FirstResponseAt is null)
+                {
+                    <AsyncButton CssClass="btn-sm btn-primary" OnClick="RespondAsync">
+                        <i class="bi bi-reply me-1"></i>Record first response
+                    </AsyncButton>
+                }
+                @if (IsOpen && !IsPaused)
+                {
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => showPause = !showPause">
+                        <i class="bi bi-pause-circle me-1"></i>Pause the clock
+                    </button>
+                }
+                @if (IsPaused)
+                {
+                    <AsyncButton CssClass="btn-sm btn-outline-primary" OnClick="EndPauseAsync">
+                        <i class="bi bi-play-circle me-1"></i>Resume — they answered
+                    </AsyncButton>
+                }
+                @if (IsOpen)
+                {
+                    <button class="btn btn-sm btn-outline-success" @onclick="() => showResolve = !showResolve">
+                        <i class="bi bi-check2 me-1"></i>Resolve
+                    </button>
+                    <button class="btn btn-sm btn-outline-dark" @onclick="() => showReject = !showReject">
+                        <i class="bi bi-box-arrow-right me-1"></i>Reject (§14.4)
+                    </button>
+                }
+                @if (ticket.Status == TicketStatus.Resolved)
+                {
+                    <AsyncButton CssClass="btn-sm btn-success" OnClick="CloseAsync">
+                        <i class="bi bi-archive me-1"></i>Close
+                    </AsyncButton>
+                }
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showPriority = !showPriority">
+                    <i class="bi bi-flag me-1"></i>
+                    @(ticket.PriorityConfirmedAt is null ? "Confirm priority" : "Reprioritise")
+                </button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => showNote = !showNote">
+                    <i class="bi bi-chat-left-text me-1"></i>Add a note
+                </button>
+            </div>
+
+            @if (showPriority)
+            {
+                <div class="border rounded p-3 mb-2">
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-3">
+                            <label class="form-label small text-muted">Priority</label>
+                            <select class="form-select form-select-sm" @bind="formPriority">
+                                @foreach (TicketPriority p in Enum.GetValues<TicketPriority>())
+                                {
+                                    <option value="@p">@p</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-7">
+                            <label class="form-label small text-muted">
+                                Reason — §14.3 requires this in writing
+                            </label>
+                            <input class="form-control form-control-sm" @bind="formReason" />
+                        </div>
+                        <div class="col-md-2 text-end">
+                            <AsyncButton CssClass="btn-sm btn-primary" OnClick="ConfirmPriorityAsync">Save</AsyncButton>
+                        </div>
+                    </div>
+                    @if (formPriority != ticket.Priority)
+                    {
+                        <div class="form-text small text-warning mt-2">
+                            <i class="bi bi-info-circle me-1"></i>
+                            Changing the priority restarts both targets from now (§14.3).
+                        </div>
+                    }
+                </div>
+            }
+
+            @if (showPause)
+            {
+                <div class="border rounded p-3 mb-2">
+                    <div class="row g-2 align-items-end">
+                        <div class="col-md-3">
+                            <label class="form-label small text-muted">Waiting on</label>
+                            <select class="form-select form-select-sm" @bind="formWaitingOn">
+                                <option value="@WaitingOn.Customer">The customer</option>
+                                <option value="@WaitingOn.CustomerVendor">The customer's supplier</option>
+                                <option value="@WaitingOn.ThirdParty">A third party</option>
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small text-muted">Who</label>
+                            <input class="form-control form-control-sm" @bind="formParty" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">What for</label>
+                            <input class="form-control form-control-sm" @bind="formReason" />
+                        </div>
+                        <div class="col-md-2 text-end">
+                            <AsyncButton CssClass="btn-sm btn-primary" OnClick="StartPauseAsync">Pause</AsyncButton>
+                        </div>
+                    </div>
+                    <div class="form-text small mt-2">
+                        §14.4 stops the resolution clock while another party is being waited on, and
+                        requires the wait to be documented. The response clock keeps running.
+                    </div>
+                </div>
+            }
+
+            @if (showResolve)
+            {
+                <div class="border rounded p-3 mb-2">
+                    <label class="form-label small text-muted">
+                        What restored the service, or which workaround the customer accepted
+                    </label>
+                    <textarea class="form-control form-control-sm mb-2" rows="2" @bind="formReason"></textarea>
+                    <div class="text-end">
+                        <AsyncButton CssClass="btn-sm btn-success" OnClick="ResolveAsync">Resolve</AsyncButton>
+                    </div>
+                </div>
+            }
+
+            @if (showReject)
+            {
+                <div class="border rounded p-3 mb-2">
+                    <label class="form-label small text-muted">
+                        Which system outside the agreement the fault lay in
+                    </label>
+                    <textarea class="form-control form-control-sm mb-2" rows="2" @bind="formReason"></textarea>
+                    <div class="form-text small mb-2">
+                        §14.4: the time spent is still billable and this does not count as a deviation.
+                    </div>
+                    <div class="text-end">
+                        <AsyncButton CssClass="btn-sm btn-dark" OnClick="RejectAsync">Reject</AsyncButton>
+                    </div>
+                </div>
+            }
+
+            @if (showNote)
+            {
+                <div class="border rounded p-3 mb-2">
+                    <textarea class="form-control form-control-sm mb-2" rows="2" @bind="formReason"
+                              placeholder="A status update, or a working note"></textarea>
+                    <div class="d-flex justify-content-between align-items-center">
+                        <div class="form-check">
+                            <input class="form-check-input" type="checkbox" id="visible" @bind="formCustomerVisible" />
+                            <label class="form-check-label small" for="visible">The customer sees this</label>
+                        </div>
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="AddNoteAsync">Add</AsyncButton>
+                    </div>
+                </div>
+            }
+        </div>
+    </div>
+
+    @* ───────────── History ───────────── *@
+    <h6 class="mb-2">History</h6>
+    <div class="text-muted small mb-3">
+        §14.6 makes these timestamps the record between the parties. Entries are appended, never edited.
+    </div>
+
+    <div class="list-group">
+        @foreach (TicketEvent entry in ticket.Events.OrderByDescending(e => e.At))
+        {
+            <div class="list-group-item py-2">
+                <div class="d-flex justify-content-between">
+                    <div class="small">
+                        <span class="badge @EventClass(entry.Kind) me-2">@entry.Kind</span>
+                        @entry.Detail
+                    </div>
+                    <div class="text-muted text-nowrap ms-3" style="font-size: .75rem">
+                        @entry.At.ToLocalTime().ToString("MMM d HH:mm")
+                        @if (entry.Actor is not null)
+                        {
+                            <div>@entry.Actor</div>
+                        }
+                        @if (!entry.CustomerVisible)
+                        {
+                            <div><i class="bi bi-eye-slash" title="Internal — the customer does not see this"></i></div>
+                        }
+                    </div>
+                </div>
+            </div>
+        }
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TicketId { get; set; }
+    [Parameter] public EventCallback OnBack { get; set; }
+    [Parameter] public EventCallback OnChanged { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private Ticket? ticket;
+    private TicketSlaStatus status;
+    private DateTime now = DateTime.UtcNow;
+
+    private bool showPriority, showPause, showResolve, showReject, showNote;
+
+    private TicketPriority formPriority = TicketPriority.P3;
+    private string formReason = "";
+    private string? formParty;
+    private WaitingOn formWaitingOn = WaitingOn.Customer;
+    private bool formCustomerVisible = true;
+
+    private bool IsOpen => ticket is { Status: not (TicketStatus.Closed or TicketStatus.Rejected) };
+
+    private bool IsPaused => ticket?.Pauses.Any(p => p.EndedAt is null) == true;
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            now = DateTime.UtcNow;
+            ticket = await Tickets.GetAsync(TicketId);
+
+            if (ticket is not null)
+            {
+                status = TicketService.StatusOf(ticket, now);
+                formPriority = ticket.Priority;
+            }
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task AfterChangeAsync(string message)
+    {
+        showPriority = showPause = showResolve = showReject = showNote = false;
+        formReason = "";
+        formParty = null;
+
+        Toasts.Success(message);
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+    }
+
+    private async Task RespondAsync()
+    {
+        await Tickets.RecordResponseAsync(TicketId, CurrentActor, DateTime.UtcNow);
+        await AfterChangeAsync("Response recorded.");
+    }
+
+    private async Task ConfirmPriorityAsync()
+    {
+        if (string.IsNullOrWhiteSpace(formReason))
+        {
+            Toasts.Error("§14.3 requires a written reason for the priority.");
+            return;
+        }
+
+        await Tickets.ConfirmPriorityAsync(TicketId, formPriority, formReason, CurrentActor, DateTime.UtcNow);
+        await AfterChangeAsync("Priority recorded.");
+    }
+
+    private async Task StartPauseAsync()
+    {
+        if (string.IsNullOrWhiteSpace(formReason))
+        {
+            Toasts.Error("§14.4 requires the wait to be documented.");
+            return;
+        }
+
+        await Tickets.StartPauseAsync(
+            TicketId, formWaitingOn, formParty, formReason, CurrentActor, DateTime.UtcNow);
+        await AfterChangeAsync("Clock paused.");
+    }
+
+    private async Task EndPauseAsync()
+    {
+        await Tickets.EndPauseAsync(TicketId, CurrentActor, DateTime.UtcNow);
+        await AfterChangeAsync("Clock resumed.");
+    }
+
+    private async Task ResolveAsync()
+    {
+        if (string.IsNullOrWhiteSpace(formReason))
+        {
+            Toasts.Error("Say what resolved it — the customer sees this.");
+            return;
+        }
+
+        await Tickets.ResolveAsync(TicketId, formReason, CurrentActor, DateTime.UtcNow);
+        await AfterChangeAsync("Resolved.");
+    }
+
+    private async Task RejectAsync()
+    {
+        if (string.IsNullOrWhiteSpace(formReason))
+        {
+            Toasts.Error("§14.4 requires the investigation to be documented.");
+            return;
+        }
+
+        await Tickets.RejectAsync(TicketId, formReason, CurrentActor, DateTime.UtcNow);
+        await AfterChangeAsync("Rejected and handed back.");
+    }
+
+    private async Task CloseAsync()
+    {
+        await Tickets.CloseAsync(TicketId, CurrentActor, DateTime.UtcNow);
+        await AfterChangeAsync("Closed.");
+    }
+
+    private async Task AddNoteAsync()
+    {
+        if (string.IsNullOrWhiteSpace(formReason))
+        {
+            return;
+        }
+
+        await Tickets.AddEventAsync(
+            TicketId, TicketEventKind.Note, formReason, CurrentActor, DateTime.UtcNow, formCustomerVisible);
+        await AfterChangeAsync("Note added.");
+    }
+
+    /// <summary>
+    /// Who is acting. Left null until the component is given the signed-in user — the
+    /// history records "unattributed" rather than guessing a name, because §14.6 makes
+    /// these entries evidence.
+    /// </summary>
+    [Parameter] public string? CurrentActor { get; set; }
+
+    private RenderFragment ClockCard(string label, ClockStatus clock, string note) => builder =>
+    {
+        int seq = 0;
+        string text;
+        string css;
+
+        if (!clock.Budget.Exists)
+        {
+            (text, css) = ("no target", "text-muted");
+        }
+        else if (clock.MetAt is not null)
+        {
+            (text, css) = clock.Breached
+                ? (clock.MetAt.Value.ToLocalTime().ToString("MMM d HH:mm") + " — late", "text-danger")
+                : (clock.MetAt.Value.ToLocalTime().ToString("MMM d HH:mm"), "text-success");
+        }
+        else if (clock.Paused)
+        {
+            (text, css) = ("paused", "text-muted");
+        }
+        else if (clock.Deadline is not null)
+        {
+            (text, css) = clock.Breached
+                ? (clock.Deadline.Value.ToLocalTime().ToString("MMM d HH:mm") + " — over", "text-danger")
+                : ("due " + clock.Deadline.Value.ToLocalTime().ToString("MMM d HH:mm"), "");
+        }
+        else
+        {
+            (text, css) = ("—", "text-muted");
+        }
+
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", "border rounded p-3 h-100");
+        builder.AddAttribute(seq++, "title", note);
+
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", "small text-muted");
+        builder.AddContent(seq++, label);
+        builder.CloseElement();
+
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", $"fs-6 fw-semibold {css}");
+        builder.AddContent(seq++, text);
+        builder.CloseElement();
+
+        builder.OpenElement(seq++, "div");
+        builder.AddAttribute(seq++, "class", "small text-muted");
+        builder.AddContent(seq++, $"{(int)clock.Elapsed.TotalHours} h {clock.Elapsed.Minutes} min counted");
+        builder.CloseElement();
+
+        builder.CloseElement();
+    };
+
+    private static string PriorityClass(TicketPriority priority) => priority switch
+    {
+        TicketPriority.P1 => "bg-danger",
+        TicketPriority.P2 => "bg-warning text-dark",
+        TicketPriority.P3 => "bg-info text-dark",
+        _ => "bg-secondary",
+    };
+
+    private static string EventClass(TicketEventKind kind) => kind switch
+    {
+        TicketEventKind.Reprioritised or TicketEventKind.Escalated => "bg-warning text-dark",
+        TicketEventKind.Resolved or TicketEventKind.Closed => "bg-success",
+        TicketEventKind.Rejected => "bg-dark",
+        TicketEventKind.PauseStarted or TicketEventKind.PauseEnded => "bg-secondary",
+        TicketEventKind.Responded => "bg-primary",
+        _ => "bg-light text-dark border",
+    };
+}

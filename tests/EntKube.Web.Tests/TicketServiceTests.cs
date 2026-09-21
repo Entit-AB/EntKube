@@ -415,6 +415,46 @@ public class TicketServiceTests : IDisposable
         status.IncidentReportDue.Should().BeNull();
     }
 
+    /// <summary>
+    /// §14.4 resolves a P1 or P2 only when service is restored or the customer accepts a
+    /// workaround, so the customer has to be able to say it is not resolved. The clock
+    /// resumes from where it stopped: the time already spent was still spent.
+    /// </summary>
+    [Fact]
+    public async Task A_customer_can_reopen_a_ticket_they_do_not_accept_as_resolved()
+    {
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P2, Tue(9));
+        await tickets.RecordResponseAsync(ticket.Id, "nils", Tue(9, 30));
+        await tickets.ResolveAsync(ticket.Id, "Restarted the pod.", "nils", Tue(11));
+
+        await tickets.ReopenAsync(ticket.Id, "It failed again ten minutes later.", "kund", Tue(12));
+
+        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+        TicketSlaStatus status = TicketService.StatusOf(loaded!, Tue(13));
+
+        loaded!.Status.Should().Be(TicketStatus.InProgress);
+        loaded.ResolvedAt.Should().BeNull();
+        loaded.Events.Should().Contain(e => e.Detail.Contains("does not accept this as resolved"));
+
+        // Four hours of window time have passed since the clock started, none of them paused.
+        status.Resolution.Elapsed.Should().Be(TimeSpan.FromHours(4));
+    }
+
+    [Fact]
+    public async Task Reopening_clears_a_close_as_well()
+    {
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P2, Tue(9));
+        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(ticket.Id, "nils", Tue(11, 30));
+
+        await tickets.ReopenAsync(ticket.Id, "Still broken.", "kund", Tue(12));
+
+        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+
+        loaded!.ClosedAt.Should().BeNull();
+        loaded.Status.Should().Be(TicketStatus.InProgress);
+    }
+
     // ---- Queues and periods --------------------------------------------------------------------
 
     [Fact]

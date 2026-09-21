@@ -10,6 +10,14 @@
    needs to know is which one runs out first.
    ═══════════════════════════════════════════════════════════════════ *@
 
+@if (selectedTicketId is not null)
+{
+    <TicketDetail TicketId="selectedTicketId.Value"
+                  OnBack="() => selectedTicketId = null"
+                  OnChanged="LoadAsync" />
+}
+else
+{
 <LoadingPanel Loading="@loading" Error="@error">
 @if (!loading)
 {
@@ -57,7 +65,8 @@
                 <tbody>
                     @foreach (TicketSlaStatus row in queue)
                     {
-                        <tr class="@RowClass(row)">
+                        <tr class="@RowClass(row)" style="cursor: pointer"
+                            @onclick="() => selectedTicketId = row.Ticket.Id">
                             <td class="text-muted small">@row.Ticket.Number</td>
                             <td>
                                 <span class="badge @PriorityClass(row.Ticket.Priority)">@row.Ticket.Priority</span>
@@ -111,6 +120,7 @@
     }
 }
 </LoadingPanel>
+}
 
 @code {
     [Parameter, EditorRequired] public Guid CustomerId { get; set; }
@@ -119,6 +129,7 @@
     private string? error;
     private DateTime now = DateTime.UtcNow;
     private List<TicketSlaStatus> queue = [];
+    private Guid? selectedTicketId;
 
     private List<TicketSlaStatus> breaching => [.. queue.Where(q => q.IsPenaltyDeviation)];
 

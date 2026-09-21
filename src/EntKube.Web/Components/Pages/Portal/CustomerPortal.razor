@@ -306,6 +306,14 @@ else
             {
                 <PortalAppRoutesPanel App="selectedRoutesApp" AccessRole="currentAccessRole" />
             }
+            else if (selectedCustomerOp == "tickets")
+            {
+                <div class="d-flex align-items-center mb-3">
+                    <span class="bi bi-life-preserver fs-4 me-2 text-primary"></span>
+                    <h4 class="mb-0">Support — @selectedCustomer.Name</h4>
+                </div>
+                <CustomerTicketsPanel Customer="selectedCustomer" AccessRole="currentAccessRole" />
+            }
             else if (selectedCustomerOp == "monitoring")
             {
                 <div class="d-flex align-items-center mb-3">
@@ -573,7 +581,7 @@ else
     private KeycloakRealm? selectedIdentityRealm;
     private HarborProject? selectedRegistryProject;
     private Data.App? selectedRoutesApp;
-    private string? selectedCustomerOp;             // "monitoring" | "logs" | "observability" | "notifications" | "cost"
+    private string? selectedCustomerOp;             // "tickets" | "monitoring" | "logs" | "observability" | "notifications" | "cost"
     private Guid? activeAppId;                       // app whose service leaf is active (for tree highlight)
     private string? activeAppServiceKey;
 
@@ -969,6 +977,7 @@ else
     {
         var items = new List<(string Key, string Label, string Icon)>
         {
+            ("tickets", "Support", "bi-life-preserver"),
             ("monitoring", "Monitoring", "bi-heart-pulse"),
             ("logs", "Logs", "bi-journal-text"),
         };
