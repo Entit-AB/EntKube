@@ -33,6 +33,10 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<ContractContact> ContractContacts => Set<ContractContact>();
     public DbSet<PriceList> PriceLists => Set<PriceList>();
     public DbSet<PriceListEntry> PriceListEntries => Set<PriceListEntry>();
+    public DbSet<Ticket> Tickets => Set<Ticket>();
+    public DbSet<TicketEvent> TicketEvents => Set<TicketEvent>();
+    public DbSet<TicketPause> TicketPauses => Set<TicketPause>();
+    public DbSet<TicketAffectedApp> TicketAffectedApps => Set<TicketAffectedApp>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
     public DbSet<CostLedgerCoverage> CostLedgerCoverages => Set<CostLedgerCoverage>();
     public DbSet<CostLedgerCursor> CostLedgerCursors => Set<CostLedgerCursor>();
@@ -446,6 +450,78 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(e => e.PriceList)
                   .WithMany(p => p.Entries)
                   .HasForeignKey(e => e.PriceListId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ---- Ticketing (§14) ------------------------------------------------------------
+
+        builder.Entity<Ticket>(entity =>
+        {
+            entity.HasKey(t => t.Id);
+
+            // The human reference people quote. Unique per tenant, not globally: two tenants
+            // each having a ticket 1042 is normal and neither should have to care.
+            entity.HasIndex(t => new { t.TenantId, t.Number }).IsUnique();
+
+            // The queue: open tickets for a customer, worst first. Also the shape the
+            // monthly report reads for a period.
+            entity.HasIndex(t => new { t.CustomerId, t.Status, t.Priority });
+            entity.HasIndex(t => new { t.TenantId, t.ReportedAt });
+            entity.HasIndex(t => t.AppId);
+
+            entity.HasOne(t => t.Tenant)
+                  .WithMany()
+                  .HasForeignKey(t => t.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(t => t.Customer)
+                  .WithMany()
+                  .HasForeignKey(t => t.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict: removing an application from EntKube must not delete the history of
+            // what went wrong with it. §14.6 makes these timestamps the record between the
+            // parties, and a record that disappears with its subject is not a record.
+            entity.HasOne(t => t.App)
+                  .WithMany()
+                  .HasForeignKey(t => t.AppId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<TicketEvent>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.TicketId, e.At });
+
+            entity.HasOne(e => e.Ticket)
+                  .WithMany(t => t.Events)
+                  .HasForeignKey(e => e.TicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketPause>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => new { p.TicketId, p.StartedAt });
+
+            entity.HasOne(p => p.Ticket)
+                  .WithMany(t => t.Pauses)
+                  .HasForeignKey(p => p.TicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketAffectedApp>(entity =>
+        {
+            entity.HasKey(a => new { a.TicketId, a.AppId });
+
+            entity.HasOne(a => a.Ticket)
+                  .WithMany(t => t.AffectedApps)
+                  .HasForeignKey(a => a.TicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(a => a.App)
+                  .WithMany()
+                  .HasForeignKey(a => a.AppId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
 

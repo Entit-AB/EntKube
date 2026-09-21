@@ -6453,6 +6453,209 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("TenantRoles");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.Ticket", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AlertIncidentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Assignee")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Channel")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("ClockStartsAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("ClosedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("ExcludedFromSla")
+                        .HasColumnType("bit");
+
+                    b.Property<DateTime?>("FirstResponseAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("IncidentReportDeliveredAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("IsCallout")
+                        .HasColumnType("bit");
+
+                    b.Property<int>("Number")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Priority")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("PriorityConfirmedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("PriorityConfirmedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("PriorityEffectiveFrom")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("PriorityReason")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("ProposedPriority")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("ReportedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RequestedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("RequestedByEmail")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Resolution")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("ResolvedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("SlaExclusionReason")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SupportWindow")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId");
+
+                    b.HasIndex("TenantId", "Number")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "ReportedAt");
+
+                    b.HasIndex("CustomerId", "Status", "Priority");
+
+                    b.ToTable("Tickets");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketAffectedApp", b =>
+                {
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("AddedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("TicketId", "AppId");
+
+                    b.HasIndex("AppId");
+
+                    b.ToTable("TicketAffectedApps");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Actor")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("At")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("CustomerVisible")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Detail")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TicketId", "At");
+
+                    b.ToTable("TicketEvents");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketPause", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("EndedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Party")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("RecordedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RecordedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("StartedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("WaitingOn")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TicketId", "StartedAt");
+
+                    b.ToTable("TicketPauses");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.VaultSecret", b =>
                 {
                     b.Property<Guid>("Id")
@@ -9012,6 +9215,73 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.Ticket", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketAffectedApp", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany("AffectedApps")
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("Ticket");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketEvent", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany("Events")
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Ticket");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketPause", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany("Pauses")
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Ticket");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.VaultSecret", b =>
                 {
                     b.HasOne("EntKube.Web.Data.App", "App")
@@ -9597,6 +9867,15 @@ namespace EntKube.Web.Data.Migrations.SqlServer
             modelBuilder.Entity("EntKube.Web.Data.TenantRole", b =>
                 {
                     b.Navigation("Memberships");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.Ticket", b =>
+                {
+                    b.Navigation("AffectedApps");
+
+                    b.Navigation("Events");
+
+                    b.Navigation("Pauses");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.VaultSecret", b =>
