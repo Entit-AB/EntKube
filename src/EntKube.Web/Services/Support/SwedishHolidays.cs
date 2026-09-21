@@ -63,19 +63,19 @@ public static class SwedishHolidays
 
         return new HashSet<DateOnly>
         {
-            new(year, 1, 1),                    // New Year's Day (nyårsdagen)
-            new(year, 1, 6),                    // Epiphany (trettondedag jul)
-            easter.AddDays(-2),                 // Good Friday (långfredagen)
-            easter,                             // Easter Sunday (påskdagen)
-            easter.AddDays(1),                  // Easter Monday (annandag påsk)
-            new(year, 5, 1),                    // May Day (första maj)
-            easter.AddDays(39),                 // Ascension Day (Kristi himmelsfärdsdag)
-            easter.AddDays(49),                 // Whit Sunday (pingstdagen)
-            new(year, 6, 6),                    // National Day (nationaldagen)
-            MidsummerDay(year),                 // Midsummer Day (midsommardagen)
-            AllSaintsDay(year),                 // All Saints' Day (alla helgons dag)
-            new(year, 12, 25),                  // Christmas Day (juldagen)
-            new(year, 12, 26),                  // Boxing Day (annandag jul)
+            new(year, 1, 1),                    // New Year's Day
+            new(year, 1, 6),                    // Epiphany
+            easter.AddDays(-2),                 // Good Friday
+            easter,                             // Easter Sunday
+            easter.AddDays(1),                  // Easter Monday
+            new(year, 5, 1),                    // May Day
+            easter.AddDays(39),                 // Ascension Day
+            easter.AddDays(49),                 // Whit Sunday
+            new(year, 6, 6),                    // National Day
+            MidsummerDay(year),                 // Midsummer Day
+            AllSaintsDay(year),                 // All Saints' Day
+            new(year, 12, 25),                  // Christmas Day
+            new(year, 12, 26),                  // Boxing Day
         };
     }
 
@@ -86,18 +86,18 @@ public static class SwedishHolidays
     public static IReadOnlySet<DateOnly> ContractEves(int year) =>
         new HashSet<DateOnly>
         {
-            MidsummerDay(year).AddDays(-1),     // Midsummer Eve (midsommarafton)
-            new(year, 12, 24),                  // Christmas Eve (julafton)
-            new(year, 12, 31),                  // New Year's Eve (nyårsafton)
+            MidsummerDay(year).AddDays(-1),     // Midsummer Eve
+            new(year, 12, 24),                  // Christmas Eve
+            new(year, 12, 31),                  // New Year's Eve
         };
 
     /// <summary>
-    /// Midsummer Day (midsommardagen): the Saturday that falls between 20 and 26 June inclusive.
+    /// Midsummer Day: the Saturday that falls between 20 and 26 June inclusive.
     /// </summary>
     public static DateOnly MidsummerDay(int year) => FirstSaturdayOnOrAfter(new DateOnly(year, 6, 20));
 
     /// <summary>
-    /// All Saints' Day (alla helgons dag): the Saturday that falls between 31 October and 6 November inclusive.
+    /// All Saints' Day: the Saturday that falls between 31 October and 6 November inclusive.
     /// </summary>
     public static DateOnly AllSaintsDay(int year) => FirstSaturdayOnOrAfter(new DateOnly(year, 10, 31));
 

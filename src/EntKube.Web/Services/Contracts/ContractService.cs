@@ -456,7 +456,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     }
 
     /// <summary>
-    /// The floor §19 puts under the annual price adjustment: "dock med minst 2 %".
+    /// The floor §19 puts under the annual price adjustment: by at least 2%.
     /// </summary>
     public const decimal MinimumIndexationPercent = 2m;
 

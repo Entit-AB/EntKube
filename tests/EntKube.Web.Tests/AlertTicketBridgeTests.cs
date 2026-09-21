@@ -57,8 +57,8 @@ public class AlertTicketBridgeTests : IDisposable
         });
 
         db.Apps.AddRange(
-            new App { Id = managedAppId, CustomerId = customerId, Name = "Journal" },
-            new App { Id = unmanagedAppId, CustomerId = customerId, Name = "Okänd" });
+            new App { Id = managedAppId, CustomerId = customerId, Name = "Records" },
+            new App { Id = unmanagedAppId, CustomerId = customerId, Name = "Unknown" });
 
         db.AppDeployments.AddRange(
             Deployment(managedAppId, "journal-prod"),
@@ -115,7 +115,7 @@ public class AlertTicketBridgeTests : IDisposable
             Fingerprint = Guid.NewGuid().ToString("N"),
             AlertName = name,
             Severity = severity,
-            Summary = "Tjänsten svarar inte",
+            Summary = "The service is not responding",
             Description = "Probe has failed for five minutes.",
             LabelsJson = JsonSerializer.Serialize(new Dictionary<string, string> { ["namespace"] = ns }),
             StartsAt = Alarm,

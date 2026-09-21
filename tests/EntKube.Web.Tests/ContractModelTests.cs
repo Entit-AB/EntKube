@@ -146,10 +146,10 @@ public class ContractModelTests : IDisposable
     [Fact]
     public async Task An_instance_inherits_its_parents_support_window()
     {
-        Guid parentId = AddApp("Vårdportal");
+        Guid parentId = AddApp("Care portal");
         AddContract(parentId, ManagementLevel.Complex, SupportWindow.S3);
 
-        Guid instanceId = AddApp("Vårdportal — Region Syd");
+        Guid instanceId = AddApp("Care portal — South");
         AddContract(instanceId, ManagementLevel.Instance, window: null, parentAppId: parentId);
 
         ResolvedServiceLevel? resolved = await contracts.ResolveServiceLevelAsync(instanceId, June);
@@ -162,10 +162,10 @@ public class ContractModelTests : IDisposable
     [Fact]
     public async Task An_instance_that_states_its_own_window_keeps_it()
     {
-        Guid parentId = AddApp("Vårdportal");
+        Guid parentId = AddApp("Care portal");
         AddContract(parentId, ManagementLevel.Complex, SupportWindow.S1);
 
-        Guid instanceId = AddApp("Vårdportal — Region Nord");
+        Guid instanceId = AddApp("Care portal — North");
         AddContract(instanceId, ManagementLevel.Instance, SupportWindow.S4, parentAppId: parentId);
 
         ResolvedServiceLevel? resolved = await contracts.ResolveServiceLevelAsync(instanceId, June);
@@ -182,12 +182,12 @@ public class ContractModelTests : IDisposable
     [Fact]
     public async Task The_twenty_first_instance_is_charged_the_reduced_fee()
     {
-        Guid parentId = AddApp("Vårdportal");
+        Guid parentId = AddApp("Care portal");
         AddContract(parentId, ManagementLevel.Complex, SupportWindow.S1);
 
         for (int i = 1; i <= 22; i++)
         {
-            Guid instanceId = AddApp($"Vårdportal — kund {i:00}");
+            Guid instanceId = AddApp($"Care portal — customer {i:00}");
             AddContract(
                 instanceId, ManagementLevel.Instance, window: null, parentAppId: parentId,
                 onboardedAt: January.AddDays(i));
@@ -280,7 +280,7 @@ public class ContractModelTests : IDisposable
     [Fact]
     public async Task An_application_with_no_window_anywhere_is_reported()
     {
-        AddContract(AddApp("Föräldralös instans"), ManagementLevel.Instance, window: null);
+        AddContract(AddApp("Orphaned instance"), ManagementLevel.Instance, window: null);
 
         BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(customerId, June);
 
@@ -405,19 +405,19 @@ public class ContractModelTests : IDisposable
             {
                 Id = Guid.NewGuid(), TenantId = tenantId, CustomerId = customerId,
                 Party = ContractParty.Customer, Role = ContractContactRole.TechnicalContact,
-                Name = "Kundens tekniska kontakt", Email = "tech@example.org", Phone = "+46 70 000 00 00",
+                Name = "Customer technical contact", Email = "tech@example.org", Phone = "+46 70 000 00 00",
             },
             new ContractContact
             {
                 Id = Guid.NewGuid(), TenantId = tenantId, CustomerId = customerId,
                 Party = ContractParty.Customer, Role = ContractContactRole.EscalationLevel3,
-                Name = "Kundens IT-chef",
+                Name = "Customer IT manager",
             },
             new ContractContact
             {
                 Id = Guid.NewGuid(), TenantId = tenantId, CustomerId = customerId,
                 Party = ContractParty.Supplier, Role = ContractContactRole.EscalationLevel3,
-                Name = "Leverantörens VD",
+                Name = "Our managing director",
             });
         await db.SaveChangesAsync();
 
@@ -462,7 +462,7 @@ public class ContractModelTests : IDisposable
         await contracts.SaveContractAsync(new ApplicationContract
         {
             TenantId = tenantId, AppId = appId, Origin = ContractOrigin.ExternallyDeveloped,
-            DevelopedBy = "Tidigare leverantör", OnboardedAt = January,
+            DevelopedBy = "Previous supplier", OnboardedAt = January,
         });
 
         await contracts.SaveContractAsync(new ApplicationContract
@@ -555,7 +555,7 @@ public class ContractModelTests : IDisposable
         {
             TenantId = tenantId, CustomerId = customerId,
             Party = ContractParty.Customer, Role = ContractContactRole.Deputy,
-            Name = "Ersättare", Phone = "+46 70 111 11 11",
+            Name = "Deputy", Phone = "+46 70 111 11 11",
         });
 
         (await contracts.ListContactsAsync(customerId)).Should().ContainSingle();

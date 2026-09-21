@@ -39,7 +39,7 @@ public class KnowledgeServiceTests : IDisposable
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
         db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Capio" });
-        db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "Journal" });
+        db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "Records" });
         db.SaveChanges();
 
         TestDbContextFactory factory = new(connection);
@@ -92,10 +92,10 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task Editing_a_section_keeps_the_previous_version()
     {
-        KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Drifthandbok", "First.");
+        KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Runbook", "First.");
 
         await knowledge.SaveSectionAsync(
-            tenantId, appId, section.Id, KnowledgeSectionKind.Runbook, "Drifthandbok", "Second.",
+            tenantId, appId, section.Id, KnowledgeSectionKind.Runbook, "Runbook", "Second.",
             "nils", "Corrected the restore order.");
 
         KnowledgeSection? loaded = await knowledge.GetSectionAsync(section.Id);
@@ -109,10 +109,10 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task Saving_the_same_text_does_not_add_a_revision()
     {
-        KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Drifthandbok", "Same.");
+        KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Runbook", "Same.");
 
         await knowledge.SaveSectionAsync(
-            tenantId, appId, section.Id, KnowledgeSectionKind.Runbook, "Drifthandbok", "Same.",
+            tenantId, appId, section.Id, KnowledgeSectionKind.Runbook, "Runbook", "Same.",
             "nils", null);
 
         KnowledgeSection? loaded = await knowledge.GetSectionAsync(section.Id);
@@ -127,7 +127,7 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task A_review_is_recorded_separately_from_an_edit()
     {
-        KnowledgeSection section = await Write(KnowledgeSectionKind.Architecture, "Arkitektur");
+        KnowledgeSection section = await Write(KnowledgeSectionKind.Architecture, "Architecture");
 
         await knowledge.MarkReviewedAsync(section.Id, "anna", Now);
 
@@ -156,8 +156,8 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task Writing_the_expected_sections_clears_those_gaps()
     {
-        await Write(KnowledgeSectionKind.Runbook, "Drifthandbok");
-        await Write(KnowledgeSectionKind.Architecture, "Arkitektur");
+        await Write(KnowledgeSectionKind.Runbook, "Runbook");
+        await Write(KnowledgeSectionKind.Architecture, "Architecture");
 
         List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
 
@@ -172,7 +172,7 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task A_section_nobody_has_reviewed_for_a_quarter_is_stale()
     {
-        KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Drifthandbok");
+        KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Runbook");
         await knowledge.MarkReviewedAsync(section.Id, "nils", Now.AddDays(-120));
 
         List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
@@ -183,7 +183,7 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task A_recently_reviewed_section_is_not_stale()
     {
-        KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Drifthandbok");
+        KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Runbook");
         await knowledge.MarkReviewedAsync(section.Id, "nils", Now.AddDays(-10));
 
         List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
@@ -204,7 +204,7 @@ public class KnowledgeServiceTests : IDisposable
         {
             TenantId = tenantId,
             AppId = appId,
-            Name = "Regionens identitetsleverantör",
+            Name = "Regional identity provider",
             Kind = DependencyKind.Infrastructure,
             OfficeHoursOnly = true,
             CriticalPath = true,
@@ -225,7 +225,7 @@ public class KnowledgeServiceTests : IDisposable
         {
             TenantId = tenantId,
             AppId = appId,
-            Name = "Regionens identitetsleverantör",
+            Name = "Regional identity provider",
             Kind = DependencyKind.Infrastructure,
             OfficeHoursOnly = true,
             CriticalPath = true,
@@ -245,7 +245,7 @@ public class KnowledgeServiceTests : IDisposable
         {
             TenantId = tenantId,
             AppId = appId,
-            Name = "Rapportverktyg",
+            Name = "Reporting tool",
             Kind = DependencyKind.Integration,
             OfficeHoursOnly = true,
             CriticalPath = false,

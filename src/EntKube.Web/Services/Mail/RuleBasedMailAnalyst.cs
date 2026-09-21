@@ -248,17 +248,17 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
     private static string DraftAcknowledgement(MailContext context, TicketPriority priority)
     {
         string name = context.Message.FromName ?? "";
-        string greeting = string.IsNullOrWhiteSpace(name) ? "Hej," : $"Hej {name.Split(' ')[0]},";
+        string greeting = string.IsNullOrWhiteSpace(name) ? "Hello," : $"Hello {name.Split(' ')[0]},";
 
         return $"""
             {greeting}
 
-            Tack för din anmälan. Vi har registrerat ärendet och återkommer så snart vi gjort
-            vår första bedömning. Föreslagen prioritet är {priority}; vi bekräftar eller ändrar
-            den med motivering enligt avsnitt 14.3.
+            Thank you for your report. We have registered the ticket and will come back to you
+            as soon as we have made our first assessment. The proposed priority is {priority};
+            we will confirm or change it with reasons, under section 14.3.
 
-            Vänliga hälsningar,
-            Supporten
+            Kind regards,
+            Support
             """;
     }
 

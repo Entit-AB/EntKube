@@ -50,7 +50,7 @@ public class MonthlyReportTests : IDisposable
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
         db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Capio" });
-        db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "Journalportalen" });
+        db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "Records portal" });
         db.PriceLists.Add(StandardPriceList.Create(tenantId, Swedish(2026, 1, 1, 0)));
 
         ApplicationContract contract = new()
@@ -89,7 +89,7 @@ public class MonthlyReportTests : IDisposable
 
     private Task<Ticket> Raise(TicketPriority priority, DateTime at) =>
         tickets.CreateAsync(
-            tenantId, customerId, appId, "Fel", "Beskrivning",
+            tenantId, customerId, appId, "Fault", "Description",
             TicketChannel.Portal, priority, at);
 
     /// <summary>A ticket whose response time was missed — the only thing §14.6 pays for.</summary>
@@ -102,7 +102,7 @@ public class MonthlyReportTests : IDisposable
 
     // ---- When it is due -------------------------------------------------------------------
 
-    /// <summary>§16.1: "senast den 5:e varje månad avseende föregående månad".</summary>
+    /// <summary>§16.1: by the fifth of each month, covering the month before.</summary>
     [Fact]
     public void The_report_is_due_on_the_fifth_of_the_following_month() =>
         MonthlyReportService.DueDate(September).Should().Be(Swedish(2026, 10, 5, 0));
@@ -336,7 +336,7 @@ public class MonthlyReportTests : IDisposable
         MonthlyReport report = await reports.BuildAsync(customerId, September);
         AvailabilityRow row = report.Availability.Should().ContainSingle().Subject;
 
-        row.AppName.Should().Be("Journalportalen");
+        row.AppName.Should().Be("Records portal");
         row.UptimePercent.Should().Be(90.0);
         row.TargetPercent.Should().Be(99.5);
         row.SampleCount.Should().Be(10);
@@ -395,7 +395,7 @@ public class MonthlyReportTests : IDisposable
 
         await time.LogAsync(
             tenantId, customerId, appId, null, Tue(9), Tue(13),
-            WorkKind.Management, "Felsökning", "nils");
+            WorkKind.Management, "Investigation", "nils");
 
         MonthlyReport report = await reports.BuildAsync(customerId, September);
 

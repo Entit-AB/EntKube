@@ -41,8 +41,8 @@ public static class TicketSla
 
     /// <summary>
     /// Resolution time, which §14.4 calls a goal rather than a guarantee — overrunning it does
-    /// not trigger §14.6's penalty, only an explanation. P4 has none: "nästa release eller
-    /// enligt överenskommelse" is not a deadline anything can be measured against.
+    /// not trigger §14.6's penalty, only an explanation. P4 has none: the next release, or as
+    /// agreed, is not a deadline anything can be measured against.
     /// </summary>
     public static SlaBudget Resolution(TicketPriority priority) => priority switch
     {

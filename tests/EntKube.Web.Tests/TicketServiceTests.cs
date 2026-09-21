@@ -47,9 +47,9 @@ public class TicketServiceTests : IDisposable
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
         db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Capio" });
         db.Apps.AddRange(
-            new App { Id = s1AppId, CustomerId = customerId, Name = "Bokning" },
-            new App { Id = s4AppId, CustomerId = customerId, Name = "Journal" },
-            new App { Id = unmanagedAppId, CustomerId = customerId, Name = "Okänd" });
+            new App { Id = s1AppId, CustomerId = customerId, Name = "Booking" },
+            new App { Id = s4AppId, CustomerId = customerId, Name = "Records" },
+            new App { Id = unmanagedAppId, CustomerId = customerId, Name = "Unknown" });
 
         AddContract(s1AppId, SupportWindow.S1);
         AddContract(s4AppId, SupportWindow.S4);
@@ -93,8 +93,8 @@ public class TicketServiceTests : IDisposable
     private Task<Ticket> Raise(
         Guid appId, TicketPriority priority, DateTime at, TicketChannel channel = TicketChannel.Portal) =>
         tickets.CreateAsync(
-            tenantId, customerId, appId, "Tjänsten svarar inte", "Ingen kommer in.",
-            channel, priority, at, "Kundens tekniska kontakt", "tech@example.org");
+            tenantId, customerId, appId, "The service is not responding", "Nobody can get in.",
+            channel, priority, at, "Customer technical contact", "tech@example.org");
 
     // ---- Registration ---------------------------------------------------------------------
 
@@ -266,17 +266,17 @@ public class TicketServiceTests : IDisposable
         await tickets.RecordResponseAsync(ticket.Id, "nils", Tue(9, 30));
 
         await tickets.StartPauseAsync(
-            ticket.Id, WaitingOn.CustomerVendor, "Hosting-leverantören",
+            ticket.Id, WaitingOn.CustomerVendor, "The hosting provider",
             "Awaiting a network trace.", "nils", Tue(10));
 
         Ticket? loaded = await tickets.GetAsync(ticket.Id);
 
         loaded!.Status.Should().Be(TicketStatus.Waiting);
         loaded.Pauses.Should().ContainSingle();
-        loaded.Pauses[0].Party.Should().Be("Hosting-leverantören");
+        loaded.Pauses[0].Party.Should().Be("The hosting provider");
         loaded.Pauses[0].EndedAt.Should().BeNull();
         loaded.Events.Should().Contain(e =>
-            e.Kind == TicketEventKind.PauseStarted && e.Detail.Contains("Hosting-leverantören"));
+            e.Kind == TicketEventKind.PauseStarted && e.Detail.Contains("The hosting provider"));
     }
 
     /// <summary>

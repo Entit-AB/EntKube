@@ -102,7 +102,7 @@ public class TimeServiceTests : IDisposable
             CustomerId = customerId,
             AppId = appId,
             Number = db.Tickets.Count() + 1,
-            Title = "Fel i exporten",
+            Title = "Export is failing",
             Priority = priority,
             PriorityEffectiveFrom = Tue(9),
             ReportedAt = Tue(9),
@@ -117,7 +117,7 @@ public class TimeServiceTests : IDisposable
 
     private Task<TimeEntry> Log(
         DateTime from, DateTime to, Guid? ticketId = null, WorkKind kind = WorkKind.Management) =>
-        time.LogAsync(tenantId, customerId, appId, ticketId, from, to, kind, "Felsökning", "nils");
+        time.LogAsync(tenantId, customerId, appId, ticketId, from, to, kind, "Investigation", "nils");
 
     // ---- Logging ---------------------------------------------------------------------------
 
@@ -268,7 +268,7 @@ public class TimeServiceTests : IDisposable
             && l.TicketId == ticket
             && l.TicketNumber == 1
             && l.Day == new DateOnly(2026, 9, 22)
-            && l.Description == "Felsökning");
+            && l.Description == "Investigation");
 
         statement.Lines.Select(l => l.Category).Should().BeEquivalentTo([
             SupportTimeCategory.Ordinary, SupportTimeCategory.EveningMorning,

@@ -291,7 +291,7 @@ public class SupportMailTests : IDisposable
         db.TimeEntries.Add(new TimeEntry
         {
             Id = Guid.NewGuid(), TenantId = tenantId, CustomerId = customerId, AppId = appId,
-            StartedAt = Tue(9), EndedAt = Swedish(2026, 9, 22, 13), Description = "Felsökning",
+            StartedAt = Tue(9), EndedAt = Swedish(2026, 9, 22, 13), Description = "Investigation",
         });
         await db.SaveChangesAsync();
 
@@ -309,7 +309,7 @@ public class SupportMailTests : IDisposable
             .Single(s => s.Kind == MailSuggestionKind.DraftReply);
 
         draft.State.Should().Be(MailSuggestionState.Pending);
-        draft.DraftText.Should().Contain("Tack för din anmälan");
+        draft.DraftText.Should().Contain("Thank you for your report");
         draft.DraftText.Should().Contain("14.3");
     }
 

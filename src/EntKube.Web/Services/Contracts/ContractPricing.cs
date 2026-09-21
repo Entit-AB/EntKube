@@ -60,8 +60,8 @@ public static class ContractPricing
     public const string ReducedInstanceKey = "InstanceReduced";
 
     /// <summary>
-    /// The ordinal at which an instance starts costing the reduced rate. §10.2.1: "från och
-    /// med den tjugoförsta (21:a) instansen".
+    /// The ordinal at which an instance starts costing the reduced rate. §10.2.1 applies it
+    /// from the twenty-first instance onwards.
     /// </summary>
     public const int ReducedInstanceFrom = 21;
 

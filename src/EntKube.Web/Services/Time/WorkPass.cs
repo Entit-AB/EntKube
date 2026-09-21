@@ -70,15 +70,15 @@ public static class WorkPassCalculator
 {
     /// <summary>
     /// How long a break may be before contiguous work becomes two passes. §13 says
-    /// "sammanhängande" without defining it; an hour is long enough to cover a meeting or
+    /// "contiguous" without defining it; an hour is long enough to cover a meeting or
     /// lunch in the middle of one investigation, short enough that the afternoon's separate
     /// visit to the same ticket is its own started hour.
     /// </summary>
     public static readonly TimeSpan MaxGapWithinPass = TimeSpan.FromHours(1);
 
     /// <summary>
-    /// The assessment §10.3 includes in the base fee: "Första bedömning av inkommen
-    /// incident, upp till 30 minuter per incident."
+    /// The assessment §10.3 includes in the base fee: a first assessment of an incoming
+    /// incident, up to thirty minutes per incident.
     /// </summary>
     public static readonly TimeSpan FreeIncidentAssessment = TimeSpan.FromMinutes(30);
 

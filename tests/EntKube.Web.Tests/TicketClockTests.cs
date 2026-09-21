@@ -214,7 +214,7 @@ public class TicketClockTests
     }
 
     /// <summary>
-    /// §14.4 gives P4 "nästa release eller enligt överenskommelse", which is not a deadline
+    /// §14.4 gives P4 the next release, or as agreed, which is not a deadline
     /// anything can be measured against — so it has none, and can never be breached.
     /// </summary>
     [Fact]
