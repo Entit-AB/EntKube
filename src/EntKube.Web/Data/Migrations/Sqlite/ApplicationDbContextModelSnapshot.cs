@@ -3625,6 +3625,72 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("IdentityBindings");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.InboundMailMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Body")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("FromAddress")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("FromName")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("HandledAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("HandledBy")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("InReplyTo")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MessageId")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("ReceivedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("SentAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("State")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Subject")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("TicketId");
+
+                    b.HasIndex("TenantId", "MessageId")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "State");
+
+                    b.ToTable("InboundMailMessages");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.IncidentNote", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4431,6 +4497,56 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("TenantId", "EnvironmentId", "PolicyType");
 
                     b.ToTable("KyvernoPolicies");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.MailSuggestion", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("DecidedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DecidedBy")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DraftText")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("Priority")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Reasoning")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("State")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Summary")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MessageId", "Kind");
+
+                    b.ToTable("MailSuggestions");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MaintenanceWindow", b =>
@@ -8788,6 +8904,31 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("KeycloakRealm");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.InboundMailMessage", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+
+                    b.Navigation("Ticket");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.IncidentNote", b =>
                 {
                     b.HasOne("EntKube.Web.Data.AlertIncident", "Incident")
@@ -9103,6 +9244,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Environment");
 
                     b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.MailSuggestion", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.InboundMailMessage", "Message")
+                        .WithMany("Suggestions")
+                        .HasForeignKey("MessageId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Message");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MaintenanceWindow", b =>
@@ -10332,6 +10484,11 @@ namespace EntKube.Web.Data.Migrations.Sqlite
             modelBuilder.Entity("EntKube.Web.Data.Group", b =>
                 {
                     b.Navigation("Memberships");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.InboundMailMessage", b =>
+                {
+                    b.Navigation("Suggestions");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KafkaCluster", b =>

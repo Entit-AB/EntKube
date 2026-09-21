@@ -1,0 +1,225 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Mail
+@inject SupportMailService Mail
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   The support mailbox, with what the analyst suggests doing about each
+   message. Everything here is a proposal: accepting one is what makes
+   it happen, and your name goes on it.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h6 class="mb-0">Support inbox</h6>
+            <div class="text-muted small">
+                Suggestions, not decisions. §14.3 makes confirming a priority a written act — the
+                reasoning is shown so you can disagree with it.
+            </div>
+        </div>
+        <div class="d-flex gap-2 align-items-center">
+            <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="handled"
+                       @bind="showHandled" @bind:after="LoadAsync" />
+                <label class="form-check-label small" for="handled">Show handled</label>
+            </div>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync">
+                <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+            </button>
+        </div>
+    </div>
+
+    @if (messages.Count == 0)
+    {
+        <EmptyState Icon="bi-inbox"
+                    Title="Nothing waiting"
+                    Message="No support mail needs triage." />
+    }
+    else
+    {
+        @foreach (InboundMailMessage message in messages)
+        {
+            <div class="card mb-3">
+                <div class="card-header bg-white py-2">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <div class="fw-semibold small">@message.Subject</div>
+                            <div class="text-muted" style="font-size: .75rem">
+                                @(message.FromName ?? message.FromAddress)
+                                &lt;@message.FromAddress&gt;
+                                · @message.SentAt.ToLocalTime().ToString("MMM d HH:mm")
+                                @if (message.Customer is not null)
+                                {
+                                    <span class="badge bg-light text-dark border ms-1">
+                                        @message.Customer.Name
+                                    </span>
+                                }
+                            </div>
+                        </div>
+                        <div class="text-end">
+                            <span class="badge @StateClass(message.State)">@message.State</span>
+                            @if (message.State is MailTriageState.Received or MailTriageState.Proposed)
+                            {
+                                <button class="btn btn-sm btn-link text-muted p-0 ms-2"
+                                        @onclick="() => DismissAsync(message.Id)">
+                                    dismiss
+                                </button>
+                            }
+                        </div>
+                    </div>
+                </div>
+                <div class="card-body py-2">
+                    <div class="small text-muted mb-3" style="white-space: pre-wrap">@Excerpt(message.Body)</div>
+
+                    @foreach (MailSuggestion suggestion in message.Suggestions.OrderBy(s => s.Kind))
+                    {
+                        <div class="border rounded p-2 mb-2 @(suggestion.State == MailSuggestionState.Pending ? "" : "opacity-50")">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div class="small">
+                                    <span class="badge @KindClass(suggestion.Kind) me-2">
+                                        @Label(suggestion.Kind)
+                                    </span>
+                                    <span class="fw-semibold">@suggestion.Summary</span>
+                                    @if (!string.IsNullOrWhiteSpace(suggestion.Reasoning))
+                                    {
+                                        <div class="text-muted mt-1">@suggestion.Reasoning</div>
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(suggestion.DraftText))
+                                    {
+                                        <pre class="bg-light border rounded p-2 mt-2 mb-0"
+                                             style="white-space: pre-wrap; font-size: .8rem">@suggestion.DraftText</pre>
+                                        <div class="text-muted mt-1" style="font-size: .75rem">
+                                            <i class="bi bi-info-circle me-1"></i>
+                                            A draft. Nothing is sent from here — copy it, or send it from
+                                            the ticket once you are happy with it.
+                                        </div>
+                                    }
+                                </div>
+                                @if (suggestion.State == MailSuggestionState.Pending && IsActionable(suggestion.Kind))
+                                {
+                                    <div class="d-flex gap-1 ms-3 text-nowrap">
+                                        <AsyncButton CssClass="btn-sm btn-primary"
+                                                     OnClick="() => AcceptAsync(suggestion.Id)">
+                                            Accept
+                                        </AsyncButton>
+                                        <button class="btn btn-sm btn-outline-secondary"
+                                                @onclick="() => RejectAsync(suggestion.Id)">
+                                            No
+                                        </button>
+                                    </div>
+                                }
+                                else if (suggestion.State != MailSuggestionState.Pending)
+                                {
+                                    <div class="text-muted text-nowrap ms-3" style="font-size: .75rem">
+                                        @suggestion.State by @suggestion.DecidedBy
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter] public string? ActorName { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private bool showHandled;
+    private List<InboundMailMessage> messages = [];
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            messages = await Mail.GetQueueAsync(TenantId, showHandled);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    /// <summary>
+    /// Which suggestions do something when accepted. A proposed priority deliberately does
+    /// not: §14.3 wants a written reason, which is given on the ticket by the person who
+    /// confirms it, not by clicking Accept on a keyword match.
+    /// </summary>
+    private static bool IsActionable(MailSuggestionKind kind) =>
+        kind is MailSuggestionKind.OpenTicket or MailSuggestionKind.AppendToTicket;
+
+    private async Task AcceptAsync(Guid suggestionId)
+    {
+        Ticket? ticket = await Mail.AcceptAsync(
+            suggestionId, ActorName ?? "unattributed", DateTime.UtcNow);
+
+        Toasts.Success(ticket is null
+            ? "Done."
+            : $"Ticket #{ticket.Number} — confirm the priority on it, with a reason (§14.3).");
+
+        await LoadAsync();
+    }
+
+    private async Task RejectAsync(Guid suggestionId)
+    {
+        await Mail.RejectAsync(suggestionId, ActorName ?? "unattributed", DateTime.UtcNow);
+        await LoadAsync();
+    }
+
+    private async Task DismissAsync(Guid messageId)
+    {
+        await Mail.DismissAsync(messageId, ActorName ?? "unattributed", DateTime.UtcNow);
+        await LoadAsync();
+    }
+
+    private static string Excerpt(string body) =>
+        body.Length <= 400 ? body : body[..400] + "…";
+
+    private static string Label(MailSuggestionKind kind) => kind switch
+    {
+        MailSuggestionKind.OpenTicket => "open",
+        MailSuggestionKind.AppendToTicket => "append",
+        MailSuggestionKind.ProposePriority => "priority",
+        MailSuggestionKind.DraftReply => "draft",
+        MailSuggestionKind.SuggestPause => "pause?",
+        MailSuggestionKind.FlagDevelopment => "§15?",
+        MailSuggestionKind.FlagTimebank => "timbank",
+        MailSuggestionKind.FlagUnknownSender => "unknown",
+        _ => kind.ToString(),
+    };
+
+    private static string KindClass(MailSuggestionKind kind) => kind switch
+    {
+        MailSuggestionKind.OpenTicket or MailSuggestionKind.AppendToTicket => "bg-primary",
+        MailSuggestionKind.ProposePriority => "bg-info text-dark",
+        MailSuggestionKind.FlagUnknownSender => "bg-warning text-dark",
+        MailSuggestionKind.FlagTimebank or MailSuggestionKind.FlagDevelopment => "bg-warning text-dark",
+        _ => "bg-light text-dark border",
+    };
+
+    private static string StateClass(MailTriageState state) => state switch
+    {
+        MailTriageState.Received => "bg-primary",
+        MailTriageState.Proposed => "bg-info text-dark",
+        MailTriageState.Handled => "bg-success",
+        _ => "bg-secondary",
+    };
+}

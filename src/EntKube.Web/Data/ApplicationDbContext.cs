@@ -45,6 +45,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<AppServiceDependency> AppServiceDependencies => Set<AppServiceDependency>();
     public DbSet<EndOfLifeNotice> EndOfLifeNotices => Set<EndOfLifeNotice>();
     public DbSet<Subconsultant> Subconsultants => Set<Subconsultant>();
+    public DbSet<InboundMailMessage> InboundMailMessages => Set<InboundMailMessage>();
+    public DbSet<MailSuggestion> MailSuggestions => Set<MailSuggestion>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
     public DbSet<CostLedgerCoverage> CostLedgerCoverages => Set<CostLedgerCoverage>();
     public DbSet<CostLedgerCursor> CostLedgerCursors => Set<CostLedgerCursor>();
@@ -680,6 +682,46 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(n => n.App)
                   .WithMany()
                   .HasForeignKey(n => n.AppId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ---- The support mailbox (§14.3) ---------------------------------------------------
+
+        builder.Entity<InboundMailMessage>(entity =>
+        {
+            entity.HasKey(m => m.Id);
+
+            // A mailbox poll hands over the same message repeatedly; this is what makes
+            // ingestion idempotent rather than duplicating tickets.
+            entity.HasIndex(m => new { m.TenantId, m.MessageId }).IsUnique();
+            entity.HasIndex(m => new { m.TenantId, m.State });
+
+            entity.HasOne(m => m.Tenant)
+                  .WithMany()
+                  .HasForeignKey(m => m.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(m => m.Customer)
+                  .WithMany()
+                  .HasForeignKey(m => m.CustomerId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            // Restrict: the message is the evidence of when a request actually arrived,
+            // which §14.6 makes the record between the parties.
+            entity.HasOne(m => m.Ticket)
+                  .WithMany()
+                  .HasForeignKey(m => m.TicketId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<MailSuggestion>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => new { s.MessageId, s.Kind });
+
+            entity.HasOne(s => s.Message)
+                  .WithMany(m => m.Suggestions)
+                  .HasForeignKey(s => s.MessageId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
 
