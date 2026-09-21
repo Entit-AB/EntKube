@@ -1,7 +1,7 @@
 namespace EntKube.Web.Data;
 
 /// <summary>
-/// One entry in an application's classification history: the förvaltningsnivå and support
+/// One entry in an application's classification history: the service level and support
 /// window that applied from a given date.
 ///
 /// <para>A dated series rather than two columns on <see cref="ApplicationContract"/>,
@@ -17,11 +17,11 @@ public class ApplicationServiceLevel
 
     public Guid ApplicationContractId { get; set; }
 
-    /// <summary>The förvaltningsnivå that applied from <see cref="EffectiveFrom"/>.</summary>
+    /// <summary>The service level that applied from <see cref="EffectiveFrom"/>.</summary>
     public ManagementLevel Level { get; set; }
 
     /// <summary>
-    /// The support window that applied. Null means inherited from the moderapplikation,
+    /// The support window that applied. Null means inherited from the parent application,
     /// which §10.2.1 makes the default for an instance unless something else is stated.
     /// </summary>
     public SupportWindow? SupportWindow { get; set; }

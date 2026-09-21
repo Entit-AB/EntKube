@@ -5,23 +5,23 @@ namespace EntKube.Web.Data;
 /// </summary>
 public enum TicketPriority
 {
-    /// <summary>Kritisk — wholly unavailable, or a risk to patient safety, data or personal data.</summary>
+    /// <summary>Critical — wholly unavailable, or a risk to patient safety, data or personal data.</summary>
     P1 = 1,
 
-    /// <summary>Hög — a material function is unavailable or wrong for a larger group.</summary>
+    /// <summary>High — a material function is unavailable or wrong for a larger group.</summary>
     P2 = 2,
 
     /// <summary>Medium — part of a function, or individual users. A workaround exists.</summary>
     P3 = 3,
 
-    /// <summary>Låg — cosmetic, documentation, questions, suggestions.</summary>
+    /// <summary>Low — cosmetic, documentation, questions, suggestions.</summary>
     P4 = 4,
 }
 
 /// <summary>Where a ticket came from. §14.3 lists the channels the agreement recognises.</summary>
 public enum TicketChannel
 {
-    /// <summary>Raised by the customer in the ärendeportal — the channel §14.3 requires.</summary>
+    /// <summary>Raised by the customer in the ticket portal — the channel §14.3 requires.</summary>
     Portal = 0,
 
     /// <summary>Arrived as e-mail, accepted for P3–P4 under §14.3.</summary>
@@ -43,7 +43,7 @@ public enum TicketStatus
     /// <summary>Registered, first assessment not yet made.</summary>
     New = 0,
 
-    /// <summary>Acknowledged and being worked (§14.4's responstid has been met).</summary>
+    /// <summary>Acknowledged and being worked (§14.4's response time has been met).</summary>
     InProgress = 1,
 
     /// <summary>Waiting on the customer or a third party — the resolution clock is paused.</summary>
@@ -86,7 +86,7 @@ public enum WaitingOn
 /// waited on. An alert incident <em>opens</em> a ticket, through
 /// <see cref="AlertIncidentId"/>; it does not become one.</para>
 ///
-/// <para><b>The timestamps are evidence.</b> §14.6 makes the ärendeportal's timestamps the
+/// <para><b>The timestamps are evidence.</b> §14.6 makes the ticket portal's timestamps the
 /// record between the parties, and §28 makes anything in the monthly report binding unless
 /// disputed within thirty days. So changes are appended to <see cref="TicketEvent"/> rather
 /// than overwritten, and the fields here say what is true now while the events say how it
@@ -103,7 +103,7 @@ public class Ticket
     /// <summary>
     /// The application the ticket is about. Null only for something that does not belong to
     /// one; the SLA cannot be measured without it, since the support window comes from
-    /// Bilaga A.
+    /// Annex A.
     /// </summary>
     public Guid? AppId { get; set; }
 
@@ -167,14 +167,14 @@ public class Ticket
     public SupportWindow SupportWindow { get; set; }
 
     /// <summary>
-    /// True when this was a P1 worked outside the bought window — an utryckning under §13,
+    /// True when this was a P1 worked outside the bought window — a call-out under §13,
     /// billed at the callout rate with a two-hour minimum.
     /// </summary>
     public bool IsCallout { get; set; }
 
     /// <summary>
     /// When we confirmed the ticket, made the first assessment and began work — what §14.4
-    /// measures responstid against.
+    /// measures response time against.
     /// </summary>
     public DateTime? FirstResponseAt { get; set; }
 
@@ -206,7 +206,7 @@ public class Ticket
 
     /// <summary>
     /// Deviations are judged per ticket and reported monthly. Recording the judgement — with
-    /// its reason — keeps §14.6's "väntetid, force majeure or a 14.7 exemption explains it"
+    /// its reason — keeps §14.6's "waiting time, force majeure or a 14.7 exemption explains it"
     /// out of a spreadsheet.
     /// </summary>
     public bool ExcludedFromSla { get; set; }
@@ -229,7 +229,7 @@ public class Ticket
 /// <summary>
 /// One more application affected by the same ticket.
 ///
-/// <para>§14.3: an issue hitting several instances of one moderapplikation is handled as a
+/// <para>§14.3: an issue hitting several instances of one parent application is handled as a
 /// single ticket at the highest affected priority. Without this the choice would be between
 /// opening twenty tickets for one fault or losing the record of which instances were
 /// down.</para>

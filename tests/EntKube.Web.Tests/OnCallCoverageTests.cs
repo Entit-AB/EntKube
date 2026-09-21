@@ -11,7 +11,7 @@ namespace EntKube.Web.Tests;
 /// Whether the jour §10.1.1 sells is actually staffed, and whether the people covering it
 /// are allowed to be there under §18.
 ///
-/// <para>S4's fönsteravgift is 95 000 kr a month for availability rather than output, so a
+/// <para>S4's window fee is 95 000 kr a month for availability rather than output, so a
 /// hole in the roster is the customer paying for something that is not there. Finding it
 /// when an incident lands in it is the expensive way.</para>
 /// </summary>

@@ -1,15 +1,15 @@
 namespace EntKube.Web.Data;
 
 /// <summary>
-/// Bilaga A for one application — the terms on which it is under förvaltning.
+/// Annex A for one application — the terms on which it is under management.
 ///
 /// <para>EntKube knows an application's deployments, routes and secrets. This is what it is
 /// <em>owed</em>: which part of the agreement governs it, when the SLA started, whether a
 /// guarantee period is still running, and what it is billed for.</para>
 ///
-/// <para><b>Förvaltningsnivå and supportfönster are deliberately not columns here.</b> §4.1
+/// <para><b>Service level and support window are deliberately not columns here.</b> §4.1
 /// lets the supplier demand reclassification, §16.2 reviews the level and the window every
-/// quarter, and the kännedomsavgift follows both. A column that is overwritten cannot
+/// quarter, and the knowledge fee follows both. A column that is overwritten cannot
 /// explain a past invoice, so the classification lives in <see cref="ApplicationServiceLevel"/>
 /// as a dated series and is resolved as of a date. Same reasoning as
 /// <see cref="CostLedgerEntry"/>: a record of what was agreed, not a view that re-derives
@@ -35,7 +35,7 @@ public class ApplicationContract
     public string? DevelopedBy { get; set; }
 
     /// <summary>
-    /// When the application came under management: the signed startprotokoll for Del 2
+    /// When the application came under management: the signed start protocol for Del 2
     /// (fas 5), or delivery acceptance for Del 3.
     /// </summary>
     public DateTime? OnboardedAt { get; set; }
@@ -47,7 +47,7 @@ public class ApplicationContract
     public DateTime? GuaranteeEndsAt { get; set; }
 
     /// <summary>
-    /// The moderapplikation this is an instance of (§10.2.1). Set only at level
+    /// The parent application this is an instance of (§10.2.1). Set only at level
     /// <see cref="ManagementLevel.Instance"/>, and it is what makes the reduced fee from the
     /// twenty-first instance, the inherited support window, and "one incident across many
     /// instances is one ticket" all fall out of the data rather than out of a convention.
@@ -55,28 +55,28 @@ public class ApplicationContract
     public Guid? ParentAppId { get; set; }
 
     /// <summary>
-    /// When SLA times begin to apply — the signed startprotokoll (§4.1, §8). Until this is
-    /// set, §4.1 says tickets are handled på bästa förmåga with no guaranteed response, so
+    /// When SLA times begin to apply — the signed start protocol (§4.1, §8). Until this is
+    /// set, §4.1 says tickets are handled on a best-effort basis with no guaranteed response, so
     /// nothing should be reported as a breach before it.
     /// </summary>
     public DateTime? SlaStartsAt { get; set; }
 
     /// <summary>
-    /// When the application left förvaltning under §19. Kept rather than deleted: the
+    /// When the application left management under §19. Kept rather than deleted: the
     /// months it was managed still have to be explicable.
     /// </summary>
     public DateTime? ManagementEndedAt { get; set; }
 
     /// <summary>
     /// The monthly ceiling on billable work the customer may set per application under §12.
-    /// Modell B only; work above it needs written approval, except for P1.
+    /// Model B only; work above it needs written approval, except for P1.
     /// </summary>
     public decimal? MonthlyWorkCapHours { get; set; }
 
-    /// <summary>The agreed on-boarding fee (§5.1, Bilaga C table C.5). Del 2 only.</summary>
+    /// <summary>The agreed on-boarding fee (§5.1, Annex C table C.5). Del 2 only.</summary>
     public decimal? OnboardingFee { get; set; }
 
-    /// <summary>Kritikalitet 1–5 as recorded in Bilaga A.1.</summary>
+    /// <summary>Kritikalitet 1–5 as recorded in Annex A.1.</summary>
     public int? Criticality { get; set; }
 
     public string? Notes { get; set; }

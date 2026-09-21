@@ -2,19 +2,19 @@ namespace EntKube.Web.Data;
 
 /// <summary>
 /// What kind of work an hour was, which decides which rate it is priced at and whether it
-/// touches the timbank at all.
+/// touches the hour bank at all.
 /// </summary>
 public enum WorkKind
 {
     /// <summary>
-    /// Förvaltning — the ordinary rate of §13, whatever the role. Draws on the timbank
-    /// under Modell A.
+    /// Management — the ordinary rate of §13, whatever the role. Draws on the hour bank
+    /// under Model A.
     /// </summary>
     Management = 0,
 
     /// <summary>
-    /// An utvecklingsuppdrag under §15, at the development rate. §11.1 is explicit that it
-    /// does not draw on the timbank.
+    /// An development assignments under §15, at the development rate. §11.1 is explicit that it
+    /// does not draw on the hour bank.
     /// </summary>
     Development = 1,
 
@@ -26,12 +26,12 @@ public enum WorkKind
 
     /// <summary>
     /// The first assessment of an incident. §10.3 includes up to thirty minutes of it per
-    /// incident in the grundavgift; the rest is ordinary förvaltning.
+    /// incident in the base fee; the rest is ordinary management.
     /// </summary>
     IncidentAssessment = 3,
 
     /// <summary>
-    /// On-boarding an application under §5. Billed at a fixed price from Bilaga C, so the
+    /// On-boarding an application under §5. Billed at a fixed price from Annex C, so the
     /// hours are recorded for our own sake and never billed by the hour or drawn from the
     /// bank.
     /// </summary>
@@ -41,8 +41,8 @@ public enum WorkKind
 /// <summary>
 /// One stretch of worked time.
 ///
-/// <para><b>Actual times, not rounded ones.</b> §13 rounds per påbörjad timme, but it also
-/// says contiguous work on one ärende counts as a single arbetspass and that short bursts
+/// <para><b>Actual times, not rounded ones.</b> §13 rounds per started hour, but it also
+/// says contiguous work on one ticket counts as a single work pass and that short bursts
 /// inside it are not rounded separately. Rounding at the point of entry would therefore
 /// overbill: three ten-minute touches on one ticket in an afternoon are one hour, not
 /// three. So the row keeps what actually happened and the arithmetic happens on the way
@@ -64,7 +64,7 @@ public class TimeEntry
 
     /// <summary>
     /// The ticket the work belongs to. What makes a work pass a work pass: §13 groups
-    /// contiguous work "i ett och samma ärende".
+    /// contiguous work "i ett och samma ticket".
     /// </summary>
     public Guid? TicketId { get; set; }
 
@@ -80,7 +80,7 @@ public class TimeEntry
     public string? PerformedBy { get; set; }
 
     /// <summary>
-    /// Set when the customer approved this work beyond the timbank (§11.1) or above a
+    /// Set when the customer approved this work beyond the hour bank (§11.1) or above a
     /// monthly cap (§12). P1 and P2 proceed without it, and say so in the reason.
     /// </summary>
     public Guid? AuthorisationId { get; set; }
@@ -98,9 +98,9 @@ public class TimeEntry
 /// <summary>
 /// The customer's go-ahead for work they would otherwise have to approve first.
 ///
-/// <para>§11.1: once the timbank is spent, further work starts after the customer approves
-/// it in the ärendeportal — except P1 and P2, which proceed without delay and are billed
-/// without separate approval. §12 has the mirror rule for a monthly cap under Modell B.
+/// <para>§11.1: once the hour bank is spent, further work starts after the customer approves
+/// it in the ticket portal — except P1 and P2, which proceed without delay and are billed
+/// without separate approval. §12 has the mirror rule for a monthly cap under Model B.
 /// Both are the same act, so both are this row.</para>
 /// </summary>
 public class WorkAuthorisation

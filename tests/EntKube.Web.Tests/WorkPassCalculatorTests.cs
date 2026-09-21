@@ -43,7 +43,7 @@ public class WorkPassCalculatorTests
     // ---- Splitting by category -----------------------------------------------------------
 
     /// <summary>
-    /// Work that crosses 17:00 is part ordinary and part kväll. Pricing all of it at
+    /// Work that crosses 17:00 is part ordinary and part evening rate. Pricing all of it at
     /// whichever category it started in is the easy mistake, and it is worth 25%.
     /// </summary>
     [Fact]
@@ -81,10 +81,10 @@ public class WorkPassCalculatorTests
         passes[0].Parts[0].WorkedHours.Should().Be(3m);
     }
 
-    // ---- Per påbörjad timme, per pass -------------------------------------------------------
+    // ---- Per started hour, per pass -------------------------------------------------------
 
     /// <summary>
-    /// §13: contiguous work on one ärende is a single arbetspass and short bursts inside it
+    /// §13: contiguous work on one ticket is a single work pass and short bursts inside it
     /// are not rounded separately. Three ten-minute touches are one hour, not three.
     /// </summary>
     [Fact]
@@ -177,7 +177,7 @@ public class WorkPassCalculatorTests
         pass.Parts[1].BilledHours.Should().Be(1.5m);
     }
 
-    // ---- Timbank factors ---------------------------------------------------------------------
+    // ---- Hour bank factors ---------------------------------------------------------------------
 
     /// <summary>§13: one hour of weekend work takes 1.5 hours out of the bank.</summary>
     [Fact]
@@ -199,7 +199,7 @@ public class WorkPassCalculatorTests
     }
 
     /// <summary>
-    /// §11.1 keeps utvecklingsuppdrag and on-boarding out of the timbank; they are billed
+    /// §11.1 keeps development assignments and on-boarding out of the hour bank; they are billed
     /// separately.
     /// </summary>
     [Theory]
@@ -211,10 +211,10 @@ public class WorkPassCalculatorTests
     public void Only_förvaltning_draws_on_the_timbank(WorkKind kind, bool draws) =>
         WorkPassCalculator.DrawsOnTimebank(kind).Should().Be(draws);
 
-    // ---- Utryckning ----------------------------------------------------------------------------
+    // ---- Call-out ----------------------------------------------------------------------------
 
     /// <summary>
-    /// §13 bills an utryckning at a minimum of two hours per occasion, at the callout rate,
+    /// §13 bills a call-out at a minimum of two hours per occasion, at the callout rate,
     /// however short the work was.
     /// </summary>
     [Fact]
@@ -244,7 +244,7 @@ public class WorkPassCalculatorTests
     // ---- The free half hour (§10.3) ---------------------------------------------------------------
 
     /// <summary>
-    /// §10.3 includes the first thirty minutes of assessing an incident in the grundavgift.
+    /// §10.3 includes the first thirty minutes of assessing an incident in the base fee.
     /// Twenty minutes of assessment is therefore free, and bills nothing at all.
     /// </summary>
     [Fact]

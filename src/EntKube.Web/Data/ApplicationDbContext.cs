@@ -330,18 +330,18 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                   .OnDelete(DeleteBehavior.Cascade);
         });
 
-        // ---- The förvaltningsavtal: Bilaga A, B and C as data -------------------------
+        // ---- The management agreement: Annex A, B and C as data -------------------------
 
         builder.Entity<ApplicationContract>(entity =>
         {
             entity.HasKey(c => c.Id);
 
-            // One set of terms per application. Bilaga A is signed per application, and two
+            // One set of terms per application. Annex A is signed per application, and two
             // live contracts for the same one would make "what was agreed" unanswerable.
             entity.HasIndex(c => c.AppId).IsUnique();
             entity.HasIndex(c => c.TenantId);
 
-            // Instances are found by their moderapplikation often enough to index: the
+            // Instances are found by their parent application often enough to index: the
             // reduced fee from the twenty-first instance and §14.3's collapsing of one
             // incident across many instances both count them.
             entity.HasIndex(c => c.ParentAppId);
@@ -356,7 +356,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
 
             // A plain FK plus the unique index above, deliberately not a required one-to-one.
             // EF treats a second dependent on a required 1:1 as replacing the first and
-            // silently marks the old row deleted; for a signed Bilaga A that is the wrong
+            // silently marks the old row deleted; for a signed Annex A that is the wrong
             // failure mode. As a normal reference, a duplicate hits the unique index and
             // fails loudly instead.
             entity.HasOne(c => c.App)
@@ -364,7 +364,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                   .HasForeignKey(c => c.AppId)
                   .OnDelete(DeleteBehavior.Cascade);
 
-            // Restrict, not cascade: removing a moderapplikation from EntKube must not
+            // Restrict, not cascade: removing a parent application from EntKube must not
             // silently delete the terms of every instance that was built on it. §10.2.1
             // makes the instances depend on it, so the dependency has to be dealt with
             // deliberately rather than by a delete rule.
@@ -423,7 +423,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
 
             // An application-specific contact outlives the application only as a row to be
             // tidied up; cascading would be fine, but Restrict keeps the delete explicit and
-            // matches how the contract itself treats a moderapplikation.
+            // matches how the contract itself treats a parent application.
             entity.HasOne(c => c.App)
                   .WithMany()
                   .HasForeignKey(c => c.AppId)
@@ -602,7 +602,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                   .OnDelete(DeleteBehavior.Restrict);
         });
 
-        // ---- Kännedom: what we know about an application (§10.2) ---------------------------
+        // ---- Knowledge: what we know about an application (§10.2) ---------------------------
 
         builder.Entity<KnowledgeSection>(entity =>
         {
@@ -616,7 +616,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
 
             // Cascade here, unlike tickets and time: this is documentation about the
             // application, not a record of what was done to it or billed for it. When the
-            // application goes, §19 has already handed the drifthandbok over.
+            // application goes, §19 has already handed the runbook over.
             entity.HasOne(s => s.App)
                   .WithMany()
                   .HasForeignKey(s => s.AppId)

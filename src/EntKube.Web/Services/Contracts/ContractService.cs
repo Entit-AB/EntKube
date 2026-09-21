@@ -9,11 +9,11 @@ namespace EntKube.Web.Services.Contracts;
 /// <param name="Level">The service level.</param>
 /// <param name="Window">
 /// The support window, after inheritance. Null when nothing has been agreed — an instance
-/// whose moderapplikation has no window either, or an application classified but never
+/// whose parent application has no window either, or an application classified but never
 /// given one. Null is reported rather than defaulted, because guessing S1 would quietly
 /// understate both the window fee and the hours the SLA clock runs.
 /// </param>
-/// <param name="WindowInherited">True when the window came from the moderapplikation (§10.2.1).</param>
+/// <param name="WindowInherited">True when the window came from the parent application (§10.2.1).</param>
 /// <param name="EffectiveFrom">When this classification took effect.</param>
 public readonly record struct ResolvedServiceLevel(
     ManagementLevel Level,
@@ -50,7 +50,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     /// <summary>
     /// The service level and support window in force for an application on a date, with
-    /// an instance inheriting its moderapplikation's window when it has none of its own.
+    /// an instance inheriting its parent application's window when it has none of its own.
     /// Null when the application has no contract or nothing had taken effect by then.
     /// </summary>
     public async Task<ResolvedServiceLevel?> ResolveServiceLevelAsync(
@@ -136,7 +136,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         }
 
         // Every contract in the tenant, because resolving an instance's inherited window may
-        // walk to a moderapplikation that belongs to another customer.
+        // walk to a parent application that belongs to another customer.
         List<ApplicationContract> allContracts = await db.ApplicationContracts
             .Include(c => c.ServiceLevels)
             .AsNoTracking()
@@ -294,7 +294,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         }
     }
 
-    /// <summary>Records a Annex B taking effect from a date.</summary>
+    /// <summary>Records an Annex B taking effect from a date.</summary>
     public async Task<PortfolioAgreement> RecordPortfolioAgreementAsync(
         PortfolioAgreement agreement, CancellationToken ct = default)
     {
@@ -474,7 +474,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         && (contract.ManagementEndedAt is null || contract.ManagementEndedAt > asOf);
 
     /// <summary>
-    /// Each instance's position among the instances of its moderapplikation, counted from
+    /// Each instance's position among the instances of its parent application, counted from
     /// one, so §10.2.1's reduced rate from the twenty-first can be applied.
     /// </summary>
     private static Dictionary<Guid, int> InstanceOrdinals(IEnumerable<ApplicationContract> contracts)
@@ -523,7 +523,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
             return new ResolvedServiceLevel(level.Level, level.SupportWindow, false, level.EffectiveFrom);
         }
 
-        // §10.2.1: an instance inherits its moderapplikation's window unless it states one.
+        // §10.2.1: an instance inherits its parent application's window unless it states one.
         Guid? parentAppId = contract.ParentAppId;
 
         for (int depth = 0; depth < MaxParentDepth && parentAppId is not null; depth++)

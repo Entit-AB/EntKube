@@ -5,12 +5,12 @@ namespace EntKube.Web.Services.Support;
 /// <summary>
 /// The support windows of §9 and the time categories of §13, applied to instants.
 ///
-/// <para><b>Everything commercial in the förvaltningsavtal rests on this.</b> Response and
+/// <para><b>Everything commercial in the management agreement rests on this.</b> Response and
 /// resolution times are counted inside the chosen support window (§14.4), a ticket that
 /// arrives outside it starts its clock at the next opening (§9.1), and what an hour is
-/// billed at — and how many hours it draws from a timbank — depends on when it was worked
+/// billed at — and how many hours it draws from a hour bank — depends on when it was worked
 /// (§13). Get this wrong and an SLA breach is reported that did not happen, or one that did
-/// is missed; §14.6 attaches 10% of the fönsteravgift to each of the latter.</para>
+/// is missed; §14.6 attaches 10% of the window fee to each of the latter.</para>
 ///
 /// <para><b>UTC in, UTC out; Swedish time in the middle.</b> Callers pass and receive
 /// <see cref="DateTimeKind.Utc"/> instants, matching the rest of EntKube. Classification
@@ -39,7 +39,7 @@ public static class BusinessCalendar
     private static readonly TimeOnly TenPm = new(22, 0);
 
     /// <summary>
-    /// When the Swedish working day ends. Targets counted in arbetsdagar expire here, and it
+    /// When the Swedish working day ends. Targets counted in working days expire here, and it
     /// is also S1's closing time, so the two cannot disagree.
     /// </summary>
     public static readonly TimeOnly WorkingDayEnd = FivePm;
@@ -196,7 +196,7 @@ public static class BusinessCalendar
     /// <summary>
     /// The instant by which a target expires, counting only time inside the support window.
     /// A P1 response target of two hours raised at 16:00 on a Friday under S1 falls at 09:00
-    /// on the following Monday — or later still, if that Monday is a röd dag.
+    /// on the following Monday — or later still, if that Monday is a public holiday.
     ///
     /// <para>A zero budget returns the next opening, which is the right answer for "when does
     /// this clock start".</para>
@@ -246,7 +246,7 @@ public static class BusinessCalendar
     /// The §13 time category an instant falls in, from the clock alone. Night wins over the
     /// weekend, because §13 puts 22:00–05:00 at "samtliga dagar".
     ///
-    /// <para>This never returns <see cref="SupportTimeCategory.Callout"/>: an utryckning
+    /// <para>This never returns <see cref="SupportTimeCategory.Callout"/>: a call-out
     /// depends on the ticket's priority and on which window was bought, neither of which is
     /// a property of the instant. Use the overload that takes them.</para>
     /// </summary>
@@ -271,7 +271,7 @@ public static class BusinessCalendar
     }
 
     /// <summary>
-    /// The §13 category including utryckning: work on a P1 outside the application's chosen
+    /// The §13 category including call-out: work on a P1 outside the application's chosen
     /// support window is a callout, whatever the clock says. Everything else falls back to
     /// the clock.
     /// </summary>
@@ -283,7 +283,7 @@ public static class BusinessCalendar
     /// <summary>
     /// A stretch of worked time that fell entirely in one §13 time category.
     /// </summary>
-    /// <param name="Category">The category, and so the rate and the timbank factor.</param>
+    /// <param name="Category">The category, and so the rate and the hour bank factor.</param>
     /// <param name="From">Start of the stretch.</param>
     /// <param name="To">End of the stretch.</param>
     public readonly record struct CategorySpan(SupportTimeCategory Category, DateTime From, DateTime To)
@@ -303,7 +303,7 @@ public static class BusinessCalendar
     /// Splits a worked period into the §13 time categories it crossed.
     ///
     /// <para>An evening's work that starts at 16:30 and runs to 18:00 is half an hour of
-    /// ordinary time and an hour of kväll — not ninety minutes of whichever one you looked
+    /// ordinary time and an hour of evening rate — not ninety minutes of whichever one you looked
     /// at first. The boundaries are 05:00, 08:00, 17:00, 22:00 and midnight in Swedish time,
     /// plus the change from a working day to a red day or a weekend.</para>
     /// </summary>
@@ -366,13 +366,13 @@ public static class BusinessCalendar
     }
 
     /// <summary>
-    /// The close of the working day <paramref name="workingDays"/> arbetsdagar after an
-    /// instant — the deadline shape behind "inom fem (5) arbetsdagar" (§14.6 incident
-    /// report), "tio (10) arbetsdagar" (§23 test acceptance, §18 subconsultant approval) and
+    /// The close of the working day <paramref name="workingDays"/> working days after an
+    /// instant — the deadline shape behind "inom fem (5) working days" (§14.6 incident
+    /// report), "tio (10) working days" (§23 test acceptance, §18 subconsultant approval) and
     /// the P3/P4 targets in §14.4.
     ///
     /// <para>The target expires when the Swedish working day ends — <see cref="WorkingDayEnd"/>,
-    /// 17:00 — on the Nth arbetsdag. Not at midnight, which would make a deliverable due at an
+    /// 17:00 — on the Nth working day. Not at midnight, which would make a deliverable due at an
     /// hour nobody works, and not at the same clock time N days later.</para>
     /// </summary>
     public static DateTime WorkingDaysDeadline(DateTime fromUtc, int workingDays)

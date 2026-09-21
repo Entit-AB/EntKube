@@ -15,7 +15,7 @@ namespace EntKube.Web.Tests;
 ///
 /// <para>The property worth defending above all others is that nothing reaches a customer
 /// or moves a clock without a person's name on it. §14.3 makes confirming a priority a
-/// written act and §14.6 attaches 10% of the fönsteravgift to a mis-clocked P1 — neither is
+/// written act and §14.6 attaches 10% of the window fee to a mis-clocked P1 — neither is
 /// a judgement to hand to a keyword match.</para>
 /// </summary>
 public class SupportMailTests : IDisposable

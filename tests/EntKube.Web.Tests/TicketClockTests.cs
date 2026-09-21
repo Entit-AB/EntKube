@@ -7,7 +7,7 @@ namespace EntKube.Web.Tests;
 
 /// <summary>
 /// The §14.4 clocks. These decide whether a response time was missed, and §14.6 pays the
-/// customer 10% of the fönsteravgift for each P1 or P2 response breach — so an error here
+/// customer 10% of the window fee for each P1 or P2 response breach — so an error here
 /// costs money in one direction and credibility in the other.
 ///
 /// <para>Instants are written in Swedish local time. Reference dates: 2026-09-22 is a
@@ -93,7 +93,7 @@ public class TicketClockTests
     }
 
     /// <summary>
-    /// §14.4 pauses lösningstiden by name and says nothing about responstid. Since a missed
+    /// §14.4 pauses the resolution time by name and says nothing about response time. Since a missed
     /// response is the only thing that carries a penalty, the response clock keeps running —
     /// the reading that cannot be accused of excusing our own lateness.
     /// </summary>

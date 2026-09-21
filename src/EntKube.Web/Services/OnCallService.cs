@@ -60,7 +60,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// <summary>
     /// Stretches of a schedule's support window that nobody is rostered for.
     ///
-    /// <para>§10.1.1 sells S3 and S4 as a staffed jourrotation, and the fönsteravgift for S4
+    /// <para>§10.1.1 sells S3 and S4 as a staffed on-call rotation, and the window fee for S4
     /// is 95 000 kr a month for availability rather than output. Discovering a hole in the
     /// roster when an incident lands in it is the expensive way to find out.</para>
     ///

@@ -1,11 +1,11 @@
 namespace EntKube.Web.Data;
 
 /// <summary>
-/// Bilaga C as it stood from a given date — every fee and hourly rate that applies.
+/// Annex C as it stood from a given date — every fee and hourly rate that applies.
 ///
 /// <para><b>Versioned, never edited.</b> §19 indexes prices annually on 1 January against
 /// SCB's arbetskostnadsindex with a floor of 2%, and §13 moves every time category and
-/// timbank price with the ordinary rate from the same date. Bilaga C says it may be
+/// hour bank price with the ordinary rate from the same date. Annex C says it may be
 /// replaced by a new signed version without otherwise changing the agreement. A statement
 /// covering March must price at March's list, so a new list is a new row and the old one
 /// stays exactly as it was.</para>
@@ -46,9 +46,9 @@ public class PriceList
 /// <summary>
 /// One amount in a price list.
 ///
-/// <para><b>Rows rather than columns, on purpose.</b> Bilaga C's shape is not fixed: the
-/// timbank tiers are whatever was negotiated, the one-off fees grow as services are added,
-/// and §10.2.1 already carries two kännedomsavgifter for the same level depending on how
+/// <para><b>Rows rather than columns, on purpose.</b> Annex C's shape is not fixed: the
+/// hour bank tiers are whatever was negotiated, the one-off fees grow as services are added,
+/// and §10.2.1 already carries two knowledge fees for the same level depending on how
 /// many instances there are. Twenty-odd nullable columns would model one version of one
 /// annex and break on the next. <see cref="Key"/> is therefore a string, interpreted
 /// according to <see cref="Kind"/> — the enum name for a window, level or time category,
@@ -77,7 +77,7 @@ public class PriceListEntry
     public decimal Amount { get; set; }
 
     /// <summary>
-    /// The hours a timbank tier buys. Set for <see cref="PriceKind.HourBankTier"/> so the
+    /// The hours a hour bank tier buys. Set for <see cref="PriceKind.HourBankTier"/> so the
     /// tier can be compared numerically rather than by parsing <see cref="Key"/>.
     /// </summary>
     public decimal? Hours { get; set; }

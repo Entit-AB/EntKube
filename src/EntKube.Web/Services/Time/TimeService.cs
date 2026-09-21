@@ -4,9 +4,9 @@ using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Time;
 
-/// <summary>How much of a month's timbank has gone, and what is left (§11).</summary>
+/// <summary>How much of a month's hour bank has gone, and what is left (§11).</summary>
 /// <param name="Month">First instant of the month, in UTC.</param>
-/// <param name="EntitledHours">What Bilaga B bought for the month. Null under Modell B.</param>
+/// <param name="EntitledHours">What Annex B bought for the month. Null under Model B.</param>
 /// <param name="DrawnHours">Hours taken out, after the §13 factors.</param>
 /// <param name="OverspillHours">Hours worked beyond the bank, billed per §13.</param>
 /// <param name="ByCategory">The drawdown split by time category.</param>
@@ -39,7 +39,7 @@ public readonly record struct TimebankStatement(
 /// <param name="Kind">What kind of work it was.</param>
 /// <param name="Category">The §13 time category.</param>
 /// <param name="BilledHours">Hours billed after the pass rounding.</param>
-/// <param name="BankHours">Hours drawn from a Modell A timbank.</param>
+/// <param name="BankHours">Hours drawn from a Model A hour bank.</param>
 /// <param name="Description">What was done.</param>
 public readonly record struct BillingLine(
     DateOnly Day,
@@ -53,7 +53,7 @@ public readonly record struct BillingLine(
     decimal BankHours,
     string Description);
 
-/// <summary>Hours performed and billable but not covered by a timbank (§12, and Modell A overspill).</summary>
+/// <summary>Hours performed and billable but not covered by a hour bank (§12, and Model A overspill).</summary>
 /// <param name="From">Start of the period.</param>
 /// <param name="To">End of the period, exclusive.</param>
 /// <param name="Lines">The specification §20 requires, one line per application/ticket/day/category.</param>
@@ -75,7 +75,7 @@ public readonly record struct CommittedHoursStatement(
 }
 
 /// <summary>
-/// Records worked time and reports it two ways: how much of the timbank is gone, and how
+/// Records worked time and reports it two ways: how much of the hour bank is gone, and how
 /// many hours have been committed.
 ///
 /// <para><b>It does not invoice.</b> That happens in another system, so what this owes that
@@ -156,7 +156,7 @@ public class TimeService(
     }
 
     /// <summary>
-    /// How much of a month's timbank has gone (§11). The balance is derived from the
+    /// How much of a month's hour bank has gone (§11). The balance is derived from the
     /// month's entries rather than stored, because §11.1 makes the bank non-rolling: every
     /// month starts again at the agreed number, and a counter would drift.
     /// </summary>
@@ -272,7 +272,7 @@ public class TimeService(
             .ToListAsync(ct);
 
     /// <summary>
-    /// Hours worked past the timbank with nothing authorising them.
+    /// Hours worked past the hour bank with nothing authorising them.
     ///
     /// <para>§11.1 excepts P1 and P2, which are worked without delay and billed without
     /// separate approval, so their hours are never counted here. What is left is the work
@@ -352,7 +352,7 @@ public class TimeService(
 
     /// <summary>
     /// The month containing an instant, as Swedish calendar months — §11.1 counts the bank
-    /// per kalendermånad, and a UTC month boundary is an hour or two out of step with that.
+    /// per calendar month, and a UTC month boundary is an hour or two out of step with that.
     /// </summary>
     public static (DateTime From, DateTime To) MonthBounds(DateTime anyInstantInMonth)
     {

@@ -1,17 +1,17 @@
 namespace EntKube.Web.Data;
 
 /// <summary>
-/// The sections an application's kännedom is kept in. A fixed set rather than free-form
+/// The sections an application's knowledge base is kept in. A fixed set rather than free-form
 /// pages, because §10.2 charges for particular things being current and a wiki with no
 /// shape cannot say whether they are.
 /// </summary>
 public enum KnowledgeSectionKind
 {
-    /// <summary>How it is built and why. The narrative a new jourhavande reads first.</summary>
+    /// <summary>How it is built and why. The narrative a new on-call engineer reads first.</summary>
     Architecture = 0,
 
     /// <summary>
-    /// Drifthandbok — start, stop, deploy, restore, and the things that break. Named as a
+    /// Runbook — start, stop, deploy, restore, and the things that break. Named as a
     /// deliverable of on-boarding fas 4 and again at off-boarding in §19.
     /// </summary>
     Runbook = 1,
@@ -42,13 +42,13 @@ public enum KnowledgeSectionKind
 /// <summary>
 /// One section of what we know about an application.
 ///
-/// <para><b>This is what the kännedomsavgift buys.</b> §10.2 charges per application for
+/// <para><b>This is what the knowledge fee buys.</b> §10.2 charges per application for
 /// keeping monitoring, alarms and documentation current and the support team insatt in it.
 /// EntKube knew an application's deployments, routes and secrets; it knew nothing about the
-/// application. This is the other half, and it is the half that makes a jourhavande who has
+/// application. This is the other half, and it is the half that makes a on-call engineer who has
 /// never seen it useful at 03:00 — which §10.1.1 requires before S3 or S4 can start.</para>
 ///
-/// <para>Kept as markdown with a revision history, because a drifthandbok that changed and
+/// <para>Kept as markdown with a revision history, because a runbook that changed and
 /// cannot say when or why is not evidence of anything at the next quarterly review.</para>
 /// </summary>
 public class KnowledgeSection
@@ -131,10 +131,10 @@ public enum DataClassification
 /// <summary>Who is responsible for backing an application's data up and testing restores.</summary>
 public enum BackupResponsibility
 {
-    /// <summary>§23's default: the customer, unless Bilaga A says otherwise.</summary>
+    /// <summary>§23's default: the customer, unless Annex A says otherwise.</summary>
     Customer = 0,
 
-    /// <summary>Agreed as ours in Bilaga A.</summary>
+    /// <summary>Agreed as ours in Annex A.</summary>
     Supplier = 1,
 
     /// <summary>A platform or hosting provider's, and named in the dependencies.</summary>
@@ -147,7 +147,7 @@ public enum BackupResponsibility
 ///
 /// <para>§23 makes assessing regulatory scope — patientdatalagen, NIS2, MDR — the
 /// customer's responsibility, and says we are not the tillverkare or regulatoriskt ansvarig
-/// unless Bilaga A says so for a named application. Recording their assessment is how that
+/// unless Annex A says so for a named application. Recording their assessment is how that
 /// stays a documented position rather than an assumption nobody wrote down.</para>
 /// </summary>
 public class AppKnowledgeProfile
@@ -161,7 +161,7 @@ public class AppKnowledgeProfile
     public DataClassification DataClassification { get; set; }
 
     /// <summary>
-    /// Whether it touches patientuppgifter. §24 limits access to such systems to what the
+    /// Whether it touches patient records. §24 limits access to such systems to what the
     /// assignment needs, personally and logged — so it has to be known which they are.
     /// </summary>
     public bool HandlesPatientData { get; set; }

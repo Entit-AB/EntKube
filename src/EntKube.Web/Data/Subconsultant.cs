@@ -3,7 +3,7 @@ namespace EntKube.Web.Data;
 /// <summary>
 /// Somebody outside our own payroll who works under the agreement — the §18 register.
 ///
-/// <para>§18 lets us use subconsultants for jour duty, incident handling, bugfixes,
+/// <para>§18 lets us use subconsultants for on-call duty, incident handling, bugfixes,
 /// deployments and development, and makes us answerable for their work as for our own. It
 /// also attaches three conditions worth holding as data rather than as a folder of PDFs:
 /// they must be bound by confidentiality and data-processing terms at least equal to §17

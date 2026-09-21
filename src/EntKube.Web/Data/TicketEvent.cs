@@ -14,7 +14,7 @@ public enum TicketEventKind
     /// <summary>Reprioritised mid-flight — the new priority's targets run from here (§14.3).</summary>
     Reprioritised = 3,
 
-    /// <summary>First assessment made and work begun — what responstid is measured to.</summary>
+    /// <summary>First assessment made and work begun — what response time is measured to.</summary>
     Responded = 4,
 
     /// <summary>A status update to the customer, at the §14.4 interval for the priority.</summary>

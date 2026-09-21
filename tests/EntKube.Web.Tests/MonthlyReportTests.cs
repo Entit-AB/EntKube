@@ -165,7 +165,7 @@ public class MonthlyReportTests : IDisposable
     // ---- §14.6's penalty ---------------------------------------------------------------------
 
     /// <summary>
-    /// §14.6 pays 10% of the month's fönsteravgift for each missed P1 or P2 response. At
+    /// §14.6 pays 10% of the month's window fee for each missed P1 or P2 response. At
     /// S1's 6 000 kr that is 600 kr; the report has to show the arithmetic, because the
     /// customer has thirty days to claim it and §28 makes the figure binding if they do not.
     /// </summary>
@@ -194,7 +194,7 @@ public class MonthlyReportTests : IDisposable
     }
 
     /// <summary>
-    /// §14.6 says an overrun lösningstid is a missed goal rather than a breach, and pays
+    /// §14.6 says an overrun resolution time is a missed goal rather than a breach, and pays
     /// nothing for it. It is still reported, because the customer is entitled to see it.
     /// </summary>
     [Fact]
@@ -265,7 +265,7 @@ public class MonthlyReportTests : IDisposable
     }
 
     /// <summary>
-    /// §14.6: more than two P1–P2 deviations in a calendar quarter obliges an åtgärdsplan
+    /// §14.6: more than two P1–P2 deviations in a calendar quarter obliges an action plan
     /// at the next quarterly meeting.
     /// </summary>
     [Fact]
@@ -379,7 +379,7 @@ public class MonthlyReportTests : IDisposable
     // ---- Hours ---------------------------------------------------------------------------------
 
     /// <summary>
-    /// §16.1 wants förbrukade timmar in the report: hours drawn, hours that expired, and
+    /// §16.1 wants hours consumed in the report: hours drawn, hours that expired, and
     /// hours beyond the bank. All three come from the same statement the Hours view shows.
     /// </summary>
     [Fact]

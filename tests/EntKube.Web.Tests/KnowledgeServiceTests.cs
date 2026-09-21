@@ -11,7 +11,7 @@ namespace EntKube.Web.Tests;
 /// <summary>
 /// What we know about an application — the half of §10.2 that is not monitoring.
 ///
-/// <para>The kännedomsavgift is charged for keeping this current, so the properties worth
+/// <para>The knowledge fee is charged for keeping this current, so the properties worth
 /// defending are that an edit does not destroy what was there before, that a review is a
 /// distinct act from an edit, and that the gaps the agreement cares about are reported
 /// before somebody needs them at three in the morning.</para>
@@ -86,7 +86,7 @@ public class KnowledgeServiceTests : IDisposable
 
     /// <summary>
     /// An edit keeps what the section said before. §19 hands this material over at
-    /// off-boarding, and a drifthandbok that cannot say when it changed is not evidence of
+    /// off-boarding, and a runbook that cannot say when it changed is not evidence of
     /// anything at a quarterly review.
     /// </summary>
     [Fact]
@@ -141,7 +141,7 @@ public class KnowledgeServiceTests : IDisposable
     // ---- The gaps the agreement cares about ---------------------------------------------
 
     /// <summary>
-    /// A drifthandbok is a named deliverable of on-boarding fas 4 and of off-boarding under
+    /// A runbook is a named deliverable of on-boarding fas 4 and of off-boarding under
     /// §19. Its absence is the most expensive thing on this list at three in the morning.
     /// </summary>
     [Fact]
@@ -193,7 +193,7 @@ public class KnowledgeServiceTests : IDisposable
 
     /// <summary>
     /// §23: choosing a window wider than your own dependencies can be reached in means no
-    /// guaranteed lösningstid. Worth saying before an incident rather than after one.
+    /// guaranteed resolution time. Worth saying before an incident rather than after one.
     /// </summary>
     [Fact]
     public async Task An_office_hours_dependency_under_a_wide_window_is_critical()

@@ -4,8 +4,8 @@ namespace EntKube.Web.Services.Support;
 
 /// <summary>
 /// The pricing consequences of a time category, kept beside the category so the two cannot
-/// drift apart. The percentages are the surcharge on the ordinary hourly rate (Bilaga C,
-/// C.4); the factor is how many hours one worked hour draws from a Modell A timbank (§13).
+/// drift apart. The percentages are the surcharge on the ordinary hourly rate (Annex C,
+/// C.4); the factor is how many hours one worked hour draws from a Model A hour bank (§13).
 /// </summary>
 public static class SupportTimeCategoryRates
 {
@@ -21,7 +21,7 @@ public static class SupportTimeCategoryRates
     };
 
     /// <summary>
-    /// Hours drawn from the timbank per hour worked (§13). One hour of weekend work costs
+    /// Hours drawn from the hour bank per hour worked (§13). One hour of weekend work costs
     /// the bank 1.5 hours.
     /// </summary>
     public static decimal BankFactor(this SupportTimeCategory category) => category switch
@@ -35,7 +35,7 @@ public static class SupportTimeCategoryRates
     };
 
     /// <summary>
-    /// The floor on a single occasion, in hours. §13 bills an utryckning at a minimum of
+    /// The floor on a single occasion, in hours. §13 bills a call-out at a minimum of
     /// two hours however short it was; every other category bills per started hour.
     /// </summary>
     public static decimal MinimumBillableHours(this SupportTimeCategory category) =>

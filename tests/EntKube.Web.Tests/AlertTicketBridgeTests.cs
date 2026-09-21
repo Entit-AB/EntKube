@@ -14,7 +14,7 @@ namespace EntKube.Web.Tests;
 /// Turning an alert into a ticket, which §14.3 requires us to do for anything our own
 /// monitoring finds — registered by us, timed at the alarm.
 ///
-/// <para>The judgements this defends: only applications under a Bilaga A get tickets, the
+/// <para>The judgements this defends: only applications under an Annex A get tickets, the
 /// priority the machine picks is a proposal and not a confirmation, and an alert that stops
 /// firing does not resolve anything, because §14.4 resolves a ticket when the service is
 /// restored or the customer accepts a workaround.</para>
@@ -64,7 +64,7 @@ public class AlertTicketBridgeTests : IDisposable
             Deployment(managedAppId, "journal-prod"),
             Deployment(unmanagedAppId, "okand-prod"));
 
-        // Only the first application is under a Bilaga A.
+        // Only the first application is under an Annex A.
         ApplicationContract contract = new()
         {
             Id = Guid.NewGuid(), TenantId = tenantId, AppId = managedAppId,
@@ -149,7 +149,7 @@ public class AlertTicketBridgeTests : IDisposable
     }
 
     /// <summary>
-    /// An application with no Bilaga A has no agreed response time, no price and nobody who
+    /// An application with no Annex A has no agreed response time, no price and nobody who
     /// agreed to be woken for it. The alert stays an alert.
     /// </summary>
     [Fact]

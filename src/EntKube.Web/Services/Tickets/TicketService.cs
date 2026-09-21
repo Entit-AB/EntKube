@@ -7,8 +7,8 @@ namespace EntKube.Web.Services.Tickets;
 
 /// <summary>Where a ticket stands against every §14 clock at once.</summary>
 /// <param name="Ticket">The ticket itself.</param>
-/// <param name="Response">Responstid — the only clock §14.6 attaches a penalty to.</param>
-/// <param name="Resolution">Lösningstid, which §14.4 calls a goal.</param>
+/// <param name="Response">Response time — the only clock §14.6 attaches a penalty to.</param>
+/// <param name="Resolution">Resolution time, which §14.4 calls a goal.</param>
 /// <param name="EscalationDue">When §14.5 escalation to level 2 falls due, if it applies.</param>
 /// <param name="IncidentReportDue">For a closed P1, when §14.6's written report is due.</param>
 public readonly record struct TicketSlaStatus(
@@ -44,9 +44,9 @@ public class TicketService(
     /// Registers a ticket and starts its clocks.
     ///
     /// <para>Three §14 rules are applied here rather than left to the caller: the support
-    /// window and the clock start come from the application's Bilaga A and §9.1, the
+    /// window and the clock start come from the application's Annex A and §9.1, the
     /// customer's proposed priority stands until the first assessment (§14.3), and a P1
-    /// arriving outside the bought window is marked as an utryckning (§13).</para>
+    /// arriving outside the bought window is marked as a call-out (§13).</para>
     /// </summary>
     public async Task<Ticket> CreateAsync(
         Guid tenantId,
@@ -102,7 +102,7 @@ public class TicketService(
             ClockStartsAt = open ? reportedAt : BusinessCalendar.NextOpening(reportedAt, window),
             SupportWindow = window,
 
-            // §13: a P1 worked outside the bought window is an utryckning, billed at the
+            // §13: a P1 worked outside the bought window is a call-out, billed at the
             // callout rate with a two-hour minimum.
             IsCallout = priority == TicketPriority.P1 && !open,
 
@@ -415,7 +415,7 @@ public class TicketService(
 
     /// <summary>
     /// Notes that a ticket is not to be counted as a deviation, with the reason §14.6
-    /// requires — väntetid, force majeure, or one of the §14.7 exemptions.
+    /// requires — waiting time, force majeure, or one of the §14.7 exemptions.
     /// </summary>
     public async Task<Ticket?> ExcludeFromSlaAsync(
         Guid ticketId, string reason, string? actor, DateTime at, CancellationToken ct = default)

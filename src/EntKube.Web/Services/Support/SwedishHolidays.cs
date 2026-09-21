@@ -3,12 +3,12 @@ using System.Collections.Concurrent;
 namespace EntKube.Web.Services.Support;
 
 /// <summary>
-/// The Swedish calendar the förvaltningsavtal is written against: which dates are röda
-/// dagar and which are working days ("helgfri måndag–fredag enligt svensk kalender").
+/// The Swedish calendar the management agreement is written against: which dates are public
+/// holidays and which are working days — Monday to Friday, holidays excluded.
 ///
-/// <para><b>Why this is data and not a constant.</b> Half the red days move with Easter,
-/// and three of them — midsommarafton, julafton and nyårsafton — are not allmänna
-/// helgdagar in law at all. They are red here because §9 of the agreement says so, which
+/// <para><b>Why this is data and not a constant.</b> Half the public holidays move with Easter,
+/// and three of them — Midsummer Eve, Christmas Eve and New Year's Eve — are not public
+/// holidays in law at all. They are closed here because §9 of the agreement says so, which
 /// makes the set a contractual choice rather than a fact about Sweden. Another customer
 /// could reasonably be sold a different one, so the two halves are kept separable:
 /// <see cref="PublicHolidays"/> is the law, <see cref="ContractEves"/> is the clause.</para>
@@ -21,7 +21,7 @@ namespace EntKube.Web.Services.Support;
 public static class SwedishHolidays
 {
     /// <summary>
-    /// Red days are looked up per instant while SLA clocks tick, so the per-year set is
+    /// Public holidays are looked up per instant while SLA clocks tick, so the per-year set is
     /// computed once. Bounded by the number of distinct years a process is asked about.
     /// </summary>
     private static readonly ConcurrentDictionary<int, HashSet<DateOnly>> RedDayCache = new();
@@ -51,11 +51,11 @@ public static class SwedishHolidays
     }
 
     /// <summary>
-    /// The allmänna helgdagar — the thirteen days that are public holidays in Swedish law.
+    /// The thirteen days that are public holidays in Swedish law.
     ///
-    /// <para>Plain Sundays are also allmänna helgdagar in law, and are deliberately left
+    /// <para>Plain Sundays are also public holidays in law, and are deliberately left
     /// out: every support window in §9 already treats Sunday by the day of the week, and
-    /// folding Sundays in here would make "helgfri vardag" ambiguous.</para>
+    /// folding Sundays in here would make "working day" ambiguous.</para>
     /// </summary>
     public static IReadOnlySet<DateOnly> PublicHolidays(int year)
     {
@@ -63,60 +63,61 @@ public static class SwedishHolidays
 
         return new HashSet<DateOnly>
         {
-            new(year, 1, 1),                    // Nyårsdagen
-            new(year, 1, 6),                    // Trettondedag jul
-            easter.AddDays(-2),                 // Långfredagen
-            easter,                             // Påskdagen
-            easter.AddDays(1),                  // Annandag påsk
-            new(year, 5, 1),                    // Första maj
-            easter.AddDays(39),                 // Kristi himmelsfärdsdag
-            easter.AddDays(49),                 // Pingstdagen
-            new(year, 6, 6),                    // Nationaldagen
-            MidsummerDay(year),                 // Midsommardagen
-            AllSaintsDay(year),                 // Alla helgons dag
-            new(year, 12, 25),                  // Juldagen
-            new(year, 12, 26),                  // Annandag jul
+            new(year, 1, 1),                    // New Year's Day (nyårsdagen)
+            new(year, 1, 6),                    // Epiphany (trettondedag jul)
+            easter.AddDays(-2),                 // Good Friday (långfredagen)
+            easter,                             // Easter Sunday (påskdagen)
+            easter.AddDays(1),                  // Easter Monday (annandag påsk)
+            new(year, 5, 1),                    // May Day (första maj)
+            easter.AddDays(39),                 // Ascension Day (Kristi himmelsfärdsdag)
+            easter.AddDays(49),                 // Whit Sunday (pingstdagen)
+            new(year, 6, 6),                    // National Day (nationaldagen)
+            MidsummerDay(year),                 // Midsummer Day (midsommardagen)
+            AllSaintsDay(year),                 // All Saints' Day (alla helgons dag)
+            new(year, 12, 25),                  // Christmas Day (juldagen)
+            new(year, 12, 26),                  // Boxing Day (annandag jul)
         };
     }
 
     /// <summary>
-    /// The three eves §9 adds to the red days: midsommarafton, julafton and nyårsafton.
-    /// Working days in law, closed days under this agreement.
+    /// The three eves §9 adds to the public holidays: Midsummer Eve, Christmas Eve and New
+    /// Year's Eve. Working days in law, closed days under this agreement.
     /// </summary>
     public static IReadOnlySet<DateOnly> ContractEves(int year) =>
         new HashSet<DateOnly>
         {
-            MidsummerDay(year).AddDays(-1),     // Midsommarafton
-            new(year, 12, 24),                  // Julafton
-            new(year, 12, 31),                  // Nyårsafton
+            MidsummerDay(year).AddDays(-1),     // Midsummer Eve (midsommarafton)
+            new(year, 12, 24),                  // Christmas Eve (julafton)
+            new(year, 12, 31),                  // New Year's Eve (nyårsafton)
         };
 
     /// <summary>
-    /// Midsommardagen: the Saturday that falls between 20 and 26 June inclusive.
+    /// Midsummer Day (midsommardagen): the Saturday that falls between 20 and 26 June inclusive.
     /// </summary>
     public static DateOnly MidsummerDay(int year) => FirstSaturdayOnOrAfter(new DateOnly(year, 6, 20));
 
     /// <summary>
-    /// Alla helgons dag: the Saturday that falls between 31 October and 6 November inclusive.
+    /// All Saints' Day (alla helgons dag): the Saturday that falls between 31 October and 6 November inclusive.
     /// </summary>
     public static DateOnly AllSaintsDay(int year) => FirstSaturdayOnOrAfter(new DateOnly(year, 10, 31));
 
     /// <summary>
-    /// Every red day in a year under this agreement — the public holidays plus the three
+    /// Every closed day in a year under this agreement — the public holidays plus the three
     /// eves named in §9.
     /// </summary>
     public static IReadOnlySet<DateOnly> RedDays(int year) => RedDaysInternal(year);
 
     /// <summary>
-    /// Whether a date is a röd dag as §9 defines it. A Saturday or Sunday that is not also
-    /// a holiday is <em>not</em> a red day by this test — it is a weekend, which the support
+    /// Whether a date is a public holiday as §9 defines it. A Saturday or Sunday that is not also
+    /// a holiday is <em>not</em> a public holiday by this test — it is a weekend, which the support
     /// windows and time categories handle by the day of the week. Callers asking "is this a
     /// closed day" want <see cref="IsWorkingDay"/>.
     /// </summary>
     public static bool IsRedDay(DateOnly date) => RedDaysInternal(date.Year).Contains(date);
 
     /// <summary>
-    /// An arbetsdag as the agreement defines it: a helgfri måndag–fredag. This is the unit
+    /// A working day as the agreement defines it: Monday to Friday, public holidays excluded.
+    /// This is the unit
     /// behind the P3 and P4 targets, the five working days for a P1 incident report (§14.6),
     /// the ten for customer test acceptance (§23) and the ten for approving a subconsultant
     /// (§18).

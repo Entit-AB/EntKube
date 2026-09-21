@@ -289,7 +289,7 @@ public class AlertSyncService(
 
         // §14.3: an issue our monitoring finds is registered by us, timed at the alarm.
         // Done before the maintenance check below, which suppresses notifications rather
-        // than the record — but only for alerts that map to an application under Bilaga A.
+        // than the record — but only for alerts that map to an application under Annex A.
         await alertTickets.OpenForIncidentsAsync(cluster.TenantId, newIncidents, ct);
         await alertTickets.NoteIncidentResolvedAsync(resolvedIncidents, now, ct);
 

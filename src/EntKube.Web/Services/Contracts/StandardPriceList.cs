@@ -3,7 +3,7 @@ using EntKube.Web.Data;
 namespace EntKube.Web.Services.Contracts;
 
 /// <summary>
-/// Bilaga C's amounts as a starting point for a new price list.
+/// Annex C's amounts as a starting point for a new price list.
 ///
 /// <para>These are the figures in the standard price annex, in SEK excluding VAT. They are
 /// a <em>template</em>, not a source of truth: the list that governs a customer is the one
@@ -42,13 +42,13 @@ public static class StandardPriceList
                 SortOrder = order++,
             });
 
-        // C.1 — fönsteravgift per support window, charged once for the whole portfolio.
+        // C.1 — window fee per support window, charged once for the whole portfolio.
         Add(PriceKind.WindowFee, nameof(SupportWindow.S1), 6_000m);
         Add(PriceKind.WindowFee, nameof(SupportWindow.S2), 30_000m);
         Add(PriceKind.WindowFee, nameof(SupportWindow.S3), 55_000m);
         Add(PriceKind.WindowFee, nameof(SupportWindow.S4), 95_000m);
 
-        // C.2 — kännedomsavgift per application. Behöver undersökas has no amount: §10.2
+        // C.2 — knowledge fee per application. Needs investigation has no amount: §10.2
         // quotes it after a technical review, which is why it is absent rather than zero.
         Add(PriceKind.KnowledgeFee, nameof(ManagementLevel.Simple), 1_500m);
         Add(PriceKind.KnowledgeFee, nameof(ManagementLevel.Standard), 4_000m);
@@ -56,7 +56,7 @@ public static class StandardPriceList
         Add(PriceKind.KnowledgeFee, nameof(ManagementLevel.Instance), 500m);
         Add(PriceKind.KnowledgeFee, ContractPricing.ReducedInstanceKey, 350m);
 
-        // C.3 — timbank tiers. The amount is the monthly price for the whole tier.
+        // C.3 — hour bank tiers. The amount is the monthly price for the whole tier.
         Add(PriceKind.HourBankTier, "10", 11_150m, 10m);
         Add(PriceKind.HourBankTier, "20", 21_800m, 20m);
         Add(PriceKind.HourBankTier, "40", 42_400m, 40m);
@@ -81,12 +81,12 @@ public static class StandardPriceList
     }
 
     /// <summary>
-    /// The rate for utvecklingsuppdrag under §15, including UX, architecture and DevOps
-    /// within the assignment. A separate rate from ordinary förvaltning, so a separate key.
+    /// The rate for development assignments under §15, including UX, architecture and DevOps
+    /// within the assignment. A separate rate from ordinary management, so a separate key.
     /// </summary>
     public const string DevelopmentRateKey = "Development";
 
-    /// <summary>Deploying a further instance of a moderapplikation (§10.2.1, C.5).</summary>
+    /// <summary>Deploying a further instance of a parent application (§10.2.1, C.5).</summary>
     public const string NewInstanceKey = "NewInstance";
 
     /// <summary>The one-off fee key for on-boarding an application at a given level (§5.1).</summary>

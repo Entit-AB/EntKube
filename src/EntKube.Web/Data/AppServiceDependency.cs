@@ -22,13 +22,13 @@ public enum DependencyKind
 ///
 /// <para><b>Not the same thing as <see cref="ExternalDependency"/>.</b> That one models
 /// egress — FQDN and port — so a deny-all NetworkPolicy does not silently break an outbound
-/// call. This is the contractual version Bilaga A.1 asks for: system, leverantör,
-/// supporttider, kontaktväg.</para>
+/// call. This is the contractual version Annex A.1 asks for: system, supplier,
+/// support hours and contact route.</para>
 ///
 /// <para><b>Why the hours matter.</b> §14.4 lets the resolution clock pause while we wait
 /// on one of these parties, explicitly including when they are only reachable during office
 /// hours — and §23 warns that choosing S2–S4 while a dependency is office-hours-only means
-/// no guaranteed lösningstid. Recording the hours is what turns both of those from an
+/// no guaranteed resolution time. Recording the hours is what turns both of those from an
 /// argument into a fact that was written down before it mattered.</para>
 /// </summary>
 public class AppServiceDependency
@@ -46,7 +46,7 @@ public class AppServiceDependency
     /// <summary>Who runs it.</summary>
     public string? Supplier { get; set; }
 
-    /// <summary>When they can be reached, as agreed with them — free text, e.g. "vardagar 08–17".</summary>
+    /// <summary>When they can be reached, as agreed with them — free text, e.g. "weekdays 08–17".</summary>
     public string? SupportHours { get; set; }
 
     /// <summary>
@@ -83,7 +83,7 @@ public class AppServiceDependency
 /// <para>§14.7: once we have given written notice with a proposed upgrade, the customer has
 /// three months to order it. If they do not, we may exempt the application from the §14.4
 /// SLA times and from liability for security faults traceable to that component — while the
-/// grundavgift carries on unchanged. All of which depends on being able to show the notice
+/// base fee carries on unchanged. All of which depends on being able to show the notice
 /// and its date, which is what this row is.</para>
 /// </summary>
 public class EndOfLifeNotice

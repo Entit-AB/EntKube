@@ -32,7 +32,7 @@ public class OnCallShift
 
     /// <summary>
     /// Whether this shift is covered by our own staff or by a subconsultant. §18 allows
-    /// subconsultants for jour duty and requires a current register of them, so which
+    /// subconsultants for on-call duty and requires a current register of them, so which
     /// shifts they cover is worth knowing at a glance rather than by recognising names.
     /// </summary>
     public OnCallAffiliation Affiliation { get; set; } = OnCallAffiliation.Employee;

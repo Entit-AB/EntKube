@@ -2,18 +2,18 @@ namespace EntKube.Web.Data;
 
 /// <summary>
 /// The four support windows of §9 — the hours during which the supplier is staffed and
-/// during which the SLA clocks of §14.4 run. Chosen per application in Bilaga A; the most
-/// extensive one in the portfolio sets the fönsteravgift (§10.1).
+/// during which the SLA clocks of §14.4 run. Chosen per application in Annex A; the most
+/// extensive one in the portfolio sets the window fee (§10.1).
 /// </summary>
 public enum SupportWindow
 {
-    /// <summary>Kontorstid — helgfria vardagar 08:00–17:00. No jour.</summary>
+    /// <summary>Office hours — working days 08:00–17:00. No on-call.</summary>
     S1 = 1,
 
-    /// <summary>Utökad kontorstid — helgfria vardagar 05:00–22:00.</summary>
+    /// <summary>Extended office hours — working days 05:00–22:00.</summary>
     S2 = 2,
 
-    /// <summary>Utökad kontorstid inkl. helger och röda dagar — alla dagar 05:00–22:00.</summary>
+    /// <summary>Extended office hours incl. weekends and public holidays — all days 05:00–22:00.</summary>
     S3 = 3,
 
     /// <summary>Dygnet runt — 24/7/365.</summary>
@@ -27,20 +27,20 @@ public enum SupportWindow
 /// </summary>
 public enum SupportTimeCategory
 {
-    /// <summary>Ordinarie — helgfria vardagar 08:00–17:00.</summary>
+    /// <summary>Ordinary — working days 08:00–17:00.</summary>
     Ordinary = 0,
 
-    /// <summary>Kväll/morgon — helgfria vardagar 05:00–08:00 and 17:00–22:00.</summary>
+    /// <summary>Evening/morning — working days 05:00–08:00 and 17:00–22:00.</summary>
     EveningMorning = 1,
 
-    /// <summary>Helg och röd dag — 05:00–22:00.</summary>
+    /// <summary>Weekend and public holiday — 05:00–22:00.</summary>
     WeekendOrRedDay = 2,
 
-    /// <summary>Natt — 22:00–05:00, every day of the week.</summary>
+    /// <summary>Night — 22:00–05:00, every day of the week.</summary>
     Night = 3,
 
     /// <summary>
-    /// Utryckning — work on a P1 incident outside the application's chosen support window.
+    /// Call-out — work on a P1 incident outside the application's chosen support window.
     /// Not derivable from the clock alone: it depends on which window was bought and on the
     /// ticket's priority, so callers state it rather than the calendar inferring it.
     /// </summary>
@@ -61,7 +61,7 @@ public enum ContractOrigin
 }
 
 /// <summary>
-/// The förvaltningsnivå of §10.2, which sets the application's kännedomsavgift.
+/// The service level of §10.2, which sets the application's knowledge fee.
 /// </summary>
 public enum ManagementLevel
 {
@@ -75,25 +75,25 @@ public enum ManagementLevel
     Complex = 2,
 
     /// <summary>
-    /// Instans — a further deployment of a moderapplikation already under management
+    /// Instans — a further deployment of a parent application already under management
     /// (§10.2.1). Same code and image, its own monitoring, alarms, certificates and config.
     /// </summary>
     Instance = 3,
 
-    /// <summary>Behöver undersökas — cannot be classified without a technical review.</summary>
+    /// <summary>Needs investigation — cannot be classified without a technical review.</summary>
     NeedsInvestigation = 4,
 }
 
 /// <summary>
-/// How work is paid for, chosen per portfolio in Bilaga B. It never replaces the
-/// grundavgift, which is charged under either model (§10).
+/// How work is paid for, chosen per portfolio in Annex B. It never replaces the
+/// base fee, which is charged under either model (§10).
 /// </summary>
 public enum PricingModel
 {
-    /// <summary>Modell A — a timbank of hours bought monthly at a discount (§11).</summary>
+    /// <summary>Model A — a hour bank of hours bought monthly at a discount (§11).</summary>
     HourBank = 0,
 
-    /// <summary>Modell B — löpande räkning, every hour billed in arrears (§12).</summary>
+    /// <summary>Model B — time and materials, every hour billed in arrears (§12).</summary>
     TimeAndMaterials = 1,
 }
 
@@ -107,7 +107,7 @@ public enum ContractParty
 /// <summary>
 /// The roles the agreement names. §23 requires a customer contact with a mandate plus a
 /// deputy; §14.5 requires named people at escalation levels 2 and 3 on both sides, recorded
-/// in Bilaga B and kept current by each party.
+/// in Annex B and kept current by each party.
 /// </summary>
 public enum ContractContactRole
 {
@@ -120,7 +120,7 @@ public enum ContractContactRole
     /// <summary>Applikationsansvarig — escalation level 2 on the customer side (§14.5).</summary>
     ApplicationOwner = 2,
 
-    /// <summary>Escalation level 2: the supplier's owner of the förvaltningsavtal (§14.5).</summary>
+    /// <summary>Escalation level 2: the supplier's owner of the management agreement (§14.5).</summary>
     EscalationLevel2 = 3,
 
     /// <summary>Escalation level 3: the supplier's VD, the customer's IT manager (§14.5).</summary>
@@ -131,18 +131,18 @@ public enum ContractContactRole
 }
 
 /// <summary>
-/// The kinds of amount Bilaga C carries. The price annex is replaced wholesale by a new
+/// The kinds of amount Annex C carries. The price annex is replaced wholesale by a new
 /// signed version rather than edited in place, so the entries are data rather than columns.
 /// </summary>
 public enum PriceKind
 {
-    /// <summary>Fönsteravgift per support window, C.1. Key: the <see cref="SupportWindow"/>.</summary>
+    /// <summary>Window fee per support window, C.1. Key: the <see cref="SupportWindow"/>.</summary>
     WindowFee = 0,
 
-    /// <summary>Kännedomsavgift per förvaltningsnivå, C.2. Key: the <see cref="ManagementLevel"/>.</summary>
+    /// <summary>Knowledge fee per service level, C.2. Key: the <see cref="ManagementLevel"/>.</summary>
     KnowledgeFee = 1,
 
-    /// <summary>Timbank tier, C.3. Key: the number of hours; the row also carries them numerically.</summary>
+    /// <summary>Hour bank tier, C.3. Key: the number of hours; the row also carries them numerically.</summary>
     HourBankTier = 2,
 
     /// <summary>Hourly rate per time category, C.4. Key: the <see cref="SupportTimeCategory"/>.</summary>

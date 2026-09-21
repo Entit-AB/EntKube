@@ -10,7 +10,7 @@ namespace EntKube.Web.Tests;
 
 /// <summary>
 /// The two reports the agreement needs and the billing system consumes: how much of the
-/// timbank is gone (§11), and how many hours have been committed (§12, §20).
+/// hour bank is gone (§11), and how many hours have been committed (§12, §20).
 ///
 /// <para>Invoicing happens elsewhere. What is defended here is that the numbers handed
 /// over are right and broken down the way §20 requires — per application, ticket, day and
@@ -129,7 +129,7 @@ public class TimeServiceTests : IDisposable
         await act.Should().ThrowAsync<ArgumentException>();
     }
 
-    // ---- The timbank (§11) --------------------------------------------------------------------
+    // ---- The hour bank (§11) --------------------------------------------------------------------
 
     [Fact]
     public async Task The_bank_is_drawn_down_by_the_hours_worked()
@@ -226,7 +226,7 @@ public class TimeServiceTests : IDisposable
     }
 
     /// <summary>
-    /// §11.1 keeps utvecklingsuppdrag out of the timbank. Development hours are still
+    /// §11.1 keeps development assignments out of the hour bank. Development hours are still
     /// committed and still billed — they simply do not come out of the bank.
     /// </summary>
     [Fact]
@@ -247,7 +247,7 @@ public class TimeServiceTests : IDisposable
     // ---- Committed hours and the §20 breakdown -------------------------------------------------
 
     /// <summary>
-    /// §20 requires the specification to be per application, ärende, day and time category
+    /// §20 requires the specification to be per application, ticket, day and time category
     /// so the customer can validate it. That obligation lands on this export, not on the
     /// billing system, which can only pass on what it is given.
     /// </summary>
@@ -290,7 +290,7 @@ public class TimeServiceTests : IDisposable
     }
 
     /// <summary>
-    /// §11.1 counts the bank per kalendermånad. A Swedish calendar month starts at
+    /// §11.1 counts the bank per calendar month. A Swedish calendar month starts at
     /// midnight in Stockholm, which in summer is 22:00 UTC the day before — work at 07:00
     /// on the first must land in the right month.
     /// </summary>
@@ -429,10 +429,10 @@ public class TimeServiceTests : IDisposable
         statement.TotalHours.Should().Be(8m);
     }
 
-    // ---- Utryckning ------------------------------------------------------------------------------
+    // ---- Call-out ------------------------------------------------------------------------------
 
     /// <summary>
-    /// A ticket the agreement made an utryckning bills its work at the callout rate with a
+    /// A ticket the agreement made a call-out bills its work at the callout rate with a
     /// two-hour floor, whatever the clock says (§13).
     /// </summary>
     [Fact]

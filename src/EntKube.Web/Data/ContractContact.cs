@@ -6,10 +6,10 @@ namespace EntKube.Web.Data;
 /// <para>§14.1 requires the customer's designated contact to be notified of every incident,
 /// §23 requires that contact to hold a mandate to prioritise and approve and to have a
 /// named deputy, and §14.5 requires people at escalation levels 2 and 3 on both sides,
-/// recorded in Bilaga B and kept current by each party. Until now a customer in EntKube was
+/// recorded in Annex B and kept current by each party. Until now a customer in EntKube was
 /// a name and nothing else, so none of that could be honoured from the data.</para>
 ///
-/// <para>Scoped to a customer, optionally narrowed to one application: Bilaga A.1 asks for
+/// <para>Scoped to a customer, optionally narrowed to one application: Annex A.1 asks for
 /// an "ansvarig teknisk kontakt" per application, which is often but not always the
 /// portfolio-wide one.</para>
 /// </summary>
@@ -33,7 +33,7 @@ public class ContractContact
     public string? Email { get; set; }
 
     /// <summary>
-    /// A phone number matters more than it looks: at 03:00 a jourhavande needs to reach a
+    /// A phone number matters more than it looks: at 03:00 a on-call engineer needs to reach a
     /// person, and §14.3 requires the supplier to make contact over Teams for P1 and P2.
     /// </summary>
     public string? Phone { get; set; }

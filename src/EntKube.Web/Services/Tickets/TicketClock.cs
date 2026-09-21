@@ -38,8 +38,8 @@ public readonly record struct ClockStatus(
 /// (§14.3), so the clock is measured from the later of registration and the current
 /// priority taking effect.</para>
 ///
-/// <para><b>Pauses do not stop the response clock.</b> §14.4 pauses lösningstiden by name
-/// and says nothing about responstid; §23 is broader but less specific. Since a missed
+/// <para><b>Pauses do not stop the response clock.</b> §14.4 pauses the resolution time by name
+/// and says nothing about response time; §23 is broader but less specific. Since a missed
 /// response time is the only thing that carries a penalty, the narrower reading is the one
 /// that cannot be accused of excusing our own lateness — so response runs unpaused.</para>
 ///

@@ -10,7 +10,7 @@ public class OnCallSchedule
 
     /// <summary>
     /// The support window this rotation exists to staff. §10.1.1 makes S3 and S4 a promise
-    /// of a jourrotation being there; knowing which window a schedule covers is what lets
+    /// of a on-call rotation being there; knowing which window a schedule covers is what lets
     /// the system answer "is next weekend actually staffed" before the customer finds out
     /// it was not. Null for a rotation that is not tied to a window.
     /// </summary>

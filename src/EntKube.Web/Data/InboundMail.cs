@@ -90,10 +90,10 @@ public enum MailSuggestionKind
     /// <summary>The message names a third party we are waiting on; §14.4 may allow a pause.</summary>
     SuggestPause = 4,
 
-    /// <summary>This reads like §15 new development rather than förvaltning.</summary>
+    /// <summary>This reads like §15 new development rather tha management.</summary>
     FlagDevelopment = 5,
 
-    /// <summary>The customer's timbank is spent, so §11.1's approval gate applies.</summary>
+    /// <summary>The customer's hour bank is spent, so §11.1's approval gate applies.</summary>
     FlagTimebank = 6,
 
     /// <summary>The sender was not recognised.</summary>
@@ -113,7 +113,7 @@ public enum MailSuggestionState
 ///
 /// <para><b>Everything here is a proposal.</b> §14.3 makes confirming a priority a written,
 /// reasoned act, §14.4 makes a resolution something the customer accepts, and §14.6 attaches
-/// 10% of the fönsteravgift to a mis-clocked P1. None of those are judgements to hand to a
+/// 10% of the window fee to a mis-clocked P1. None of those are judgements to hand to a
 /// keyword match or a language model. What the analyst is good at is reading the queue
 /// quickly and having the paperwork ready; the deciding stays with a person, and the
 /// decision is recorded with their name on it.</para>

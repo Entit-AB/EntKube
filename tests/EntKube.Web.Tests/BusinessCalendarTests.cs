@@ -13,8 +13,8 @@ namespace EntKube.Web.Tests;
 /// with the production helper, so a mistake in that helper cannot cancel itself out.</para>
 ///
 /// <para>Reference dates: 2026-09-22 is a Tuesday, 2026-09-25 a Friday, 2026-09-26 a
-/// Saturday, 2026-09-28 a Monday. Easter 2026 falls on 5 April, so 3 April is långfredagen
-/// and 6 April annandag påsk.</para>
+/// Saturday, 2026-09-28 a Monday. Easter 2026 falls on 5 April, so 3 April is Good Friday
+/// and 6 April Easter Monday.</para>
 /// </summary>
 public class BusinessCalendarTests
 {
@@ -57,16 +57,16 @@ public class BusinessCalendarTests
     }
 
     /// <summary>
-    /// Trettondedag jul 2026 is a Tuesday. A weekday that is a röd dag is not a helgfri
-    /// vardag, so S1 and S2 are shut and no response clock runs.
+    /// Epiphany 2026 is a Tuesday. A weekday that is a public holiday is not a working
+    /// day, so S1 and S2 are shut and no response clock runs.
     /// </summary>
     [Fact]
     public void S1_is_closed_on_a_red_day_that_falls_midweek() =>
         BusinessCalendar.IsOpen(Swedish(2026, 1, 6, 10), SupportWindow.S1).Should().BeFalse();
 
     /// <summary>
-    /// Julafton is an ordinary working day in Swedish law and a closed day under §9. If this
-    /// test fails, the agreement's own definition of röd dag has been lost somewhere.
+    /// Christmas Eve is an ordinary working day in Swedish law and a closed day under §9. If this
+    /// test fails, the agreement's own definition of public holiday has been lost somewhere.
     /// </summary>
     [Fact]
     public void S1_is_closed_on_julafton() =>
@@ -99,7 +99,7 @@ public class BusinessCalendarTests
 
     /// <summary>
     /// Maundy Thursday evening under S1. The next opening is the Tuesday after Easter:
-    /// långfredagen, the weekend and annandag påsk are all closed.
+    /// Good Friday, the weekend and Easter Monday are all closed.
     /// </summary>
     [Fact]
     public void The_next_opening_steps_over_the_whole_Easter_weekend() =>
@@ -217,11 +217,11 @@ public class BusinessCalendarTests
         act.Should().Throw<ArgumentOutOfRangeException>();
     }
 
-    // ---- §14.4 / §14.6 / §23: targets counted in arbetsdagar ---------------------------
+    // ---- §14.4 / §14.6 / §23: targets counted in working days ---------------------------
 
     /// <summary>
     /// The five working days §14.6 allows for a P1 incident report, starting the Wednesday
-    /// before Christmas. Julafton, juldagen, annandag jul, nyårsafton and nyårsdagen all fall
+    /// before Christmas. Christmas Eve, Christmas Day, Boxing Day, New Year's Eve and New Year's Day all fall
     /// out, so the report is due when the working day ends on 5 January.
     /// </summary>
     [Fact]
@@ -237,7 +237,7 @@ public class BusinessCalendarTests
     /// <summary>
     /// A Swedish working day ends at 17:00, not at midnight — a deliverable is due while
     /// there is still someone there to deliver it. 17:00 is also when S1 closes, so a target
-    /// counted in arbetsdagar and one counted in window hours agree about when the day is over.
+    /// counted in working days and one counted in window hours agree about when the day is over.
     /// </summary>
     [Fact]
     public void A_working_day_target_expires_at_seventeen_hundred()
@@ -312,7 +312,7 @@ public class BusinessCalendarTests
         BusinessCalendar.CategoryAt(Saturday(10), SupportWindow.S1, isP1Callout: false)
             .Should().Be(SupportTimeCategory.WeekendOrRedDay);
 
-    // ---- Bilaga C: surcharges and timbank factors ---------------------------------------
+    // ---- Annex C: surcharges and hour bank factors ---------------------------------------
 
     [Theory]
     [InlineData(SupportTimeCategory.Ordinary, 0, 1.0)]
@@ -327,7 +327,7 @@ public class BusinessCalendarTests
         category.BankFactor().Should().Be((decimal)factor);
     }
 
-    /// <summary>§13 bills an utryckning at a minimum of two hours per occasion.</summary>
+    /// <summary>§13 bills a call-out at a minimum of two hours per occasion.</summary>
     [Fact]
     public void An_utryckning_bills_at_least_two_hours()
     {

@@ -121,7 +121,7 @@ public class TicketServiceTests : IDisposable
     }
 
     /// <summary>
-    /// §13: a P1 worked outside the bought window is an utryckning — the callout rate, with
+    /// §13: a P1 worked outside the bought window is a call-out — the callout rate, with
     /// a two-hour minimum. The same ticket on an application that bought S4 is not.
     /// </summary>
     [Fact]
@@ -173,7 +173,7 @@ public class TicketServiceTests : IDisposable
     }
 
     /// <summary>
-    /// An application with no Bilaga A still has to be able to raise a ticket — but the
+    /// An application with no Annex A still has to be able to raise a ticket — but the
     /// assumption has to be visible. S1 is the narrowest window, so it is also the
     /// assumption least favourable to us.
     /// </summary>

@@ -49,16 +49,16 @@ public readonly record struct PriorityRow(
 /// <param name="Availability">Uptime per application.</param>
 /// <param name="ByPriority">Tickets and SLA compliance per priority band.</param>
 /// <param name="OpenAtMonthEnd">Tickets still open when the month ended.</param>
-/// <param name="Timebank">The timbank as it stood (§11.1 — including what expired).</param>
+/// <param name="Timebank">The hour bank as it stood (§11.1 — including what expired).</param>
 /// <param name="Hours">Committed hours at the §20 granularity.</param>
 /// <param name="PenaltyDeviations">Response breaches on P1 or P2 that carry §14.6's penalty.</param>
-/// <param name="PenaltyAmount">What those come to, at 10% of the month's fönsteravgift each.</param>
-/// <param name="WindowFee">The fönsteravgift the penalty is a fraction of.</param>
+/// <param name="PenaltyAmount">What those come to, at 10% of the month's window fee each.</param>
+/// <param name="WindowFee">The window fee the penalty is a fraction of.</param>
 /// <param name="PenaltiesAlreadyThisYear">
 /// Penalty deviations earlier in the same calendar year, against §14.6's cap of three.
 /// </param>
 /// <param name="ActionPlanRequired">
-/// Whether §14.6's åtgärdsplan is owed — more than two P1/P2 deviations in the quarter.
+/// Whether §14.6's action plan is owed — more than two P1/P2 deviations in the quarter.
 /// </param>
 public readonly record struct MonthlyReport(
     string CustomerName,
@@ -92,7 +92,7 @@ public readonly record struct MonthlyReport(
 ///
 /// <para>Every figure here already exists somewhere — uptime in the health snapshots,
 /// tickets and their clocks in the ticket store, hours in the time entries, the
-/// fönsteravgift in Bilaga C. What this does is put them in the shape the agreement asks
+/// window fee in Annex C. What this does is put them in the shape the agreement asks
 /// for, on the date it asks for, so producing the report is not a monthly exercise in
 /// remembering where everything lives.</para>
 ///
@@ -162,7 +162,7 @@ public class MonthlyReportService(
 
         int penaltyDeviations = inMonth.Count(t => t.IsPenaltyDeviation);
 
-        // §14.6 prices the penalty at 10% of the month's fönsteravgift, which comes from the
+        // §14.6 prices the penalty at 10% of the month's window fee, which comes from the
         // portfolio's widest window and the price list in force then.
         BaseFeeBreakdown fees = await contracts.CalculateBaseFeeAsync(customerId, from, ct);
 
@@ -259,7 +259,7 @@ public class MonthlyReportService(
     }
 
     /// <summary>
-    /// Whether §14.6's åtgärdsplan is owed: more than two P1–P2 deviations in the calendar
+    /// Whether §14.6's action plan is owed: more than two P1–P2 deviations in the calendar
     /// quarter the month falls in, presented at the next quarterly meeting.
     /// </summary>
     private async Task<bool> ActionPlanRequiredAsync(

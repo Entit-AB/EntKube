@@ -6,7 +6,7 @@ using Microsoft.EntityFrameworkCore;
 namespace EntKube.Web.Services.Tickets;
 
 /// <summary>
-/// Opens tickets for alerts that fire against an application under förvaltning.
+/// Opens tickets for alerts that fire against an application under management.
 ///
 /// <para><b>Why this is a bridge and not a conversion.</b> §14.3 says an issue our own
 /// monitoring finds is registered by us, with the time of the alarm as the reporting time —
@@ -20,7 +20,7 @@ namespace EntKube.Web.Services.Tickets;
 /// about patient safety or whether a workaround exists.</para>
 ///
 /// <para><b>Only applications under management.</b> A platform alert with no application
-/// behind it, or one against an application with no Bilaga A, stays an incident. Opening
+/// behind it, or one against an application with no Annex A, stays an incident. Opening
 /// tickets nobody agreed to support would fill the queue with work that has no SLA, no
 /// price and no customer.</para>
 /// </summary>
@@ -88,7 +88,7 @@ public class AlertTicketBridge(
                     continue;
                 }
 
-                // No Bilaga A means no SLA, no price and nothing agreed to respond to.
+                // No Annex A means no SLA, no price and nothing agreed to respond to.
                 ResolvedServiceLevel? level =
                     await contracts.ResolveServiceLevelAsync(match.AppId, incident.StartsAt, ct);
 

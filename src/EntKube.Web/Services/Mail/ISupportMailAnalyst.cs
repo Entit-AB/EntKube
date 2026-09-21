@@ -21,7 +21,7 @@ public readonly record struct MailContext(
 /// <para><b>An interface, and on purpose.</b> The default implementation matches keywords
 /// and reference numbers, which is unglamorous and entirely predictable. A language model
 /// would read these messages far better — but routing a customer's support mail through a
-/// third party is a personuppgiftsbiträde question before it is a technical one: §17
+/// third party is a data processor question before it is a technical one: §17
 /// requires a DPA before personal data is processed, §18 requires the customer to approve
 /// a new processor, and these messages will contain patient data. That is a decision for
 /// the people who sign the agreement, not one to make by adding a dependency.</para>

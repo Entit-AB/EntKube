@@ -4,10 +4,10 @@ using FluentAssertions;
 namespace EntKube.Web.Tests;
 
 /// <summary>
-/// The Swedish calendar the förvaltningsavtal is written against.
+/// The Swedish calendar the management agreement is written against.
 ///
-/// <para>Every commercial clause in the agreement counts in either röda dagar or
-/// arbetsdagar, so an error here propagates straight into SLA compliance and into what an
+/// <para>Every commercial clause in the agreement counts in either public holidays or
+/// working days, so an error here propagates straight into SLA compliance and into what an
 /// hour is billed at. The cases below are named after what they defend rather than after
 /// the method they call.</para>
 /// </summary>
@@ -26,11 +26,11 @@ public class SwedishHolidaysTests
     {
         IReadOnlySet<DateOnly> holidays = SwedishHolidays.PublicHolidays(2026);
 
-        holidays.Should().Contain(new DateOnly(2026, 4, 3));   // Långfredagen
-        holidays.Should().Contain(new DateOnly(2026, 4, 5));   // Påskdagen
-        holidays.Should().Contain(new DateOnly(2026, 4, 6));   // Annandag påsk
-        holidays.Should().Contain(new DateOnly(2026, 5, 14));  // Kristi himmelsfärdsdag
-        holidays.Should().Contain(new DateOnly(2026, 5, 24));  // Pingstdagen
+        holidays.Should().Contain(new DateOnly(2026, 4, 3));   // Good Friday
+        holidays.Should().Contain(new DateOnly(2026, 4, 5));   // Easter Sunday
+        holidays.Should().Contain(new DateOnly(2026, 4, 6));   // Easter Monday
+        holidays.Should().Contain(new DateOnly(2026, 5, 14));  // Ascension Day
+        holidays.Should().Contain(new DateOnly(2026, 5, 24));  // Whit Sunday
     }
 
     [Theory]
@@ -69,9 +69,9 @@ public class SwedishHolidaysTests
     /// country, and another customer could be sold a different set.
     /// </summary>
     [Theory]
-    [InlineData(2026, 6, 19)]   // Midsommarafton, a Friday
-    [InlineData(2026, 12, 24)]  // Julafton, a Thursday
-    [InlineData(2026, 12, 31)]  // Nyårsafton, a Thursday
+    [InlineData(2026, 6, 19)]   // Midsummer Eve, a Friday
+    [InlineData(2026, 12, 24)]  // Christmas Eve, a Thursday
+    [InlineData(2026, 12, 31)]  // New Year's Eve, a Thursday
     public void The_three_contract_eves_are_red_days_but_not_public_holidays(int year, int month, int day)
     {
         DateOnly date = new(year, month, day);
@@ -88,13 +88,13 @@ public class SwedishHolidaysTests
     [Theory]
     [InlineData(2026, 9, 26)]   // Saturday
     [InlineData(2026, 9, 27)]   // Sunday
-    [InlineData(2026, 1, 6)]    // Trettondedag jul, a Tuesday
-    [InlineData(2026, 12, 25)]  // Juldagen, a Friday
+    [InlineData(2026, 1, 6)]    // Epiphany, a Tuesday
+    [InlineData(2026, 12, 25)]  // Christmas Day, a Friday
     public void Weekends_and_red_days_are_not_working_days(int year, int month, int day) =>
         SwedishHolidays.IsWorkingDay(new DateOnly(year, month, day)).Should().BeFalse();
 
     /// <summary>
-    /// A weekend day that is not also a holiday is not a röd dag — it is a weekend. The
+    /// A weekend day that is not also a holiday is not a public holiday — it is a weekend. The
     /// support windows and §13 time categories distinguish the two, so this test pins the
     /// boundary rather than letting "closed" blur into "red".
     /// </summary>
@@ -103,8 +103,8 @@ public class SwedishHolidaysTests
         SwedishHolidays.IsRedDay(new DateOnly(2026, 9, 26)).Should().BeFalse();
 
     /// <summary>
-    /// The worst stretch in the Swedish year: Wednesday 23 December, then julafton, juldagen,
-    /// annandag jul and a weekend. One working day later is the following Monday.
+    /// The worst stretch in the Swedish year: Wednesday 23 December, then Christmas Eve, Christmas Day,
+    /// Boxing Day and a weekend. One working day later is the following Monday.
     /// </summary>
     [Fact]
     public void Working_days_step_over_the_Christmas_stretch() =>
@@ -112,8 +112,8 @@ public class SwedishHolidaysTests
             .Should().Be(new DateOnly(2026, 12, 28));
 
     /// <summary>
-    /// Five working days from 23 December reaches 5 January: nyårsafton and nyårsdagen are
-    /// both red, and the weekend between them does not count either.
+    /// Five working days from 23 December reaches 5 January: New Year's Eve and New Year's Day are
+    /// both closed, and the weekend between them does not count either.
     /// </summary>
     [Fact]
     public void Five_working_days_from_before_Christmas_lands_in_January() =>

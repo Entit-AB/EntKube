@@ -7,12 +7,12 @@ using Microsoft.EntityFrameworkCore;
 namespace EntKube.Web.Tests;
 
 /// <summary>
-/// Bilaga A, B and C as data: what was agreed for an application, what the portfolio chose,
-/// and what the grundavgift of §10 comes to.
+/// Annex A, B and C as data: what was agreed for an application, what the portfolio chose,
+/// and what the base fee of §10 comes to.
 ///
 /// <para>The properties these defend, in order of how expensive they are to get wrong: the
 /// terms in force on a past date do not change when someone edits them today; the
-/// fönsteravgift is charged once for the portfolio and priced on the most extensive window
+/// window fee is charged once for the portfolio and priced on the most extensive window
 /// anyone bought; and an application nobody classified is reported as unpriced rather than
 /// charged at zero.</para>
 /// </summary>
@@ -140,7 +140,7 @@ public class ContractModelTests : IDisposable
     // ---- §10.2.1: instances ------------------------------------------------------------
 
     /// <summary>
-    /// An instance with no window of its own takes its moderapplikation's, which is what
+    /// An instance with no window of its own takes its parent application's, which is what
     /// §10.2.1 makes the default.
     /// </summary>
     [Fact]
@@ -175,8 +175,8 @@ public class ContractModelTests : IDisposable
     }
 
     /// <summary>
-    /// §10.2.1 drops the kännedomsavgift from the twenty-first instance of one
-    /// moderapplikation. The ordinal is by on-boarding date, so it does not move month to
+    /// §10.2.1 drops the knowledge fee from the twenty-first instance of one
+    /// parent application. The ordinal is by on-boarding date, so it does not move month to
     /// month.
     /// </summary>
     [Fact]
@@ -203,10 +203,10 @@ public class ContractModelTests : IDisposable
         fee.KnowledgeFees.Should().Be(9_000m + (20 * 500m) + (2 * 350m));
     }
 
-    // ---- §10.1: the fönsteravgift ------------------------------------------------------
+    // ---- §10.1: the window fee ------------------------------------------------------
 
     /// <summary>
-    /// One fönsteravgift for the whole portfolio, priced on the most extensive window any
+    /// One window fee for the whole portfolio, priced on the most extensive window any
     /// application bought — not one per application, and not the commonest window.
     /// </summary>
     [Fact]
@@ -228,7 +228,7 @@ public class ContractModelTests : IDisposable
     public void The_most_extensive_window_of_nothing_is_nothing() =>
         ContractPricing.MostExtensiveWindow([]).Should().BeNull();
 
-    // ---- §19: applications entering and leaving förvaltning ----------------------------
+    // ---- §19: applications entering and leaving management ----------------------------
 
     [Fact]
     public async Task An_application_not_yet_onboarded_is_not_charged()
@@ -261,7 +261,7 @@ public class ContractModelTests : IDisposable
     // ---- Gaps are reported, never discounted -------------------------------------------
 
     /// <summary>
-    /// §10.2 quotes Behöver undersökas after a technical review, so the standard list has no
+    /// §10.2 quotes Needs investigation after a technical review, so the standard list has no
     /// amount for it. An application sitting at that level has to surface as a gap: charging
     /// it at zero would hide an unbilled application indefinitely.
     /// </summary>
@@ -287,7 +287,7 @@ public class ContractModelTests : IDisposable
         fee.Unpriced.Should().ContainSingle().Which.Should().Contain("support window");
     }
 
-    // ---- Bilaga B and C ----------------------------------------------------------------
+    // ---- Annex B and C ----------------------------------------------------------------
 
     [Fact]
     public async Task The_portfolio_agreement_in_force_is_the_latest_one_that_has_started()
@@ -371,13 +371,13 @@ public class ContractModelTests : IDisposable
             .Should().Be(34_500m);
         ContractService.Lookup(list, PriceKind.OneOffFee, StandardPriceList.NewInstanceKey).Should().Be(2_500m);
 
-        // Behöver undersökas is quoted after review (§10.2), so it deliberately has no amount.
+        // Needs investigation is quoted after review (§10.2), so it deliberately has no amount.
         ContractService.Lookup(list, PriceKind.KnowledgeFee, nameof(ManagementLevel.NeedsInvestigation))
             .Should().BeNull();
     }
 
     /// <summary>
-    /// The timbank tiers carry their hours numerically as well as in the key, so a tier can
+    /// The hour bank tiers carry their hours numerically as well as in the key, so a tier can
     /// be compared and totalled without parsing strings.
     /// </summary>
     [Fact]
@@ -514,7 +514,7 @@ public class ContractModelTests : IDisposable
 
     /// <summary>
     /// Every amount moves together. §13 says that when the ordinary rate is adjusted, every
-    /// time category and every timbank price moves with it from the same date — so an
+    /// time category and every hour bank price moves with it from the same date — so an
     /// indexation that touched only some rows would break the relationship between them.
     /// </summary>
     [Fact]

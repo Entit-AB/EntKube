@@ -65,8 +65,8 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
     ];
 
     /// <summary>
-    /// Wording that suggests §15 new development rather than förvaltning — which is billed
-    /// differently, does not draw on the timbank, and wants a kravgenomgång first.
+    /// Wording that suggests §15 new development rather tha management — which is billed
+    /// differently, does not draw on the hour bank, and wants a requirements review first.
     /// </summary>
     private static readonly string[] DevelopmentMarkers =
     [
@@ -153,10 +153,10 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
         {
             suggestions.Add(Suggestion(
                 message.Id, MailSuggestionKind.FlagDevelopment,
-                "This reads like new development, not förvaltning",
-                "§15.1 puts new functionality outside förvaltning: it is quoted separately, billed "
-                + "at the development rate, and does not draw on the timbank. §15.2 wants a "
-                + "kravgenomgång and a written go-ahead before it starts."));
+                "This reads like new development, not management",
+                "§15.1 puts new functionality outside management: it is quoted separately, billed "
+                + "at the development rate, and does not draw on the hour bank. §15.2 wants a "
+                + "requirements review and a written go-ahead before it starts."));
         }
 
         if (ThirdPartyMarkers.Any(text.Contains))
@@ -174,7 +174,7 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
         {
             suggestions.Add(Suggestion(
                 message.Id, MailSuggestionKind.FlagTimebank,
-                "The timbank for this month is spent",
+                "The hour bank for this month is spent",
                 "§11.1 wants the customer's go-ahead before work beyond the bank — except for P1 "
                 + "and P2, which proceed without delay and are billed without separate approval."));
         }

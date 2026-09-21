@@ -5,10 +5,10 @@ namespace EntKube.Web.Services.Tickets;
 
 /// <summary>
 /// A §14.4 target, which is expressed in one of two units depending on the priority: hours
-/// of open support window for P1 and P2, arbetsdagar for P3 and P4.
+/// of open support window for P1 and P2, working days for P3 and P4.
 /// </summary>
 /// <param name="WindowTime">Hours counted inside the support window, or null.</param>
-/// <param name="WorkingDays">Whole arbetsdagar, or null.</param>
+/// <param name="WorkingDays">Whole working days, or null.</param>
 public readonly record struct SlaBudget(TimeSpan? WindowTime, int? WorkingDays)
 {
     public bool Exists => WindowTime is not null || WorkingDays is not null;
@@ -29,7 +29,7 @@ public readonly record struct SlaBudget(TimeSpan? WindowTime, int? WorkingDays)
 /// </summary>
 public static class TicketSla
 {
-    /// <summary>Responstid: registration to confirmed, first assessment made, work begun.</summary>
+    /// <summary>Response time: registration to confirmed, first assessment made, work begun.</summary>
     public static SlaBudget Response(TicketPriority priority) => priority switch
     {
         TicketPriority.P1 => SlaBudget.Hours(2),
@@ -40,7 +40,7 @@ public static class TicketSla
     };
 
     /// <summary>
-    /// Lösningstid, which §14.4 calls a goal rather than a guarantee — overrunning it does
+    /// Resolution time, which §14.4 calls a goal rather than a guarantee — overrunning it does
     /// not trigger §14.6's penalty, only an explanation. P4 has none: "nästa release eller
     /// enligt överenskommelse" is not a deadline anything can be measured against.
     /// </summary>
@@ -77,7 +77,7 @@ public static class TicketSla
 
     /// <summary>
     /// Only a missed <em>response</em> time on a P1 or P2 carries §14.6's penalty of 10% of
-    /// the fönsteravgift. An overrun resolution time is a missed goal, not a breach.
+    /// the window fee. An overrun resolution time is a missed goal, not a breach.
     /// </summary>
     public static bool ResponseBreachCarriesPenalty(TicketPriority priority) =>
         priority is TicketPriority.P1 or TicketPriority.P2;
@@ -87,11 +87,11 @@ public static class TicketSla
     /// </summary>
     public const int MaxPenaltiesPerYear = 3;
 
-    /// <summary>The penalty, as a fraction of the month's fönsteravgift (§14.6).</summary>
+    /// <summary>The penalty, as a fraction of the month's window fee (§14.6).</summary>
     public const decimal PenaltyFractionOfWindowFee = 0.10m;
 
     /// <summary>
-    /// More than this many P1–P2 deviations in a quarter obliges us to produce an åtgärdsplan
+    /// More than this many P1–P2 deviations in a quarter obliges us to produce an action plan
     /// for the next quarterly meeting (§14.6).
     /// </summary>
     public const int DeviationsBeforeActionPlan = 2;

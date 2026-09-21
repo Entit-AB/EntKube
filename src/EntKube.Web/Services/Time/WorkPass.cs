@@ -4,7 +4,7 @@ using EntKube.Web.Services.Support;
 namespace EntKube.Web.Services.Time;
 
 /// <summary>Part of a work pass that fell in one §13 time category.</summary>
-/// <param name="Category">Which category, and so which rate and which timbank factor.</param>
+/// <param name="Category">Which category, and so which rate and which hour bank factor.</param>
 /// <param name="WorkedHours">Time actually spent in this category.</param>
 /// <param name="BilledHours">
 /// Hours billed here after the pass was rounded up to a started hour. Sums, across a pass's
@@ -15,12 +15,12 @@ public readonly record struct WorkPassPart(
     decimal WorkedHours,
     decimal BilledHours)
 {
-    /// <summary>Hours drawn from a Modell A timbank: the billed hours times the §13 factor.</summary>
+    /// <summary>Hours drawn from a Model A hour bank: the billed hours times the §13 factor.</summary>
     public decimal BankHours => BilledHours * Category.BankFactor();
 }
 
 /// <summary>
-/// One arbetspass: contiguous work on one ärende, billed as a unit.
+/// One work pass: contiguous work on one ticket, billed as a unit.
 /// </summary>
 /// <param name="TicketId">The ticket the pass belongs to, when it belongs to one.</param>
 /// <param name="AppId">The application worked on.</param>
@@ -30,7 +30,7 @@ public readonly record struct WorkPassPart(
 /// <param name="Parts">The pass split by time category.</param>
 /// <param name="FreeHours">
 /// Hours not billed because §10.3 includes the first thirty minutes of assessing an
-/// incident in the grundavgift.
+/// incident in the base fee.
 /// </param>
 public readonly record struct WorkPass(
     Guid? TicketId,
@@ -45,18 +45,18 @@ public readonly record struct WorkPass(
 
     public decimal BilledHours => Parts.Sum(p => p.BilledHours);
 
-    /// <summary>Hours this pass takes out of a Modell A timbank.</summary>
+    /// <summary>Hours this pass takes out of a Model A hour bank.</summary>
     public decimal BankHours => Parts.Sum(p => p.BankHours);
 }
 
 /// <summary>
 /// The §13 billing arithmetic: what a set of worked minutes actually costs.
 ///
-/// <para><b>Three rules, and they interact.</b> Work is billed per påbörjad timme, but
-/// contiguous work on one ärende is a single arbetspass and short bursts inside it are not
+/// <para><b>Three rules, and they interact.</b> Work is billed per started hour, but
+/// contiguous work on one ticket is a single work pass and short bursts inside it are not
 /// rounded separately — so three ten-minute touches on one ticket in an afternoon are one
 /// hour, not three. The rate follows when the work happened, so a pass that crosses 17:00
-/// is part ordinary and part kväll. And an utryckning bills at least two hours however
+/// is part ordinary and part evening rate. And a call-out bills at least two hours however
 /// short it was.</para>
 ///
 /// <para><b>Where the rounding lands.</b> When a pass is rounded up, the extra minutes are
@@ -77,7 +77,7 @@ public static class WorkPassCalculator
     public static readonly TimeSpan MaxGapWithinPass = TimeSpan.FromHours(1);
 
     /// <summary>
-    /// The assessment §10.3 includes in the grundavgift: "Första bedömning av inkommen
+    /// The assessment §10.3 includes in the base fee: "Första bedömning av inkommen
     /// incident, upp till 30 minuter per incident."
     /// </summary>
     public static readonly TimeSpan FreeIncidentAssessment = TimeSpan.FromMinutes(30);
@@ -87,7 +87,7 @@ public static class WorkPassCalculator
     /// </summary>
     /// <param name="entries">The worked stretches, in any order.</param>
     /// <param name="calloutTickets">
-    /// Tickets whose work is an utryckning under §13 — a P1 outside the bought window. Their
+    /// Tickets whose work is a call-out under §13 — a P1 outside the bought window. Their
     /// passes bill at the callout category with a two-hour minimum.
     /// </param>
     public static IReadOnlyList<WorkPass> BuildPasses(
@@ -118,7 +118,7 @@ public static class WorkPassCalculator
     /// <summary>
     /// Groups entries into passes: same ticket, same kind, and no gap longer than
     /// <see cref="MaxGapWithinPass"/>. Entries with no ticket group by application instead,
-    /// which is the closest thing to an ärende they have.
+    /// which is the closest thing to a ticket they have.
     /// </summary>
     private static IEnumerable<List<TimeEntry>> GroupIntoPasses(List<TimeEntry> ordered)
     {
@@ -165,7 +165,7 @@ public static class WorkPassCalculator
             TimeSpan billableSpan = entry.EndedAt - entry.StartedAt;
             DateTime from = entry.StartedAt;
 
-            // §10.3: the first half hour of assessing an incident is in the grundavgift.
+            // §10.3: the first half hour of assessing an incident is in the base fee.
             if (entry.Kind == WorkKind.IncidentAssessment && entry.TicketId is Guid ticketId)
             {
                 if (!assessmentRemaining.TryGetValue(ticketId, out TimeSpan left))
@@ -211,8 +211,8 @@ public static class WorkPassCalculator
 
         decimal totalWorked = Hours(totalTicks);
 
-        // Per påbörjad timme, with the §13 floor for the category — two hours for an
-        // utryckning, one for everything else.
+        // Per started hour, with the §13 floor for the category — two hours for an
+        // call-out, one for everything else.
         decimal minimum = order.Max(c => c.MinimumBillableHours());
         decimal billedTotal = Math.Max(Math.Ceiling(totalWorked), minimum);
 
@@ -243,8 +243,8 @@ public static class WorkPassCalculator
         Math.Round((decimal)ticks / TimeSpan.TicksPerHour, 6, MidpointRounding.AwayFromZero);
 
     /// <summary>
-    /// Whether this kind of work draws on a Modell A timbank. §11.1 keeps on-boarding and
-    /// utvecklingsuppdrag out of it; they are billed separately.
+    /// Whether this kind of work draws on a Model A hour bank. §11.1 keeps on-boarding and
+    /// development assignments out of it; they are billed separately.
     /// </summary>
     public static bool DrawsOnTimebank(WorkKind kind) =>
         kind is WorkKind.Management or WorkKind.IncidentAssessment;
