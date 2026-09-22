@@ -90,7 +90,7 @@ public enum MailSuggestionKind
     /// <summary>The message names a third party we are waiting on; §14.4 may allow a pause.</summary>
     SuggestPause = 4,
 
-    /// <summary>This reads like §15 new development rather tha management.</summary>
+    /// <summary>This reads like §15 new development rather than management.</summary>
     FlagDevelopment = 5,
 
     /// <summary>The customer's hour bank is spent, so §11.1's approval gate applies.</summary>

@@ -551,6 +551,7 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.Knowledge.KnowledgeService>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.ISupportMailAnalyst,
             EntKube.Web.Services.Mail.RuleBasedMailAnalyst>();
+        builder.Services.AddScoped<EntKube.Web.Services.Mail.MailTriageRuleService>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailService>();
         builder.Services.AddScoped<EntKube.Web.Services.Reporting.MonthlyReportService>();
         builder.Services.AddSingleton<EntKube.Web.Services.Cost.CostScanCache>();

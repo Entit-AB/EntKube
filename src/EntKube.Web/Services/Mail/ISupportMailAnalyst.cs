@@ -8,12 +8,14 @@ namespace EntKube.Web.Services.Mail;
 /// <param name="Apps">That customer's applications, for matching a name in the text.</param>
 /// <param name="OpenTickets">Their open tickets, for threading a reply onto one.</param>
 /// <param name="TimebankExhausted">Whether §11.1's approval gate is already in force.</param>
+/// <param name="Rules">The phrases this tenant watches for, configured or built-in.</param>
 public readonly record struct MailContext(
     InboundMailMessage Message,
     Customer? Customer,
     IReadOnlyList<App> Apps,
     IReadOnlyList<Ticket> OpenTickets,
-    bool TimebankExhausted);
+    bool TimebankExhausted,
+    MailTriageRuleSet Rules);
 
 /// <summary>
 /// Reads an inbound support message and proposes what to do with it.

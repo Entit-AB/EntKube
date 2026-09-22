@@ -1,0 +1,352 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Mail
+@inject MailTriageRuleService Rules
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   The phrases the support mailbox watches for. Written in whatever
+   language the customers write in; what they mean is written for the
+   operator who has to confirm a priority under §14.3.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<ConfirmDialog Visible="@(pendingDeleteId is not null)"
+               Message="Delete this phrase? The mailbox stops recognising it."
+               ConfirmText="Delete"
+               OnConfirm="DeleteAsync"
+               OnCancel="() => pendingDeleteId = null" />
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h6 class="mb-0">Mail triage phrases</h6>
+            <div class="text-muted small">
+                What the support mailbox looks for, and what each phrase is taken as evidence of.
+                Nothing here decides anything — it proposes, and a person confirms.
+            </div>
+        </div>
+        @if (configured)
+        {
+            <button class="btn btn-sm btn-primary" @onclick="StartNew">
+                <i class="bi bi-plus-lg me-1"></i>Add a phrase
+            </button>
+        }
+    </div>
+
+    @if (!configured)
+    {
+        <div class="alert alert-light border">
+            <div class="d-flex justify-content-between align-items-start">
+                <div class="small">
+                    <strong>Using the built-in phrases.</strong>
+                    The mailbox works out of the box on a starting set — Swedish and English, since
+                    the agreement is Swedish and the mail will not be consistent about it. They are
+                    examples, not a specification: whoever reads the mail every day knows better
+                    than the list does.
+                    <div class="mt-1">
+                        Copy them in to start editing. After that this tenant owns them, and a
+                        phrase you delete stays deleted.
+                    </div>
+                </div>
+                <AsyncButton CssClass="btn-sm btn-primary ms-3 text-nowrap" OnClick="AdoptAsync">
+                    Copy them in
+                </AsyncButton>
+            </div>
+        </div>
+    }
+
+    @* ───────────── Try it ───────────── *@
+    <div class="card mb-4">
+        <div class="card-header bg-white py-2"><strong class="small">Try a message</strong></div>
+        <div class="card-body">
+            <div class="row g-2 align-items-end">
+                <div class="col-md-9">
+                    <input class="form-control form-control-sm" @bind="sample" @bind:event="oninput"
+                           placeholder="Paste a subject or a sentence from a real message" />
+                </div>
+                <div class="col-md-3 text-end">
+                    <AsyncButton CssClass="btn-sm btn-outline-primary" OnClick="PreviewAsync">
+                        What would this be?
+                    </AsyncButton>
+                </div>
+            </div>
+
+            @if (previewed)
+            {
+                <div class="mt-3 small">
+                    <span class="badge @PriorityClass(preview.Priority) me-2">@preview.Priority</span>
+                    @if (preview.Criterion is not null)
+                    {
+                        <span class="text-muted">§14.2 — matched: @preview.Criterion</span>
+                    }
+                    else
+                    {
+                        <span class="text-muted">
+                            Nothing matched a higher band, so P3 by default rather than by assessment.
+                        </span>
+                    }
+                    @if (preview.Development)
+                    {
+                        <span class="badge bg-warning text-dark ms-2">looks like §15 development</span>
+                    }
+                    @if (preview.ThirdParty)
+                    {
+                        <span class="badge bg-light text-dark border ms-2">names a third party</span>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+
+    @if (editing is not null)
+    {
+        <div class="card border-primary mb-3">
+            <div class="card-body">
+                <div class="row g-2 align-items-end">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Signal</label>
+                        <select class="form-select form-select-sm" @bind="editing.Signal">
+                            <option value="@MailSignal.Priority">Priority (§14.2)</option>
+                            <option value="@MailSignal.Development">New development (§15)</option>
+                            <option value="@MailSignal.ThirdParty">Third party (§14.4)</option>
+                        </select>
+                    </div>
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Phrase</label>
+                        <input class="form-control form-control-sm" @bind="editing.Phrase"
+                               placeholder="e.g. ingen kan logga in" />
+                    </div>
+                    @if (editing.Signal == MailSignal.Priority)
+                    {
+                        <div class="col-md-2">
+                            <label class="form-label small text-muted">Proposes</label>
+                            <select class="form-select form-select-sm" @bind="editing.Priority">
+                                @foreach (TicketPriority p in Enum.GetValues<TicketPriority>())
+                                {
+                                    <option value="@p">@p</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Evidence of — shown to the operator</label>
+                            <input class="form-control form-control-sm" @bind="editing.Criterion"
+                                   placeholder="e.g. login impossible for all users" />
+                        </div>
+                    }
+                </div>
+                <div class="text-end mt-3">
+                    <button class="btn btn-sm btn-outline-secondary me-2" @onclick="() => editing = null">
+                        Cancel
+                    </button>
+                    <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveAsync">Save</AsyncButton>
+                </div>
+            </div>
+        </div>
+    }
+
+    @foreach (MailSignal signal in Enum.GetValues<MailSignal>())
+    {
+        List<MailTriageRule> group = [.. Effective.Where(r => r.Signal == signal)];
+
+        <h6 class="small text-muted mt-3 mb-2">@SignalName(signal) — @group.Count</h6>
+
+        @if (group.Count == 0)
+        {
+            <div class="text-muted small mb-2">Nothing watched for.</div>
+        }
+        else
+        {
+            <div class="table-responsive mb-2">
+                <table class="table table-sm align-middle mb-0">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Phrase</th>
+                            @if (signal == MailSignal.Priority)
+                            {
+                                <th>Proposes</th>
+                                <th>Evidence of</th>
+                            }
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (MailTriageRule rule in group)
+                        {
+                            <tr class="@(rule.IsEnabled ? "" : "opacity-50")">
+                                <td class="small font-monospace">@rule.Phrase</td>
+                                @if (signal == MailSignal.Priority)
+                                {
+                                    <td>
+                                        <span class="badge @PriorityClass(rule.Priority ?? TicketPriority.P3)">
+                                            @rule.Priority
+                                        </span>
+                                    </td>
+                                    <td class="small text-muted">@rule.Criterion</td>
+                                }
+                                <td class="text-end">
+                                    @if (configured)
+                                    {
+                                        <button class="btn btn-sm btn-outline-secondary me-1"
+                                                @onclick="() => StartEdit(rule)">Edit</button>
+                                        <button class="btn btn-sm btn-outline-secondary me-1"
+                                                @onclick="() => ToggleAsync(rule)">
+                                            @(rule.IsEnabled ? "Disable" : "Enable")
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-danger"
+                                                aria-label="@($"Delete the phrase {rule.Phrase}")"
+                                                @onclick="() => pendingDeleteId = rule.Id">
+                                            <span class="bi bi-trash"></span>
+                                        </button>
+                                    }
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private bool configured;
+
+    private List<MailTriageRule> own = [];
+    private MailTriageRule? editing;
+    private Guid? pendingDeleteId;
+
+    private string sample = "";
+    private bool previewed;
+    private (TicketPriority Priority, string? Criterion, bool Development, bool ThirdParty) preview;
+
+    /// <summary>
+    /// What is actually in force — this tenant's rules once it has taken them over, and
+    /// the built-in list until then, so the table always shows what the mailbox will do.
+    /// </summary>
+    private IReadOnlyList<MailTriageRule> Effective =>
+        configured ? own : MailTriageRuleSet.BuiltIn.Rules;
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            configured = await Rules.IsConfiguredAsync(TenantId);
+            own = configured ? await Rules.ListAsync(TenantId) : [];
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task AdoptAsync()
+    {
+        int copied = await Rules.AdoptBuiltInAsync(TenantId);
+        Toasts.Success($"{copied} phrases copied in. They are yours to edit now.");
+        await LoadAsync();
+    }
+
+    private void StartNew() =>
+        editing = new MailTriageRule
+        {
+            TenantId = TenantId,
+            Signal = MailSignal.Priority,
+            Phrase = "",
+            Priority = TicketPriority.P2,
+            SortOrder = own.Count,
+        };
+
+    private void StartEdit(MailTriageRule rule) =>
+        editing = new MailTriageRule
+        {
+            Id = rule.Id,
+            TenantId = rule.TenantId,
+            Signal = rule.Signal,
+            Phrase = rule.Phrase,
+            Priority = rule.Priority,
+            Criterion = rule.Criterion,
+            IsEnabled = rule.IsEnabled,
+            SortOrder = rule.SortOrder,
+        };
+
+    private async Task SaveAsync()
+    {
+        if (editing is null || string.IsNullOrWhiteSpace(editing.Phrase))
+        {
+            Toasts.Error("A phrase is needed.");
+            return;
+        }
+
+        if (editing.Signal == MailSignal.Priority && string.IsNullOrWhiteSpace(editing.Criterion))
+        {
+            Toasts.Error("Say what the phrase is evidence of — the operator confirming it reads that, not the phrase.");
+            return;
+        }
+
+        try
+        {
+            await Rules.SaveAsync(editing);
+            editing = null;
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not save — is the phrase already watched for? {ex.Message}");
+        }
+    }
+
+    private async Task ToggleAsync(MailTriageRule rule)
+    {
+        rule.IsEnabled = !rule.IsEnabled;
+        await Rules.SaveAsync(rule);
+        await LoadAsync();
+    }
+
+    private async Task DeleteAsync()
+    {
+        if (pendingDeleteId is Guid id)
+        {
+            await Rules.DeleteAsync(id);
+            pendingDeleteId = null;
+            await LoadAsync();
+        }
+    }
+
+    private async Task PreviewAsync()
+    {
+        preview = await Rules.PreviewAsync(TenantId, sample);
+        previewed = true;
+    }
+
+    private static string SignalName(MailSignal signal) => signal switch
+    {
+        MailSignal.Priority => "Priority (§14.2)",
+        MailSignal.Development => "New development (§15)",
+        MailSignal.ThirdParty => "Third party (§14.4)",
+        _ => signal.ToString(),
+    };
+
+    private static string PriorityClass(TicketPriority priority) => priority switch
+    {
+        TicketPriority.P1 => "bg-danger",
+        TicketPriority.P2 => "bg-warning text-dark",
+        TicketPriority.P3 => "bg-info text-dark",
+        _ => "bg-secondary",
+    };
+}

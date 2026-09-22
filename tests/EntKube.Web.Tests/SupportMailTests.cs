@@ -85,8 +85,10 @@ public class SupportMailTests : IDisposable
         TestDbContextFactory factory = new(connection);
         ContractService contracts = new(factory);
         tickets = new TicketService(factory, contracts);
+        MailTriageRuleService ruleService = new(factory);
         mail = new SupportMailService(
-            factory, new RuleBasedMailAnalyst(), tickets, new TimeService(factory, contracts));
+            factory, new RuleBasedMailAnalyst(), ruleService, tickets,
+            new TimeService(factory, contracts));
     }
 
     public void Dispose()
@@ -190,7 +192,7 @@ public class SupportMailTests : IDisposable
     [InlineData("Lite konstigt beteende", TicketPriority.P3)]
     public void The_proposed_priority_follows_the_wording_of_14_2(string text, TicketPriority expected)
     {
-        (TicketPriority priority, _) = RuleBasedMailAnalyst.ProposePriority(text.ToLowerInvariant());
+        (TicketPriority priority, _) = MailTriageRuleSet.BuiltIn.ProposePriority(text.ToLowerInvariant());
 
         priority.Should().Be(expected);
     }

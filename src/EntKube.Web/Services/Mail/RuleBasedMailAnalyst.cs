@@ -12,78 +12,12 @@ namespace EntKube.Web.Services.Mail;
 /// matched — so the operator confirming it under §14.3 can see the reasoning rather than
 /// being handed a verdict. Everything it produces is a proposal.</para>
 ///
-/// <para>Swedish and English both, because the agreement is Swedish and the tickets will
-/// not be consistent about it.</para>
+/// <para>The phrases themselves are not here. They live as tenant configuration, because
+/// they are whatever the customers actually write — necessarily in the customer's language,
+/// and changing as a portfolio does. The set in force arrives on the context.</para>
 /// </summary>
 public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
 {
-    /// <summary>
-    /// §14.2's P1: wholly unavailable for all users, or a risk to patient safety, data loss
-    /// or unauthorised access to personal data.
-    /// </summary>
-    private static readonly (string Phrase, string Criterion)[] CriticalMarkers =
-    [
-        ("patientsäkerhet", "risk to patient safety"),
-        ("patient safety", "risk to patient safety"),
-        ("dataläcka", "suspected data leak"),
-        ("data leak", "suspected data leak"),
-        ("dataintrång", "unauthorised access"),
-        ("helt nere", "wholly unavailable"),
-        ("totalt nere", "wholly unavailable"),
-        ("ingen kan logga in", "login impossible for all users"),
-        ("ingen kommer in", "login impossible for all users"),
-        ("alla användare", "affects all users"),
-        ("all users", "affects all users"),
-        ("svarar inte", "the service is not responding"),
-        ("completely down", "wholly unavailable"),
-        ("dataförlust", "risk of data loss"),
-    ];
-
-    /// <summary>§14.2's P2: a material function unavailable or wrong for a larger group.</summary>
-    private static readonly (string Phrase, string Criterion)[] HighMarkers =
-    [
-        ("fungerar inte", "a function is unavailable"),
-        ("går inte att", "a function is unavailable"),
-        ("felaktigt resultat", "a function returns the wrong result"),
-        ("mycket långsam", "severely degraded response time"),
-        ("väldigt långsamt", "severely degraded response time"),
-        ("not working", "a function is unavailable"),
-        ("integration", "an integration is affected"),
-        ("export", "a central function is affected"),
-    ];
-
-    /// <summary>§14.2's P4: cosmetic, documentation, questions, suggestions.</summary>
-    private static readonly (string Phrase, string Criterion)[] LowMarkers =
-    [
-        ("stavfel", "a typo"),
-        ("typo", "a typo"),
-        ("fråga om", "a question"),
-        ("undrar", "a question"),
-        ("förslag", "a suggestion"),
-        ("önskemål", "a wish"),
-        ("hur gör man", "a question about how something works"),
-    ];
-
-    /// <summary>
-    /// Wording that suggests §15 new development rather tha management — which is billed
-    /// differently, does not draw on the hour bank, and wants a requirements review first.
-    /// </summary>
-    private static readonly string[] DevelopmentMarkers =
-    [
-        "ny funktion", "nytt fält", "kan ni bygga", "kan vi få", "vi skulle vilja ha",
-        "new feature", "would like to add", "nyutveckling", "vidareutveckling",
-    ];
-
-    /// <summary>
-    /// Parties whose involvement §14.4 lets us pause the resolution clock for. Naming one
-    /// is not proof we are waiting on them, so this only ever suggests.
-    /// </summary>
-    private static readonly string[] ThirdPartyMarkers =
-    [
-        "väntar på", "waiting for", "hosting", "leverantören", "driftleverantör",
-        "third party", "tredje part", "molnleverantör",
-    ];
-
     public Task<IReadOnlyList<MailSuggestion>> AnalyseAsync(
         MailContext context, CancellationToken ct = default)
     {
@@ -119,7 +53,7 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
         }
         else
         {
-            (TicketPriority priority, string? criterion) = ProposePriority(text);
+            (TicketPriority priority, string? criterion) = context.Rules.ProposePriority(text);
 
             suggestions.Add(Suggestion(
                 message.Id, MailSuggestionKind.OpenTicket,
@@ -149,7 +83,7 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
                 draftText: DraftAcknowledgement(context, priority)));
         }
 
-        if (DevelopmentMarkers.Any(text.Contains))
+        if (context.Rules.LooksLikeDevelopment(text))
         {
             suggestions.Add(Suggestion(
                 message.Id, MailSuggestionKind.FlagDevelopment,
@@ -159,7 +93,7 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
                 + "requirements review and a written go-ahead before it starts."));
         }
 
-        if (ThirdPartyMarkers.Any(text.Contains))
+        if (context.Rules.MentionsThirdParty(text))
         {
             suggestions.Add(Suggestion(
                 message.Id, MailSuggestionKind.SuggestPause,
@@ -211,39 +145,6 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
         apps.Where(a => a.Name.Length > 2)
             .OrderByDescending(a => a.Name.Length)
             .FirstOrDefault(a => lowercaseText.Contains(a.Name.ToLowerInvariant()));
-
-    /// <summary>
-    /// A priority, with the §14.2 criterion behind it. P3 when nothing matched — the
-    /// middle of the scale, so a wrong guess is wrong in both directions equally.
-    /// </summary>
-    public static (TicketPriority Priority, string? Criterion) ProposePriority(string lowercaseText)
-    {
-        foreach ((string phrase, string criterion) in CriticalMarkers)
-        {
-            if (lowercaseText.Contains(phrase))
-            {
-                return (TicketPriority.P1, criterion);
-            }
-        }
-
-        foreach ((string phrase, string criterion) in HighMarkers)
-        {
-            if (lowercaseText.Contains(phrase))
-            {
-                return (TicketPriority.P2, criterion);
-            }
-        }
-
-        foreach ((string phrase, string criterion) in LowMarkers)
-        {
-            if (lowercaseText.Contains(phrase))
-            {
-                return (TicketPriority.P4, criterion);
-            }
-        }
-
-        return (TicketPriority.P3, null);
-    }
 
     private static string DraftAcknowledgement(MailContext context, TicketPriority priority)
     {

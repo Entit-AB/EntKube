@@ -23,6 +23,7 @@ namespace EntKube.Web.Services.Mail;
 public class SupportMailService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     ISupportMailAnalyst analyst,
+    MailTriageRuleService rules,
     TicketService tickets,
     TimeService time)
 {
@@ -71,8 +72,10 @@ public class SupportMailService(
             bankSpent = bank.IsExhausted;
         }
 
+        MailTriageRuleSet ruleSet = await rules.GetEffectiveAsync(message.TenantId, ct);
+
         IReadOnlyList<MailSuggestion> suggestions = await analyst.AnalyseAsync(
-            new MailContext(message, customer, apps, openTickets, bankSpent), ct);
+            new MailContext(message, customer, apps, openTickets, bankSpent, ruleSet), ct);
 
         message.Suggestions.AddRange(suggestions);
         message.State = suggestions.Count > 0 ? MailTriageState.Proposed : MailTriageState.Received;

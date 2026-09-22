@@ -47,6 +47,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<Subconsultant> Subconsultants => Set<Subconsultant>();
     public DbSet<InboundMailMessage> InboundMailMessages => Set<InboundMailMessage>();
     public DbSet<MailSuggestion> MailSuggestions => Set<MailSuggestion>();
+    public DbSet<MailTriageRule> MailTriageRules => Set<MailTriageRule>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
     public DbSet<CostLedgerCoverage> CostLedgerCoverages => Set<CostLedgerCoverage>();
     public DbSet<CostLedgerCursor> CostLedgerCursors => Set<CostLedgerCursor>();
@@ -722,6 +723,24 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(s => s.Message)
                   .WithMany(m => m.Suggestions)
                   .HasForeignKey(s => s.MessageId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<MailTriageRule>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => new { r.TenantId, r.Signal, r.SortOrder });
+
+            // One phrase per signal per tenant. Two rows for the same words would make the
+            // proposal depend on which one the ordering happened to reach first.
+            entity.HasIndex(r => new { r.TenantId, r.Signal, r.Phrase }).IsUnique();
+
+            entity.Property(r => r.Phrase).HasMaxLength(200);
+            entity.Property(r => r.Criterion).HasMaxLength(300);
+
+            entity.HasOne(r => r.Tenant)
+                  .WithMany()
+                  .HasForeignKey(r => r.TenantId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
 
