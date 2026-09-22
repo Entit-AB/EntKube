@@ -174,8 +174,8 @@ else
                     </button>
                 }
 
-                @* ── Operations (infrastructure: clusters + services, grouped by type) ── *@
-                <div class="tree-section-head"><span class="tree-section-label">Operations</span></div>
+                @* ── Infrastructure (clusters + services, grouped by type) ── *@
+                <div class="tree-section-head"><span class="tree-section-label">Infrastructure</span></div>
 
                 @{ bool opsClustersOpen = GroupOpen("ops:clusters"); }
                 <button type="button" class="node group indent-1" @onclick='() => ToggleGroup("ops:clusters")' aria-expanded="@opsClustersOpen">
@@ -269,7 +269,7 @@ else
                     }
                 }
 
-                @* ── Operations ── *@
+                @* ── Operations: what an operator does ── *@
                 <div class="tree-section-head"><span class="tree-section-label">Operations</span></div>
                 @foreach (TreeGroup g in OperationsGroups)
                 {
@@ -295,9 +295,9 @@ else
                     }
                 }
 
-                @* ── Observability ── *@
+                @* ── Observability: what an operator watches ── *@
                 <div class="tree-section-head"><span class="tree-section-label">Observability</span></div>
-                @foreach (TreeGroup g in OpsGroups)
+                @foreach (TreeGroup g in ObservabilityGroups)
                 {
                     List<SectionItem> gi = VisibleGroupItems(g);
                     if (HasFilter && gi.Count == 0) { continue; }
@@ -398,40 +398,55 @@ else
         // INTO, so burying it under Services → <env> → Storage made it unfindable for that job.
         new("cloud-connections", "Cloud connections", "bi-cloud-haze2"),
     ];
-    private static readonly TreeGroup[] OpsGroups =
+    /// <summary>
+    /// What an operator <em>watches</em>. Deliberately small: for a long time this heading
+    /// carried everything, because it was simply where new things got added, and a queue of
+    /// people waiting for an answer filed under "Observability" reads as a dashboard —
+    /// which is exactly how it gets scrolled past.
+    /// </summary>
+    private static readonly TreeGroup[] ObservabilityGroups =
     [
-        new("Advisor", "bi-lightbulb",
-        [ new("advisor", "Priorities", "bi-lightbulb") ]),
         new("Monitoring", "bi-speedometer2",
         [ new("overview", "Overview", "bi-speedometer2"), new("workloads", "Workloads", "bi-boxes"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
+    ];
+
+    /// <summary>
+    /// What an operator <em>does</em>, as opposed to what they watch.
+    ///
+    /// <para>The first four groups are in the order a problem actually travels: something
+    /// is noticed, it becomes an alert, the alert becomes an incident somebody is on call
+    /// for, and a customer writes in about it. Keeping that sequence adjacent is the point
+    /// of the ordering — the alternative files the alert rules with the dashboards they
+    /// were written against, which is true of how they are authored and useless for how
+    /// they are used.</para>
+    /// </summary>
+    private static readonly TreeGroup[] OperationsGroups =
+    [
+        new("Priorities", "bi-lightbulb",
+        [ new("advisor", "Priorities", "bi-lightbulb") ]),
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
-        [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon"), new("support-inbox", "Support inbox", "bi-envelope"), new("support-mailbox", "Mailbox connection", "bi-envelope-at"), new("mail-triage", "Mail triage phrases", "bi-funnel") ]),
+        [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon") ]),
+        // Split out of Incidents: a mailbox and its triage phrases are how work arrives,
+        // not an incident. Filing them together made the group's name a lie and buried the
+        // one thing in it an operator opens every morning.
+        new("Support", "bi-envelope",
+        [ new("support-inbox", "Support inbox", "bi-envelope"), new("support-mailbox", "Mailbox connection", "bi-envelope-at"), new("mail-triage", "Mail triage phrases", "bi-funnel") ]),
+        new("Reliability", "bi-check2-square",
+        [ new("sla", "SLA", "bi-check2-square"), new("maintenance", "Maintenance", "bi-tools"), new("secret-expiry", "Secret expiry", "bi-clock-history") ]),
         new("Networking", "bi-signpost-split",
         [ new("ingress", "Routes & Ingress", "bi-signpost-split"), new("networking", "VPN mesh", "bi-hdd-network") ]),
         new("Disaster recovery", "bi-shield-check",
         [ new("disaster-recovery", "Backups & restore", "bi-shield-check") ]),
-        new("Reliability", "bi-check2-square",
-        [ new("sla", "SLA", "bi-check2-square"), new("maintenance", "Maintenance", "bi-tools"), new("secret-expiry", "Secret expiry", "bi-clock-history") ]),
         new("Lifecycle", "bi-arrow-up-circle",
         [ new("upgrades", "Upgrades", "bi-arrow-up-circle"), new("drift", "Drift", "bi-shuffle"), new("supply-chain", "Supply chain", "bi-box-seam") ]),
         new("Delivery", "bi-rocket-takeoff",
         [ new("rollouts", "Rollouts", "bi-rocket-takeoff") ]),
-        new("Cost", "bi-cash-coin",
-        [ new("cost", "Cost & chargeback", "bi-cash-coin") ]),
-    ];
-    /// <summary>
-    /// Things an operator does, as opposed to things an operator watches.
-    ///
-    /// Separate from <see cref="OpsGroups"/> because that heading reads "Observability", and a
-    /// queue of people waiting for an answer is not something you observe — filing it there says
-    /// it is a dashboard, which is exactly how it gets scrolled past.
-    /// </summary>
-    private static readonly TreeGroup[] OperationsGroups =
-    [
         new("Access", "bi-terminal",
         [ new("jit-access", "JIT cluster access", "bi-terminal") ]),
+        new("Cost", "bi-cash-coin",
+        [ new("cost", "Cost & chargeback", "bi-cash-coin") ]),
     ];
 
     private static readonly SectionItem[] ManageItems =
