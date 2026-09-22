@@ -2,11 +2,14 @@ namespace EntKube.Web.Data.Backup;
 
 public class BackupBundle
 {
+    // Version 3 added application management and support: the agreement's annexes, the
+    // ticket store and its clocks, worked time, the knowledge base, and the support
+    // mailbox with its triage rules.
     // Version 2 added the full set of configuration entities (routing, connectivity,
     // Kafka, governance, blueprints, CA trust, observability config, secret history, …).
-    // Version 1 bundles are still accepted on import — their missing lists deserialize
-    // to empty collections.
-    public int Version { get; set; } = 2;
+    // Version 1 and 2 bundles are still accepted on import — their missing lists
+    // deserialize to empty collections.
+    public int Version { get; set; } = 3;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public string CreatedBy { get; set; } = "";
 
@@ -117,6 +120,10 @@ public class BackupBundle
     public List<TelemetryStorageSetting> TelemetryStorageSettings { get; set; } = [];
     public List<AdvisorDigestConfig> AdvisorDigestConfigs { get; set; } = [];
 
+    // What a person decided about an advisor finding — acknowledged, snoozed, assigned,
+    // annotated. The findings themselves are recomputed on every read; these are not.
+    public List<AdvisorFindingState> AdvisorFindingStates { get; set; } = [];
+
     // Notification & secret-expiry provider config
     // NotificationProviderConfig is a GLOBAL singleton set (no TenantId) — see wipe handling on restore.
     public List<NotificationProviderConfig> NotificationProviderConfigs { get; set; } = [];
@@ -143,6 +150,37 @@ public class BackupBundle
     public List<OpenLdapUser> OpenLdapUsers { get; set; } = [];
     public List<OpenLdapGroup> OpenLdapGroups { get; set; } = [];
     public List<OpenLdapGroupMember> OpenLdapGroupMembers { get; set; } = [];
+
+    // Application management and support (the förvaltningsavtal's annexes, the work done
+    // under them, and the record of how it was reported). Migrating a server without
+    // these would lose what was agreed and every SLA timestamp §14.6 makes evidence.
+    public List<ApplicationContract> ApplicationContracts { get; set; } = [];
+    public List<ApplicationServiceLevel> ApplicationServiceLevels { get; set; } = [];
+    public List<PortfolioAgreement> PortfolioAgreements { get; set; } = [];
+    public List<ContractContact> ContractContacts { get; set; } = [];
+    public List<PriceList> PriceLists { get; set; } = [];
+    public List<PriceListEntry> PriceListEntries { get; set; } = [];
+    public List<Subconsultant> Subconsultants { get; set; } = [];
+
+    public List<Ticket> Tickets { get; set; } = [];
+    public List<TicketEvent> TicketEvents { get; set; } = [];
+    public List<TicketPause> TicketPauses { get; set; } = [];
+    public List<TicketAffectedApp> TicketAffectedApps { get; set; } = [];
+    public List<TimeEntry> TimeEntries { get; set; } = [];
+    public List<WorkAuthorisation> WorkAuthorisations { get; set; } = [];
+
+    public List<AppKnowledgeProfile> AppKnowledgeProfiles { get; set; } = [];
+    public List<KnowledgeSection> KnowledgeSections { get; set; } = [];
+    public List<KnowledgeRevision> KnowledgeRevisions { get; set; } = [];
+    public List<AppServiceDependency> AppServiceDependencies { get; set; } = [];
+    public List<EndOfLifeNotice> EndOfLifeNotices { get; set; } = [];
+
+    // The mailbox's own IMAP password rides along in VaultSecrets, like every other
+    // credential; this is only the connection settings.
+    public List<SupportMailbox> SupportMailboxes { get; set; } = [];
+    public List<MailTriageRule> MailTriageRules { get; set; } = [];
+    public List<InboundMailMessage> InboundMailMessages { get; set; } = [];
+    public List<MailSuggestion> MailSuggestions { get; set; } = [];
 
     // Secrets — stored as decrypted plaintext in the bundle.
     // On restore, fresh DEKs are generated and secrets are re-encrypted with the
@@ -200,6 +238,15 @@ public record VaultSecretRecord(
     Guid? VpnRemoteEndpointId,
     Guid? GitRepositoryId,
     Guid? CustomerGitCredentialId,
+    // These four were missing, so a restore silently unhooked every secret that used
+    // them: a cluster's kubeconfig, a Kafka cluster's credentials, an app secret's
+    // environment scoping, and the support mailbox's password. Added late, hence the
+    // position — the record is positional and the earlier fields cannot move.
+    Guid? KafkaClusterId,
+    Guid? OwnerClusterId,
+    Guid? EnvironmentId,
+    Guid? SupportMailboxId,
+    VaultSecretType SecretType,
     bool SyncToKubernetes,
     Guid? KubernetesClusterId,
     string? KubernetesSecretName,

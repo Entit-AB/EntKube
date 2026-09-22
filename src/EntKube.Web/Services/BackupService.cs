@@ -61,6 +61,7 @@ public class BackupService(
                 s.CnpgClusterId, s.CnpgDatabaseId, s.MongoDatabaseId, s.MongoClusterId,
                 s.RegisteredPostgresDatabaseId, s.RabbitMQClusterId,
                 s.RedisClusterId, s.VpnRemoteEndpointId, s.GitRepositoryId, s.CustomerGitCredentialId,
+                s.KafkaClusterId, s.OwnerClusterId, s.EnvironmentId, s.SupportMailboxId, s.SecretType,
                 s.SyncToKubernetes, s.KubernetesClusterId, s.KubernetesSecretName, s.KubernetesNamespace,
                 s.CreatedAt, s.UpdatedAt));
         }
@@ -181,6 +182,30 @@ public class BackupService(
             NotificationChannels = await db.NotificationChannels.AsNoTracking().ToListAsync(),
             SlaTargets = await db.SlaTargets.AsNoTracking().ToListAsync(),
             MaintenanceWindows = await db.MaintenanceWindows.AsNoTracking().ToListAsync(),
+
+            // Application management and support.
+            ApplicationContracts = await db.ApplicationContracts.AsNoTracking().ToListAsync(),
+            ApplicationServiceLevels = await db.ApplicationServiceLevels.AsNoTracking().ToListAsync(),
+            PortfolioAgreements = await db.PortfolioAgreements.AsNoTracking().ToListAsync(),
+            ContractContacts = await db.ContractContacts.AsNoTracking().ToListAsync(),
+            PriceLists = await db.PriceLists.AsNoTracking().ToListAsync(),
+            PriceListEntries = await db.PriceListEntries.AsNoTracking().ToListAsync(),
+            Subconsultants = await db.Subconsultants.AsNoTracking().ToListAsync(),
+            Tickets = await db.Tickets.AsNoTracking().ToListAsync(),
+            TicketEvents = await db.TicketEvents.AsNoTracking().ToListAsync(),
+            TicketPauses = await db.TicketPauses.AsNoTracking().ToListAsync(),
+            TicketAffectedApps = await db.TicketAffectedApps.AsNoTracking().ToListAsync(),
+            TimeEntries = await db.TimeEntries.AsNoTracking().ToListAsync(),
+            WorkAuthorisations = await db.WorkAuthorisations.AsNoTracking().ToListAsync(),
+            AppKnowledgeProfiles = await db.AppKnowledgeProfiles.AsNoTracking().ToListAsync(),
+            KnowledgeSections = await db.KnowledgeSections.AsNoTracking().ToListAsync(),
+            KnowledgeRevisions = await db.KnowledgeRevisions.AsNoTracking().ToListAsync(),
+            AppServiceDependencies = await db.AppServiceDependencies.AsNoTracking().ToListAsync(),
+            EndOfLifeNotices = await db.EndOfLifeNotices.AsNoTracking().ToListAsync(),
+            SupportMailboxes = await db.SupportMailboxes.AsNoTracking().ToListAsync(),
+            MailTriageRules = await db.MailTriageRules.AsNoTracking().ToListAsync(),
+            InboundMailMessages = await db.InboundMailMessages.AsNoTracking().ToListAsync(),
+            MailSuggestions = await db.MailSuggestions.AsNoTracking().ToListAsync(),
             AlertRoutingRules = await db.AlertRoutingRules.AsNoTracking().ToListAsync(),
             OnCallSchedules = await db.OnCallSchedules.AsNoTracking().ToListAsync(),
             OnCallShifts = await db.OnCallShifts.AsNoTracking().ToListAsync(),
@@ -189,6 +214,7 @@ public class BackupService(
             TelemetryAlertRules = await db.TelemetryAlertRules.AsNoTracking().ToListAsync(),
             TelemetryStorageSettings = await db.TelemetryStorageSettings.AsNoTracking().ToListAsync(),
             AdvisorDigestConfigs = await db.AdvisorDigestConfigs.AsNoTracking().ToListAsync(),
+            AdvisorFindingStates = await db.AdvisorFindingStates.AsNoTracking().ToListAsync(),
             NotificationProviderConfigs = await db.NotificationProviderConfigs.AsNoTracking().ToListAsync(),
             SecretExpiryNotificationConfigs = await db.SecretExpiryNotificationConfigs.AsNoTracking().ToListAsync(),
             ClusterServers = await db.ClusterServers.AsNoTracking().ToListAsync(),
@@ -317,6 +343,7 @@ public class BackupService(
             await InsertEntities(db, db.OnCallShifts, bundle.OnCallShifts);
             await InsertEntities(db, db.Dashboards, bundle.Dashboards);
             await InsertEntities(db, db.AdvisorDigestConfigs, bundle.AdvisorDigestConfigs);
+            await InsertEntities(db, db.AdvisorFindingStates, bundle.AdvisorFindingStates);
             // NotificationProviderConfig is a global singleton set (no TenantId).
             await InsertEntities(db, db.NotificationProviderConfigs, bundle.NotificationProviderConfigs);
             // Cluster blueprints — blueprint before its steps/variables; values reference Environments (inserted above).
@@ -399,6 +426,10 @@ public class BackupService(
             var bundledRepoIds       = bundle.GitRepositories.Select(r => r.Id).ToHashSet();
             var bundledRedisIds      = bundle.RedisClusters.Select(r => r.Id).ToHashSet();
             var bundledVpnEndIds     = bundle.VpnRemoteEndpoints.Select(e => e.Id).ToHashSet();
+            var bundledKafkaIds      = bundle.KafkaClusters.Select(k => k.Id).ToHashSet();
+            var bundledClusterIds    = bundle.KubernetesClusters.Select(c => c.Id).ToHashSet();
+            var bundledEnvIds        = bundle.Environments.Select(e => e.Id).ToHashSet();
+            var bundledMailboxIds    = bundle.SupportMailboxes.Select(m => m.Id).ToHashSet();
 
             foreach (var d in bundle.AppDeployments)
             {
@@ -454,6 +485,32 @@ public class BackupService(
             // Alert routing references NotificationChannels + KubernetesClusters (both inserted above).
             await InsertEntities(db, db.AlertRoutingRules, bundle.AlertRoutingRules);
 
+            // Application management and support. Ordered by what points at what: the
+            // annexes before the work booked against them, the mailbox before the
+            // messages, a ticket before its events and the time logged on it.
+            await InsertEntities(db, db.ApplicationContracts, bundle.ApplicationContracts);
+            await InsertEntities(db, db.ApplicationServiceLevels, bundle.ApplicationServiceLevels);
+            await InsertEntities(db, db.PortfolioAgreements, bundle.PortfolioAgreements);
+            await InsertEntities(db, db.ContractContacts, bundle.ContractContacts);
+            await InsertEntities(db, db.PriceLists, bundle.PriceLists);
+            await InsertEntities(db, db.PriceListEntries, bundle.PriceListEntries);
+            await InsertEntities(db, db.Subconsultants, bundle.Subconsultants);
+            await InsertEntities(db, db.Tickets, bundle.Tickets);
+            await InsertEntities(db, db.TicketEvents, bundle.TicketEvents);
+            await InsertEntities(db, db.TicketPauses, bundle.TicketPauses);
+            await InsertEntities(db, db.TicketAffectedApps, bundle.TicketAffectedApps);
+            await InsertEntities(db, db.TimeEntries, bundle.TimeEntries);
+            await InsertEntities(db, db.WorkAuthorisations, bundle.WorkAuthorisations);
+            await InsertEntities(db, db.AppKnowledgeProfiles, bundle.AppKnowledgeProfiles);
+            await InsertEntities(db, db.KnowledgeSections, bundle.KnowledgeSections);
+            await InsertEntities(db, db.KnowledgeRevisions, bundle.KnowledgeRevisions);
+            await InsertEntities(db, db.AppServiceDependencies, bundle.AppServiceDependencies);
+            await InsertEntities(db, db.EndOfLifeNotices, bundle.EndOfLifeNotices);
+            await InsertEntities(db, db.SupportMailboxes, bundle.SupportMailboxes);
+            await InsertEntities(db, db.MailTriageRules, bundle.MailTriageRules);
+            await InsertEntities(db, db.InboundMailMessages, bundle.InboundMailMessages);
+            await InsertEntities(db, db.MailSuggestions, bundle.MailSuggestions);
+
             // Null out VaultSecret FKs that point to entities not present in this bundle
             // (backwards-compatible with bundles exported before these entity types were added).
             for (int i = 0; i < bundle.VaultSecrets.Count; i++)
@@ -467,6 +524,14 @@ public class BackupService(
                     sr = sr with { VpnRemoteEndpointId = null };
                 if (sr.CustomerGitCredentialId.HasValue && !bundledCredIds.Contains(sr.CustomerGitCredentialId.Value))
                     sr = sr with { CustomerGitCredentialId = null };
+                if (sr.KafkaClusterId.HasValue        && !bundledKafkaIds.Contains(sr.KafkaClusterId.Value))
+                    sr = sr with { KafkaClusterId = null };
+                if (sr.OwnerClusterId.HasValue        && !bundledClusterIds.Contains(sr.OwnerClusterId.Value))
+                    sr = sr with { OwnerClusterId = null };
+                if (sr.EnvironmentId.HasValue         && !bundledEnvIds.Contains(sr.EnvironmentId.Value))
+                    sr = sr with { EnvironmentId = null };
+                if (sr.SupportMailboxId.HasValue      && !bundledMailboxIds.Contains(sr.SupportMailboxId.Value))
+                    sr = sr with { SupportMailboxId = null };
                 bundle.VaultSecrets[i] = sr;
             }
 
@@ -513,6 +578,13 @@ public class BackupService(
                     VpnRemoteEndpointId = sr.VpnRemoteEndpointId,
                     GitRepositoryId = sr.GitRepositoryId,
                     CustomerGitCredentialId = sr.CustomerGitCredentialId,
+                    KafkaClusterId = sr.KafkaClusterId,
+                    OwnerClusterId = sr.OwnerClusterId,
+                    EnvironmentId = sr.EnvironmentId,
+                    SupportMailboxId = sr.SupportMailboxId,
+                    // A bundle from before these were carried says Opaque here, which is
+                    // what the restore assumed anyway — so an older bundle is no worse off.
+                    SecretType = sr.SecretType,
                     SyncToKubernetes = sr.SyncToKubernetes, KubernetesClusterId = sr.KubernetesClusterId,
                     KubernetesSecretName = sr.KubernetesSecretName, KubernetesNamespace = sr.KubernetesNamespace,
                     CreatedAt = sr.CreatedAt, UpdatedAt = sr.UpdatedAt,
