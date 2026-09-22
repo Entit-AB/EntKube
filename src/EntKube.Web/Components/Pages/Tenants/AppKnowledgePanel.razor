@@ -23,125 +23,125 @@
 <LoadingPanel Loading="@loading" Error="@error">
 @if (!loading)
 {
-    <div class="kb">
+    <div class="pane">
         @* ───────────── Navigator ───────────── *@
-        <div class="kb-nav">
-            <div class="kb-nav-scroll">
-                <button type="button" class="kb-item @(view == View.Overview ? "selected" : "")"
+        <div class="pane-nav">
+            <div class="pane-nav-scroll">
+                <button type="button" class="pane-item @(view == View.Overview ? "selected" : "")"
                         @onclick="() => Show(View.Overview)">
                     <span class="ico bi bi-clipboard-pulse"></span>
-                    <span class="kb-item-body">
-                        <span class="kb-item-title">
+                    <span class="pane-item-body">
+                        <span class="pane-item-title">
                             Overview
                             @if (health.Critical > 0)
                             {
-                                <span class="kb-dot critical" title="@health.Critical critical"></span>
+                                <span class="pane-dot critical" title="@health.Critical critical"></span>
                             }
                             else if (health.Warnings > 0)
                             {
-                                <span class="kb-dot" title="@health.Warnings to look at"></span>
+                                <span class="pane-dot" title="@health.Warnings to look at"></span>
                             }
                         </span>
-                        <span class="kb-item-sub">
+                        <span class="pane-item-sub">
                             @health.PassedChecks of @KnowledgeHealth.TotalChecks checks pass
                         </span>
                     </span>
                 </button>
 
-                <div class="kb-group">Written down</div>
+                <div class="pane-group">Written down</div>
 
                 @foreach (KnowledgeSection article in sections)
                 {
                     <button type="button"
-                            class="kb-item @(view == View.Section && selectedSectionId == article.Id ? "selected" : "")"
+                            class="pane-item @(view == View.Section && selectedSectionId == article.Id ? "selected" : "")"
                             @onclick="() => ShowSectionAsync(article)">
                         <span class="ico bi @SectionIcon(article.Kind)"></span>
-                        <span class="kb-item-body">
-                            <span class="kb-item-title">
+                        <span class="pane-item-body">
+                            <span class="pane-item-title">
                                 @article.Title
                                 @if (IsStale(article))
                                 {
-                                    <span class="kb-dot" title="Not confirmed within its review interval"></span>
+                                    <span class="pane-dot" title="Not confirmed within its review interval"></span>
                                 }
                             </span>
-                            <span class="kb-item-sub">@Excerpt(article)</span>
+                            <span class="pane-item-sub">@Excerpt(article)</span>
                         </span>
                     </button>
                 }
 
                 @foreach (KnowledgeSectionKind missing in MissingExpected)
                 {
-                    <button type="button" class="kb-item" @onclick="() => StartNewSection(missing)">
+                    <button type="button" class="pane-item" @onclick="() => StartNewSection(missing)">
                         <span class="ico bi bi-plus-circle-dotted text-warning"></span>
-                        <span class="kb-item-body">
-                            <span class="kb-item-title text-muted">@KindName(missing)</span>
-                            <span class="kb-item-sub">not written yet</span>
+                        <span class="pane-item-body">
+                            <span class="pane-item-title text-muted">@KindName(missing)</span>
+                            <span class="pane-item-sub">not written yet</span>
                         </span>
                     </button>
                 }
 
-                <button type="button" class="kb-item text-muted" @onclick="() => StartNewSection(null)">
+                <button type="button" class="pane-item text-muted" @onclick="() => StartNewSection(null)">
                     <span class="ico bi bi-plus-lg"></span>
-                    <span class="kb-item-body"><span class="kb-item-title">Add a section</span></span>
+                    <span class="pane-item-body"><span class="pane-item-title">Add a section</span></span>
                 </button>
 
-                <div class="kb-group">The facts</div>
+                <div class="pane-group">The facts</div>
 
-                <button type="button" class="kb-item @(view == View.Classification ? "selected" : "")"
+                <button type="button" class="pane-item @(view == View.Classification ? "selected" : "")"
                         @onclick="() => Show(View.Classification)">
                     <span class="ico bi bi-shield-lock"></span>
-                    <span class="kb-item-body">
-                        <span class="kb-item-title">
+                    <span class="pane-item-body">
+                        <span class="pane-item-title">
                             Classification
                             @if (profileMissing)
                             {
-                                <span class="kb-dot" title="Not recorded"></span>
+                                <span class="pane-dot" title="Not recorded"></span>
                             }
                         </span>
-                        <span class="kb-item-sub">@ClassificationSummary()</span>
+                        <span class="pane-item-sub">@ClassificationSummary()</span>
                     </span>
                 </button>
 
-                <button type="button" class="kb-item @(view == View.Dependencies ? "selected" : "")"
+                <button type="button" class="pane-item @(view == View.Dependencies ? "selected" : "")"
                         @onclick="() => Show(View.Dependencies)">
                     <span class="ico bi bi-diagram-2"></span>
-                    <span class="kb-item-body">
-                        <span class="kb-item-title">
+                    <span class="pane-item-body">
+                        <span class="pane-item-title">
                             Dependencies
                             @if (health.Gaps.Any(g => g.Check == KnowledgeCheck.DependencyHours))
                             {
-                                <span class="kb-dot critical"
+                                <span class="pane-dot critical"
                                       title="Reachable for fewer hours than the window sold"></span>
                             }
                         </span>
-                        <span class="kb-item-sub">@DependencySummary()</span>
+                        <span class="pane-item-sub">@DependencySummary()</span>
                     </span>
-                    <span class="kb-count">@dependencies.Count</span>
+                    <span class="pane-count">@dependencies.Count</span>
                 </button>
 
-                <button type="button" class="kb-item @(view == View.EndOfLife ? "selected" : "")"
+                <button type="button" class="pane-item @(view == View.EndOfLife ? "selected" : "")"
                         @onclick="() => Show(View.EndOfLife)">
                     <span class="ico bi bi-hourglass-bottom"></span>
-                    <span class="kb-item-body">
-                        <span class="kb-item-title">
+                    <span class="pane-item-body">
+                        <span class="pane-item-title">
                             End of life
                             @if (health.Gaps.Any(g => g.Check == KnowledgeCheck.EndOfLife))
                             {
-                                <span class="kb-dot critical"></span>
+                                <span class="pane-dot critical"></span>
                             }
                         </span>
-                        <span class="kb-item-sub">@EndOfLifeSummary()</span>
+                        <span class="pane-item-sub">@EndOfLifeSummary()</span>
                     </span>
-                    <span class="kb-count">@notices.Count(n => n.UpgradedAt is null)</span>
+                    <span class="pane-count">@notices.Count(n => n.UpgradedAt is null)</span>
                 </button>
             </div>
         </div>
 
         @* ───────────── Content ───────────── *@
-        <div class="kb-main">
+        <div class="pane-main">
             @if (view == View.Overview)
             {
-                <div class="kb-head">
+                <div class="pane-head">
                     <div>
                         <div class="fw-semibold">@App.Name</div>
                         <div class="text-muted small">
@@ -149,12 +149,12 @@
                         </div>
                     </div>
                 </div>
-                <div class="kb-body">
+                <div class="pane-body">
                     <div class="d-flex align-items-center gap-3 mb-1">
                         <div class="fs-4 fw-bold">@health.Percent%</div>
                         <div class="flex-grow-1">
-                            <div class="kb-meter">
-                                <div class="kb-meter-fill @MeterClass" style="width: @health.Percent%"></div>
+                            <div class="pane-meter">
+                                <div class="pane-meter-fill @MeterClass" style="width: @health.Percent%"></div>
                             </div>
                         </div>
                         <div class="text-muted small text-nowrap">
@@ -202,7 +202,7 @@
             {
                 @if (editing is not null)
                 {
-                    <div class="kb-head">
+                    <div class="pane-head">
                         <div class="flex-grow-1">
                             <input class="form-control form-control-sm mb-2" @bind="editing.Title"
                                    placeholder="Title" style="max-width: 24rem" />
@@ -221,7 +221,7 @@
                             <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveSectionAsync">Save</AsyncButton>
                         </div>
                     </div>
-                    <div class="kb-body">
+                    <div class="pane-body">
                         <div class="kb-edit">
                             <div>
                                 <label class="form-label small text-muted">Markdown</label>
@@ -241,11 +241,11 @@
                 }
                 else if (Selected is null)
                 {
-                    <div class="kb-body text-muted small">This section is gone.</div>
+                    <div class="pane-body text-muted small">This section is gone.</div>
                 }
                 else
                 {
-                    <div class="kb-head">
+                    <div class="pane-head">
                         <div>
                             <div class="fw-semibold">@Selected.Title</div>
                             <div class="text-muted" style="font-size: .78rem">
@@ -284,7 +284,7 @@
                             </button>
                         </div>
                     </div>
-                    <div class="kb-body">
+                    <div class="pane-body">
                         @if (IsStale(Selected))
                         {
                             <div class="alert alert-warning py-2 small">
@@ -309,7 +309,7 @@
             }
             else if (view == View.Classification)
             {
-                <div class="kb-head">
+                <div class="pane-head">
                     <div>
                         <div class="fw-semibold">Classification</div>
                         <div class="text-muted small">
@@ -320,7 +320,7 @@
                     </div>
                     <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveProfileAsync">Save</AsyncButton>
                 </div>
-                <div class="kb-body">
+                <div class="pane-body">
                     <div class="row g-3" style="max-width: 46rem">
                         <div class="col-md-6">
                             <label class="form-label small text-muted">Personal data</label>
@@ -372,7 +372,7 @@
             }
             else if (view == View.Dependencies)
             {
-                <div class="kb-head">
+                <div class="pane-head">
                     <div>
                         <div class="fw-semibold">External dependencies</div>
                         <div class="text-muted small">
@@ -384,7 +384,7 @@
                         <i class="bi bi-plus-lg me-1"></i>Add
                     </button>
                 </div>
-                <div class="kb-body">
+                <div class="pane-body">
                     @if (newDependency is not null)
                     {
                         <div class="border rounded p-3 mb-3">
@@ -505,7 +505,7 @@
             }
             else if (view == View.EndOfLife)
             {
-                <div class="kb-head">
+                <div class="pane-head">
                     <div>
                         <div class="fw-semibold">End of life</div>
                         <div class="text-muted small">
@@ -518,7 +518,7 @@
                         <i class="bi bi-plus-lg me-1"></i>Add
                     </button>
                 </div>
-                <div class="kb-body">
+                <div class="pane-body">
                     @if (newNotice is not null)
                     {
                         <div class="border rounded p-3 mb-3">
