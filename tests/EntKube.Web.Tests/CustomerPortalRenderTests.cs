@@ -187,6 +187,90 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
             .And.NotContain(e => e.Actor == CurrentActor.Unattributed);
     }
 
+    // ---- Committing the customer's money ------------------------------------------------------
+
+    /// <summary>
+    /// The most expensive thing anybody does in this subsystem. §11.1 stops work once the
+    /// hour bank is spent, and going further needs the customer's approval — which is a
+    /// commitment of their money, so the record has to name the person who made it.
+    ///
+    /// <para>This was the one screen left uncovered when the attribution fix went in, and
+    /// covering it last was the wrong order: an approval filed as "Capio" says a company
+    /// agreed to pay, which is not something a company can do.</para>
+    /// </summary>
+    [Fact]
+    public async Task Approving_work_beyond_the_bank_names_the_person_who_approved_it()
+    {
+        SignIn("ekonomi@capio.example");
+
+        // A bank of two hours, with three booked against it: one hour needs approval.
+        db.PortfolioAgreements.Add(new PortfolioAgreement
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customer.Id,
+            PricingModel = PricingModel.HourBank,
+            HourBankHoursPerMonth = 2m,
+            EffectiveFrom = Swedish(2026, 1, 1, 0),
+        });
+
+        Ticket ticket = await Raise();
+
+        db.TimeEntries.Add(new TimeEntry
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customer.Id,
+            TicketId = ticket.Id,
+            AppId = appId,
+            StartedAt = Tue(9),
+            EndedAt = Tue(12),
+            Description = "Investigating",
+            PerformedBy = "nils",
+        });
+        await db.SaveChangesAsync();
+
+        IRenderedComponent<CustomerHoursPanel> panel = Render<CustomerHoursPanel>(p => p
+            .Add(c => c.Customer, customer)
+            .Add(c => c.AccessRole, CustomerAccessRole.Operator));
+
+        panel.Markup.Should().Contain("Approve further work",
+            "the bank is spent, so §11.1's gate is what the customer is looking at");
+
+        await panel.InvokeAsync(() => panel.FindAll("button")
+            .First(b => b.TextContent.Trim().StartsWith("Approve further work", StringComparison.Ordinal))
+            .Click());
+
+        await panel.InvokeAsync(() => panel.FindAll("button")
+            .Last(b => b.TextContent.Trim().StartsWith("Approve", StringComparison.Ordinal))
+            .Click());
+
+        db.ChangeTracker.Clear();
+
+        WorkAuthorisation approval = db.Set<WorkAuthorisation>()
+            .Single(a => a.CustomerId == customer.Id);
+
+        approval.ApprovedBy.Should().Be("ekonomi@capio.example");
+        approval.ApprovedBy.Should().NotBe("Capio", "a company cannot agree to pay; a person does");
+        approval.ApprovedBy.Should().NotBe(CurrentActor.Unattributed);
+    }
+
+    /// <summary>
+    /// A viewer can read the hours and cannot commit the money. §11.1's approval is the
+    /// clearest case there is for the role gate meaning something.
+    /// </summary>
+    [Fact]
+    public void A_viewer_cannot_approve_work_beyond_the_bank()
+    {
+        SignIn("lasse@capio.example");
+
+        IRenderedComponent<CustomerHoursPanel> viewer = Render<CustomerHoursPanel>(p => p
+            .Add(c => c.Customer, customer)
+            .Add(c => c.AccessRole, CustomerAccessRole.Viewer));
+
+        viewer.Markup.Should().NotContain("Approve further work");
+    }
+
     // ---- What a customer is allowed to see ----------------------------------------------------
 
     /// <summary>
