@@ -2,6 +2,7 @@ namespace EntKube.Web.Data.Backup;
 
 public class BackupBundle
 {
+    // Version 5 added the customer mail-domain register.
     // Version 4 added the platform configuration a coverage test found missing: API
     // tokens, egress agents, cost rates, SSO group mappings, rollout policies, the
     // client CAs and mesh mTLS policy, the Stalwart mail configuration, and the
@@ -22,7 +23,7 @@ public class BackupBundle
     /// literal here and a second literal in the import's guard, which is how a bundle
     /// this very code wrote came to be rejected by it.</para>
     /// </summary>
-    public const int CurrentVersion = 4;
+    public const int CurrentVersion = 5;
 
     public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -193,6 +194,10 @@ public class BackupBundle
     // The mailbox's own IMAP password rides along in VaultSecrets, like every other
     // credential; this is only the connection settings.
     public List<SupportMailbox> SupportMailboxes { get; set; } = [];
+    // Which domains belong to which customer. Losing it does not lose a message, but every
+    // sender who is not individually named stops being recognised — support mail quietly
+    // starts arriving unplaced and somebody has to work out why.
+    public List<CustomerEmailDomain> CustomerEmailDomains { get; set; } = [];
     public List<MailTriageRule> MailTriageRules { get; set; } = [];
     public List<InboundMailMessage> InboundMailMessages { get; set; } = [];
     public List<MailSuggestion> MailSuggestions { get; set; } = [];

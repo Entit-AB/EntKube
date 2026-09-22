@@ -49,6 +49,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<MailSuggestion> MailSuggestions => Set<MailSuggestion>();
     public DbSet<MailTriageRule> MailTriageRules => Set<MailTriageRule>();
     public DbSet<SupportMailbox> SupportMailboxes => Set<SupportMailbox>();
+    public DbSet<CustomerEmailDomain> CustomerEmailDomains => Set<CustomerEmailDomain>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
     public DbSet<CostLedgerCoverage> CostLedgerCoverages => Set<CostLedgerCoverage>();
     public DbSet<CostLedgerCursor> CostLedgerCursors => Set<CostLedgerCursor>();
@@ -742,6 +743,31 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(r => r.Tenant)
                   .WithMany()
                   .HasForeignKey(r => r.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<CustomerEmailDomain>(entity =>
+        {
+            entity.HasKey(d => d.Id);
+
+            // One claim per domain per tenant. Two customers claiming the same domain would
+            // make a sender's customer depend on which row a query returned first, and the
+            // same person would land in different queues on different days.
+            entity.HasIndex(d => new { d.TenantId, d.Domain }).IsUnique();
+            entity.HasIndex(d => d.CustomerId);
+
+            entity.Property(d => d.Domain).HasMaxLength(253);
+            entity.Property(d => d.Notes).HasMaxLength(500);
+            entity.Property(d => d.AddedBy).HasMaxLength(256);
+
+            entity.HasOne(d => d.Tenant)
+                  .WithMany()
+                  .HasForeignKey(d => d.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(d => d.Customer)
+                  .WithMany()
+                  .HasForeignKey(d => d.CustomerId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
 

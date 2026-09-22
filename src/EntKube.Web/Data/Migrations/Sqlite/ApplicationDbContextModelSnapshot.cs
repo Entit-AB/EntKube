@@ -2573,6 +2573,44 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("CustomerAccesses");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.CustomerEmailDomain", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("AddedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Domain")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("TenantId", "Domain")
+                        .IsUnique();
+
+                    b.ToTable("CustomerEmailDomains");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.CustomerEnvironment", b =>
                 {
                     b.Property<Guid>("CustomerId")
@@ -8606,6 +8644,25 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Customer");
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CustomerEmailDomain", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CustomerEnvironment", b =>

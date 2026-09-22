@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Services.Mail;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Contracts;
@@ -364,6 +365,83 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
         await db.SaveChangesAsync(ct);
         return contact;
+    }
+
+    /// <summary>The mail domains registered to a customer, most specific first.</summary>
+    public async Task<List<CustomerEmailDomain>> ListEmailDomainsAsync(
+        Guid customerId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        return await db.CustomerEmailDomains.AsNoTracking()
+            .Where(d => d.CustomerId == customerId)
+            .OrderBy(d => d.Domain)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Registers a mail domain to a customer, so support mail from anyone there is placed.
+    /// </summary>
+    /// <returns>The row, or an explanation of why it was refused.</returns>
+    public async Task<(CustomerEmailDomain? Added, string? Refused)> AddEmailDomainAsync(
+        Guid tenantId, Guid customerId, string entered, string? notes, string? addedBy,
+        CancellationToken ct = default)
+    {
+        string? domain = SenderDomain.Normalise(entered);
+
+        if (domain is null)
+        {
+            return (null, "That is not a mail domain — it needs at least one dot, as in capio.se.");
+        }
+
+        if (SenderDomain.PublicProviders.Contains(domain))
+        {
+            return (null,
+                $"{domain} belongs to everybody, so registering it would place every message "
+                + "from it with this customer — including strangers. Add the individual "
+                + "addresses as contacts instead.");
+        }
+
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        CustomerEmailDomain? existing = await db.CustomerEmailDomains
+            .Include(d => d.Customer)
+            .FirstOrDefaultAsync(d => d.TenantId == tenantId && d.Domain == domain, ct);
+
+        if (existing is not null)
+        {
+            return existing.CustomerId == customerId
+                ? (existing, null)
+                : (null, $"{domain} is already registered to {existing.Customer.Name}.");
+        }
+
+        CustomerEmailDomain added = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customerId,
+            Domain = domain,
+            Notes = notes,
+            AddedBy = addedBy,
+        };
+
+        db.CustomerEmailDomains.Add(added);
+        await db.SaveChangesAsync(ct);
+
+        return (added, null);
+    }
+
+    public async Task DeleteEmailDomainAsync(Guid id, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        CustomerEmailDomain? domain = await db.CustomerEmailDomains.FindAsync([id], ct);
+
+        if (domain is not null)
+        {
+            db.CustomerEmailDomains.Remove(domain);
+            await db.SaveChangesAsync(ct);
+        }
     }
 
     public async Task DeleteContactAsync(Guid id, CancellationToken ct = default)

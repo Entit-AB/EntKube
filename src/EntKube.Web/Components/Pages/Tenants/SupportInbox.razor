@@ -1,8 +1,11 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Mail
+@using Microsoft.EntityFrameworkCore
 @inject SupportMailService Mail
 @inject ToastService Toasts
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject AuthenticationStateProvider AuthState
 
 @* ═══════════════════════════════════════════════════════════════════
    The support mailbox, with what the analyst suggests doing about each
@@ -73,6 +76,64 @@
                     </div>
                 </div>
                 <div class="card-body py-2">
+                    @* ── Nobody recognised the sender ── *@
+                    @if (message.CustomerId is null
+                         && message.State is MailTriageState.Received or MailTriageState.Proposed)
+                    {
+                        <div class="alert alert-warning py-2 small">
+                            <div class="mb-2">
+                                <span class="bi bi-person-question me-1"></span>
+                                <strong>Nobody recognised this sender.</strong>
+                                Until it is placed with a customer, the analyst cannot tell which
+                                application it is about or whether their hours are spent — so
+                                everything below is what can be said without knowing who wrote in.
+                            </div>
+                            <div class="row g-2 align-items-end">
+                                <div class="col-md-5">
+                                    <label class="form-label small text-muted mb-1">It is from</label>
+                                    <select class="form-select form-select-sm"
+                                            value="@(assigning.TryGetValue(message.Id, out Guid c) ? c.ToString() : "")"
+                                            @onchange="e => assigning[message.Id] = Guid.TryParse(e.Value?.ToString(), out Guid id) ? id : Guid.Empty">
+                                        <option value="">Choose a customer…</option>
+                                        @foreach (Customer customer in customers)
+                                        {
+                                            <option value="@customer.Id">@customer.Name</option>
+                                        }
+                                    </select>
+                                </div>
+                                <div class="col-md-5">
+                                    @if (SenderDomain.Of(message.FromAddress) is string domain
+                                         && !SenderDomain.PublicProviders.Contains(domain))
+                                    {
+                                        <div class="form-check">
+                                            <input type="checkbox" class="form-check-input"
+                                                   id="@($"remember-{message.Id}")"
+                                                   checked="@remembering.Contains(message.Id)"
+                                                   @onchange="e => Remember(message.Id, (bool?)e.Value == true)" />
+                                            <label class="form-check-label small"
+                                                   for="@($"remember-{message.Id}")">
+                                                Also place future mail from <code>@domain</code>
+                                                with them
+                                            </label>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="small text-muted">
+                                            That address is at a public provider, so only this
+                                            message is placed — a domain everybody uses cannot
+                                            belong to one customer.
+                                        </div>
+                                    }
+                                </div>
+                                <div class="col-md-2 text-end">
+                                    <AsyncButton CssClass="btn-sm btn-primary"
+                                                 OnClick="() => AssignAsync(message.Id)">Place</AsyncButton>
+                                </div>
+                            </div>
+                        </div>
+                    }
+
                     <div class="small text-muted mb-3" style="white-space: pre-wrap">@Excerpt(message.Body)</div>
 
                     @foreach (MailSuggestion suggestion in message.Suggestions.OrderBy(s => s.Kind))
@@ -136,6 +197,46 @@
     private string? error;
     private bool showHandled;
     private List<InboundMailMessage> messages = [];
+    private List<Customer> customers = [];
+    private string? actor;
+
+    /// <summary>The customer picked for each unplaced message, before Place is pressed.</summary>
+    private readonly Dictionary<Guid, Guid> assigning = [];
+
+    /// <summary>Which of those should also register the sender's domain.</summary>
+    private readonly HashSet<Guid> remembering = [];
+
+    private void Remember(Guid messageId, bool on)
+    {
+        if (on) { remembering.Add(messageId); } else { remembering.Remove(messageId); }
+    }
+
+    private async Task AssignAsync(Guid messageId)
+    {
+        if (!assigning.TryGetValue(messageId, out Guid customerId) || customerId == Guid.Empty)
+        {
+            Toasts.Error("Choose which customer it is from.");
+            return;
+        }
+
+        try
+        {
+            await Mail.AssignCustomerAsync(
+                messageId, customerId, actor ?? "unknown", remembering.Contains(messageId));
+
+            assigning.Remove(messageId);
+            remembering.Remove(messageId);
+            Toasts.Success("Placed, and read again now that the customer is known.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not place it: {ex.Message}");
+        }
+    }
+
+    protected override async Task OnInitializedAsync() =>
+        actor = (await AuthState.GetAuthenticationStateAsync()).User.Identity?.Name;
 
     protected override async Task OnParametersSetAsync() => await LoadAsync();
 
@@ -147,6 +248,14 @@
         try
         {
             messages = await Mail.GetQueueAsync(TenantId, showHandled);
+
+            // Only needed to place a message nobody recognised, but loading it with the
+            // queue keeps the picker from being empty the moment somebody reaches for it.
+            using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+            customers = await db.Customers.AsNoTracking()
+                .Where(c => c.TenantId == TenantId)
+                .OrderBy(c => c.Name)
+                .ToListAsync();
         }
         catch (Exception ex)
         {

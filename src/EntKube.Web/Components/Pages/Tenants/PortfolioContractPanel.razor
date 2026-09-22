@@ -3,6 +3,7 @@
 @using EntKube.Web.Services.Contracts
 @inject ContractService Contracts
 @inject ToastService Toasts
+@inject AuthenticationStateProvider AuthState
 
 @* ═══════════════════════════════════════════════════════════════════
    Annex B and C for a customer's portfolio, plus the people the
@@ -33,6 +34,13 @@
                IsBusy="busy"
                OnConfirm="DeleteListAsync"
                OnCancel="() => pendingDeleteList = null" />
+
+<ConfirmDialog Visible="@(pendingDeleteDomain is not null)"
+               Message="@($"Stop recognising {pendingDeleteDomain?.Domain}? Mail from anyone there who is not named as a contact will arrive unplaced from now on. Messages already taken in keep the customer they were given.")"
+               ConfirmText="Stop recognising it"
+               IsBusy="busy"
+               OnConfirm="DeleteDomainAsync"
+               OnCancel="() => pendingDeleteDomain = null" />
 
 <LoadingPanel Loading="@loading" Error="@error">
 @if (!loading)
@@ -107,7 +115,7 @@
                         </span>
                         <span class="pane-item-sub">@ContactSummary()</span>
                     </span>
-                    <span class="pane-count">@contacts.Count</span>
+                    <span class="pane-count">@(contacts.Count + domains.Count)</span>
                 </button>
             </div>
         </div>
@@ -718,6 +726,64 @@
                             }
                         }
                     }
+
+                    @* ───────────── Mail domains ───────────── *@
+                    <h6 class="small text-muted mt-4 mb-2">Mail domains</h6>
+                    <div class="text-muted small mb-2">
+                        Support mail from these domains is placed with this customer, which is
+                        what lets it be read for an application name. Somebody named above as a
+                        contact wins over any domain. Subdomains count:
+                        <code>capio.se</code> also covers <code>it.capio.se</code>.
+                    </div>
+
+                    <div class="row g-2 align-items-end mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Domain</label>
+                            <input class="form-control form-control-sm" @bind="newDomain"
+                                   placeholder="capio.se" />
+                        </div>
+                        <div class="col-md-5">
+                            <label class="form-label small text-muted">Notes</label>
+                            <input class="form-control form-control-sm" @bind="newDomainNotes"
+                                   placeholder="Who confirmed it" />
+                        </div>
+                        <div class="col-md-3 text-end">
+                            <AsyncButton CssClass="btn-sm btn-outline-primary"
+                                         OnClick="AddDomainAsync">Register</AsyncButton>
+                        </div>
+                    </div>
+
+                    @if (domains.Count == 0)
+                    {
+                        <div class="text-muted small">
+                            None registered. Only people named as contacts above are recognised,
+                            so everybody else's mail arrives in the inbox unplaced.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-0">
+                                <tbody>
+                                    @foreach (CustomerEmailDomain domain in domains)
+                                    {
+                                        <tr>
+                                            <td class="small fw-semibold" style="width: 30%">@domain.Domain</td>
+                                            <td class="small text-muted">@domain.Notes</td>
+                                            <td class="small text-muted" style="width: 20%">@domain.AddedBy</td>
+                                            <td class="text-end" style="width: 10%">
+                                                <button class="btn btn-sm btn-outline-danger"
+                                                        aria-label="@($"Stop recognising {domain.Domain}")"
+                                                        @onclick="() => pendingDeleteDomain = domain">
+                                                    <span class="bi bi-trash"></span>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
                 </div>
             }
         </div>
@@ -727,6 +793,9 @@
 
 @code {
     [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
+
+    /// <summary>Whoever registered a domain, recorded beside it.</summary>
+    private string? actor;
 
     private enum View { Overview, AnnexB, AnnexC, Contacts }
 
@@ -751,6 +820,11 @@
     private bool addingContact;
     private ContractContact newContact = NewContact();
     private Guid? pendingDeleteContactId;
+
+    private List<CustomerEmailDomain> domains = [];
+    private string? newDomain;
+    private string? newDomainNotes;
+    private CustomerEmailDomain? pendingDeleteDomain;
 
     private PortfolioAgreement? pendingDeleteAgreement;
     private PriceList? pendingDeleteList;
@@ -811,6 +885,9 @@
         }
     }
 
+    protected override async Task OnInitializedAsync() =>
+        actor = (await AuthState.GetAuthenticationStateAsync()).User.Identity?.Name;
+
     protected override async Task OnParametersSetAsync() => await LoadAsync();
 
     private void Show(View next)
@@ -831,6 +908,7 @@
             fee = await Contracts.CalculateBaseFeeAsync(Customer.Id, at);
             agreements = await Contracts.ListPortfolioAgreementsAsync(Customer.Id);
             contacts = await Contracts.ListContactsAsync(Customer.Id);
+            domains = await Contracts.ListEmailDomainsAsync(Customer.Id);
 
             // A customer's own lists if any have been negotiated, otherwise the tenant's.
             priceLists = await Contracts.ListPriceListsAsync(Customer.TenantId, Customer.Id);
@@ -931,6 +1009,63 @@
         catch (Exception ex)
         {
             Toasts.Error($"Could not save: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task AddDomainAsync()
+    {
+        if (string.IsNullOrWhiteSpace(newDomain))
+        {
+            Toasts.Error("A domain is required.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            (CustomerEmailDomain? added, string? refused) = await Contracts.AddEmailDomainAsync(
+                Customer.TenantId, Customer.Id, newDomain, newDomainNotes, actor);
+
+            if (refused is not null)
+            {
+                Toasts.Error(refused);
+                return;
+            }
+
+            newDomain = null;
+            newDomainNotes = null;
+            Toasts.Success($"Mail from {added!.Domain} is now placed with {Customer.Name}.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not register: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DeleteDomainAsync()
+    {
+        if (pendingDeleteDomain is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Contracts.DeleteEmailDomainAsync(pendingDeleteDomain.Id);
+            pendingDeleteDomain = null;
+            await LoadAsync();
         }
         finally
         {
@@ -1196,12 +1331,18 @@
             ? "none in force"
             : $"in force since {InForceList.EffectiveFrom.ToLocalTime():MMM yyyy}";
 
-    private string ContactSummary() =>
-        contacts.Count == 0
+    private string ContactSummary()
+    {
+        string roles = contacts.Count == 0
             ? "nobody named"
             : MissingRequiredContacts.Count == 0
                 ? "all roles filled"
                 : $"{MissingRequiredContacts.Count} role{(MissingRequiredContacts.Count == 1 ? "" : "s")} empty";
+
+        return domains.Count == 0
+            ? $"{roles} · no mail domains"
+            : $"{roles} · {domains.Count} mail domain{(domains.Count == 1 ? "" : "s")}";
+    }
 
     private static string RoleName(ContractContactRole role) => role switch
     {

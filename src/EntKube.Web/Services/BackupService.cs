@@ -203,6 +203,7 @@ public class BackupService(
             AppServiceDependencies = await db.AppServiceDependencies.AsNoTracking().ToListAsync(),
             EndOfLifeNotices = await db.EndOfLifeNotices.AsNoTracking().ToListAsync(),
             SupportMailboxes = await db.SupportMailboxes.AsNoTracking().ToListAsync(),
+            CustomerEmailDomains = await db.CustomerEmailDomains.AsNoTracking().ToListAsync(),
             MailTriageRules = await db.MailTriageRules.AsNoTracking().ToListAsync(),
             InboundMailMessages = await db.InboundMailMessages.AsNoTracking().ToListAsync(),
             MailSuggestions = await db.MailSuggestions.AsNoTracking().ToListAsync(),
@@ -532,6 +533,7 @@ public class BackupService(
             await InsertEntities(db, db.AppServiceDependencies, bundle.AppServiceDependencies);
             await InsertEntities(db, db.EndOfLifeNotices, bundle.EndOfLifeNotices);
             await InsertEntities(db, db.SupportMailboxes, bundle.SupportMailboxes);
+            await InsertEntities(db, db.CustomerEmailDomains, bundle.CustomerEmailDomains);
             await InsertEntities(db, db.MailTriageRules, bundle.MailTriageRules);
             await InsertEntities(db, db.InboundMailMessages, bundle.InboundMailMessages);
             await InsertEntities(db, db.MailSuggestions, bundle.MailSuggestions);

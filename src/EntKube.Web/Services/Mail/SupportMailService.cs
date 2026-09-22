@@ -49,6 +49,29 @@ public class SupportMailService(
         message.Id = message.Id == Guid.Empty ? Guid.NewGuid() : message.Id;
         message.CustomerId ??= await MatchCustomerAsync(db, message.TenantId, message.FromAddress, ct);
 
+        message.Suggestions.AddRange(await ProposeAsync(db, message, ct));
+        message.State = message.Suggestions.Count > 0
+            ? MailTriageState.Proposed
+            : MailTriageState.Received;
+
+        db.InboundMailMessages.Add(message);
+        await db.SaveChangesAsync(ct);
+
+        return message;
+    }
+
+    /// <summary>
+    /// What the analyst makes of a message, given everything known about who sent it.
+    ///
+    /// <para>Separated from ingestion because it has to be able to run twice. Almost
+    /// everything the analyst can say depends on the customer having been placed — which
+    /// application is named is decided against <em>that customer's</em> applications, and
+    /// the hour bank is theirs — so a message that arrives unplaced and is assigned by hand
+    /// afterwards deserves the analysis it could not have had the first time.</para>
+    /// </summary>
+    private async Task<IReadOnlyList<MailSuggestion>> ProposeAsync(
+        ApplicationDbContext db, InboundMailMessage message, CancellationToken ct)
+    {
         Customer? customer = message.CustomerId is Guid customerId
             ? await db.Customers.AsNoTracking().FirstOrDefaultAsync(c => c.Id == customerId, ct)
             : null;
@@ -75,16 +98,115 @@ public class SupportMailService(
 
         MailTriageRuleSet ruleSet = await rules.GetEffectiveAsync(message.TenantId, ct);
 
-        IReadOnlyList<MailSuggestion> suggestions = await analyst.AnalyseAsync(
+        return await analyst.AnalyseAsync(
             new MailContext(message, customer, apps, openTickets, bankSpent, ruleSet), ct);
+    }
 
-        message.Suggestions.AddRange(suggestions);
-        message.State = suggestions.Count > 0 ? MailTriageState.Proposed : MailTriageState.Received;
+    /// <summary>
+    /// Says who a message was from, when nothing placed it automatically, and analyses it
+    /// again now that the answer is known.
+    /// </summary>
+    /// <param name="rememberDomain">
+    /// Also add the sender's domain to that customer's register, so the next message from
+    /// anyone there is placed without being asked about. Offered rather than done, because
+    /// it is a statement about every future sender at that domain and not only this one.
+    /// </param>
+    public async Task<InboundMailMessage?> AssignCustomerAsync(
+        Guid messageId, Guid customerId, string actor, bool rememberDomain = false,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        db.InboundMailMessages.Add(message);
+        InboundMailMessage? message = await db.InboundMailMessages
+            .Include(m => m.Suggestions)
+            .FirstOrDefaultAsync(m => m.Id == messageId, ct);
+
+        if (message is null)
+        {
+            return null;
+        }
+
+        Customer? customer = await db.Customers
+            .FirstOrDefaultAsync(c => c.Id == customerId && c.TenantId == message.TenantId, ct);
+
+        if (customer is null)
+        {
+            throw new InvalidOperationException("That customer is not in this tenant.");
+        }
+
+        message.CustomerId = customerId;
+
+        // Only the proposals nobody has acted on. A suggestion already accepted or
+        // rejected is a record of what a person decided, not a working note.
+        //
+        // Removed from the collection and not also from the set: the relationship cascades,
+        // so dropping the orphan is the delete. Doing both marks the same row deleted twice
+        // and the second attempt finds nothing to delete.
+        foreach (MailSuggestion stale in
+            message.Suggestions.Where(s => s.State == MailSuggestionState.Pending).ToList())
+        {
+            message.Suggestions.Remove(stale);
+        }
+
+        IReadOnlyList<MailSuggestion> fresh = await ProposeAsync(db, message, ct);
+
+        // Added to the set explicitly, not merely hung off the tracked parent. The analyst
+        // stamps each suggestion with a fresh Guid, and EF reads a key that is already set
+        // as "this row exists" — so discovering them through the navigation marks them
+        // Modified and issues an UPDATE against a row that was never inserted. Ingestion
+        // gets away with it only because Add on the parent marks the whole graph Added.
+        db.Set<MailSuggestion>().AddRange(fresh);
+        message.Suggestions.AddRange(fresh);
+
+        if (message.State is MailTriageState.Received or MailTriageState.Proposed)
+        {
+            message.State = message.Suggestions.Any(s => s.State == MailSuggestionState.Pending)
+                ? MailTriageState.Proposed
+                : MailTriageState.Received;
+        }
+
+        if (rememberDomain && SenderDomain.Of(message.FromAddress) is string domain)
+        {
+            await RememberDomainAsync(db, message.TenantId, customerId, domain, actor, ct);
+        }
+
         await db.SaveChangesAsync(ct);
 
         return message;
+    }
+
+    /// <summary>
+    /// Adds a domain to a customer's register, unless somebody already claimed it or it
+    /// belongs to everybody.
+    /// </summary>
+    private static async Task RememberDomainAsync(
+        ApplicationDbContext db, Guid tenantId, Guid customerId, string domain, string actor,
+        CancellationToken ct)
+    {
+        if (SenderDomain.PublicProviders.Contains(domain))
+        {
+            // Registering a public provider would hand every consumer address at it to one
+            // customer. Assigning this one message still stands; the register does not.
+            return;
+        }
+
+        bool taken = await db.CustomerEmailDomains
+            .AnyAsync(d => d.TenantId == tenantId && d.Domain == domain, ct);
+
+        if (taken)
+        {
+            return;
+        }
+
+        db.CustomerEmailDomains.Add(new CustomerEmailDomain
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customerId,
+            Domain = domain,
+            AddedBy = actor,
+            Notes = "Added from the support inbox.",
+        });
     }
 
     public async Task<List<InboundMailMessage>> GetQueueAsync(
@@ -221,9 +343,20 @@ public class SupportMailService(
     }
 
     /// <summary>
-    /// The customer a sender belongs to, from the §23 contact register. Exact address only:
-    /// guessing by domain would attach one customer's mail to another's tickets, and the
-    /// register exists precisely so this does not have to be guessed.
+    /// The customer a sender belongs to. Two registers, in order.
+    ///
+    /// <para><b>The §23 contacts first</b>, by exact address. Somebody named in the
+    /// agreement is the strongest statement there is about who a sender is, and it beats a
+    /// domain even where both would answer — a consultant at another company named as a
+    /// customer's technical contact belongs to that customer, whatever their address says.</para>
+    ///
+    /// <para><b>Then the customer's registered domains</b>, longest match first. This is
+    /// still not guessing: somebody stated that mail from this domain is that customer's.
+    /// It exists for the eighty people at a customer who write in once and were never going
+    /// to be listed individually.</para>
+    ///
+    /// <para>No match is a real answer and leaves the message unplaced, where the inbox
+    /// flags it and an operator says who it was.</para>
     /// </summary>
     private static async Task<Guid?> MatchCustomerAsync(
         ApplicationDbContext db, Guid tenantId, string fromAddress, CancellationToken ct)
@@ -234,6 +367,22 @@ public class SupportMailService(
             .Where(c => c.TenantId == tenantId && c.Email != null && c.IsActive)
             .FirstOrDefaultAsync(c => c.Email!.ToLower() == address, ct);
 
-        return contact?.CustomerId;
+        if (contact is not null)
+        {
+            return contact.CustomerId;
+        }
+
+        string? domain = SenderDomain.Of(address);
+
+        if (domain is null)
+        {
+            return null;
+        }
+
+        List<CustomerEmailDomain> registered = await db.CustomerEmailDomains.AsNoTracking()
+            .Where(d => d.TenantId == tenantId)
+            .ToListAsync(ct);
+
+        return SenderDomain.BestMatch(registered, d => d.Domain, domain)?.CustomerId;
     }
 }

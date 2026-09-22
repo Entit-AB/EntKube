@@ -187,6 +187,29 @@ carrying only `References` threads on its last entry, and the `Date` header is n
 trusted past our own clock — it is written by the sender, and a future date would
 start a response clock before the message existed.
 
+### Placing a message
+
+Two registers, in order. The **§23 contacts** by exact address — somebody named in the
+agreement is the strongest statement there is about who a sender is, and it beats a
+domain even where both would answer. Then the **customer's registered mail domains**,
+longest match first, for the eighty people at a customer who write in once and were
+never going to be listed individually.
+
+A registered domain covers its subdomains, on a dot boundary — `capio.se` places
+`it.capio.se` but not `notcapio.se`, which anybody in the world can register and whose
+mail would otherwise be triaged straight into a customer's queue.
+[`SenderDomain`](../src/EntKube.Web/Services/Mail/SenderDomain.cs) holds that rule, pure
+and tested, and refuses to register a public provider: handing gmail.com to one customer
+would place every stranger's mail with them, and the mistake is invisible afterwards.
+
+**Placing the customer is what makes everything else possible.** An application name is
+recognised among *that customer's* applications, and the hour bank is theirs — so an
+unplaced message cannot be placed on an application either. That is why a message nobody
+recognised can be assigned by hand from the inbox, and why doing so **analyses it again**:
+the first pass had no customer and could say almost nothing. Assigning can also remember
+the sender's domain, which is offered rather than done, because it is a statement about
+every future sender there and not only this one.
+
 [`SupportMailboxService`](../src/EntKube.Web/Services/Mail/SupportMailboxService.cs)
 stores settings per tenant with the password in the tenant's vault. A new mailbox
 starts **switched off**; five failed polls in a row stop it, because presenting a
