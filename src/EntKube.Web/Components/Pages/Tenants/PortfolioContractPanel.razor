@@ -16,6 +16,20 @@
                OnConfirm="DeleteContactAsync"
                OnCancel="() => pendingDeleteContactId = null" />
 
+<ConfirmDialog Visible="@(pendingDeleteAgreement is not null)"
+               Message="@($"Delete the Annex B effective {pendingDeleteAgreement?.EffectiveFrom:yyyy-MM-dd}? Months that resolved their pricing model from it will fall back to whichever agreement preceded it. To end an arrangement, record a new one with a later date instead.")"
+               ConfirmText="Delete it"
+               IsBusy="busy"
+               OnConfirm="DeleteAgreementAsync"
+               OnCancel="() => pendingDeleteAgreement = null" />
+
+<ConfirmDialog Visible="@(pendingDeleteList is not null)"
+               Message="@($"Delete the price list effective {pendingDeleteList?.EffectiveFrom:yyyy-MM-dd} and all {pendingDeleteList?.Entries.Count} amounts in it? Every month priced from it — including ones already reported — will reprice from whichever list preceded it.")"
+               ConfirmText="Delete it"
+               IsBusy="busy"
+               OnConfirm="DeleteListAsync"
+               OnCancel="() => pendingDeleteList = null" />
+
 <LoadingPanel Loading="@loading" Error="@error">
 @if (!loading)
 {
@@ -173,6 +187,7 @@
                         <th>Pricing model</th>
                         <th>Hour bank</th>
                         <th>Notes</th>
+                        <th></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -190,6 +205,13 @@
                             <td>@(agreement.PricingModel == PricingModel.HourBank ? "Model A — hour bank" : "Model B — time and materials")</td>
                             <td>@(agreement.HourBankHoursPerMonth is null ? "—" : $"{agreement.HourBankHoursPerMonth:0.##} h")</td>
                             <td class="small text-muted">@agreement.Notes</td>
+                            <td class="text-end">
+                                <button class="btn btn-sm btn-outline-danger"
+                                        aria-label="@($"Delete the Annex B effective {agreement.EffectiveFrom:yyyy-MM-dd}")"
+                                        @onclick="() => pendingDeleteAgreement = agreement">
+                                    <span class="bi bi-trash"></span>
+                                </button>
+                            </td>
                         </tr>
                     }
                 </tbody>
@@ -381,8 +403,9 @@
                         <th>Effective from</th>
                         <th>Entries</th>
                         <th>S1 / S4 window fee</th>
-                        <th>Ordinary timme</th>
+                        <th>Ordinary hour</th>
                         <th>Notes</th>
+                        <th></th>
                     </tr>
                 </thead>
                 <tbody>
@@ -407,10 +430,163 @@
                                 @Money(ContractService.Lookup(list, PriceKind.HourlyRate, nameof(SupportTimeCategory.Ordinary)) ?? 0m)
                             </td>
                             <td class="small text-muted">@list.Notes</td>
+                            <td class="text-end text-nowrap">
+                                <button class="btn btn-sm btn-outline-secondary me-1"
+                                        @onclick="() => OpenEditor(list)">
+                                    @(editingList?.Id == list.Id ? "Close" : "Amounts")
+                                </button>
+                                <button class="btn btn-sm btn-outline-danger"
+                                        aria-label="@($"Delete the price list effective {list.EffectiveFrom:yyyy-MM-dd}")"
+                                        @onclick="() => pendingDeleteList = list">
+                                    <span class="bi bi-trash"></span>
+                                </button>
+                            </td>
                         </tr>
                     }
                 </tbody>
             </table>
+        </div>
+    }
+
+    @if (editingList is not null)
+    {
+        <div class="card border-primary mb-3">
+            <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
+                <div>
+                    <strong class="small">
+                        Amounts — effective @editingList.EffectiveFrom.ToLocalTime().ToString("yyyy-MM-dd")
+                    </strong>
+                    <span class="text-muted small ms-2">@editingList.Currency, excl. VAT</span>
+                </div>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => editingList = null">
+                    Close
+                </button>
+            </div>
+            <div class="card-body">
+                <div class="alert alert-warning py-2 small">
+                    <i class="bi bi-exclamation-triangle me-1"></i>
+                    Editing an amount reprices <strong>every month that used this list</strong>,
+                    including ones already reported — §28 gives the customer thirty days to dispute
+                    a report, and a figure that moves underneath one is how that starts. Use this to
+                    enter what was signed or to fix a typo. To change prices going forward, add a
+                    list with a later effective date.
+                </div>
+
+                <div class="row g-2 align-items-end mb-3">
+                    <div class="col-md-3">
+                        <label class="form-label small text-muted">Effective from</label>
+                        <input type="date" class="form-control form-control-sm" @bind="headerEffectiveFrom" />
+                    </div>
+                    <div class="col-md-7">
+                        <label class="form-label small text-muted">Notes</label>
+                        <input class="form-control form-control-sm" @bind="headerNotes" />
+                    </div>
+                    <div class="col-md-2 text-end">
+                        <AsyncButton CssClass="btn-sm btn-outline-primary" OnClick="SaveHeaderAsync">
+                            Save
+                        </AsyncButton>
+                    </div>
+                </div>
+
+                @foreach (PriceKind kind in Enum.GetValues<PriceKind>())
+                {
+                    List<PriceListEntry> group =
+                        [.. editingList.Entries.Where(e => e.Kind == kind).OrderBy(e => e.SortOrder)];
+
+                    <h6 class="small text-muted mt-3 mb-2">@KindName(kind)</h6>
+
+                    @if (group.Count == 0)
+                    {
+                        <div class="text-muted small mb-2">Nothing priced.</div>
+                    }
+                    else
+                    {
+                        <div class="table-responsive mb-2">
+                            <table class="table table-sm align-middle mb-0">
+                                <tbody>
+                                    @foreach (PriceListEntry entry in group)
+                                    {
+                                        <tr>
+                                            <td class="small" style="width: 40%">@KeyLabel(entry)</td>
+                                            <td style="width: 30%">
+                                                <div class="input-group input-group-sm">
+                                                    <input type="number" step="1" class="form-control"
+                                                           value="@entry.Amount"
+                                                           @onchange="e => StageAmount(entry, e.Value?.ToString())" />
+                                                    <span class="input-group-text">kr</span>
+                                                </div>
+                                            </td>
+                                            <td style="width: 20%">
+                                                @if (entry.Kind == PriceKind.HourBankTier)
+                                                {
+                                                    <div class="input-group input-group-sm">
+                                                        <input type="number" step="1" class="form-control"
+                                                               value="@entry.Hours"
+                                                               @onchange="e => StageHours(entry, e.Value?.ToString())" />
+                                                        <span class="input-group-text">h</span>
+                                                    </div>
+                                                }
+                                            </td>
+                                            <td class="text-end">
+                                                <button class="btn btn-sm btn-outline-danger"
+                                                        aria-label="@($"Remove the price for {KeyLabel(entry)}")"
+                                                        @onclick="() => RemoveEntryAsync(entry)">
+                                                    <span class="bi bi-trash"></span>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                }
+
+                <div class="d-flex justify-content-between align-items-end mt-3 pt-3 border-top">
+                    <div class="row g-2 align-items-end flex-grow-1 me-3">
+                        <div class="col-md-3">
+                            <label class="form-label small text-muted">Add a line</label>
+                            <select class="form-select form-select-sm" @bind="newEntryKind">
+                                @foreach (PriceKind kind in Enum.GetValues<PriceKind>())
+                                {
+                                    <option value="@kind">@KindName(kind)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">For</label>
+                            <input class="form-control form-control-sm" @bind="newEntryKey"
+                                   placeholder="@KeyHint(newEntryKind)" />
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small text-muted">Amount</label>
+                            <input type="number" step="1" class="form-control form-control-sm"
+                                   @bind="newEntryAmount" />
+                        </div>
+                        @if (newEntryKind == PriceKind.HourBankTier)
+                        {
+                            <div class="col-md-2">
+                                <label class="form-label small text-muted">Hours</label>
+                                <input type="number" step="1" class="form-control form-control-sm"
+                                       @bind="newEntryHours" />
+                            </div>
+                        }
+                    </div>
+                    <div class="text-end">
+                        <AsyncButton CssClass="btn-sm btn-outline-primary" OnClick="AddEntryAsync">Add</AsyncButton>
+                    </div>
+                </div>
+
+                @if (staged.Count > 0)
+                {
+                    <div class="text-end mt-3">
+                        <span class="text-muted small me-2">@staged.Count unsaved</span>
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveAmountsAsync">
+                            Save amounts
+                        </AsyncButton>
+                    </div>
+                }
+            </div>
         </div>
     }
 }
@@ -440,6 +616,23 @@
     private ContractContact newContact = NewContact();
 
     private Guid? pendingDeleteContactId;
+    private PortfolioAgreement? pendingDeleteAgreement;
+    private PriceList? pendingDeleteList;
+
+    private PriceList? editingList;
+    private DateTime? headerEffectiveFrom;
+    private string? headerNotes;
+
+    /// <summary>
+    /// Amounts typed but not yet saved, keyed by entry. Held rather than written on every
+    /// keystroke, because each save reprices whatever used this list.
+    /// </summary>
+    private readonly Dictionary<Guid, (decimal Amount, decimal? Hours)> staged = [];
+
+    private PriceKind newEntryKind = PriceKind.KnowledgeFee;
+    private string newEntryKey = "";
+    private decimal newEntryAmount;
+    private decimal? newEntryHours;
 
     private bool indexing;
     private DateTime? indexFrom = new DateTime(DateTime.UtcNow.Year + 1, 1, 1);
@@ -553,6 +746,203 @@
             busy = false;
         }
     }
+
+    private void OpenEditor(PriceList list)
+    {
+        if (editingList?.Id == list.Id)
+        {
+            editingList = null;
+            return;
+        }
+
+        editingList = list;
+        headerEffectiveFrom = list.EffectiveFrom.ToLocalTime().Date;
+        headerNotes = list.Notes;
+        staged.Clear();
+    }
+
+    private void StageAmount(PriceListEntry entry, string? value)
+    {
+        if (decimal.TryParse(value, out decimal amount))
+        {
+            staged[entry.Id] = (amount, staged.TryGetValue(entry.Id, out var s) ? s.Hours : entry.Hours);
+        }
+    }
+
+    private void StageHours(PriceListEntry entry, string? value)
+    {
+        decimal? hours = decimal.TryParse(value, out decimal parsed) ? parsed : null;
+        staged[entry.Id] = (staged.TryGetValue(entry.Id, out var s) ? s.Amount : entry.Amount, hours);
+    }
+
+    private async Task SaveAmountsAsync()
+    {
+        if (editingList is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            foreach ((Guid entryId, (decimal amount, decimal? hours)) in staged)
+            {
+                PriceListEntry? entry = editingList.Entries.FirstOrDefault(e => e.Id == entryId);
+
+                if (entry is not null)
+                {
+                    await Contracts.SavePriceListEntryAsync(
+                        editingList.Id, entry.Kind, entry.Key, amount, hours);
+                }
+            }
+
+            int saved = staged.Count;
+            staged.Clear();
+            Toasts.Success($"{saved} amount{(saved == 1 ? "" : "s")} saved.");
+            await ReloadEditorAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not save: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task SaveHeaderAsync()
+    {
+        if (editingList is null || headerEffectiveFrom is null)
+        {
+            Toasts.Error("An effective date is required.");
+            return;
+        }
+
+        await Contracts.UpdatePriceListAsync(
+            editingList.Id,
+            DateTime.SpecifyKind(headerEffectiveFrom.Value.Date, DateTimeKind.Utc),
+            headerNotes);
+
+        Toasts.Success("Saved.");
+        await ReloadEditorAsync();
+    }
+
+    private async Task AddEntryAsync()
+    {
+        if (editingList is null || string.IsNullOrWhiteSpace(newEntryKey))
+        {
+            Toasts.Error("Say what the amount is for.");
+            return;
+        }
+
+        try
+        {
+            await Contracts.SavePriceListEntryAsync(
+                editingList.Id, newEntryKind, newEntryKey.Trim(), newEntryAmount,
+                newEntryKind == PriceKind.HourBankTier ? newEntryHours : null);
+
+            newEntryKey = "";
+            newEntryAmount = 0m;
+            newEntryHours = null;
+            await ReloadEditorAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not add: {ex.Message}");
+        }
+    }
+
+    private async Task RemoveEntryAsync(PriceListEntry entry)
+    {
+        await Contracts.DeletePriceListEntryAsync(entry.Id);
+        staged.Remove(entry.Id);
+        await ReloadEditorAsync();
+    }
+
+    private async Task ReloadEditorAsync()
+    {
+        Guid? open = editingList?.Id;
+        await LoadAsync();
+        editingList = open is Guid id ? priceLists.FirstOrDefault(p => p.Id == id) : null;
+    }
+
+    private async Task DeleteAgreementAsync()
+    {
+        if (pendingDeleteAgreement is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Contracts.DeletePortfolioAgreementAsync(pendingDeleteAgreement.Id);
+            pendingDeleteAgreement = null;
+            await LoadAsync();
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DeleteListAsync()
+    {
+        if (pendingDeleteList is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            if (editingList?.Id == pendingDeleteList.Id)
+            {
+                editingList = null;
+            }
+
+            await Contracts.DeletePriceListAsync(pendingDeleteList.Id);
+            pendingDeleteList = null;
+            await LoadAsync();
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private static string KindName(PriceKind kind) => kind switch
+    {
+        PriceKind.WindowFee => "Window fee, per support window",
+        PriceKind.KnowledgeFee => "Knowledge fee, per service level",
+        PriceKind.HourBankTier => "Hour bank tiers",
+        PriceKind.HourlyRate => "Hourly rates, per time category",
+        PriceKind.OneOffFee => "One-off fees",
+        _ => kind.ToString(),
+    };
+
+    private static string KeyHint(PriceKind kind) => kind switch
+    {
+        PriceKind.WindowFee => "S1, S2, S3 or S4",
+        PriceKind.KnowledgeFee => "Simple, Standard, Complex, Instance, InstanceReduced",
+        PriceKind.HourBankTier => "the number of hours, e.g. 20",
+        PriceKind.HourlyRate => "Ordinary, EveningMorning, WeekendOrRedDay, Night, Callout, Development",
+        PriceKind.OneOffFee => "OnboardingStandard, NewInstance",
+        _ => "",
+    };
+
+    /// <summary>The key as a person reads it — the stored key is an enum name.</summary>
+    private static string KeyLabel(PriceListEntry entry) => entry.Kind switch
+    {
+        PriceKind.HourBankTier => $"{entry.Key} hours per month",
+        PriceKind.KnowledgeFee when entry.Key == ContractPricing.ReducedInstanceKey =>
+            "Instance, from the 21st",
+        _ => entry.Key,
+    };
 
     private async Task DeleteContactAsync()
     {

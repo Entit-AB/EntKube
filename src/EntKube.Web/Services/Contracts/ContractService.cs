@@ -378,6 +378,141 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         }
     }
 
+    /// <summary>
+    /// Removes a recorded Annex B.
+    ///
+    /// <para>For a row that should not be there — a mistyped date, a change that was
+    /// entered twice. Not the way to end an arrangement: that is a new agreement with a
+    /// later effective date, which leaves the old one readable. Deleting the one that was
+    /// in force changes which terms a past month resolves to.</para>
+    /// </summary>
+    public async Task DeletePortfolioAgreementAsync(Guid id, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        PortfolioAgreement? agreement = await db.PortfolioAgreements.FindAsync([id], ct);
+
+        if (agreement is not null)
+        {
+            db.PortfolioAgreements.Remove(agreement);
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    /// <summary>
+    /// Removes a price list and everything in it.
+    ///
+    /// <para><b>This reprices the past.</b> A month resolves its prices from the list in
+    /// force on its own dates, so deleting one makes every month that used it fall back to
+    /// whichever list preceded it — including months already reported and invoiced. It is
+    /// here for a list entered by mistake, not for superseding one.</para>
+    /// </summary>
+    public async Task DeletePriceListAsync(Guid id, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        PriceList? list = await db.PriceLists
+            .Include(p => p.Entries)
+            .FirstOrDefaultAsync(p => p.Id == id, ct);
+
+        if (list is not null)
+        {
+            db.PriceLists.Remove(list);
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    /// <summary>
+    /// Changes a price list's own details — when it takes effect, and the note explaining
+    /// what it is.
+    /// </summary>
+    public async Task UpdatePriceListAsync(
+        Guid id, DateTime effectiveFrom, string? notes, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        PriceList? list = await db.PriceLists.FirstOrDefaultAsync(p => p.Id == id, ct);
+
+        if (list is not null)
+        {
+            list.EffectiveFrom = effectiveFrom;
+            list.Notes = notes;
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    /// <summary>
+    /// Sets one amount in a price list, adding the line if the list does not carry it yet.
+    ///
+    /// <para>Needed because <see cref="StandardPriceList"/> is a template: the amounts it
+    /// seeds are the standard ones, and what governs a customer is what they signed. It is
+    /// also how a typo gets fixed.</para>
+    ///
+    /// <para><b>An edit reprices every month that used this list</b>, including ones
+    /// already reported — §28 gives the customer thirty days to dispute a report, and a
+    /// figure that changes underneath one is how that dispute starts. To change prices
+    /// going forward, add a list with a later effective date instead.</para>
+    /// </summary>
+    public async Task<PriceListEntry> SavePriceListEntryAsync(
+        Guid priceListId,
+        PriceKind kind,
+        string key,
+        decimal amount,
+        decimal? hours = null,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        PriceListEntry? entry = await db.PriceListEntries
+            .FirstOrDefaultAsync(e => e.PriceListId == priceListId && e.Kind == kind && e.Key == key, ct);
+
+        if (entry is null)
+        {
+            int nextOrder = await db.PriceListEntries
+                .Where(e => e.PriceListId == priceListId)
+                .Select(e => (int?)e.SortOrder)
+                .MaxAsync(ct) ?? -1;
+
+            entry = new PriceListEntry
+            {
+                Id = Guid.NewGuid(),
+                PriceListId = priceListId,
+                Kind = kind,
+                Key = key,
+                Amount = amount,
+                Hours = hours,
+                SortOrder = nextOrder + 1,
+            };
+
+            db.PriceListEntries.Add(entry);
+        }
+        else
+        {
+            entry.Amount = amount;
+            entry.Hours = hours;
+        }
+
+        await db.SaveChangesAsync(ct);
+        return entry;
+    }
+
+    /// <summary>
+    /// Removes one amount from a price list. Anything priced from that line then reports
+    /// as unpriced rather than as free, which is the point of reporting gaps at all.
+    /// </summary>
+    public async Task DeletePriceListEntryAsync(Guid entryId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        PriceListEntry? entry = await db.PriceListEntries.FindAsync([entryId], ct);
+
+        if (entry is not null)
+        {
+            db.PriceListEntries.Remove(entry);
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
     public async Task<List<PriceList>> ListPriceListsAsync(
         Guid tenantId, Guid? customerId, CancellationToken ct = default)
     {

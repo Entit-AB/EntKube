@@ -565,6 +565,165 @@ public class ContractModelTests : IDisposable
         (await contracts.ListContactsAsync(customerId)).Should().BeEmpty();
     }
 
+    // ---- Deleting and correcting -----------------------------------------------------------
+
+    /// <summary>
+    /// A row entered by mistake has to be removable. Deleting the one in force changes
+    /// which terms a past month resolves to, which is why the UI says so before it happens.
+    /// </summary>
+    [Fact]
+    public async Task An_Annex_B_can_be_deleted_and_the_earlier_one_takes_over()
+    {
+        PortfolioAgreement first = await contracts.RecordPortfolioAgreementAsync(new PortfolioAgreement
+        {
+            TenantId = tenantId, CustomerId = customerId, EffectiveFrom = January,
+            PricingModel = PricingModel.TimeAndMaterials,
+        });
+
+        PortfolioAgreement mistake = await contracts.RecordPortfolioAgreementAsync(new PortfolioAgreement
+        {
+            TenantId = tenantId, CustomerId = customerId, EffectiveFrom = June,
+            PricingModel = PricingModel.HourBank, HourBankHoursPerMonth = 20m,
+        });
+
+        await contracts.DeletePortfolioAgreementAsync(mistake.Id);
+
+        PortfolioAgreement? inForce = await contracts.GetPortfolioAgreementAsync(
+            customerId, new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        inForce!.Id.Should().Be(first.Id);
+        (await contracts.ListPortfolioAgreementsAsync(customerId)).Should().ContainSingle();
+    }
+
+    /// <summary>
+    /// Deleting a price list reprices every month that used it — the earlier list takes
+    /// over, and with it the earlier amounts.
+    /// </summary>
+    [Fact]
+    public async Task Deleting_a_price_list_reprices_from_the_one_before_it()
+    {
+        DateTime nextYear = new(2027, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        PriceList? indexed = await contracts.IndexPriceListAsync(tenantId, null, nextYear, 10m, "nils");
+
+        AddContract(AddApp("Booking"), ManagementLevel.Standard, SupportWindow.S1);
+
+        BaseFeeBreakdown after = await contracts.CalculateBaseFeeAsync(customerId, nextYear);
+        after.WindowFee.Should().Be(6_600m);
+
+        await contracts.DeletePriceListAsync(indexed!.Id);
+
+        BaseFeeBreakdown reverted = await contracts.CalculateBaseFeeAsync(customerId, nextYear);
+        reverted.WindowFee.Should().Be(6_000m);
+    }
+
+    [Fact]
+    public async Task Deleting_a_price_list_takes_its_amounts_with_it()
+    {
+        PriceList extra = StandardPriceList.Create(tenantId, June);
+        await contracts.AddPriceListAsync(extra);
+
+        await contracts.DeletePriceListAsync(extra.Id);
+
+        db.PriceListEntries.Count(e => e.PriceListId == extra.Id).Should().Be(0);
+    }
+
+    /// <summary>
+    /// The standard list is a template; what governs a customer is what they signed. Until
+    /// an amount could be edited, there was no way to record the difference.
+    /// </summary>
+    [Fact]
+    public async Task An_amount_can_be_corrected_to_what_was_signed()
+    {
+        PriceList list = (await contracts.ListPriceListsAsync(tenantId, null)).Single();
+
+        await contracts.SavePriceListEntryAsync(
+            list.Id, PriceKind.WindowFee, nameof(SupportWindow.S1), 7_500m);
+
+        AddContract(AddApp("Booking"), ManagementLevel.Standard, SupportWindow.S1);
+
+        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(customerId, June);
+
+        fee.WindowFee.Should().Be(7_500m);
+    }
+
+    [Fact]
+    public async Task An_amount_the_list_did_not_carry_can_be_added()
+    {
+        PriceList list = (await contracts.ListPriceListsAsync(tenantId, null)).Single();
+
+        // §10.2 quotes Needs investigation after a review, so the standard list has no
+        // amount for it — which is exactly the case where one gets typed in later.
+        await contracts.SavePriceListEntryAsync(
+            list.Id, PriceKind.KnowledgeFee, nameof(ManagementLevel.NeedsInvestigation), 2_750m);
+
+        AddContract(AddApp("New system"), ManagementLevel.NeedsInvestigation, SupportWindow.S1);
+
+        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(customerId, June);
+
+        fee.Unpriced.Should().BeEmpty();
+        fee.KnowledgeFees.Should().Be(2_750m);
+    }
+
+    /// <summary>
+    /// Removing an amount makes whatever used it report as unpriced rather than as free —
+    /// the same principle the gap reporting rests on everywhere else.
+    /// </summary>
+    [Fact]
+    public async Task Removing_an_amount_makes_what_used_it_unpriced()
+    {
+        PriceList list = (await contracts.ListPriceListsAsync(tenantId, null)).Single();
+        PriceListEntry standard = list.Entries
+            .Single(e => e.Kind == PriceKind.KnowledgeFee && e.Key == nameof(ManagementLevel.Standard));
+
+        await contracts.DeletePriceListEntryAsync(standard.Id);
+
+        AddContract(AddApp("Booking"), ManagementLevel.Standard, SupportWindow.S1);
+
+        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(customerId, June);
+
+        fee.KnowledgeFees.Should().Be(0m);
+        fee.Unpriced.Should().ContainSingle().Which.Should().Contain("Booking");
+    }
+
+    [Fact]
+    public async Task Editing_an_amount_twice_updates_rather_than_duplicates()
+    {
+        PriceList list = (await contracts.ListPriceListsAsync(tenantId, null)).Single();
+
+        await contracts.SavePriceListEntryAsync(list.Id, PriceKind.WindowFee, nameof(SupportWindow.S1), 7_000m);
+        await contracts.SavePriceListEntryAsync(list.Id, PriceKind.WindowFee, nameof(SupportWindow.S1), 8_000m);
+
+        db.PriceListEntries
+            .Count(e => e.PriceListId == list.Id && e.Kind == PriceKind.WindowFee
+                        && e.Key == nameof(SupportWindow.S1))
+            .Should().Be(1);
+
+        ContractService.Lookup(
+            await contracts.GetPriceListAsync(tenantId, null, June),
+            PriceKind.WindowFee, nameof(SupportWindow.S1))
+            .Should().Be(8_000m);
+    }
+
+    [Fact]
+    public async Task A_price_list_can_be_redated()
+    {
+        PriceList list = (await contracts.ListPriceListsAsync(tenantId, null)).Single();
+        DateTime moved = new(2026, 4, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        await contracts.UpdatePriceListAsync(list.Id, moved, "Corrected — signed in April.");
+
+        AddContract(AddApp("Booking"), ManagementLevel.Standard, SupportWindow.S1);
+
+        BaseFeeBreakdown march = await contracts.CalculateBaseFeeAsync(
+            customerId, new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc));
+        BaseFeeBreakdown may = await contracts.CalculateBaseFeeAsync(
+            customerId, new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc));
+
+        // Before it took effect there is no list at all, so nothing prices.
+        march.WindowFee.Should().Be(0m);
+        may.WindowFee.Should().Be(6_000m);
+    }
+
     [Fact]
     public async Task An_application_can_only_have_one_contract()
     {
