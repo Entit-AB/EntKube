@@ -3,6 +3,7 @@
 @using EntKube.Web.Services.Tickets
 @inject TicketService Tickets
 @inject ToastService Toasts
+@inject CurrentActor ActorService
 
 @* ═══════════════════════════════════════════════════════════════════
    One ticket, with the actions §14 actually defines and the history
@@ -258,7 +259,7 @@
     @* ───────────── Time ───────────── *@
     <div class="card mb-4">
         <div class="card-body">
-            <TicketTimeLog Ticket="ticket" ActorName="CurrentActor" OnChanged="OnChanged" />
+            <TicketTimeLog Ticket="ticket" ActorName="Actor" OnChanged="OnChanged" />
         </div>
     </div>
 
@@ -318,6 +319,9 @@
 
     private bool IsPaused => ticket?.Pauses.Any(p => p.EndedAt is null) == true;
 
+    protected override async Task OnInitializedAsync() =>
+        resolvedActor = await ActorService.NameAsync();
+
     protected override async Task OnParametersSetAsync() => await LoadAsync();
 
     private async Task LoadAsync()
@@ -359,7 +363,7 @@
 
     private async Task RespondAsync()
     {
-        await Tickets.RecordResponseAsync(TicketId, CurrentActor, DateTime.UtcNow);
+        await Tickets.RecordResponseAsync(TicketId, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Response recorded.");
     }
 
@@ -371,7 +375,7 @@
             return;
         }
 
-        await Tickets.ConfirmPriorityAsync(TicketId, formPriority, formReason, CurrentActor, DateTime.UtcNow);
+        await Tickets.ConfirmPriorityAsync(TicketId, formPriority, formReason, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Priority recorded.");
     }
 
@@ -384,13 +388,13 @@
         }
 
         await Tickets.StartPauseAsync(
-            TicketId, formWaitingOn, formParty, formReason, CurrentActor, DateTime.UtcNow);
+            TicketId, formWaitingOn, formParty, formReason, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Clock paused.");
     }
 
     private async Task EndPauseAsync()
     {
-        await Tickets.EndPauseAsync(TicketId, CurrentActor, DateTime.UtcNow);
+        await Tickets.EndPauseAsync(TicketId, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Clock resumed.");
     }
 
@@ -402,7 +406,7 @@
             return;
         }
 
-        await Tickets.ResolveAsync(TicketId, formReason, CurrentActor, DateTime.UtcNow);
+        await Tickets.ResolveAsync(TicketId, formReason, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Resolved.");
     }
 
@@ -414,13 +418,13 @@
             return;
         }
 
-        await Tickets.RejectAsync(TicketId, formReason, CurrentActor, DateTime.UtcNow);
+        await Tickets.RejectAsync(TicketId, formReason, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Rejected and handed back.");
     }
 
     private async Task CloseAsync()
     {
-        await Tickets.CloseAsync(TicketId, CurrentActor, DateTime.UtcNow);
+        await Tickets.CloseAsync(TicketId, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Closed.");
     }
 
@@ -432,7 +436,7 @@
         }
 
         await Tickets.AddEventAsync(
-            TicketId, TicketEventKind.Note, formReason, CurrentActor, DateTime.UtcNow, formCustomerVisible);
+            TicketId, TicketEventKind.Note, formReason, Actor, DateTime.UtcNow, formCustomerVisible);
         await AfterChangeAsync("Note added.");
     }
 
@@ -441,7 +445,17 @@
     /// history records "unattributed" rather than guessing a name, because §14.6 makes
     /// these entries evidence.
     /// </summary>
+    /// <summary>
+    /// Overrides who is recorded, for a caller that knows better. Normally null, and the
+    /// signed-in user is used — it was a parameter alone, and the ticket queue never
+    /// passed one, so every confirmation and resolution was filed under nobody.
+    /// </summary>
     [Parameter] public string? CurrentActor { get; set; }
+
+    private string? resolvedActor;
+
+    /// <summary>Who this is being done by. Resolved once, used everywhere below.</summary>
+    private string Actor => CurrentActor ?? resolvedActor ?? EntKube.Web.Services.CurrentActor.Unattributed;
 
     private RenderFragment ClockCard(string label, ClockStatus clock, string note) => builder =>
     {

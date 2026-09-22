@@ -3,6 +3,7 @@
 @using EntKube.Web.Services.Knowledge
 @inject KnowledgeService Knowledge
 @inject ToastService Toasts
+@inject CurrentActor ActorService
 
 @* ═══════════════════════════════════════════════════════════════════
    What we know about an application.
@@ -641,7 +642,15 @@
 @code {
     [Parameter, EditorRequired] public Data.App App { get; set; } = null!;
     [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    /// <summary>
+    /// Overrides who is recorded against a revision. Normally null — nothing passed one,
+    /// so every revision was authored by nobody.
+    /// </summary>
     [Parameter] public string? ActorName { get; set; }
+
+    private string? resolvedActor;
+
+    private string Actor => ActorName ?? resolvedActor ?? EntKube.Web.Services.CurrentActor.Unattributed;
 
     private enum View { Overview, Section, Classification, Dependencies, EndOfLife }
 
@@ -671,6 +680,9 @@
         KnowledgeService.ExpectedSections.Where(k => !sections.Any(s => s.Kind == k));
 
     private string MeterClass => health.Percent >= 90 ? "" : health.Percent >= 60 ? "partial" : "poor";
+
+    protected override async Task OnInitializedAsync() =>
+        resolvedActor = await ActorService.NameAsync();
 
     protected override async Task OnParametersSetAsync() => await LoadAsync();
 
@@ -824,7 +836,7 @@
 
         KnowledgeSection saved = await Knowledge.SaveSectionAsync(
             TenantId, App.Id, editing.Id == Guid.Empty ? null : editing.Id,
-            editing.Kind, editing.Title, editing.Body, ActorName, changeSummary);
+            editing.Kind, editing.Title, editing.Body, Actor, changeSummary);
 
         editing = null;
         changeSummary = null;
@@ -837,7 +849,7 @@
 
     private async Task MarkReviewedAsync(Guid sectionId)
     {
-        await Knowledge.MarkReviewedAsync(sectionId, ActorName, DateTime.UtcNow);
+        await Knowledge.MarkReviewedAsync(sectionId, Actor, DateTime.UtcNow);
         Toasts.Success("Confirmed as still true.");
         await LoadAsync();
     }
@@ -858,7 +870,7 @@
     {
         profile.TenantId = TenantId;
         profile.AppId = App.Id;
-        profile.UpdatedBy = ActorName;
+        profile.UpdatedBy = Actor;
 
         await Knowledge.SaveProfileAsync(profile);
         Toasts.Success("Classification saved.");
@@ -906,7 +918,7 @@
     private async Task RecordNoticeAsync(EndOfLifeNotice notice)
     {
         notice.NoticeGivenAt = DateTime.UtcNow;
-        notice.NoticeGivenBy = ActorName;
+        notice.NoticeGivenBy = Actor;
         await Knowledge.SaveEndOfLifeAsync(notice);
         Toasts.Success("Notice recorded — §14.7's three months start now.");
         await LoadAsync();

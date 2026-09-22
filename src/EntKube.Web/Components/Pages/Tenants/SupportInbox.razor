@@ -5,7 +5,7 @@
 @inject SupportMailService Mail
 @inject ToastService Toasts
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
-@inject AuthenticationStateProvider AuthState
+@inject CurrentActor Actor
 
 @* ═══════════════════════════════════════════════════════════════════
    The support mailbox, with what the analyst suggests doing about each
@@ -225,7 +225,6 @@
     private bool showHandled;
     private List<InboundMailMessage> messages = [];
     private List<Customer> customers = [];
-    private string? actor;
 
     /// <summary>The customer picked for each unplaced message, before Place is pressed.</summary>
     private readonly Dictionary<Guid, Guid> assigning = [];
@@ -255,7 +254,7 @@
         try
         {
             await Mail.AssignCustomerAsync(
-                messageId, customerId, actor ?? "unknown", remembering.Contains(messageId));
+                messageId, customerId, await Actor.NameAsync(), remembering.Contains(messageId));
 
             assigning.Remove(messageId);
             remembering.Remove(messageId);
@@ -267,9 +266,6 @@
             Toasts.Error($"Could not place it: {ex.Message}");
         }
     }
-
-    protected override async Task OnInitializedAsync() =>
-        actor = (await AuthState.GetAuthenticationStateAsync()).User.Identity?.Name;
 
     protected override async Task OnParametersSetAsync() => await LoadAsync();
 
@@ -347,7 +343,7 @@
             : null;
 
         Ticket? ticket = await Mail.AcceptAsync(
-            suggestion.Id, ActorName ?? "unattributed", DateTime.UtcNow, chosen);
+            suggestion.Id, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow, chosen);
 
         chosenApps.Remove(suggestion.Id);
 
@@ -360,13 +356,13 @@
 
     private async Task RejectAsync(Guid suggestionId)
     {
-        await Mail.RejectAsync(suggestionId, ActorName ?? "unattributed", DateTime.UtcNow);
+        await Mail.RejectAsync(suggestionId, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow);
         await LoadAsync();
     }
 
     private async Task DismissAsync(Guid messageId)
     {
-        await Mail.DismissAsync(messageId, ActorName ?? "unattributed", DateTime.UtcNow);
+        await Mail.DismissAsync(messageId, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow);
         await LoadAsync();
     }
 

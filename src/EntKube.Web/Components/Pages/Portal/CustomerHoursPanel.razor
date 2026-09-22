@@ -3,6 +3,7 @@
 @using EntKube.Web.Services.Time
 @inject TimeService Time
 @inject ToastService Toasts
+@inject CurrentActor ActorService
 
 @* ═══════════════════════════════════════════════════════════════════
    The customer's own view of their hours, and the one decision §11.1
@@ -241,7 +242,7 @@
                 CustomerId = Customer.Id,
                 Month = TimeService.MonthBounds(month).From,
                 Hours = approvalHours,
-                ApprovedBy = ActorName ?? Customer.Name,
+                ApprovedBy = await ActorService.NameOrAsync(Customer.Name),
                 Note = approvalNote,
             });
 

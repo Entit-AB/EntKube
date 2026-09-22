@@ -252,6 +252,17 @@ and reasoned act, §14.4 makes a resolution something the customer agrees to, an
 §14.6 attaches real money to a mis-clocked P1. What the machine is good at is
 having the paperwork ready.
 
+The name comes from
+[`CurrentActor`](../src/EntKube.Web/Services/CurrentActor.cs), which a component
+injects. It used to come from an `ActorName` parameter, and almost nothing passed
+one — the ticket queue rendered the detail without it, the tenant tree rendered
+the support inbox without it — so every accept, reject, resolution and knowledge
+revision was filed under `"unattributed"`. The property the whole design rests on
+was not true of the running system, because asking a parameter to carry it made
+every call site a place to forget. Reading the name also never fails: an action
+that cannot be taken because the identity could not be read is an outage made out
+of bookkeeping.
+
 ## Maintenance and availability
 
 Time under an agreed maintenance window is **excluded from measured availability**

@@ -5,6 +5,7 @@
 @inject TicketService Tickets
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject ToastService Toasts
+@inject CurrentActor ActorService
 
 @* ═══════════════════════════════════════════════════════════════════
    The customer's own view of §14: raise a ticket, follow it, and say
@@ -368,12 +369,12 @@
         }
 
         await Tickets.AddEventAsync(
-            selected.Id, TicketEventKind.Note, replyText, ActorName ?? Customer.Name, DateTime.UtcNow);
+            selected.Id, TicketEventKind.Note, replyText, await ActorService.NameOrAsync(Customer.Name), DateTime.UtcNow);
 
         // An answer from the customer is what §14.4 was waiting for, so the clock resumes.
         if (WaitingOnYou is not null)
         {
-            await Tickets.EndPauseAsync(selected.Id, ActorName ?? Customer.Name, DateTime.UtcNow);
+            await Tickets.EndPauseAsync(selected.Id, await ActorService.NameOrAsync(Customer.Name), DateTime.UtcNow);
         }
 
         replyText = "";
@@ -390,9 +391,9 @@
         await Tickets.AddEventAsync(
             selected.Id, TicketEventKind.Note,
             "The customer accepts this as resolved (§14.4).",
-            ActorName ?? Customer.Name, DateTime.UtcNow);
+            await ActorService.NameOrAsync(Customer.Name), DateTime.UtcNow);
 
-        await Tickets.CloseAsync(selected.Id, ActorName ?? Customer.Name, DateTime.UtcNow);
+        await Tickets.CloseAsync(selected.Id, await ActorService.NameOrAsync(Customer.Name), DateTime.UtcNow);
 
         Toasts.Success("Thank you — the ticket is closed.");
         await LoadAsync();
@@ -407,7 +408,7 @@
         }
 
         await Tickets.ReopenAsync(
-            selected.Id, replyText, ActorName ?? Customer.Name, DateTime.UtcNow);
+            selected.Id, replyText, await ActorService.NameOrAsync(Customer.Name), DateTime.UtcNow);
 
         showReopen = false;
         replyText = "";

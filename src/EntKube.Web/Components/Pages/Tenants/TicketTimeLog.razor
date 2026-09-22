@@ -5,6 +5,7 @@
 @inject TimeService Time
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject ToastService Toasts
+@inject CurrentActor ActorService
 
 @* ═══════════════════════════════════════════════════════════════════
    Time logged against one ticket, with what §13 will actually bill for
@@ -116,7 +117,16 @@ else
 
 @code {
     [Parameter, EditorRequired] public Ticket Ticket { get; set; } = null!;
+    /// <summary>
+    /// Who booked the time. Supplied by the ticket detail; the fallback is here because a
+    /// second caller would otherwise book hours against nobody, which is how this went
+    /// wrong across the whole subsystem the first time.
+    /// </summary>
     [Parameter] public string? ActorName { get; set; }
+
+    private string? resolvedActor;
+
+    private string Actor => ActorName ?? resolvedActor ?? EntKube.Web.Services.CurrentActor.Unattributed;
     [Parameter] public EventCallback OnChanged { get; set; }
 
     private List<TimeEntry> entries = [];
@@ -131,6 +141,9 @@ else
     private decimal billedHours;
     private decimal bankHours;
     private decimal freeHours;
+
+    protected override async Task OnInitializedAsync() =>
+        resolvedActor = await ActorService.NameAsync();
 
     protected override async Task OnParametersSetAsync() => await LoadAsync();
 
@@ -173,7 +186,7 @@ else
             await Time.LogAsync(
                 Ticket.TenantId, Ticket.CustomerId, Ticket.AppId, Ticket.Id,
                 from.Value.ToUniversalTime(), to.Value.ToUniversalTime(),
-                kind, description, ActorName);
+                kind, description, Actor);
 
             logging = false;
             description = "";

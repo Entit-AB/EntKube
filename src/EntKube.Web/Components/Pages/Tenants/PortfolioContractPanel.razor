@@ -3,7 +3,7 @@
 @using EntKube.Web.Services.Contracts
 @inject ContractService Contracts
 @inject ToastService Toasts
-@inject AuthenticationStateProvider AuthState
+@inject CurrentActor Actor
 
 @* ═══════════════════════════════════════════════════════════════════
    Annex B and C for a customer's portfolio, plus the people the
@@ -794,9 +794,6 @@
 @code {
     [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
 
-    /// <summary>Whoever registered a domain, recorded beside it.</summary>
-    private string? actor;
-
     private enum View { Overview, AnnexB, AnnexC, Contacts }
 
     private bool loading = true;
@@ -884,9 +881,6 @@
             return missing;
         }
     }
-
-    protected override async Task OnInitializedAsync() =>
-        actor = (await AuthState.GetAuthenticationStateAsync()).User.Identity?.Name;
 
     protected override async Task OnParametersSetAsync() => await LoadAsync();
 
@@ -1029,7 +1023,7 @@
         try
         {
             (CustomerEmailDomain? added, string? refused) = await Contracts.AddEmailDomainAsync(
-                Customer.TenantId, Customer.Id, newDomain, newDomainNotes, actor);
+                Customer.TenantId, Customer.Id, newDomain, newDomainNotes, await Actor.NameAsync());
 
             if (refused is not null)
             {
