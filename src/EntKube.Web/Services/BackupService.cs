@@ -206,6 +206,23 @@ public class BackupService(
             MailTriageRules = await db.MailTriageRules.AsNoTracking().ToListAsync(),
             InboundMailMessages = await db.InboundMailMessages.AsNoTracking().ToListAsync(),
             MailSuggestions = await db.MailSuggestions.AsNoTracking().ToListAsync(),
+
+            // Platform configuration nothing live recreates.
+            ApiTokens = await db.ApiTokens.AsNoTracking().ToListAsync(),
+            EgressAgents = await db.EgressAgents.AsNoTracking().ToListAsync(),
+            ClusterCostRates = await db.ClusterCostRates.AsNoTracking().ToListAsync(),
+            ExternalGroupMappings = await db.ExternalGroupMappings.AsNoTracking().ToListAsync(),
+            RolloutPolicies = await db.RolloutPolicies.AsNoTracking().ToListAsync(),
+            ClientCaBundles = await db.ClientCaBundles.AsNoTracking().ToListAsync(),
+            ClientCaCertificates = await db.ClientCaCertificates.AsNoTracking().ToListAsync(),
+            MeshMtlsPolicies = await db.MeshMtlsPolicies.AsNoTracking().ToListAsync(),
+            OutboundMtlsCredentials = await db.OutboundMtlsCredentials.AsNoTracking().ToListAsync(),
+            StalwartComponentConfigs = await db.StalwartComponentConfigs.AsNoTracking().ToListAsync(),
+            StalwartMailDomains = await db.StalwartMailDomains.AsNoTracking().ToListAsync(),
+            StalwartMailAccounts = await db.StalwartMailAccounts.AsNoTracking().ToListAsync(),
+            RegisteredPostgresDumps = await db.RegisteredPostgresDumps.AsNoTracking().ToListAsync(),
+            RabbitMQBackups = await db.RabbitMQBackups.AsNoTracking().ToListAsync(),
+            KeycloakBackups = await db.KeycloakBackups.AsNoTracking().ToListAsync(),
             AlertRoutingRules = await db.AlertRoutingRules.AsNoTracking().ToListAsync(),
             OnCallSchedules = await db.OnCallSchedules.AsNoTracking().ToListAsync(),
             OnCallShifts = await db.OnCallShifts.AsNoTracking().ToListAsync(),
@@ -273,8 +290,16 @@ public class BackupService(
         BackupBundle? bundle = await JsonSerializer.DeserializeAsync<BackupBundle>(jsonStream, JsonOptions)
             ?? throw new InvalidDataException("Failed to deserialize backup bundle.");
 
-        if (bundle.Version is not (1 or 2))
-            throw new InvalidDataException($"Unsupported backup version: {bundle.Version}. Only versions 1 and 2 are supported.");
+        // Older bundles restore fine: their missing lists deserialize to empty collections.
+        // A newer one may carry tables this build cannot place, and half a restore is
+        // worse than none.
+        if (bundle.Version < 1 || bundle.Version > BackupBundle.CurrentVersion)
+            throw new InvalidDataException(
+                $"Unsupported backup version: {bundle.Version}. This build writes and reads "
+                + $"up to version {BackupBundle.CurrentVersion}"
+                + (bundle.Version > BackupBundle.CurrentVersion
+                    ? " — the bundle was written by a newer EntKube."
+                    : "."));
 
         await using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -510,6 +535,25 @@ public class BackupService(
             await InsertEntities(db, db.MailTriageRules, bundle.MailTriageRules);
             await InsertEntities(db, db.InboundMailMessages, bundle.InboundMailMessages);
             await InsertEntities(db, db.MailSuggestions, bundle.MailSuggestions);
+
+            // Platform configuration. Everything these point at — tenants and their roles,
+            // clusters and components, apps and deployments, storage links, the Postgres
+            // and RabbitMQ and Keycloak objects — is already in by this point.
+            await InsertEntities(db, db.ApiTokens, bundle.ApiTokens);
+            await InsertEntities(db, db.EgressAgents, bundle.EgressAgents);
+            await InsertEntities(db, db.ClusterCostRates, bundle.ClusterCostRates);
+            await InsertEntities(db, db.ExternalGroupMappings, bundle.ExternalGroupMappings);
+            await InsertEntities(db, db.RolloutPolicies, bundle.RolloutPolicies);
+            await InsertEntities(db, db.ClientCaBundles, bundle.ClientCaBundles);
+            await InsertEntities(db, db.ClientCaCertificates, bundle.ClientCaCertificates);
+            await InsertEntities(db, db.MeshMtlsPolicies, bundle.MeshMtlsPolicies);
+            await InsertEntities(db, db.OutboundMtlsCredentials, bundle.OutboundMtlsCredentials);
+            await InsertEntities(db, db.StalwartComponentConfigs, bundle.StalwartComponentConfigs);
+            await InsertEntities(db, db.StalwartMailDomains, bundle.StalwartMailDomains);
+            await InsertEntities(db, db.StalwartMailAccounts, bundle.StalwartMailAccounts);
+            await InsertEntities(db, db.RegisteredPostgresDumps, bundle.RegisteredPostgresDumps);
+            await InsertEntities(db, db.RabbitMQBackups, bundle.RabbitMQBackups);
+            await InsertEntities(db, db.KeycloakBackups, bundle.KeycloakBackups);
 
             // Null out VaultSecret FKs that point to entities not present in this bundle
             // (backwards-compatible with bundles exported before these entity types were added).

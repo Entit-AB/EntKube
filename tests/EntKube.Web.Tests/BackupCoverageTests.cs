@@ -21,11 +21,10 @@ namespace EntKube.Web.Tests;
 /// usually right; excluding it is fine when there is a reason, and the reason goes next to
 /// the name below.</para>
 ///
-/// <para><b>This test does not claim the backup is complete.</b> Writing it turned up
-/// thirty tables already outside the bundle, listed in <see cref="KnownGaps"/>. They have
-/// not been analysed one by one and several of them plainly matter — the whole Stalwart
-/// mail configuration, the mTLS bundles and policies, the rollout policies. What the test
-/// guarantees is that the list stops growing by accident, which is how it got to thirty.</para>
+/// <para>Writing this test turned up thirty tables already outside the bundle, since
+/// worked through: fifteen are now carried, eleven are named in
+/// <see cref="DeliberatelyExcluded"/> with why, and one is left in
+/// <see cref="KnownGaps"/> because it raises a question this test cannot settle.</para>
 /// </summary>
 public class BackupCoverageTests
 {
@@ -53,48 +52,50 @@ public class BackupCoverageTests
         ["CostLedgerCoverage"] = "measurements of the old installation's own clusters",
         ["CostLedgerCursor"] = "a position in a sweep the new server has not run",
         ["TelemetrySegment"] = "an index of segments in object storage, rebuilt by the node",
+
+        // Mirrors of Kubernetes objects. The backup exists in the cluster; the row is a
+        // copy of what the operator reports, and is re-read.
+        ["CnpgBackup"] = "mirrors the CNPG Backup resource in the cluster",
+        ["MongoBackup"] = "mirrors the backup CR in the cluster",
+
+        // Runs. A restored server is not halfway through any of these, and a rollout or
+        // bootstrap that was in flight when the old one stopped has to be re-decided by a
+        // person looking at what the cluster actually ended up with.
+        ["BootstrapRun"] = "a run on the old server; the blueprint it ran is carried",
+        ["BootstrapStepRun"] = "a step of a run that is not carried",
+        ["BlueprintRollout"] = "a run on the old server; the blueprint is carried",
+        ["BlueprintRolloutTarget"] = "a target of a rollout that is not carried",
+        ["DeploymentRollout"] = "a rollout watch in flight; the policy behind it is carried",
+
+        // Tied to a parent that is not carried.
+        ["IncidentNote"] = "hangs off AlertIncident, which is re-raised rather than carried",
+
+        // Sending history, not configuration. The dedupe window simply restarts, which at
+        // worst repeats one notice.
+        ["SecretExpiryNotification"] = "a log of notices sent; the config behind it is carried",
+
+        // Short-lived by construction, and self-defeating to carry: the cluster token on
+        // the row is sealed under the old server's root key and would not unwrap on the
+        // new one — a grant that looks live but cannot be used is worse than none.
+        ["JitGrant"] = "time-boxed, and its cluster token is sealed under the old root key",
     };
 
     /// <summary>
     /// Tables outside the bundle that nobody has decided about — a backlog, not a policy.
     ///
-    /// <para>These were already missing when this test was written. Each is a real loss on
-    /// a server migration until somebody works out whether it should be carried; the
-    /// obvious ones are the Stalwart mail configuration, the client-CA bundles and mTLS
-    /// policies, and the rollout policies, none of which any live system recreates.</para>
-    ///
-    /// <para>The list is here so that it is visible and so that it cannot quietly grow.
-    /// Names come off it as they are dealt with; nothing new should ever go on it.</para>
+    /// <para>A real loss on a server migration until somebody settles it. The list is here
+    /// so that it is visible and cannot quietly grow: names come off as they are dealt
+    /// with, and nothing new should go on it. Something genuinely not worth carrying
+    /// belongs in <see cref="DeliberatelyExcluded"/> with its reason instead.</para>
     /// </summary>
     private static readonly HashSet<string> KnownGaps =
     [
-        "ApiToken",
-        "ApplicationUser",
+        // The question is volume against evidence. An audit event is written on every
+        // destructive operation and says who did it, which is exactly the sort of thing
+        // that is wanted a year later — but the bundle is one JSON document, and a busy
+        // installation's audit history could be most of it. Carrying it probably means
+        // giving the bundle a second file or a retention window first.
         "AuditEvent",
-        "BlueprintRollout",
-        "BlueprintRolloutTarget",
-        "BootstrapRun",
-        "BootstrapStepRun",
-        "ClientCaBundle",
-        "ClientCaCertificate",
-        "ClusterCostRate",
-        "CnpgBackup",
-        "DeploymentRollout",
-        "EgressAgent",
-        "ExternalGroupMapping",
-        "IncidentNote",
-        "JitGrant",
-        "KeycloakBackup",
-        "MeshMtlsPolicy",
-        "MongoBackup",
-        "OutboundMtlsCredential",
-        "RabbitMQBackup",
-        "RegisteredPostgresDump",
-        "RolloutPolicy",
-        "SecretExpiryNotification",
-        "StalwartComponentConfig",
-        "StalwartMailAccount",
-        "StalwartMailDomain",
     ];
 
     private static IModel Model()
@@ -135,6 +136,7 @@ public class BackupCoverageTests
         // The records whose names do not simply drop a suffix.
         carried.Add("SecretVault");                 // VaultRecord
         carried.Add("DockerRegistryCredential");    // DockerCredentialRecord
+        carried.Add("ApplicationUser");             // UserRecord — this is the Identity user
 
         return carried;
     }

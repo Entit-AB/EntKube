@@ -2,14 +2,29 @@ namespace EntKube.Web.Data.Backup;
 
 public class BackupBundle
 {
+    // Version 4 added the platform configuration a coverage test found missing: API
+    // tokens, egress agents, cost rates, SSO group mappings, rollout policies, the
+    // client CAs and mesh mTLS policy, the Stalwart mail configuration, and the
+    // backup rows that index an object in storage.
     // Version 3 added application management and support: the agreement's annexes, the
     // ticket store and its clocks, worked time, the knowledge base, and the support
     // mailbox with its triage rules.
     // Version 2 added the full set of configuration entities (routing, connectivity,
     // Kafka, governance, blueprints, CA trust, observability config, secret history, …).
-    // Version 1 and 2 bundles are still accepted on import — their missing lists
-    // deserialize to empty collections.
-    public int Version { get; set; } = 3;
+    // Earlier bundles are still accepted on import — their missing lists deserialize
+    // to empty collections.
+    /// <summary>
+    /// The version this build writes. Import accepts anything up to it and refuses
+    /// anything beyond — a newer bundle may carry tables this build cannot place, and
+    /// restoring half of one is worse than refusing it.
+    ///
+    /// <para>Bumping this is the <em>only</em> edit a new version needs. It used to be a
+    /// literal here and a second literal in the import's guard, which is how a bundle
+    /// this very code wrote came to be rejected by it.</para>
+    /// </summary>
+    public const int CurrentVersion = 4;
+
+    public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public string CreatedBy { get; set; } = "";
 
@@ -181,6 +196,33 @@ public class BackupBundle
     public List<MailTriageRule> MailTriageRules { get; set; } = [];
     public List<InboundMailMessage> InboundMailMessages { get; set; } = [];
     public List<MailSuggestion> MailSuggestions { get; set; } = [];
+
+    // Platform configuration that nothing live recreates. Added when a coverage test was
+    // written and found them missing; see BackupCoverageTests for what is still not here.
+    public List<ApiToken> ApiTokens { get; set; } = [];
+    public List<EgressAgent> EgressAgents { get; set; } = [];
+    public List<ClusterCostRate> ClusterCostRates { get; set; } = [];
+    public List<ExternalGroupMapping> ExternalGroupMappings { get; set; } = [];
+    public List<RolloutPolicy> RolloutPolicies { get; set; } = [];
+
+    // Client certificate authorities and mesh policy. An mTLS setup that has to be
+    // rebuilt by hand is one where every partner's client certificate stops working.
+    public List<ClientCaBundle> ClientCaBundles { get; set; } = [];
+    public List<ClientCaCertificate> ClientCaCertificates { get; set; } = [];
+    public List<MeshMtlsPolicy> MeshMtlsPolicies { get; set; } = [];
+    public List<OutboundMtlsCredential> OutboundMtlsCredentials { get; set; } = [];
+
+    // The Stalwart mail stack's declarative configuration — domains and accounts are
+    // authored here and replayed onto the server, so this is the only copy.
+    public List<StalwartComponentConfig> StalwartComponentConfigs { get; set; } = [];
+    public List<StalwartMailDomain> StalwartMailDomains { get; set; } = [];
+    public List<StalwartMailAccount> StalwartMailAccounts { get; set; } = [];
+
+    // Backups whose row is the only index of an object in storage. The file survives a
+    // migration either way; without the row, nothing knows it is there.
+    public List<RegisteredPostgresDump> RegisteredPostgresDumps { get; set; } = [];
+    public List<RabbitMQBackup> RabbitMQBackups { get; set; } = [];
+    public List<KeycloakBackup> KeycloakBackups { get; set; } = [];
 
     // Secrets — stored as decrypted plaintext in the bundle.
     // On restore, fresh DEKs are generated and secrets are re-encrypted with the
