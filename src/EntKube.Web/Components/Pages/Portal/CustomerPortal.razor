@@ -322,6 +322,14 @@ else
                 </div>
                 <CustomerTicketsPanel Customer="selectedCustomer" AccessRole="currentAccessRole" />
             }
+            else if (selectedCustomerOp == "report")
+            {
+                <div class="d-flex align-items-center mb-3">
+                    <span class="bi bi-file-earmark-bar-graph fs-4 me-2 text-primary"></span>
+                    <h4 class="mb-0">Service report — @selectedCustomer.Name</h4>
+                </div>
+                <MonthlyReportPanel CustomerId="selectedCustomer.Id" Customer="true" />
+            }
             else if (selectedCustomerOp == "monitoring")
             {
                 <div class="d-flex align-items-center mb-3">
@@ -339,10 +347,6 @@ else
                         <CustomerSlaReport Deployments="AllCustomerDeployments" CustomerId="selectedCustomer.Id" TenantId="selectedCustomer.TenantId" />
                     }
                     else { <div class="text-muted small">No deployments yet.</div> }
-                </div>
-                <div class="mb-4">
-                    <h6 class="text-muted small mb-2"><span class="bi bi-file-earmark-bar-graph me-1"></span>Monthly report</h6>
-                    <MonthlyReportPanel CustomerId="selectedCustomer.Id" Customer="true" />
                 </div>
                 <div>
                     <h6 class="text-muted small mb-2"><span class="bi bi-clock-history me-1"></span>Incident History (30 days)</h6>
@@ -593,7 +597,7 @@ else
     private KeycloakRealm? selectedIdentityRealm;
     private HarborProject? selectedRegistryProject;
     private Data.App? selectedRoutesApp;
-    private string? selectedCustomerOp;             // "tickets" | "hours" | "monitoring" | "logs" | "observability" | "notifications" | "cost"
+    private string? selectedCustomerOp;             // "tickets" | "report" | "hours" | "monitoring" | "logs" | "observability" | "notifications" | "cost"
     private Guid? activeAppId;                       // app whose service leaf is active (for tree highlight)
     private string? activeAppServiceKey;
 
@@ -990,6 +994,11 @@ else
         var items = new List<(string Key, string Label, string Icon)>
         {
             ("tickets", "Support", "bi-life-preserver"),
+            // The §16.1 report is the agreement's own document, not a dashboard: §28 makes
+            // what it says binding unless disputed within thirty days, and it states any
+            // penalty credit that can be claimed. It sat third on the Monitoring page,
+            // behind two live dashboards — findable only by somebody who already knew.
+            ("report", "Service report", "bi-file-earmark-bar-graph"),
             ("monitoring", "Monitoring", "bi-heart-pulse"),
             ("logs", "Logs", "bi-journal-text"),
         };

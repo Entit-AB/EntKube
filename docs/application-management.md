@@ -266,12 +266,38 @@ listed maintenance on somebody else's cluster.
 
 ## Where it appears
 
-**Tenant view** — Annex A on the app, Annex B/C and contacts on the customer, the
-ticket queue and detail, the time log, the timebank, the monthly report, the
-support inbox, the mailbox connection, the triage phrases, the knowledge panel.
+**Tenant view.** The tree separates what an operator *does* from what they
+*watch*, and this subsystem is almost entirely the former. Under **Operations**,
+the first four groups are the path a problem travels:
 
-**Customer portal** — their own tickets (raise, reply, accept a resolution), their
-hours and the approval gate, the monthly report, upcoming maintenance.
+```
+Operations
+  Priorities        the advisor's "what needs doing"
+  Alerting          alerts, rules, routing, notification channels
+  Incidents         on-call rota, incidents
+  Support           support inbox, mailbox connection, triage phrases
+  Reliability       SLA, maintenance windows, secret expiry
+  …
+```
+
+Alerting leads because an alert that fires becomes an incident somebody is on
+call for and then a customer writing in. Filing the alert rules under
+**Observability** with the dashboards they were written against is true of how
+they are authored and useless for how they are used.
+
+The per-record panels hang off what they describe: Annex A on the application,
+Annex B/C and the §23 contacts on the customer, the knowledge panel on the
+application.
+
+**Customer portal.** `Support` (raise, reply, accept a resolution), `Service
+report`, `Hours` behind the operator gate, and upcoming maintenance.
+
+`Service report` is its own entry rather than a block on the Monitoring page.
+The monthly report is the agreement's document, not a dashboard: §28 makes what
+it says binding unless disputed within thirty days, and it states any penalty
+credit the customer can claim. Monitoring keeps the things that are live or
+rolling — the health dashboard, thirty-day uptime against target, recent
+incidents.
 
 ## What this deliberately does not do
 
