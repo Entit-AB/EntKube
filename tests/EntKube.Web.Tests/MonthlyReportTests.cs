@@ -376,6 +376,236 @@ public class MonthlyReportTests : IDisposable
         row.TargetMet.Should().BeNull();
     }
 
+    /// <summary>
+    /// Agreed downtime is not unavailability. A window covering the cluster takes its
+    /// samples out of both halves of the fraction, so a maintenance night does not report
+    /// the customer a worse figure than the agreement entitles them to.
+    /// </summary>
+    [Fact]
+    public async Task Samples_taken_during_maintenance_are_left_out()
+    {
+        Guid deploymentId = SeedDeployment(out Guid clusterId);
+
+        // Ten samples five minutes apart from 09:00. The last four are unhealthy, and a
+        // window covers exactly those four.
+        for (int i = 0; i < 10; i++)
+        {
+            db.DeploymentHealthSnapshots.Add(new DeploymentHealthSnapshot
+            {
+                Id = Guid.NewGuid(),
+                DeploymentId = deploymentId,
+                HealthStatus = i < 6 ? HealthStatus.Healthy : HealthStatus.Degraded,
+                SnapshotAt = Tue(9).AddMinutes(i * 5),
+            });
+        }
+
+        db.MaintenanceWindows.Add(new MaintenanceWindow
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            ClusterId = clusterId,
+            Title = "Database upgrade",
+            CreatedBy = "nils",
+            CreatedAt = Swedish(2026, 9, 14, 9),
+            StartsAt = Tue(9).AddMinutes(30),
+            EndsAt = Tue(9).AddMinutes(50),
+        });
+        await db.SaveChangesAsync();
+
+        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        AvailabilityRow row = report.Availability.Should().ContainSingle().Subject;
+
+        row.SampleCount.Should().Be(6);
+        row.ExcludedSamples.Should().Be(4);
+        row.UptimePercent.Should().Be(100.0);
+    }
+
+    /// <summary>
+    /// A window with no cluster is tenant-wide, which is how it already suppresses alerts.
+    /// Availability has to read it the same way, or the two disagree about what was
+    /// covered.
+    /// </summary>
+    [Fact]
+    public async Task A_window_with_no_cluster_covers_every_cluster()
+    {
+        Guid deploymentId = SeedDeployment(out _);
+
+        db.DeploymentHealthSnapshots.Add(new DeploymentHealthSnapshot
+        {
+            Id = Guid.NewGuid(),
+            DeploymentId = deploymentId,
+            HealthStatus = HealthStatus.Degraded,
+            SnapshotAt = Tue(9),
+        });
+        db.MaintenanceWindows.Add(new MaintenanceWindow
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            ClusterId = null,
+            Title = "Platform upgrade",
+            CreatedBy = "nils",
+            CreatedAt = Swedish(2026, 9, 14, 9),
+            StartsAt = Tue(8),
+            EndsAt = Tue(12),
+        });
+        await db.SaveChangesAsync();
+
+        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        AvailabilityRow row = report.Availability.Should().ContainSingle().Subject;
+
+        row.ExcludedSamples.Should().Be(1);
+        row.SampleCount.Should().Be(0);
+        row.UptimePercent.Should().BeNull("nothing was measured outside the window");
+    }
+
+    /// <summary>
+    /// A window over someone else's cluster excludes nothing here — the tenant's windows
+    /// are all loaded, so the cluster test is what keeps them apart.
+    /// </summary>
+    [Fact]
+    public async Task A_window_over_another_cluster_excludes_nothing()
+    {
+        Guid deploymentId = SeedDeployment(out _);
+        Guid elsewhere = SeedCluster("prod-2");
+
+        db.DeploymentHealthSnapshots.Add(new DeploymentHealthSnapshot
+        {
+            Id = Guid.NewGuid(),
+            DeploymentId = deploymentId,
+            HealthStatus = HealthStatus.Degraded,
+            SnapshotAt = Tue(9),
+        });
+        db.MaintenanceWindows.Add(new MaintenanceWindow
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            ClusterId = elsewhere,
+            Title = "Elsewhere",
+            CreatedBy = "nils",
+            CreatedAt = Swedish(2026, 9, 14, 9),
+            StartsAt = Tue(8),
+            EndsAt = Tue(12),
+        });
+        await db.SaveChangesAsync();
+
+        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        AvailabilityRow row = report.Availability.Should().ContainSingle().Subject;
+
+        row.ExcludedSamples.Should().Be(0);
+        row.UptimePercent.Should().Be(0.0);
+    }
+
+    // ---- Maintenance notice ---------------------------------------------------------------
+
+    /// <summary>
+    /// Planned maintenance that went ahead on short notice is named in the report. The
+    /// downtime is still excluded — the exclusion is what the customer is owed, not a
+    /// judgement on how we behaved — but the shortfall is not left in whatever mail
+    /// announced it.
+    /// </summary>
+    [Fact]
+    public async Task Planned_maintenance_on_short_notice_is_named_in_the_report()
+    {
+        db.MaintenanceWindows.Add(new MaintenanceWindow
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            Title = "Urgent index rebuild",
+            CreatedBy = "nils",
+            CreatedAt = Tue(8),                 // told the same morning
+            StartsAt = Tue(22),
+            EndsAt = Swedish(2026, 9, 23, 2),
+        });
+        await db.SaveChangesAsync();
+
+        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        ShortNoticeWindow row = report.ShortNoticeMaintenance.Should().ContainSingle().Subject;
+
+        row.Title.Should().Be("Urgent index rebuild");
+        row.ScheduledBy.Should().Be("nils");
+        row.Notice.Given.Should().Be(0);
+        row.Notice.Shortfall.Should().Be(MaintenanceNotice.DefaultWorkingDays);
+    }
+
+    [Fact]
+    public async Task Maintenance_announced_in_time_is_not_reported_as_short()
+    {
+        db.MaintenanceWindows.Add(new MaintenanceWindow
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            Title = "Database upgrade",
+            CreatedBy = "nils",
+            CreatedAt = Swedish(2026, 9, 14, 9),   // Monday, a full week ahead
+            StartsAt = Tue(22),
+            EndsAt = Swedish(2026, 9, 23, 2),
+        });
+        await db.SaveChangesAsync();
+
+        MonthlyReport report = await reports.BuildAsync(customerId, September);
+
+        report.ShortNoticeMaintenance.Should().BeEmpty();
+    }
+
+    /// <summary>Emergency maintenance owes no notice, so it is not listed as short.</summary>
+    [Fact]
+    public async Task Emergency_maintenance_is_not_reported_as_short_notice()
+    {
+        db.MaintenanceWindows.Add(new MaintenanceWindow
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            Title = "Failed over the primary",
+            CreatedBy = "nils",
+            Kind = MaintenanceKind.Emergency,
+            CreatedAt = Tue(8),
+            StartsAt = Tue(8),
+            EndsAt = Tue(10),
+        });
+        await db.SaveChangesAsync();
+
+        MonthlyReport report = await reports.BuildAsync(customerId, September);
+
+        report.ShortNoticeMaintenance.Should().BeEmpty();
+    }
+
+    /// <summary>A cluster in an environment of its own, for the availability tests.</summary>
+    private Guid SeedCluster(string name)
+    {
+        Guid environmentId = Guid.NewGuid();
+        Guid clusterId = Guid.NewGuid();
+
+        db.Environments.Add(new EntKube.Web.Data.Environment
+        {
+            Id = environmentId, TenantId = tenantId, Name = name,
+        });
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = clusterId, TenantId = tenantId, EnvironmentId = environmentId,
+            Name = name, ApiServerUrl = $"https://{name}.example.com",
+        });
+
+        return clusterId;
+    }
+
+    /// <summary>A deployment and the cluster it runs on, for the availability tests.</summary>
+    private Guid SeedDeployment(out Guid clusterId)
+    {
+        Guid cluster = SeedCluster("prod-1");
+        clusterId = cluster;
+
+        Guid deploymentId = Guid.NewGuid();
+        Guid environmentId = db.KubernetesClusters.Local.Single(c => c.Id == cluster).EnvironmentId;
+
+        db.AppDeployments.Add(new AppDeployment
+        {
+            Id = deploymentId, AppId = appId, Name = "journal",
+            EnvironmentId = environmentId, ClusterId = clusterId, Namespace = "journal",
+        });
+
+        return deploymentId;
+    }
+
     // ---- Hours ---------------------------------------------------------------------------------
 
     /// <summary>

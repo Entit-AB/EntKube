@@ -12,11 +12,18 @@ namespace EntKube.Web.Services.Reporting;
 /// <param name="UptimePercent">Fraction of health snapshots that were healthy, as a percentage.</param>
 /// <param name="TargetPercent">The agreed SLA target, when one is recorded.</param>
 /// <param name="SampleCount">How many snapshots the figure rests on.</param>
+/// <param name="ExcludedSamples">
+/// Snapshots dropped because a maintenance window covered them. Reported rather than
+/// quietly removed: taking downtime out of a number is exactly the operation that has to
+/// be visible, both because the customer is owed the exclusion and because nothing else
+/// would stop a window being drawn around an outage after the fact.
+/// </param>
 public readonly record struct AvailabilityRow(
     string AppName,
     double? UptimePercent,
     double? TargetPercent,
-    int SampleCount)
+    int SampleCount,
+    int ExcludedSamples = 0)
 {
     /// <summary>
     /// Whether the target was met. Null when there is no target or no data — reported as
@@ -41,6 +48,17 @@ public readonly record struct PriorityRow(
     int ResolutionOverruns,
     TimeSpan? AverageResolution);
 
+/// <summary>Planned maintenance that went ahead on short notice.</summary>
+/// <param name="Title">What the window was called.</param>
+/// <param name="StartsAt">When it began.</param>
+/// <param name="Notice">How much notice was given, and how much was owed.</param>
+/// <param name="ScheduledBy">Who scheduled it.</param>
+public readonly record struct ShortNoticeWindow(
+    string Title,
+    DateTime StartsAt,
+    NoticeGiven Notice,
+    string ScheduledBy);
+
 /// <summary>
 /// The monthly report §16.1 requires, due by the fifth of the following month.
 /// </summary>
@@ -60,6 +78,12 @@ public readonly record struct PriorityRow(
 /// <param name="ActionPlanRequired">
 /// Whether §14.6's action plan is owed — more than two P1/P2 deviations in the quarter.
 /// </param>
+/// <param name="ShortNoticeMaintenance">
+/// Planned maintenance in the month that went ahead on less than the agreed notice. Its
+/// downtime is excluded from availability like any other window — the exclusion is about
+/// what the customer is owed, not about whether we behaved — but the shortfall belongs in
+/// the report rather than only in whatever mail announced it.
+/// </param>
 public readonly record struct MonthlyReport(
     string CustomerName,
     DateTime Month,
@@ -72,7 +96,8 @@ public readonly record struct MonthlyReport(
     decimal PenaltyAmount,
     decimal WindowFee,
     int PenaltiesAlreadyThisYear,
-    bool ActionPlanRequired)
+    bool ActionPlanRequired,
+    IReadOnlyList<ShortNoticeWindow> ShortNoticeMaintenance)
 {
     public int TotalRaised => ByPriority.Sum(p => p.Raised);
 
@@ -129,7 +154,7 @@ public class MonthlyReportService(
         if (customer is null)
         {
             return new MonthlyReport(
-                "", from, [], [], 0, default, default, 0, 0m, 0m, 0, false);
+                "", from, [], [], 0, default, default, 0, 0m, 0m, 0, false, []);
         }
 
         List<TicketSlaStatus> inMonth = await tickets.GetForPeriodAsync(customerId, from, to, to, ct);
@@ -168,10 +193,17 @@ public class MonthlyReportService(
 
         decimal penalty = fees.WindowFee * TicketSla.PenaltyFractionOfWindowFee * penaltyDeviations;
 
+        // Loaded once: availability needs them to drop covered samples, and the report
+        // needs the planned ones that went ahead on short notice.
+        List<MaintenanceWindow> maintenance = await db.MaintenanceWindows.AsNoTracking()
+            .Where(w => w.TenantId == customer.TenantId && w.StartsAt < to && w.EndsAt > from)
+            .OrderBy(w => w.StartsAt)
+            .ToListAsync(ct);
+
         return new MonthlyReport(
             customer.Name,
             from,
-            await AvailabilityAsync(db, customerId, from, to, ct),
+            await AvailabilityAsync(db, customerId, from, to, maintenance, ct),
             byPriority,
             await db.Tickets.CountAsync(t =>
                 t.CustomerId == customerId
@@ -183,20 +215,51 @@ public class MonthlyReportService(
             penalty,
             fees.WindowFee,
             await PenaltiesEarlierThisYearAsync(customerId, from, ct),
-            await ActionPlanRequiredAsync(customerId, from, ct));
+            await ActionPlanRequiredAsync(customerId, from, ct),
+            ShortNotice(maintenance));
+    }
+
+    /// <summary>
+    /// Planned maintenance in the month that went ahead on less than the agreed notice.
+    /// Emergency windows are not listed: they owe none.
+    /// </summary>
+    private static List<ShortNoticeWindow> ShortNotice(List<MaintenanceWindow> windows)
+    {
+        List<ShortNoticeWindow> rows = [];
+
+        foreach (MaintenanceWindow window in windows)
+        {
+            NoticeGiven notice = MaintenanceNotice.Assess(window);
+
+            if (!notice.IsSufficient)
+            {
+                rows.Add(new ShortNoticeWindow(
+                    window.Title, window.StartsAt, notice, window.CreatedBy));
+            }
+        }
+
+        return rows;
     }
 
     /// <summary>
     /// Uptime per application, from the health snapshots. §14.1 samples every five minutes,
     /// so a month is around 8,600 samples per deployment; the count is reported alongside
     /// so a figure resting on twelve of them is visibly not worth much.
+    ///
+    /// <para><b>Maintenance is excluded.</b> A sample taken while a window covered the
+    /// deployment's cluster is dropped from both halves of the fraction, because agreed
+    /// downtime is not unavailability and counting it as such reports the customer a worse
+    /// figure than they are entitled to. How many were dropped is carried alongside, so a
+    /// month where most of the samples were excluded cannot present itself as a clean
+    /// hundred percent.</para>
     /// </summary>
     private static async Task<List<AvailabilityRow>> AvailabilityAsync(
-        ApplicationDbContext db, Guid customerId, DateTime from, DateTime to, CancellationToken ct)
+        ApplicationDbContext db, Guid customerId, DateTime from, DateTime to,
+        List<MaintenanceWindow> maintenance, CancellationToken ct)
     {
         var deployments = await db.AppDeployments.AsNoTracking()
             .Where(d => d.App.CustomerId == customerId)
-            .Select(d => new { d.Id, d.AppId, AppName = d.App.Name })
+            .Select(d => new { d.Id, d.AppId, d.ClusterId, AppName = d.App.Name })
             .ToListAsync(ct);
 
         if (deployments.Count == 0)
@@ -208,8 +271,18 @@ public class MonthlyReportService(
 
         var samples = await db.DeploymentHealthSnapshots.AsNoTracking()
             .Where(s => ids.Contains(s.DeploymentId) && s.SnapshotAt >= from && s.SnapshotAt < to)
-            .Select(s => new { s.DeploymentId, s.HealthStatus })
+            .Select(s => new { s.DeploymentId, s.HealthStatus, s.SnapshotAt })
             .ToListAsync(ct);
+
+        Dictionary<Guid, Guid> clusterOf = deployments.ToDictionary(d => d.Id, d => d.ClusterId);
+
+        // A window with no cluster covers every cluster in the tenant.
+        bool UnderMaintenance(Guid deploymentId, DateTime at) =>
+            clusterOf.TryGetValue(deploymentId, out Guid cluster)
+            && maintenance.Any(w =>
+                (w.ClusterId is null || w.ClusterId == cluster)
+                && w.StartsAt <= at
+                && w.EndsAt >= at);
 
         List<SlaTarget> targets = await db.SlaTargets.AsNoTracking()
             .Where(t => t.CustomerId == customerId || t.CustomerId == null)
@@ -220,7 +293,10 @@ public class MonthlyReportService(
         foreach (var group in deployments.GroupBy(d => new { d.AppId, d.AppName }))
         {
             HashSet<Guid> groupIds = [.. group.Select(d => d.Id)];
-            var taken = samples.Where(s => groupIds.Contains(s.DeploymentId)).ToList();
+            var all = samples.Where(s => groupIds.Contains(s.DeploymentId)).ToList();
+
+            var taken = all.Where(s => !UnderMaintenance(s.DeploymentId, s.SnapshotAt)).ToList();
+            int excluded = all.Count - taken.Count;
 
             double? uptime = taken.Count == 0
                 ? null
@@ -232,7 +308,7 @@ public class MonthlyReportService(
                                 ?? targets.FirstOrDefault(t => t.AppId == null && t.CustomerId == null);
 
             rows.Add(new AvailabilityRow(
-                group.Key.AppName, uptime, target?.TargetPercent, taken.Count));
+                group.Key.AppName, uptime, target?.TargetPercent, taken.Count, excluded));
         }
 
         return [.. rows.OrderBy(r => r.AppName)];

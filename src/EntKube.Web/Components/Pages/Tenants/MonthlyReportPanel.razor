@@ -48,6 +48,26 @@
         </div>
     }
 
+    @if (report.ShortNoticeMaintenance.Count > 0)
+    {
+        <div class="alert alert-warning py-2 small">
+            <span class="bi bi-calendar-x me-1"></span>
+            <strong>Maintenance on short notice.</strong> These went ahead with less than the
+            agreed notice. Their downtime is excluded from availability like any other window
+            — the exclusion is what the customer is owed — but the shortfall belongs in the
+            report.
+            <ul class="mb-0 mt-1">
+                @foreach (ShortNoticeWindow w in report.ShortNoticeMaintenance)
+                {
+                    <li>
+                        <strong>@w.Title</strong>, @w.StartsAt.ToLocalTime().ToString("MMM d HH:mm")
+                        — @w.Notice.Describe(), scheduled by @w.ScheduledBy
+                    </li>
+                }
+            </ul>
+        </div>
+    }
+
     @* ───────────── Availability ───────────── *@
     <h6 class="small text-muted mt-3 mb-2">Availability</h6>
     @if (report.Availability.Count == 0)
@@ -64,6 +84,7 @@
                         <th class="text-end">Uptime</th>
                         <th class="text-end">Target</th>
                         <th class="text-end">Samples</th>
+                        <th class="text-end">Excluded</th>
                         <th></th>
                     </tr>
                 </thead>
@@ -79,6 +100,18 @@
                                 @(row.TargetPercent is double t ? $"{t:F1}%" : "—")
                             </td>
                             <td class="text-end small text-muted">@row.SampleCount</td>
+                            <td class="text-end small text-muted">
+                                @if (row.ExcludedSamples == 0)
+                                {
+                                    <span>—</span>
+                                }
+                                else
+                                {
+                                    <span title="Samples taken during maintenance, left out of the figure">
+                                        @row.ExcludedSamples
+                                    </span>
+                                }
+                            </td>
                             <td class="text-end">
                                 @if (row.TargetMet is true)
                                 {
@@ -97,6 +130,12 @@
                     }
                 </tbody>
             </table>
+        </div>
+
+        <div class="text-muted small mb-3">
+            Time under an agreed maintenance window is left out of these figures. What was
+            left out is counted in the Excluded column, so a near-perfect month resting on
+            very little measurement is visible as one.
         </div>
     }
 

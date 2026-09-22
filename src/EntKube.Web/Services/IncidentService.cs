@@ -421,9 +421,19 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
             .ToListAsync(ct);
     }
 
+    /// <param name="kind">
+    /// Whether the agreement's notice period applies. Planned by default: a window
+    /// recorded without saying which kind it is has not earned the exemption.
+    /// </param>
+    /// <param name="announcedAt">
+    /// When the customer was told, when that is not now — for a window entered here after
+    /// the mail already went out. Null counts the notice from this moment.
+    /// </param>
     public async Task CreateMaintenanceWindowAsync(
         Guid tenantId, string title, string? description, Guid? clusterId,
         DateTime startsAt, DateTime endsAt, string createdBy,
+        MaintenanceKind kind = MaintenanceKind.Planned,
+        DateTime? announcedAt = null,
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
@@ -435,7 +445,9 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
             Description = description,
             StartsAt = startsAt,
             EndsAt = endsAt,
-            CreatedBy = createdBy
+            CreatedBy = createdBy,
+            Kind = kind,
+            AnnouncedAt = announcedAt,
         });
         await db.SaveChangesAsync(ct);
     }

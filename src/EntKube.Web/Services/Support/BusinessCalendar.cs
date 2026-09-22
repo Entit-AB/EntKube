@@ -411,7 +411,7 @@ public static class BusinessCalendar
     /// which on a machine set to Swedish time silently moved every stored instant two hours
     /// and produced negative worked time.</para>
     /// </summary>
-    private static DateTime ToLocal(DateTime instant)
+    public static DateTime ToLocal(DateTime instant)
     {
         DateTime utc = instant.Kind switch
         {

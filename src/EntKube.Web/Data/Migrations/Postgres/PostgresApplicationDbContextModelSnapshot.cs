@@ -4606,6 +4606,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
 
+                    b.Property<DateTime?>("AnnouncedAt")
+                        .HasColumnType("timestamp with time zone");
+
                     b.Property<Guid?>("ClusterId")
                         .HasColumnType("uuid");
 
@@ -4623,6 +4626,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<DateTime>("EndsAt")
                         .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("integer");
 
                     b.Property<DateTime>("StartsAt")
                         .HasColumnType("timestamp with time zone");

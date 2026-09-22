@@ -151,6 +151,59 @@ public static class SwedishHolidays
     }
 
     /// <summary>
+    /// The working day that lies <paramref name="count"/> working days before
+    /// <paramref name="from"/> — the latest date on which something announced still gives
+    /// that much notice.
+    ///
+    /// <para>This is the exact inverse of <see cref="WorkingDaysBetween"/>: the result
+    /// always satisfies <c>WorkingDaysBetween(result, from) == count</c>, so a deadline
+    /// shown in the interface and the days counted in a report can never disagree. It is
+    /// deliberately not a naive "step back over <paramref name="count"/> working days":
+    /// when <paramref name="from"/> is itself closed — maintenance starting on a Sunday
+    /// night, say — that would land a day short.</para>
+    ///
+    /// <para>The answer is always a working day, because a deadline is a day on which
+    /// somebody has to have sent something. Where the arithmetic lands on a weekend, the
+    /// preceding working day is returned: no working days separate the two, so it is the
+    /// same deadline said usefully.</para>
+    /// </summary>
+    public static DateOnly WorkingDaysBefore(DateOnly from, int count)
+    {
+        ArgumentOutOfRangeException.ThrowIfNegative(count);
+
+        if (count == 0)
+        {
+            return from;
+        }
+
+        // Walk back over the working days being counted. The last one reached is the
+        // earliest day that still falls inside the notice period.
+        DateOnly earliest = from;
+        int remaining = count;
+
+        while (true)
+        {
+            if (IsWorkingDay(earliest) && --remaining == 0)
+            {
+                break;
+            }
+
+            earliest = earliest.AddDays(-1);
+        }
+
+        // The deadline is the working day before it — announcing then leaves every one of
+        // those days still to come.
+        DateOnly deadline = earliest.AddDays(-1);
+
+        while (!IsWorkingDay(deadline))
+        {
+            deadline = deadline.AddDays(-1);
+        }
+
+        return deadline;
+    }
+
+    /// <summary>
     /// How many working days lie in (<paramref name="from"/>, <paramref name="to"/>] —
     /// the inverse of <see cref="AddWorkingDays"/>, for reporting how late something was.
     /// </summary>

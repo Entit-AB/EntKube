@@ -4601,6 +4601,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
 
+                    b.Property<DateTime?>("AnnouncedAt")
+                        .HasColumnType("TEXT");
+
                     b.Property<Guid?>("ClusterId")
                         .HasColumnType("TEXT");
 
@@ -4618,6 +4621,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<DateTime>("EndsAt")
                         .HasColumnType("TEXT");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("INTEGER");
 
                     b.Property<DateTime>("StartsAt")
                         .HasColumnType("TEXT");
