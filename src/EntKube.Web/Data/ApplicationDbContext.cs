@@ -48,6 +48,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<InboundMailMessage> InboundMailMessages => Set<InboundMailMessage>();
     public DbSet<MailSuggestion> MailSuggestions => Set<MailSuggestion>();
     public DbSet<MailTriageRule> MailTriageRules => Set<MailTriageRule>();
+    public DbSet<SupportMailbox> SupportMailboxes => Set<SupportMailbox>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
     public DbSet<CostLedgerCoverage> CostLedgerCoverages => Set<CostLedgerCoverage>();
     public DbSet<CostLedgerCursor> CostLedgerCursors => Set<CostLedgerCursor>();
@@ -744,6 +745,28 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                   .OnDelete(DeleteBehavior.Cascade);
         });
 
+        builder.Entity<SupportMailbox>(entity =>
+        {
+            entity.HasKey(m => m.Id);
+
+            // One support mailbox per tenant. Two would race each other for the same
+            // messages and produce the duplicate tickets the message-id check exists to
+            // prevent — only it would not, because both would win their own insert.
+            entity.HasIndex(m => m.TenantId).IsUnique();
+
+            entity.Property(m => m.Host).HasMaxLength(256);
+            entity.Property(m => m.Username).HasMaxLength(256);
+            entity.Property(m => m.Address).HasMaxLength(256);
+            entity.Property(m => m.Folder).HasMaxLength(256);
+            entity.Property(m => m.MoveToFolder).HasMaxLength(256);
+            entity.Property(m => m.LastError).HasMaxLength(2000);
+
+            entity.HasOne(m => m.Tenant)
+                  .WithMany()
+                  .HasForeignKey(m => m.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
         builder.Entity<CostLedgerCoverage>(entity =>
         {
             entity.HasKey(c => c.Id);
@@ -1119,6 +1142,13 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(s => s.OwnerCluster)
                 .WithMany()
                 .HasForeignKey(s => s.OwnerClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // The support mailbox's IMAP password. Deleting the mailbox takes the
+            // credential with it rather than leaving it in the vault unreferenced.
+            entity.HasOne<SupportMailbox>()
+                .WithMany()
+                .HasForeignKey(s => s.SupportMailboxId)
                 .OnDelete(DeleteBehavior.Cascade);
 
             entity.HasMany(s => s.Versions)

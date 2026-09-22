@@ -169,6 +169,12 @@ public class VaultSecret
     public Guid? OwnerClusterId { get; set; }
 
     /// <summary>
+    /// If set, this secret belongs to the tenant's support mailbox. One name is used:
+    /// "PASSWORD". Deleting the mailbox cascades the secret away.
+    /// </summary>
+    public Guid? SupportMailboxId { get; set; }
+
+    /// <summary>
     /// When true, this secret will be synced to Kubernetes as a Secret resource.
     /// </summary>
     public bool SyncToKubernetes { get; set; }

@@ -407,7 +407,7 @@ else
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
-        [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon"), new("support-inbox", "Support inbox", "bi-envelope"), new("mail-triage", "Mail triage phrases", "bi-funnel") ]),
+        [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon"), new("support-inbox", "Support inbox", "bi-envelope"), new("support-mailbox", "Mailbox connection", "bi-envelope-at"), new("mail-triage", "Mail triage phrases", "bi-funnel") ]),
         new("Networking", "bi-signpost-split",
         [ new("ingress", "Routes & Ingress", "bi-signpost-split"), new("networking", "VPN mesh", "bi-hdd-network") ]),
         new("Disaster recovery", "bi-shield-check",
@@ -871,6 +871,7 @@ else
             case "notifications": builder.OpenComponent<NotificationChannels>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "on-call": builder.OpenComponent<OnCallTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-inbox": builder.OpenComponent<SupportInbox>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "support-mailbox": builder.OpenComponent<SupportMailboxTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "mail-triage": builder.OpenComponent<MailTriageRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "incidents":
                 builder.OpenComponent<IncidentManagement>(0);

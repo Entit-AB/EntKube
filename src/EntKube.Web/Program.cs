@@ -553,6 +553,11 @@ public class Program
             EntKube.Web.Services.Mail.RuleBasedMailAnalyst>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.MailTriageRuleService>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailboxService>();
+
+        // Fetches support mail into the triage queue. Does nothing until a tenant has
+        // configured a mailbox and switched it on.
+        builder.Services.AddHostedService<EntKube.Web.Services.Mail.SupportMailPoller>();
         builder.Services.AddScoped<EntKube.Web.Services.Reporting.MonthlyReportService>();
         builder.Services.AddSingleton<EntKube.Web.Services.Cost.CostScanCache>();
         builder.Services.AddHostedService<EntKube.Web.Services.Cost.CostScanService>();

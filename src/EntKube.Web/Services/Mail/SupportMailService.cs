@@ -16,9 +16,10 @@ namespace EntKube.Web.Services.Mail;
 /// customer agrees to. The value here is that the paperwork is ready, not that the decision
 /// is made.</para>
 ///
-/// <para><b>Connecting a mailbox is a separate step.</b> This ingests messages it is
-/// handed; fetching them over IMAP needs credentials and a per-tenant mailbox
-/// configuration, which is not wired up. The pipeline is complete and testable without it.</para>
+/// <para><b>Where the messages come from is somebody else's problem.</b> This takes in
+/// whatever it is handed and is testable without a mail server;
+/// <see cref="SupportMailboxService"/> does the fetching over IMAP, and a message can
+/// equally well be handed over by hand or by a test.</para>
 /// </summary>
 public class SupportMailService(
     IDbContextFactory<ApplicationDbContext> dbFactory,

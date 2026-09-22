@@ -6746,6 +6746,86 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("Subconsultants");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.SupportMailbox", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Address")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<int>("ConsecutiveFailures")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Disposition")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Folder")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<DateTime?>("LastMessageAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("LastPolledAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<long?>("LastSeenUid")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("LastUidValidity")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("MoveToFolder")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<int>("PollIntervalSeconds")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Port")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("UseSsl")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Username")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId")
+                        .IsUnique();
+
+                    b.ToTable("SupportMailboxes");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TelemetryAlertRule", b =>
                 {
                     b.Property<Guid>("Id")
@@ -7293,6 +7373,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<Guid?>("StorageLinkId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<Guid?>("SupportMailboxId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<bool>("SyncToKubernetes")
                         .HasColumnType("bit");
 
@@ -7341,6 +7424,8 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("RegisteredPostgresDatabaseId");
 
                     b.HasIndex("StorageLinkId");
+
+                    b.HasIndex("SupportMailboxId");
 
                     b.HasIndex("VpnRemoteEndpointId");
 
@@ -9932,6 +10017,17 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.SupportMailbox", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TenantMembership", b =>
                 {
                     b.HasOne("EntKube.Web.Data.TenantRole", "Role")
@@ -10157,6 +10253,11 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasOne("EntKube.Web.Data.StorageLink", "StorageLink")
                         .WithMany()
                         .HasForeignKey("StorageLinkId");
+
+                    b.HasOne("EntKube.Web.Data.SupportMailbox", null)
+                        .WithMany()
+                        .HasForeignKey("SupportMailboxId")
+                        .OnDelete(DeleteBehavior.Cascade);
 
                     b.HasOne("EntKube.Web.Data.SecretVault", "Vault")
                         .WithMany("Secrets")

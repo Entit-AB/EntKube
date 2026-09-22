@@ -6743,6 +6743,86 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("Subconsultants");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.SupportMailbox", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Address")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<int>("ConsecutiveFailures")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Disposition")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Folder")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<DateTime?>("LastMessageAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime?>("LastPolledAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<long?>("LastSeenUid")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("LastUidValidity")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("MoveToFolder")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<int>("PollIntervalSeconds")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Port")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("UseSsl")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Username")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId")
+                        .IsUnique();
+
+                    b.ToTable("SupportMailboxes");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TelemetryAlertRule", b =>
                 {
                     b.Property<Guid>("Id")
@@ -7290,6 +7370,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid?>("StorageLinkId")
                         .HasColumnType("uuid");
 
+                    b.Property<Guid?>("SupportMailboxId")
+                        .HasColumnType("uuid");
+
                     b.Property<bool>("SyncToKubernetes")
                         .HasColumnType("boolean");
 
@@ -7338,6 +7421,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("RegisteredPostgresDatabaseId");
 
                     b.HasIndex("StorageLinkId");
+
+                    b.HasIndex("SupportMailboxId");
 
                     b.HasIndex("VpnRemoteEndpointId");
 
@@ -9928,6 +10013,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.SupportMailbox", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TenantMembership", b =>
                 {
                     b.HasOne("EntKube.Web.Data.TenantRole", "Role")
@@ -10153,6 +10249,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasOne("EntKube.Web.Data.StorageLink", "StorageLink")
                         .WithMany()
                         .HasForeignKey("StorageLinkId");
+
+                    b.HasOne("EntKube.Web.Data.SupportMailbox", null)
+                        .WithMany()
+                        .HasForeignKey("SupportMailboxId")
+                        .OnDelete(DeleteBehavior.Cascade);
 
                     b.HasOne("EntKube.Web.Data.SecretVault", "Vault")
                         .WithMany("Secrets")
