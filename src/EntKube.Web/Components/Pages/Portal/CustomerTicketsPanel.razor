@@ -319,7 +319,13 @@
 
     private async Task OpenAsync(Guid ticketId)
     {
-        selected = await Tickets.GetAsync(ticketId);
+        Ticket? found = await Tickets.GetAsync(ticketId);
+
+        // Only ever called from a row of this customer's own list, so this cannot fire
+        // today. It is here because the next caller might not be, and the whole class of
+        // mistake is trusting an id because the only caller that exists happens to be safe.
+        selected = found?.CustomerId == Customer.Id ? found : null;
+
         showReopen = false;
         replyText = "";
     }

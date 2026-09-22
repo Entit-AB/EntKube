@@ -193,10 +193,26 @@ public class MonthlyReportService(
 
         decimal penalty = fees.WindowFee * TicketSla.PenaltyFractionOfWindowFee * penaltyDeviations;
 
+        // The clusters this customer actually runs on. A tenant hosts several customers,
+        // and this report goes to one of them — so the windows below are narrowed to the
+        // ones that could have touched them, or a customer's own monthly report would
+        // name maintenance on somebody else's cluster.
+        HashSet<Guid> clusters =
+        [
+            .. await db.AppDeployments.AsNoTracking()
+                .Where(d => d.App.CustomerId == customerId)
+                .Select(d => d.ClusterId)
+                .Distinct()
+                .ToListAsync(ct)
+        ];
+
         // Loaded once: availability needs them to drop covered samples, and the report
-        // needs the planned ones that went ahead on short notice.
+        // needs the planned ones that went ahead on short notice. A window with no
+        // cluster is tenant-wide and reaches everyone.
         List<MaintenanceWindow> maintenance = await db.MaintenanceWindows.AsNoTracking()
-            .Where(w => w.TenantId == customer.TenantId && w.StartsAt < to && w.EndsAt > from)
+            .Where(w => w.TenantId == customer.TenantId
+                && w.StartsAt < to && w.EndsAt > from
+                && (w.ClusterId == null || clusters.Contains(w.ClusterId.Value)))
             .OrderBy(w => w.StartsAt)
             .ToListAsync(ct);
 

@@ -163,8 +163,15 @@ public static class TicketClock
                     return null;
                 }
 
+                // Through ToLocal, not straight off the UTC instant: these are stored in
+                // UTC and the agreement counts Swedish calendar days. A pause running
+                // from Saturday 00:30 to Monday 00:30 in Stockholm covers one working
+                // day; read as UTC dates the same instants are Friday to Sunday and
+                // cover none, so the target would not move and we would be held to a
+                // date the customer's own wait had already pushed past.
                 int paused = SwedishHolidays.WorkingDaysBetween(
-                    DateOnly.FromDateTime(pause.StartedAt), DateOnly.FromDateTime(pause.EndedAt.Value));
+                    DateOnly.FromDateTime(BusinessCalendar.ToLocal(pause.StartedAt)),
+                    DateOnly.FromDateTime(BusinessCalendar.ToLocal(pause.EndedAt.Value)));
 
                 if (paused > 0)
                 {

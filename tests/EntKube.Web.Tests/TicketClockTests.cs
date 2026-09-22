@@ -214,6 +214,35 @@ public class TicketClockTests
     }
 
     /// <summary>
+    /// A working-day pause is counted in Swedish calendar days, like everything else the
+    /// agreement measures.
+    ///
+    /// <para>A pause running from Saturday 00:30 to Monday 00:30 in Stockholm covers one
+    /// working day — the Monday. Read as UTC dates, the same two instants are Friday
+    /// 22:30 and Sunday 22:30, which covers none, and the resolution deadline would not
+    /// move at all. The clock would then hold us to a date the customer's own wait had
+    /// already pushed past.</para>
+    /// </summary>
+    [Fact]
+    public void A_pause_over_a_weekend_is_counted_in_Swedish_days()
+    {
+        // Saturday 26 September 00:30 to Monday 28 September 00:30, Stockholm.
+        ClockPause overTheWeekend = new(Swedish(2026, 9, 26, 0, 30), Swedish(2026, 9, 28, 0, 30));
+
+        ClockStatus paused = TicketClock.Resolution(
+            Tue(9), Tue(9), TicketPriority.P3, SupportWindow.S1,
+            pauses: [overTheWeekend], resolvedAt: null, now: Mon(9));
+
+        ClockStatus unpaused = TicketClock.Resolution(
+            Tue(9), Tue(9), TicketPriority.P3, SupportWindow.S1,
+            pauses: [], resolvedAt: null, now: Mon(9));
+
+        paused.Deadline.Should().Be(
+            BusinessCalendar.WorkingDaysDeadline(unpaused.Deadline!.Value, 1),
+            "the Monday inside the pause is a working day, so the target moves by one");
+    }
+
+    /// <summary>
     /// §14.4 gives P4 the next release, or as agreed, which is not a deadline
     /// anything can be measured against — so it has none, and can never be breached.
     /// </summary>

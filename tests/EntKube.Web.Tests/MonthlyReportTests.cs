@@ -547,6 +547,61 @@ public class MonthlyReportTests : IDisposable
         report.ShortNoticeMaintenance.Should().BeEmpty();
     }
 
+    /// <summary>
+    /// A tenant hosts several customers, and this report goes to one of them. A window on
+    /// a cluster this customer has nothing on is none of their business — naming it in
+    /// their monthly report tells them what another customer's platform is doing and when
+    /// it was down.
+    /// </summary>
+    [Fact]
+    public async Task Maintenance_on_another_customers_cluster_is_not_in_this_report()
+    {
+        SeedDeployment(out _);
+        Guid elsewhere = SeedCluster("someone-elses");
+
+        db.MaintenanceWindows.Add(new MaintenanceWindow
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            ClusterId = elsewhere,
+            Title = "Rebuilding the other customer's database",
+            CreatedBy = "nils",
+            CreatedAt = Tue(8),
+            StartsAt = Tue(22),
+            EndsAt = Swedish(2026, 9, 23, 2),
+        });
+        await db.SaveChangesAsync();
+
+        MonthlyReport report = await reports.BuildAsync(customerId, September);
+
+        report.ShortNoticeMaintenance.Should().BeEmpty();
+    }
+
+    /// <summary>A window with no cluster is tenant-wide, so it does reach them.</summary>
+    [Fact]
+    public async Task Tenant_wide_maintenance_is_in_every_customers_report()
+    {
+        SeedDeployment(out _);
+
+        db.MaintenanceWindows.Add(new MaintenanceWindow
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            ClusterId = null,
+            Title = "Platform upgrade",
+            CreatedBy = "nils",
+            CreatedAt = Tue(8),
+            StartsAt = Tue(22),
+            EndsAt = Swedish(2026, 9, 23, 2),
+        });
+        await db.SaveChangesAsync();
+
+        MonthlyReport report = await reports.BuildAsync(customerId, September);
+
+        report.ShortNoticeMaintenance.Should().ContainSingle()
+            .Which.Title.Should().Be("Platform upgrade");
+    }
+
     /// <summary>Emergency maintenance owes no notice, so it is not listed as short.</summary>
     [Fact]
     public async Task Emergency_maintenance_is_not_reported_as_short_notice()

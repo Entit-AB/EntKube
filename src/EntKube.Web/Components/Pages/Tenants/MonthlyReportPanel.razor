@@ -61,7 +61,7 @@
                 {
                     <li>
                         <strong>@w.Title</strong>, @w.StartsAt.ToLocalTime().ToString("MMM d HH:mm")
-                        — @w.Notice.Describe(), scheduled by @w.ScheduledBy
+                        — @w.Notice.Describe()@(Customer ? "" : $", scheduled by {w.ScheduledBy}")
                     </li>
                 }
             </ul>

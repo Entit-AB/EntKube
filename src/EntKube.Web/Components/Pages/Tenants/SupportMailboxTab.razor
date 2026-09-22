@@ -365,7 +365,11 @@
     {
         MailPollResult result = await Mailboxes.PollAsync(TenantId);
 
-        if (result.Ok)
+        if (result.AlreadyRunning)
+        {
+            Toasts.Info("A fetch is already running for this mailbox.");
+        }
+        else if (result.Ok)
         {
             Toasts.Success(result.Taken == 0
                 ? $"Nothing new — {result.Seen} message(s) looked at."

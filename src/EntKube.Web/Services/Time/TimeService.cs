@@ -372,7 +372,11 @@ public class TimeService(
             TimeZoneInfo.ConvertTimeToUtc(nextLocal, Support.BusinessCalendar.SwedishTime));
     }
 
+    /// <summary>
+    /// The Swedish calendar day an instant falls on. Through the calendar's own converter
+    /// rather than a second copy of the same three lines — a copy is a second place for
+    /// the Kind to be read wrongly, which is a fault this codebase has already paid for.
+    /// </summary>
     private static DateOnly LocalDay(DateTime instant) =>
-        DateOnly.FromDateTime(TimeZoneInfo.ConvertTimeFromUtc(
-            DateTime.SpecifyKind(instant, DateTimeKind.Utc), Support.BusinessCalendar.SwedishTime));
+        DateOnly.FromDateTime(Support.BusinessCalendar.ToLocal(instant));
 }
