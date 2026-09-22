@@ -1,0 +1,281 @@
+/* ═══════════════════════════════════════════════════════════════════
+   Two panes: what there is to read on the left, the thing itself on
+   the right. The old single column put a classification form between
+   somebody and the runbook they opened the page for.
+
+   Follows the explorer idiom already used by the tenant and portal
+   trees, so this does not look like a different application.
+   ═══════════════════════════════════════════════════════════════════ */
+
+.kb {
+    display: flex;
+    align-items: stretch;
+    min-height: 34rem;
+    border: 1px solid rgba(0, 0, 0, .09);
+    border-radius: 10px;
+    overflow: hidden;
+    background: #fff;
+}
+
+/* ── The navigator ── */
+
+.kb-nav {
+    width: 260px;
+    flex: none;
+    border-right: 1px solid rgba(0, 0, 0, .09);
+    background: #fbfcfe;
+    display: flex;
+    flex-direction: column;
+    max-height: 46rem;
+}
+
+.kb-nav-scroll {
+    overflow-y: auto;
+    padding: .5rem .4rem .75rem;
+}
+
+.kb-group {
+    font-size: .68rem;
+    font-weight: 700;
+    letter-spacing: .06em;
+    text-transform: uppercase;
+    color: #8595a8;
+    padding: .75rem .55rem .3rem;
+}
+
+.kb-item {
+    display: flex;
+    align-items: flex-start;
+    gap: .5rem;
+    width: 100%;
+    text-align: left;
+    border: none;
+    background: transparent;
+    border-radius: 7px;
+    padding: .4rem .55rem;
+    color: #1b2a3d;
+    line-height: 1.25;
+}
+
+.kb-item:hover {
+    background: rgba(13, 110, 253, .06);
+}
+
+.kb-item.selected {
+    background: rgba(13, 110, 253, .11);
+    font-weight: 600;
+}
+
+.kb-item .ico {
+    flex: none;
+    width: 1rem;
+    text-align: center;
+    color: #6c8199;
+    margin-top: .1rem;
+}
+
+.kb-item.selected .ico {
+    color: #0d6efd;
+}
+
+.kb-item-body {
+    min-width: 0;
+    flex: 1;
+}
+
+.kb-item-title {
+    font-size: .84rem;
+    display: flex;
+    align-items: center;
+    gap: .35rem;
+}
+
+.kb-item-sub {
+    font-size: .72rem;
+    color: #8595a8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* A section nobody has confirmed inside its review interval. Deliberately a dot rather
+   than a badge: it has to be scannable down a list, not read one entry at a time. */
+.kb-dot {
+    flex: none;
+    width: .45rem;
+    height: .45rem;
+    border-radius: 50%;
+    background: #ffc107;
+}
+
+.kb-dot.critical {
+    background: #dc3545;
+}
+
+.kb-count {
+    font-size: .7rem;
+    color: #8595a8;
+    margin-left: auto;
+    padding-left: .35rem;
+}
+
+/* ── The content pane ── */
+
+.kb-main {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    max-height: 46rem;
+}
+
+.kb-head {
+    padding: .7rem .95rem;
+    border-bottom: 1px solid rgba(0, 0, 0, .07);
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+}
+
+.kb-body {
+    overflow-y: auto;
+    padding: 1rem 1.15rem 1.5rem;
+}
+
+/* ── Rendered markdown ──
+   Sized for reading a runbook at three in the morning: generous line height, headings
+   that separate without shouting, code that is obviously code. */
+
+.kb-prose {
+    font-size: .9rem;
+    line-height: 1.6;
+    color: #22303f;
+    max-width: 52rem;
+}
+
+.kb-prose ::deep h1,
+.kb-prose ::deep h2,
+.kb-prose ::deep h3 {
+    font-weight: 650;
+    margin: 1.4rem 0 .5rem;
+    line-height: 1.3;
+}
+
+.kb-prose ::deep h1 { font-size: 1.15rem; }
+.kb-prose ::deep h2 { font-size: 1.02rem; }
+.kb-prose ::deep h3 { font-size: .93rem; }
+
+.kb-prose ::deep > *:first-child {
+    margin-top: 0;
+}
+
+.kb-prose ::deep p,
+.kb-prose ::deep ul,
+.kb-prose ::deep ol {
+    margin-bottom: .75rem;
+}
+
+.kb-prose ::deep li {
+    margin-bottom: .2rem;
+}
+
+.kb-prose ::deep code {
+    background: #f2f4f7;
+    border-radius: 4px;
+    padding: .1rem .3rem;
+    font-size: .85em;
+    color: #b5316a;
+}
+
+.kb-prose ::deep pre {
+    background: #1b2430;
+    color: #e7edf4;
+    border-radius: 8px;
+    padding: .75rem .9rem;
+    overflow-x: auto;
+    margin-bottom: .9rem;
+}
+
+.kb-prose ::deep pre code {
+    background: transparent;
+    color: inherit;
+    padding: 0;
+    font-size: .82rem;
+}
+
+.kb-prose ::deep table {
+    width: 100%;
+    margin-bottom: .9rem;
+    font-size: .85rem;
+    border-collapse: collapse;
+}
+
+.kb-prose ::deep th,
+.kb-prose ::deep td {
+    border: 1px solid rgba(0, 0, 0, .1);
+    padding: .35rem .5rem;
+    text-align: left;
+}
+
+.kb-prose ::deep th {
+    background: #f7f9fb;
+    font-weight: 600;
+}
+
+.kb-prose ::deep blockquote {
+    border-left: 3px solid rgba(13, 110, 253, .35);
+    padding-left: .8rem;
+    color: #556677;
+    margin: 0 0 .9rem;
+}
+
+/* ── Editing ──
+   Source and preview side by side: what a runbook looks like matters, and finding out
+   after saving is a poor way to learn it. */
+
+.kb-edit {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: .9rem;
+}
+
+@media (max-width: 1100px) {
+    .kb-edit {
+        grid-template-columns: 1fr;
+    }
+}
+
+.kb-edit textarea {
+    min-height: 26rem;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+    font-size: .82rem;
+    line-height: 1.55;
+}
+
+.kb-preview {
+    border: 1px dashed rgba(0, 0, 0, .14);
+    border-radius: 8px;
+    padding: .8rem .95rem;
+    overflow-y: auto;
+    max-height: 30rem;
+    background: #fdfdfe;
+}
+
+/* ── Completeness ── */
+
+.kb-meter {
+    height: .4rem;
+    border-radius: 999px;
+    background: rgba(0, 0, 0, .07);
+    overflow: hidden;
+}
+
+.kb-meter-fill {
+    height: 100%;
+    background: #198754;
+    transition: width .2s ease;
+}
+
+.kb-meter-fill.partial { background: #ffc107; }
+.kb-meter-fill.poor { background: #dc3545; }

@@ -18,16 +18,64 @@ public enum KnowledgeGapSeverity
     Info = 2,
 }
 
+/// <summary>
+/// The things that can be wrong with an application's knowledge. Each is one check, so a
+/// completeness figure and the list of gaps are two views of the same answer rather than
+/// two calculations that can drift apart.
+/// </summary>
+public enum KnowledgeCheck
+{
+    /// <summary>An architecture narrative exists.</summary>
+    Architecture = 0,
+
+    /// <summary>A runbook exists — §5.2 and §19 both name it as a deliverable.</summary>
+    Runbook = 1,
+
+    /// <summary>Every section has been confirmed inside its review interval (§10.2).</summary>
+    Freshness = 2,
+
+    /// <summary>No critical dependency is reachable for fewer hours than the window sold (§23).</summary>
+    DependencyHours = 3,
+
+    /// <summary>No component is out of support with its notice period run out (§14.7).</summary>
+    EndOfLife = 4,
+
+    /// <summary>The data and regulatory classification is recorded (§23, §24).</summary>
+    Classification = 5,
+}
+
 /// <summary>One thing wrong with what we know about an application.</summary>
+/// <param name="Check">Which check it failed.</param>
 /// <param name="Severity">How serious.</param>
 /// <param name="Title">What is wrong, in a few words.</param>
 /// <param name="Detail">Why it matters, with the clause that says so.</param>
 /// <param name="Clause">The section of the agreement behind it.</param>
 public readonly record struct KnowledgeGap(
+    KnowledgeCheck Check,
     KnowledgeGapSeverity Severity,
     string Title,
     string Detail,
     string Clause);
+
+/// <summary>
+/// How much of what the agreement assumes about an application is actually written down.
+/// </summary>
+/// <param name="Gaps">Everything wrong, worst first.</param>
+public readonly record struct KnowledgeHealth(IReadOnlyList<KnowledgeGap> Gaps)
+{
+    /// <summary>Every check there is. A check nothing can fail counts as passed.</summary>
+    public static int TotalChecks => Enum.GetValues<KnowledgeCheck>().Length;
+
+    public int FailedChecks => Gaps.Select(g => g.Check).Distinct().Count();
+
+    public int PassedChecks => TotalChecks - FailedChecks;
+
+    public int Percent => (int)Math.Round(100.0 * PassedChecks / TotalChecks);
+
+    public int Critical => Gaps.Count(g => g.Severity == KnowledgeGapSeverity.Critical);
+
+    public int Warnings => Gaps.Count(g => g.Severity == KnowledgeGapSeverity.Warning);
+}
 
 /// <summary>
 /// What we know about an application, and what we do not.
@@ -298,6 +346,14 @@ public class KnowledgeService(
         && notice.NoticeGivenAt.Value.AddMonths(3) <= asOf;
 
     /// <summary>
+    /// How complete an application's knowledge is, from the same gaps the list shows —
+    /// so the figure at the top and the items underneath it always agree.
+    /// </summary>
+    public async Task<KnowledgeHealth> GetHealthAsync(
+        Guid appId, DateTime asOf, CancellationToken ct = default) =>
+        new(await GetGapsAsync(appId, asOf, ct));
+
+    /// <summary>
     /// What is missing or has lapsed in what we know about an application.
     ///
     /// <para>These are the things the agreement assumes are true and nobody checks until
@@ -321,6 +377,9 @@ public class KnowledgeService(
             {
                 gaps.Add(new KnowledgeGap(
                     expected == KnowledgeSectionKind.Runbook
+                        ? KnowledgeCheck.Runbook
+                        : KnowledgeCheck.Architecture,
+                    expected == KnowledgeSectionKind.Runbook
                         ? KnowledgeGapSeverity.Critical
                         : KnowledgeGapSeverity.Warning,
                     $"No {expected} written",
@@ -339,6 +398,7 @@ public class KnowledgeService(
             if (due <= asOf)
             {
                 gaps.Add(new KnowledgeGap(
+                    KnowledgeCheck.Freshness,
                     KnowledgeGapSeverity.Warning,
                     $"{section.Title} has not been reviewed since "
                     + $"{(section.ReviewedAt ?? section.CreatedAt):yyyy-MM-dd}",
@@ -360,6 +420,7 @@ public class KnowledgeService(
             foreach (AppServiceDependency dependency in officeHours)
             {
                 gaps.Add(new KnowledgeGap(
+                    KnowledgeCheck.DependencyHours,
                     KnowledgeGapSeverity.Critical,
                     $"{dependency.Name} is office-hours only, but this application is on {window}",
                     "§23 says that where the customer chooses a wider window than their own "
@@ -380,6 +441,7 @@ public class KnowledgeService(
             if (ExemptionApplies(notice, asOf))
             {
                 gaps.Add(new KnowledgeGap(
+                    KnowledgeCheck.EndOfLife,
                     KnowledgeGapSeverity.Critical,
                     $"{notice.Component} is out of support and the notice period has run out",
                     "Three months have passed since written notice and no upgrade has been ordered. "
@@ -391,6 +453,7 @@ public class KnowledgeService(
             else if (notice.NoticeGivenAt is null && notice.EndOfLifeOn <= asOf)
             {
                 gaps.Add(new KnowledgeGap(
+                    KnowledgeCheck.EndOfLife,
                     KnowledgeGapSeverity.Warning,
                     $"{notice.Component} is out of support and no notice has been given",
                     "§14.7's protection starts from written notice with a proposed upgrade. Until "
@@ -402,6 +465,7 @@ public class KnowledgeService(
         if (await db.AppKnowledgeProfiles.AsNoTracking().AllAsync(p => p.AppId != appId, ct))
         {
             gaps.Add(new KnowledgeGap(
+                KnowledgeCheck.Classification,
                 KnowledgeGapSeverity.Warning,
                 "No classification recorded",
                 "Whether this holds personal or patient data decides how access to it is handled "

@@ -405,6 +405,67 @@ public class KnowledgeServiceTests : IDisposable
         db.AppKnowledgeProfiles.Count(p => p.AppId == appId).Should().Be(1);
     }
 
+    // ---- Health ------------------------------------------------------------------------
+
+    /// <summary>
+    /// The figure at the top of the panel and the list underneath it come from the same
+    /// gaps, so they cannot say different things.
+    /// </summary>
+    [Fact]
+    public async Task Health_counts_the_same_checks_the_gaps_report()
+    {
+        KnowledgeHealth health = await knowledge.GetHealthAsync(appId, Now);
+
+        health.FailedChecks.Should().Be(health.Gaps.Select(g => g.Check).Distinct().Count());
+        health.PassedChecks.Should().Be(KnowledgeHealth.TotalChecks - health.FailedChecks);
+    }
+
+    /// <summary>
+    /// Several stale sections are one failed check, not several — otherwise a well-kept
+    /// application with three sections would score worse than an empty one with none.
+    /// </summary>
+    [Fact]
+    public async Task Many_gaps_of_one_kind_are_one_failed_check()
+    {
+        KnowledgeSection runbook = await Write(KnowledgeSectionKind.Runbook, "Runbook");
+        KnowledgeSection architecture = await Write(KnowledgeSectionKind.Architecture, "Architecture");
+        await knowledge.MarkReviewedAsync(runbook.Id, "nils", Now.AddDays(-200));
+        await knowledge.MarkReviewedAsync(architecture.Id, "nils", Now.AddDays(-200));
+
+        KnowledgeHealth health = await knowledge.GetHealthAsync(appId, Now);
+
+        health.Gaps.Count(g => g.Check == KnowledgeCheck.Freshness).Should().Be(2);
+        health.FailedChecks.Should().Be(2, "staleness and the missing classification");
+    }
+
+    [Fact]
+    public async Task A_fully_kept_application_passes_everything()
+    {
+        await Write(KnowledgeSectionKind.Runbook, "Runbook");
+        await Write(KnowledgeSectionKind.Architecture, "Architecture");
+        await knowledge.SaveProfileAsync(new AppKnowledgeProfile
+        {
+            TenantId = tenantId, AppId = appId,
+            DataClassification = DataClassification.SensitivePersonal, HandlesPatientData = true,
+        });
+
+        KnowledgeHealth health = await knowledge.GetHealthAsync(appId, Now);
+
+        health.Gaps.Should().BeEmpty();
+        health.Percent.Should().Be(100);
+    }
+
+    [Fact]
+    public async Task An_empty_application_does_not_score_zero_for_checks_nothing_can_fail()
+    {
+        KnowledgeHealth health = await knowledge.GetHealthAsync(appId, Now);
+
+        // Nothing written, no classification — but no dependency or end-of-life problem
+        // either, because there is nothing to have a problem with.
+        health.FailedChecks.Should().Be(3);
+        health.Percent.Should().Be(50);
+    }
+
     [Fact]
     public async Task Gaps_are_ordered_worst_first()
     {
