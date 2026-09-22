@@ -210,6 +210,14 @@ the first pass had no customer and could say almost nothing. Assigning can also 
 the sender's domain, which is offered rather than done, because it is a statement about
 every future sender there and not only this one.
 
+The application is a separate question and gets the same treatment. The analyst
+recognises one by its name appearing in the subject or body, longest name first, so it is
+sometimes confidently wrong — and a message saying "everything is broken" names nothing at
+all. Accepting therefore carries an `AppChoice`, which distinguishes three answers that a
+plain `Guid?` cannot: use what was recognised, use this one instead, and *a person looked
+and it is none of them*. A ticket with no application is a valid outcome; refusing to open
+one until somebody picks would be worse than the ticket.
+
 [`SupportMailboxService`](../src/EntKube.Web/Services/Mail/SupportMailboxService.cs)
 stores settings per tenant with the password in the tenant's vault. A new mailbox
 starts **switched off**; five failed polls in a row stop it, because presenting a

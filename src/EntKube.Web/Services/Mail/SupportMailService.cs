@@ -6,6 +6,21 @@ using Microsoft.EntityFrameworkCore;
 namespace EntKube.Web.Services.Mail;
 
 /// <summary>
+/// Which application a person chose for a message, as distinct from not having chosen.
+///
+/// <para>A plain <c>Guid?</c> cannot say "somebody looked and it is none of these", which
+/// is a real answer and a different one from "nobody said". The analyst recognises an
+/// application by its name appearing in a sentence, so it is sometimes confidently wrong,
+/// and clearing its guess has to be possible.</para>
+/// </summary>
+/// <param name="AppId">The application, or null for none of them.</param>
+public readonly record struct AppChoice(Guid? AppId)
+{
+    /// <summary>A person looked and it is none of the customer's applications.</summary>
+    public static AppChoice None => new((Guid?)null);
+}
+
+/// <summary>
 /// The support mailbox: takes messages in, has the analyst propose what to do, and applies
 /// what a person accepts.
 ///
@@ -237,8 +252,16 @@ public class SupportMailService(
     /// written reason, which comes from the person confirming it on the ticket, not from a
     /// keyword match. The flags are there to be read.</para>
     /// </summary>
+    /// <param name="chosenApp">
+    /// The application a person picked, which overrides whatever was recognised in the
+    /// text. Null means "use what was recognised"; <see cref="AppChoice.None"/> means a
+    /// person looked and said it is none of them — a distinction that matters, because
+    /// the analyst guesses from a name appearing in a sentence and is sometimes wrong in
+    /// the direction of confidence.
+    /// </param>
     public async Task<Ticket?> AcceptAsync(
-        Guid suggestionId, string actor, DateTime at, CancellationToken ct = default)
+        Guid suggestionId, string actor, DateTime at, AppChoice? chosenApp = null,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
@@ -264,10 +287,16 @@ public class SupportMailService(
                     .FirstOrDefaultAsync(s => s.MessageId == message.Id
                                               && s.Kind == MailSuggestionKind.ProposePriority, ct);
 
+                Guid? appId = chosenApp is AppChoice chosen ? chosen.AppId : suggestion.AppId;
+
+                // Recorded on the suggestion too, so the reasoning shown beside it does not
+                // go on claiming an application nobody accepted.
+                suggestion.AppId = appId;
+
                 ticket = await tickets.CreateAsync(
                     message.TenantId,
                     customerId,
-                    suggestion.AppId,
+                    appId,
                     message.Subject,
                     message.Body,
                     TicketChannel.Email,

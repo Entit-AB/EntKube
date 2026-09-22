@@ -310,6 +310,104 @@ public class SupportMailTests : IDisposable
         await assign.Should().ThrowAsync<InvalidOperationException>();
     }
 
+    // ---- Choosing the application --------------------------------------------------------
+
+    /// <summary>
+    /// Nothing named an application, so the ticket is opened for the customer without one.
+    /// That has to be possible: a message saying "everything is broken" names nothing, and
+    /// refusing to open a ticket until somebody picks would be worse than a ticket with no
+    /// application on it.
+    /// </summary>
+    [Fact]
+    public async Task A_message_that_names_no_application_still_opens_a_ticket()
+    {
+        InboundMailMessage? message = await Receive("Allt är nere", "Inget fungerar.");
+
+        MailSuggestion open = message!.Suggestions.Single(
+            s => s.Kind == MailSuggestionKind.OpenTicket);
+
+        open.AppId.Should().BeNull();
+
+        Ticket? ticket = await tickets.GetAsync(
+            (await mail.AcceptAsync(open.Id, "nils", Tue(11)))!.Id);
+
+        ticket!.AppId.Should().BeNull();
+    }
+
+    /// <summary>
+    /// The operator picks the application the text did not name. This is the other half of
+    /// "no match has to end up somewhere" — the suggestion used to say which one this is
+    /// about has to be chosen, and there was no way to choose it.
+    /// </summary>
+    [Fact]
+    public async Task An_application_can_be_chosen_for_a_message_that_named_none()
+    {
+        InboundMailMessage? message = await Receive("Allt är nere", "Inget fungerar.");
+
+        MailSuggestion open = message!.Suggestions.Single(
+            s => s.Kind == MailSuggestionKind.OpenTicket);
+
+        Ticket? created = await mail.AcceptAsync(
+            open.Id, "nils", Tue(11), new AppChoice(appId));
+
+        (await tickets.GetAsync(created!.Id))!.AppId.Should().Be(appId);
+    }
+
+    /// <summary>
+    /// The analyst recognises an application by its name appearing in a sentence, so it is
+    /// sometimes confidently wrong. A person saying "none of them" has to be able to
+    /// override that, and is a different answer from nobody having said anything.
+    /// </summary>
+    [Fact]
+    public async Task A_recognised_application_can_be_cleared_by_a_person()
+    {
+        InboundMailMessage? message = await Receive(
+            "Journalportalen svarar inte", "Fast egentligen gäller det något annat.");
+
+        MailSuggestion open = message!.Suggestions.Single(
+            s => s.Kind == MailSuggestionKind.OpenTicket);
+
+        open.AppId.Should().Be(appId, "the name is in the subject");
+
+        Ticket? created = await mail.AcceptAsync(open.Id, "nils", Tue(11), AppChoice.None);
+
+        (await tickets.GetAsync(created!.Id))!.AppId.Should().BeNull();
+    }
+
+    /// <summary>Saying nothing keeps what was recognised.</summary>
+    [Fact]
+    public async Task Not_choosing_keeps_what_was_recognised()
+    {
+        InboundMailMessage? message = await Receive(
+            "Journalportalen svarar inte", "Ingen kommer in.");
+
+        MailSuggestion open = message!.Suggestions.Single(
+            s => s.Kind == MailSuggestionKind.OpenTicket);
+
+        Ticket? created = await mail.AcceptAsync(open.Id, "nils", Tue(11));
+
+        (await tickets.GetAsync(created!.Id))!.AppId.Should().Be(appId);
+    }
+
+    /// <summary>
+    /// The suggestion records what was actually accepted, so the reasoning shown beside it
+    /// afterwards does not go on claiming an application nobody agreed to.
+    /// </summary>
+    [Fact]
+    public async Task The_suggestion_records_the_application_that_was_accepted()
+    {
+        InboundMailMessage? message = await Receive(
+            "Journalportalen svarar inte", "Ingen kommer in.");
+
+        MailSuggestion open = message!.Suggestions.Single(
+            s => s.Kind == MailSuggestionKind.OpenTicket);
+
+        await mail.AcceptAsync(open.Id, "nils", Tue(11), AppChoice.None);
+
+        db.ChangeTracker.Clear();
+        db.Set<MailSuggestion>().Single(s => s.Id == open.Id).AppId.Should().BeNull();
+    }
+
     // ---- Matching ---------------------------------------------------------------------
 
     [Fact]

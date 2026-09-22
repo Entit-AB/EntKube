@@ -149,6 +149,33 @@
                                     {
                                         <div class="text-muted mt-1">@suggestion.Reasoning</div>
                                     }
+                                    @if (suggestion.Kind == MailSuggestionKind.OpenTicket
+                                         && suggestion.State == MailSuggestionState.Pending
+                                         && message.CustomerId is Guid appOwner)
+                                    {
+                                        <div class="mt-2 d-flex align-items-center gap-2">
+                                            <label class="text-muted mb-0" style="font-size: .75rem">
+                                                On application
+                                            </label>
+                                            <select class="form-select form-select-sm" style="max-width: 20rem"
+                                                    value="@ChosenApp(suggestion)"
+                                                    @onchange="e => ChooseApp(suggestion.Id, e.Value?.ToString())">
+                                                <option value="">&#8212; none of them &#8212;</option>
+                                                @foreach (Data.App app in AppsFor(appOwner))
+                                                {
+                                                    <option value="@app.Id">@app.Name</option>
+                                                }
+                                            </select>
+                                        </div>
+                                        @if (suggestion.AppId is null && AppsFor(appOwner).Count > 0)
+                                        {
+                                            <div class="text-muted mt-1" style="font-size: .75rem">
+                                                No application name was recognised in the text. Choosing one
+                                                here puts the ticket on it; leaving it as none opens the
+                                                ticket without naming an application.
+                                            </div>
+                                        }
+                                    }
                                     @if (!string.IsNullOrWhiteSpace(suggestion.DraftText))
                                     {
                                         <pre class="bg-light border rounded p-2 mt-2 mb-0"
@@ -164,7 +191,7 @@
                                 {
                                     <div class="d-flex gap-1 ms-3 text-nowrap">
                                         <AsyncButton CssClass="btn-sm btn-primary"
-                                                     OnClick="() => AcceptAsync(suggestion.Id)">
+                                                     OnClick="() => AcceptAsync(suggestion)">
                                             Accept
                                         </AsyncButton>
                                         <button class="btn btn-sm btn-outline-secondary"
@@ -205,6 +232,12 @@
 
     /// <summary>Which of those should also register the sender's domain.</summary>
     private readonly HashSet<Guid> remembering = [];
+
+    /// <summary>The application picked for a suggestion, before Accept is pressed.</summary>
+    private readonly Dictionary<Guid, string> chosenApps = [];
+
+    /// <summary>Each customer's applications, for the picker.</summary>
+    private readonly Dictionary<Guid, List<Data.App>> appsByCustomer = [];
 
     private void Remember(Guid messageId, bool on)
     {
@@ -256,6 +289,21 @@
                 .Where(c => c.TenantId == TenantId)
                 .OrderBy(c => c.Name)
                 .ToListAsync();
+
+            // Only the customers with something in the queue, so a tenant with hundreds of
+            // applications does not load all of them to render a handful of pickers.
+            HashSet<Guid> inQueue = [.. messages.Where(m => m.CustomerId is not null)
+                                                .Select(m => m.CustomerId!.Value)];
+
+            appsByCustomer.Clear();
+
+            foreach (IGrouping<Guid, Data.App> group in (await db.Apps.AsNoTracking()
+                .Where(a => inQueue.Contains(a.CustomerId))
+                .OrderBy(a => a.Name)
+                .ToListAsync()).GroupBy(a => a.CustomerId))
+            {
+                appsByCustomer[group.Key] = [.. group];
+            }
         }
         catch (Exception ex)
         {
@@ -275,10 +323,33 @@
     private static bool IsActionable(MailSuggestionKind kind) =>
         kind is MailSuggestionKind.OpenTicket or MailSuggestionKind.AppendToTicket;
 
-    private async Task AcceptAsync(Guid suggestionId)
+    /// <summary>
+    /// The application chosen for a suggestion, as the select's value: whatever a person
+    /// picked, otherwise whatever was recognised.
+    /// </summary>
+    private string ChosenApp(MailSuggestion suggestion) =>
+        chosenApps.TryGetValue(suggestion.Id, out string? picked)
+            ? picked
+            : suggestion.AppId?.ToString() ?? "";
+
+    private void ChooseApp(Guid suggestionId, string? value) =>
+        chosenApps[suggestionId] = value ?? "";
+
+    private List<Data.App> AppsFor(Guid customerId) =>
+        appsByCustomer.TryGetValue(customerId, out List<Data.App>? found) ? found : [];
+
+    private async Task AcceptAsync(MailSuggestion suggestion)
     {
+        // Only the kind that opens a ticket carries an application, and only then is the
+        // picker rendered — so anything else accepts with no choice attached.
+        AppChoice? chosen = suggestion.Kind == MailSuggestionKind.OpenTicket
+            ? new AppChoice(Guid.TryParse(ChosenApp(suggestion), out Guid id) ? id : null)
+            : null;
+
         Ticket? ticket = await Mail.AcceptAsync(
-            suggestionId, ActorName ?? "unattributed", DateTime.UtcNow);
+            suggestion.Id, ActorName ?? "unattributed", DateTime.UtcNow, chosen);
+
+        chosenApps.Remove(suggestion.Id);
 
         Toasts.Success(ticket is null
             ? "Done."
