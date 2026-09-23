@@ -466,7 +466,7 @@ else
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
-        [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon") ]),
+        [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon"), new("subconsultants", "Subconsultants", "bi-people") ]),
         // Named for what it is rather than for the section it sits in: a mailbox, its
         // connection and the phrases that triage it.
         new("Mail", "bi-envelope",
@@ -934,6 +934,7 @@ else
             case "alert-rules": builder.OpenComponent<TenantAlertRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "alert-routing": builder.OpenComponent<AlertRoutingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "notifications": builder.OpenComponent<NotificationChannels>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "subconsultants": builder.OpenComponent<SubconsultantRegister>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "on-call": builder.OpenComponent<OnCallTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-inbox": builder.OpenComponent<SupportInbox>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-mailbox": builder.OpenComponent<SupportMailboxTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;

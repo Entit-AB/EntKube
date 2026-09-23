@@ -372,6 +372,27 @@ is the failure an unowned queue actually produces. Handovers are recorded on the
 are **not** customer-visible: §14.1 promises them a named contact of theirs, not a view of
 our rota.
 
+## Subconsultants (§18)
+
+Anybody outside our payroll who takes on-call duty, handles an incident, fixes a bug or
+deploys. §18 makes us answerable for their work as for our own and attaches three
+conditions, all of which are dates rather than opinions: bound by confidentiality, bound by
+§17 data-processing terms, and notified to the customer for approval — plus a current list
+kept available on request.
+
+**Approval is tacit.** The customer has ten working days to object, after which somebody
+counts as approved. That is a working-day calculation on the §9 calendar, so the register
+shows the date rather than leaving anyone to work it out.
+
+`OnCallService.MayAccessCustomerEnvironments` is the gate: active, both undertakings in
+place, and approved. The register leads with whoever fails it and says which specific thing
+is missing, because §18 wants the terms in place *before* anybody touches a customer's
+environment and "not allowed" is not an actionable sentence.
+
+All of this was written and tested when the subsystem was, and none of it was reachable —
+no way to register a person, no way to record that the customer had been told, and the list
+§18 requires could only ever be empty. The rules were never the gap; the door was.
+
 ## Maintenance and availability
 
 Time under an agreed maintenance window is **excluded from measured availability**
