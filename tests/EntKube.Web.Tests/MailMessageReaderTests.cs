@@ -121,6 +121,70 @@ public class MailMessageReaderTests
         MailMessageReader.Read(Message(fromName: ""), Tenant, Fetched)
             .FromName.Should().BeNull();
 
+    // ---- Who it was sent to -----------------------------------------------------------------
+
+    /// <summary>
+    /// The address somebody chose to write to is how a customer's own support address
+    /// routes, so it has to survive into the row.
+    /// </summary>
+    [Fact]
+    public void The_addresses_it_was_sent_to_are_kept()
+    {
+        MimeMessage message = Message();
+        message.Cc.Add(new MailboxAddress("Capio", "capio-support@entit.se"));
+
+        MailMessageReader.Read(message, Tenant, Fetched).ToAddresses
+            .Should().Contain("support@entit.se").And.Contain("capio-support@entit.se");
+    }
+
+    /// <summary>
+    /// <b>The one that makes aliases work at all.</b> An address that is an alias for the
+    /// mailbox is expanded before the message is written, so it appears in no header the
+    /// sender wrote — only in the envelope header the delivering server left behind. Miss
+    /// that and a customer's own address routes nothing.
+    /// </summary>
+    [Fact]
+    public void An_address_that_survives_only_in_the_envelope_is_kept()
+    {
+        MimeMessage message = Message();
+        message.Headers.Add("Delivered-To", "capio-support@entit.se");
+
+        MailMessageReader.RecipientsOf(message).Should().Contain("capio-support@entit.se");
+    }
+
+    [Theory]
+    [InlineData("X-Original-To")]
+    [InlineData("X-Envelope-To")]
+    public void The_other_envelope_headers_are_read_too(string header)
+    {
+        MimeMessage message = Message();
+        message.Headers.Add(header, "capio-support@entit.se");
+
+        MailMessageReader.RecipientsOf(message).Should().Contain("capio-support@entit.se");
+    }
+
+    /// <summary>A server may write a display name into one; parse it rather than store it raw.</summary>
+    [Fact]
+    public void An_envelope_header_with_a_display_name_is_parsed()
+    {
+        MimeMessage message = Message();
+        message.Headers.Add("Delivered-To", "Capio Support <capio-support@entit.se>");
+
+        MailMessageReader.RecipientsOf(message).Should().Contain("capio-support@entit.se");
+    }
+
+    /// <summary>Compared case-insensitively later, so stored lower-cased and once.</summary>
+    [Fact]
+    public void Recipients_are_lower_cased_and_not_repeated()
+    {
+        MimeMessage message = Message();
+        message.Cc.Add(new MailboxAddress(null, "CAPIO-Support@Entit.SE"));
+        message.Headers.Add("Delivered-To", "capio-support@entit.se");
+
+        MailMessageReader.RecipientsOf(message)
+            .Count(a => a == "capio-support@entit.se").Should().Be(1);
+    }
+
     // ---- Identity -------------------------------------------------------------------------
 
     /// <summary>

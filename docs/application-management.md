@@ -189,11 +189,27 @@ start a response clock before the message existed.
 
 ### Placing a message
 
-Two registers, in order. The **§23 contacts** by exact address — somebody named in the
-agreement is the strongest statement there is about who a sender is, and it beats a
-domain even where both would answer. Then the **customer's registered mail domains**,
-longest match first, for the eighty people at a customer who write in once and were
-never going to be listed individually.
+Three registers, in order.
+
+**The address it was sent to**, when the customer has one of their own —
+`capio-support@entit.se`. That is a choice somebody made about this message, and it
+outranks anything inferred about the sender: a consultant at a third company reporting a
+fault on a customer's system has a domain that identifies nobody useful, and a supplier's
+engineer has one that identifies the wrong customer entirely. The same address is what
+replies come from, so the thread stays on it — answering from the generic address someone
+who wrote to theirs teaches them to use the generic address.
+
+These are **aliases, not second mailboxes**: the address must deliver into the mailbox the
+tenant already polls, and nothing opens another connection. An alias is expanded before
+the message is written, so the address often survives in no header the sender wrote — only
+in `Delivered-To` or `X-Original-To`, which is why the reader keeps those too. Miss them
+and a customer's own address routes nothing.
+
+**Then the §23 contacts** by exact address — somebody named in the agreement is the
+strongest statement there is about who a *sender* is, and it beats a domain.
+
+**Then the customer's registered mail domains**, longest match first, for the eighty people
+at a customer who write in once and were never going to be listed individually.
 
 A registered domain covers its subdomains, on a dot boundary — `capio.se` places
 `it.capio.se` but not `notcapio.se`, which anybody in the world can register and whose

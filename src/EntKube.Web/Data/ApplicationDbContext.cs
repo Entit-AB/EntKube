@@ -50,6 +50,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<MailTriageRule> MailTriageRules => Set<MailTriageRule>();
     public DbSet<SupportMailbox> SupportMailboxes => Set<SupportMailbox>();
     public DbSet<CustomerEmailDomain> CustomerEmailDomains => Set<CustomerEmailDomain>();
+    public DbSet<CustomerSupportAddress> CustomerSupportAddresses => Set<CustomerSupportAddress>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
     public DbSet<CostLedgerCoverage> CostLedgerCoverages => Set<CostLedgerCoverage>();
     public DbSet<CostLedgerCursor> CostLedgerCursors => Set<CostLedgerCursor>();
@@ -697,6 +698,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             // A mailbox poll hands over the same message repeatedly; this is what makes
             // ingestion idempotent rather than duplicating tickets.
             entity.HasIndex(m => new { m.TenantId, m.MessageId }).IsUnique();
+            entity.Property(m => m.ToAddresses).HasMaxLength(2000);
             entity.HasIndex(m => new { m.TenantId, m.State });
 
             entity.HasOne(m => m.Tenant)
@@ -768,6 +770,31 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(d => d.Customer)
                   .WithMany()
                   .HasForeignKey(d => d.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<CustomerSupportAddress>(entity =>
+        {
+            entity.HasKey(a => a.Id);
+
+            // One customer per address. Two claiming the same one would make routing depend
+            // on which row came back first, and the same message would land in different
+            // queues on different days.
+            entity.HasIndex(a => new { a.TenantId, a.Address }).IsUnique();
+            entity.HasIndex(a => a.CustomerId);
+
+            entity.Property(a => a.Address).HasMaxLength(320);
+            entity.Property(a => a.Notes).HasMaxLength(500);
+            entity.Property(a => a.AddedBy).HasMaxLength(256);
+
+            entity.HasOne(a => a.Tenant)
+                  .WithMany()
+                  .HasForeignKey(a => a.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(a => a.Customer)
+                  .WithMany()
+                  .HasForeignKey(a => a.CustomerId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
 

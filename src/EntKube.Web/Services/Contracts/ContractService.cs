@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using MimeKit;
 using EntKube.Web.Services.Mail;
 using Microsoft.EntityFrameworkCore;
 
@@ -429,6 +430,103 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         await db.SaveChangesAsync(ct);
 
         return (added, null);
+    }
+
+    /// <summary>The support addresses that route to a customer.</summary>
+    public async Task<List<CustomerSupportAddress>> ListSupportAddressesAsync(
+        Guid customerId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        return await db.CustomerSupportAddresses.AsNoTracking()
+            .Where(a => a.CustomerId == customerId)
+            .OrderBy(a => a.Address)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Gives a customer a support address of their own.
+    /// </summary>
+    /// <returns>The row, or an explanation of why it was refused.</returns>
+    public async Task<(CustomerSupportAddress? Added, string? Refused)> AddSupportAddressAsync(
+        Guid tenantId, Guid customerId, string entered, bool replyFromThis, string? notes,
+        string? addedBy, CancellationToken ct = default)
+    {
+        string address = (entered ?? "").Trim().ToLowerInvariant();
+
+        if (!MailboxAddress.TryParse(address, out MailboxAddress? parsed)
+            || string.IsNullOrWhiteSpace(parsed.Address)
+            || !parsed.Address.Contains('@', StringComparison.Ordinal))
+        {
+            return (null, "That is not an email address.");
+        }
+
+        address = parsed.Address.ToLowerInvariant();
+
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        // The tenant's own generic address would route every message to one customer.
+        string? generic = await db.SupportMailboxes.AsNoTracking()
+            .Where(m => m.TenantId == tenantId).Select(m => m.Address).FirstOrDefaultAsync(ct);
+
+        if (address.Equals(generic, StringComparison.OrdinalIgnoreCase))
+        {
+            return (null,
+                $"{address} is the mailbox everything arrives in, so giving it to one "
+                + "customer would route every message to them. Use an alias that delivers "
+                + "into it, such as their own name at the same domain.");
+        }
+
+        CustomerSupportAddress? existing = await db.CustomerSupportAddresses
+            .Include(a => a.Customer)
+            .FirstOrDefaultAsync(a => a.TenantId == tenantId && a.Address == address, ct);
+
+        if (existing is not null)
+        {
+            return existing.CustomerId == customerId
+                ? (existing, null)
+                : (null, $"{address} already routes to {existing.Customer.Name}.");
+        }
+
+        // At most one address replies come from, so the newest wins if it claims that.
+        if (replyFromThis)
+        {
+            foreach (CustomerSupportAddress other in await db.CustomerSupportAddresses
+                .Where(a => a.CustomerId == customerId && a.ReplyFromThis).ToListAsync(ct))
+            {
+                other.ReplyFromThis = false;
+            }
+        }
+
+        CustomerSupportAddress added = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customerId,
+            Address = address,
+            ReplyFromThis = replyFromThis,
+            Notes = notes,
+            AddedBy = addedBy,
+        };
+
+        db.CustomerSupportAddresses.Add(added);
+        await db.SaveChangesAsync(ct);
+
+        return (added, null);
+    }
+
+    public async Task DeleteSupportAddressAsync(Guid id, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        CustomerSupportAddress? address =
+            await db.CustomerSupportAddresses.FindAsync([id], ct);
+
+        if (address is not null)
+        {
+            db.CustomerSupportAddresses.Remove(address);
+            await db.SaveChangesAsync(ct);
+        }
     }
 
     public async Task DeleteEmailDomainAsync(Guid id, CancellationToken ct = default)

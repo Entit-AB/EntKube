@@ -39,6 +39,20 @@ public class InboundMailMessage
 
     public required string FromAddress { get; set; }
 
+    /// <summary>
+    /// Every address this was sent to, lower-cased and separated by spaces.
+    ///
+    /// <para>Kept because the address somebody chose to write to is a statement about which
+    /// customer they mean — often a better one than their own domain, since a consultant
+    /// writing on a customer's behalf has a domain that says nothing. It is also the
+    /// evidence for why a message was routed where it was, which is the first question
+    /// asked when it lands in the wrong queue.</para>
+    ///
+    /// <para>Includes the envelope headers a forwarding alias leaves behind, because an
+    /// address that was aliased into the mailbox may survive nowhere else.</para>
+    /// </summary>
+    public string? ToAddresses { get; set; }
+
     public string? FromName { get; set; }
 
     public required string Subject { get; set; }

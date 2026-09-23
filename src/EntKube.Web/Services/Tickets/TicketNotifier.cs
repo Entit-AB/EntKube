@@ -62,7 +62,7 @@ public class TicketNotifier(
                     .Where(a => a.Id == appId).Select(a => a.Name).FirstOrDefaultAsync(ct)
                 : null;
 
-            string from = await SenderAddressAsync(db, ticket.TenantId, settings, ct);
+            string from = await SenderAddressAsync(db, ticket, settings, ct);
 
             Acknowledgement receipt =
                 TicketAcknowledgement.For(ticket, window, appName, responseDue);
@@ -148,18 +148,33 @@ public class TicketNotifier(
             .ToListAsync(ct);
 
     /// <summary>
-    /// The tenant's support address when one is configured, so a reply lands back in the
-    /// mailbox that is being polled rather than wherever alerts happen to come from.
+    /// Who the mail comes from: the customer's own support address if they have one, then
+    /// the tenant's, then whatever the SMTP configuration names.
+    ///
+    /// <para>The customer's own address first is the point of giving them one. Answering
+    /// from the generic address a customer who wrote to theirs teaches them to use the
+    /// generic address, and the routing that address exists for stops happening.</para>
     /// </summary>
     private static async Task<string> SenderAddressAsync(
-        ApplicationDbContext db, Guid tenantId, SmtpSettings settings, CancellationToken ct)
+        ApplicationDbContext db, Ticket ticket, SmtpSettings settings, CancellationToken ct)
     {
-        string? support = await db.SupportMailboxes.AsNoTracking()
-            .Where(m => m.TenantId == tenantId)
+        string? theirs = await db.CustomerSupportAddresses.AsNoTracking()
+            .Where(a => a.CustomerId == ticket.CustomerId && a.ReplyFromThis)
+            .OrderBy(a => a.Address)
+            .Select(a => a.Address)
+            .FirstOrDefaultAsync(ct);
+
+        if (!string.IsNullOrWhiteSpace(theirs))
+        {
+            return theirs;
+        }
+
+        string? tenant = await db.SupportMailboxes.AsNoTracking()
+            .Where(m => m.TenantId == ticket.TenantId)
             .Select(m => m.Address)
             .FirstOrDefaultAsync(ct);
 
-        return string.IsNullOrWhiteSpace(support) ? settings.From : support;
+        return string.IsNullOrWhiteSpace(tenant) ? settings.From : tenant;
     }
 
     private async Task SendAsync(

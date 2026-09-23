@@ -62,7 +62,8 @@ public class SupportMailService(
         }
 
         message.Id = message.Id == Guid.Empty ? Guid.NewGuid() : message.Id;
-        message.CustomerId ??= await MatchCustomerAsync(db, message.TenantId, message.FromAddress, ct);
+        message.CustomerId ??= await MatchCustomerAsync(
+            db, message.TenantId, message.FromAddress, message.ToAddresses, ct);
 
         message.Suggestions.AddRange(await ProposeAsync(db, message, ct));
         message.State = message.Suggestions.Count > 0
@@ -372,12 +373,18 @@ public class SupportMailService(
     }
 
     /// <summary>
-    /// The customer a sender belongs to. Two registers, in order.
+    /// The customer a message belongs to. Three registers, in order.
     ///
-    /// <para><b>The §23 contacts first</b>, by exact address. Somebody named in the
-    /// agreement is the strongest statement there is about who a sender is, and it beats a
-    /// domain even where both would answer — a consultant at another company named as a
-    /// customer's technical contact belongs to that customer, whatever their address says.</para>
+    /// <para><b>The address it was sent to first</b>, when the customer has one of their
+    /// own. That is a choice somebody made about this message, and it outranks anything
+    /// inferred about the sender — a consultant at a third company writing to
+    /// <c>capio-support@</c> has a domain that identifies nobody useful, and a supplier's
+    /// engineer has one that identifies the wrong customer entirely.</para>
+    ///
+    /// <para><b>Then the §23 contacts</b>, by exact address. Somebody named in the
+    /// agreement is the strongest statement there is about who a <em>sender</em> is, and it
+    /// beats a domain — a consultant named as a customer's technical contact belongs to
+    /// that customer whatever their own address says.</para>
     ///
     /// <para><b>Then the customer's registered domains</b>, longest match first. This is
     /// still not guessing: somebody stated that mail from this domain is that customer's.
@@ -388,9 +395,33 @@ public class SupportMailService(
     /// flags it and an operator says who it was.</para>
     /// </summary>
     private static async Task<Guid?> MatchCustomerAsync(
-        ApplicationDbContext db, Guid tenantId, string fromAddress, CancellationToken ct)
+        ApplicationDbContext db, Guid tenantId, string fromAddress, string? toAddresses,
+        CancellationToken ct)
     {
         string address = fromAddress.Trim().ToLowerInvariant();
+
+        if (!string.IsNullOrWhiteSpace(toAddresses))
+        {
+            List<CustomerSupportAddress> mailboxes = await db.CustomerSupportAddresses
+                .AsNoTracking()
+                .Where(a => a.TenantId == tenantId)
+                .ToListAsync(ct);
+
+            // A reply-all can carry several of ours; any one of them places the message,
+            // and two different customers' addresses on one message is a situation no
+            // ordering can rescue, so the first found is as good as any.
+            HashSet<string> recipients = new(
+                toAddresses.Split(' ', StringSplitOptions.RemoveEmptyEntries),
+                StringComparer.OrdinalIgnoreCase);
+
+            CustomerSupportAddress? addressed =
+                mailboxes.FirstOrDefault(a => recipients.Contains(a.Address));
+
+            if (addressed is not null)
+            {
+                return addressed.CustomerId;
+            }
+        }
 
         ContractContact? contact = await db.ContractContacts.AsNoTracking()
             .Where(c => c.TenantId == tenantId && c.Email != null && c.IsActive)

@@ -258,6 +258,59 @@ public class TicketNotifierTests : IDisposable
         sink.Received.Should().OnlyContain(m => m.From == "support@entit.se");
     }
 
+    /// <summary>
+    /// A customer with their own address is answered from it. Answering from the generic
+    /// one a customer who wrote to theirs teaches them to use the generic one, and the
+    /// routing that address exists for stops happening.
+    /// </summary>
+    [Fact]
+    public async Task A_customer_with_their_own_address_is_answered_from_it()
+    {
+        db.SupportMailboxes.Add(new SupportMailbox
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            Host = "imap.example.com",
+            Username = "support@entit.se",
+            Address = "support@entit.se",
+        });
+        db.CustomerSupportAddresses.Add(new CustomerSupportAddress
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customerId,
+            Address = "capio-support@entit.se",
+            ReplyFromThis = true,
+        });
+        await db.SaveChangesAsync();
+
+        await Raise();
+
+        sink.Received.Should().OnlyContain(m => m.From == "capio-support@entit.se");
+    }
+
+    /// <summary>
+    /// An address registered for routing only does not become the sender. Some addresses
+    /// exist to catch mail from an old system and should not be written back to.
+    /// </summary>
+    [Fact]
+    public async Task An_address_marked_not_to_reply_from_is_not_used_as_the_sender()
+    {
+        db.CustomerSupportAddresses.Add(new CustomerSupportAddress
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customerId,
+            Address = "old-helpdesk@capio.example",
+            ReplyFromThis = false,
+        });
+        await db.SaveChangesAsync();
+
+        await Raise();
+
+        sink.Received.Should().OnlyContain(m => m.From == "alerts@entkube.io");
+    }
+
     [Fact]
     public async Task Without_a_support_address_it_falls_back_to_the_configured_sender()
     {

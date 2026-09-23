@@ -2713,6 +2713,47 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("CustomerGitRepoPolicies");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.CustomerSupportAddress", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("AddedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("Address")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("nvarchar(320)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<bool>("ReplyFromThis")
+                        .HasColumnType("bit");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("TenantId", "Address")
+                        .IsUnique();
+
+                    b.ToTable("CustomerSupportAddresses");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.Dashboard", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3720,6 +3761,10 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<Guid?>("TicketId")
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ToAddresses")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
 
                     b.HasKey("Id");
 
@@ -8741,6 +8786,25 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Customer");
 
                     b.Navigation("Environment");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CustomerSupportAddress", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.DatabaseBinding", b =>

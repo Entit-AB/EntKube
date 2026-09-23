@@ -120,6 +120,117 @@ public class SupportMailTests : IDisposable
             Domain = domain,
         });
 
+    private void RegisterAddress(string address, Guid? forCustomer = null) =>
+        db.CustomerSupportAddresses.Add(new CustomerSupportAddress
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = forCustomer ?? customerId,
+            Address = address,
+        });
+
+    private Task<InboundMailMessage?> ReceiveAddressedTo(
+        string to, string from, string subject = "Fel", string body = "Beskrivning.") =>
+        mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = from,
+            ToAddresses = to,
+            Subject = subject,
+            Body = body,
+            SentAt = Tue(10),
+        });
+
+    // ---- Matching by the address it was sent to ---------------------------------------------
+
+    /// <summary>
+    /// The case a domain cannot cover. A consultant at a third company reporting a fault on
+    /// a customer's system has a domain that identifies nobody useful — but the address
+    /// they were given says plainly whose system it is.
+    /// </summary>
+    [Fact]
+    public async Task A_message_sent_to_a_customers_own_address_is_placed_with_them()
+    {
+        RegisterAddress("capio-support@entit.se");
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await ReceiveAddressedTo(
+            "capio-support@entit.se", from: "consultant@thirdparty.example");
+
+        message!.CustomerId.Should().Be(customerId);
+    }
+
+    /// <summary>
+    /// The address beats what can be inferred about the sender. Somebody who consults for
+    /// two customers is telling us which one they mean by the address they chose, and that
+    /// is a decision about this message rather than a standing fact about them.
+    /// </summary>
+    [Fact]
+    public async Task The_address_written_to_beats_the_senders_own_domain()
+    {
+        Guid other = Guid.NewGuid();
+        db.Customers.Add(new Customer { Id = other, TenantId = tenantId, Name = "Other" });
+
+        RegisterDomain("capio.example");                        // the sender is Capio's
+        RegisterAddress("other-support@entit.se", forCustomer: other);
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await ReceiveAddressedTo(
+            "other-support@entit.se", from: "karin@capio.example");
+
+        message!.CustomerId.Should().Be(other, "they wrote to the other customer's address");
+    }
+
+    /// <summary>
+    /// A reply-all carries several recipients. Finding ours among the customer's own staff,
+    /// the generic address and a colleague is the ordinary case, not the exception.
+    /// </summary>
+    [Fact]
+    public async Task The_address_is_found_among_the_other_recipients()
+    {
+        RegisterAddress("capio-support@entit.se");
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await ReceiveAddressedTo(
+            "kollega@capio.example support@entit.se capio-support@entit.se",
+            from: "stranger@nowhere.example");
+
+        message!.CustomerId.Should().Be(customerId);
+    }
+
+    /// <summary>
+    /// Addresses are compared without regard to case, since a client is free to write them
+    /// however it likes.
+    /// </summary>
+    [Fact]
+    public async Task The_address_is_matched_whatever_case_it_arrives_in()
+    {
+        RegisterAddress("capio-support@entit.se");
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await ReceiveAddressedTo(
+            "Capio-Support@Entit.SE", from: "stranger@nowhere.example");
+
+        message!.CustomerId.Should().Be(customerId);
+    }
+
+    /// <summary>
+    /// Nothing addressed to a customer still falls through to who sent it — the two
+    /// registers work together rather than one replacing the other.
+    /// </summary>
+    [Fact]
+    public async Task Without_a_matching_address_the_sender_still_places_it()
+    {
+        RegisterDomain("capio.example");
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await ReceiveAddressedTo(
+            "support@entit.se", from: "anyone@capio.example");
+
+        message!.CustomerId.Should().Be(customerId);
+    }
+
     // ---- Matching by registered domain ----------------------------------------------------
 
     /// <summary>

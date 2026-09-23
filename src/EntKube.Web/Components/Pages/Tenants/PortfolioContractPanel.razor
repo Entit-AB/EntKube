@@ -35,6 +35,13 @@
                OnConfirm="DeleteListAsync"
                OnCancel="() => pendingDeleteList = null" />
 
+<ConfirmDialog Visible="@(pendingDeleteAddress is not null)"
+               Message="@($"Stop routing {pendingDeleteAddress?.Address}? Mail sent to it will be placed by who sent it instead, and may not be placed at all. Replies will come from the tenant's own support address.")"
+               ConfirmText="Stop routing it"
+               IsBusy="busy"
+               OnConfirm="DeleteSupportAddressAsync"
+               OnCancel="() => pendingDeleteAddress = null" />
+
 <ConfirmDialog Visible="@(pendingDeleteDomain is not null)"
                Message="@($"Stop recognising {pendingDeleteDomain?.Domain}? Mail from anyone there who is not named as a contact will arrive unplaced from now on. Messages already taken in keep the customer they were given.")"
                ConfirmText="Stop recognising it"
@@ -115,7 +122,7 @@
                         </span>
                         <span class="pane-item-sub">@ContactSummary()</span>
                     </span>
-                    <span class="pane-count">@(contacts.Count + domains.Count)</span>
+                    <span class="pane-count">@(contacts.Count + domains.Count + addresses.Count)</span>
                 </button>
             </div>
         </div>
@@ -727,6 +734,85 @@
                         }
                     }
 
+                    @* ───────────── Their own support address ───────────── *@
+                    <h6 class="small text-muted mt-4 mb-2">Support address</h6>
+                    <div class="text-muted small mb-2">
+                        An address of this customer's own. Anything sent to it is placed with
+                        them whoever wrote it — which is the case a domain cannot cover, like a
+                        consultant reporting a fault on their behalf. Their replies come from it
+                        too, so the thread stays on it.
+                        <strong>It has to be an alias that delivers into the mailbox above</strong>;
+                        nothing here opens a second connection.
+                    </div>
+
+                    <div class="row g-2 align-items-end mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Address</label>
+                            <input class="form-control form-control-sm" @bind="newAddress"
+                                   placeholder="capio-support@entit.se" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Notes</label>
+                            <input class="form-control form-control-sm" @bind="newAddressNotes" />
+                        </div>
+                        <div class="col-md-2 align-self-center">
+                            <div class="form-check">
+                                <input type="checkbox" class="form-check-input" id="reply-from"
+                                       @bind="newAddressReplyFrom" />
+                                <label class="form-check-label small" for="reply-from">
+                                    Reply from it
+                                </label>
+                            </div>
+                        </div>
+                        <div class="col-md-2 text-end">
+                            <AsyncButton CssClass="btn-sm btn-outline-primary"
+                                         OnClick="AddSupportAddressAsync">Add</AsyncButton>
+                        </div>
+                    </div>
+
+                    @if (addresses.Count == 0)
+                    {
+                        <div class="text-muted small">
+                            None. Mail for this customer is recognised by who sent it — the
+                            contacts above, and the domains below.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-0">
+                                <tbody>
+                                    @foreach (CustomerSupportAddress address in addresses)
+                                    {
+                                        <tr>
+                                            <td class="small fw-semibold" style="width: 35%">
+                                                @address.Address
+                                                @if (address.ReplyFromThis)
+                                                {
+                                                    <span class="badge bg-light text-dark border ms-1"
+                                                          title="Replies to this customer come from here">
+                                                        replies from
+                                                    </span>
+                                                }
+                                            </td>
+                                            <td class="small text-muted">@address.Notes</td>
+                                            <td class="small text-muted" style="width: 20%">
+                                                @address.AddedBy
+                                            </td>
+                                            <td class="text-end" style="width: 10%">
+                                                <button class="btn btn-sm btn-outline-danger"
+                                                        aria-label="@($"Stop routing {address.Address}")"
+                                                        @onclick="() => pendingDeleteAddress = address">
+                                                    <span class="bi bi-trash"></span>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+
                     @* ───────────── Mail domains ───────────── *@
                     <h6 class="small text-muted mt-4 mb-2">Mail domains</h6>
                     <div class="text-muted small mb-2">
@@ -819,6 +905,11 @@
     private Guid? pendingDeleteContactId;
 
     private List<CustomerEmailDomain> domains = [];
+    private List<CustomerSupportAddress> addresses = [];
+    private string? newAddress;
+    private string? newAddressNotes;
+    private bool newAddressReplyFrom = true;
+    private CustomerSupportAddress? pendingDeleteAddress;
     private string? newDomain;
     private string? newDomainNotes;
     private CustomerEmailDomain? pendingDeleteDomain;
@@ -903,6 +994,7 @@
             agreements = await Contracts.ListPortfolioAgreementsAsync(Customer.Id);
             contacts = await Contracts.ListContactsAsync(Customer.Id);
             domains = await Contracts.ListEmailDomainsAsync(Customer.Id);
+            addresses = await Contracts.ListSupportAddressesAsync(Customer.Id);
 
             // A customer's own lists if any have been negotiated, otherwise the tenant's.
             priceLists = await Contracts.ListPriceListsAsync(Customer.TenantId, Customer.Id);
@@ -1003,6 +1095,65 @@
         catch (Exception ex)
         {
             Toasts.Error($"Could not save: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task AddSupportAddressAsync()
+    {
+        if (string.IsNullOrWhiteSpace(newAddress))
+        {
+            Toasts.Error("An address is required.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            (CustomerSupportAddress? added, string? refused) =
+                await Contracts.AddSupportAddressAsync(
+                    Customer.TenantId, Customer.Id, newAddress, newAddressReplyFrom,
+                    newAddressNotes, await Actor.NameAsync());
+
+            if (refused is not null)
+            {
+                Toasts.Error(refused);
+                return;
+            }
+
+            newAddress = null;
+            newAddressNotes = null;
+            Toasts.Success($"Mail to {added!.Address} is now placed with {Customer.Name}.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not add: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DeleteSupportAddressAsync()
+    {
+        if (pendingDeleteAddress is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Contracts.DeleteSupportAddressAsync(pendingDeleteAddress.Id);
+            pendingDeleteAddress = null;
+            await LoadAsync();
         }
         finally
         {
