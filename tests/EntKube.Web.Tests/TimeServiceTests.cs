@@ -452,4 +452,185 @@ public class TimeServiceTests : IDisposable
         TimebankStatement bank = await time.GetTimebankAsync(customerId, September);
         bank.DrawnHours.Should().Be(4m);
     }
+
+    // ---- §12: the monthly ceiling on an application -----------------------------------------
+
+    /// <summary>
+    /// The contract form has offered this ceiling from the beginning and nothing read it.
+    /// An operator could set it, a customer could believe it was in force, and work sailed
+    /// past it in silence.
+    /// </summary>
+    private void CapTheApp(decimal hours)
+    {
+        db.ApplicationContracts.Add(new ApplicationContract
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            AppId = appId,
+            Origin = ContractOrigin.ExternallyDeveloped,
+            OnboardedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc),
+            MonthlyWorkCapHours = hours,
+        });
+        db.SaveChanges();
+    }
+
+    private void Authorise(Guid? ticketId = null, Guid? forAppId = null)
+    {
+        db.WorkAuthorisations.Add(new WorkAuthorisation
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customerId,
+            TicketId = ticketId,
+            AppId = forAppId,
+            Month = TimeService.MonthBounds(September).From,
+            ApprovedBy = "Capio",
+        });
+        db.SaveChanges();
+    }
+
+    [Fact]
+    public async Task Work_past_an_applications_ceiling_needs_approval()
+    {
+        UseTimeAndMaterials();
+        CapTheApp(2m);
+
+        await Log(Tue(9), Tue(12));          // three billable hours against a ceiling of two
+
+        CommittedHoursStatement committed =
+            await time.GetCommittedHoursAsync(
+                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+
+        committed.UnauthorisedHours.Should().Be(1m);
+    }
+
+    [Fact]
+    public async Task Work_within_the_ceiling_needs_nothing()
+    {
+        UseTimeAndMaterials();
+        CapTheApp(4m);
+
+        await Log(Tue(9), Tue(12));
+
+        CommittedHoursStatement committed =
+            await time.GetCommittedHoursAsync(
+                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+
+        committed.UnauthorisedHours.Should().Be(0m);
+    }
+
+    /// <summary>An application the customer did not cap has no ceiling invented for it.</summary>
+    [Fact]
+    public async Task An_application_with_no_ceiling_is_not_given_one()
+    {
+        UseTimeAndMaterials();
+
+        await Log(Tue(9), Tue(17));
+
+        CommittedHoursStatement committed =
+            await time.GetCommittedHoursAsync(
+                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+
+        committed.UnauthorisedHours.Should().Be(0m);
+    }
+
+    /// <summary>
+    /// §11.1 and §12 both let P1 and P2 proceed without delay. A ceiling that stopped an
+    /// emergency would be a ceiling nobody could agree to.
+    /// </summary>
+    [Fact]
+    public async Task An_emergency_passes_the_ceiling_without_approval()
+    {
+        UseTimeAndMaterials();
+        CapTheApp(1m);
+
+        await Log(Tue(9), Tue(12), AddTicket(TicketPriority.P1));
+
+        CommittedHoursStatement committed =
+            await time.GetCommittedHoursAsync(
+                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+
+        committed.UnauthorisedHours.Should().Be(0m);
+    }
+
+    /// <summary>
+    /// Counted in order, so an emergency after the ceiling was already passed excuses
+    /// itself and not the ordinary work that passed it. By totals, one urgent hour would
+    /// excuse a month of them.
+    /// </summary>
+    [Fact]
+    public async Task An_emergency_afterwards_does_not_excuse_what_came_before()
+    {
+        UseTimeAndMaterials();
+        CapTheApp(1m);
+
+        await Log(Tue(9), Tue(12));                                  // two hours past
+        await Log(Tue(13), Tue(14), AddTicket(TicketPriority.P1));   // excused
+
+        CommittedHoursStatement committed =
+            await time.GetCommittedHoursAsync(
+                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+
+        committed.UnauthorisedHours.Should().Be(2m);
+    }
+
+    /// <summary>
+    /// The customer approving the application for the month clears it — which is what
+    /// WorkAuthorisation.AppId was added for, and nothing read either.
+    /// </summary>
+    [Fact]
+    public async Task Approving_the_application_for_the_month_clears_its_ceiling()
+    {
+        UseTimeAndMaterials();
+        CapTheApp(1m);
+        Authorise(forAppId: appId);
+
+        await Log(Tue(9), Tue(12));
+
+        CommittedHoursStatement committed =
+            await time.GetCommittedHoursAsync(
+                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+
+        committed.UnauthorisedHours.Should().Be(0m);
+    }
+
+    /// <summary>Approving one ticket clears that ticket, not the application.</summary>
+    [Fact]
+    public async Task Approving_one_ticket_does_not_clear_the_rest()
+    {
+        UseTimeAndMaterials();
+        CapTheApp(1m);
+
+        Guid approved = AddTicket();
+        Authorise(ticketId: approved);
+
+        await Log(Tue(9), Tue(11), approved);     // excused
+        await Log(Tue(12), Tue(14));              // not
+
+        CommittedHoursStatement committed =
+            await time.GetCommittedHoursAsync(
+                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+
+        committed.UnauthorisedHours.Should().BeGreaterThan(0m);
+    }
+
+    /// <summary>
+    /// The ceiling is §12's, which is Model B's rule. A portfolio on an hour bank is
+    /// governed by §11.1 instead, and applying both would charge the customer twice for
+    /// the same agreement.
+    /// </summary>
+    [Fact]
+    public async Task A_portfolio_on_an_hour_bank_is_governed_by_the_bank_and_not_the_ceiling()
+    {
+        UseHourBank(100m);
+        CapTheApp(1m);
+
+        await Log(Tue(9), Tue(12));
+
+        CommittedHoursStatement committed =
+            await time.GetCommittedHoursAsync(
+                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+
+        committed.UnauthorisedHours.Should().Be(0m, "the bank has plenty left");
+    }
 }

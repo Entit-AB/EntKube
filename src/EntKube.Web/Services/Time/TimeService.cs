@@ -288,7 +288,31 @@ public class TimeService(
     {
         PortfolioAgreement? agreement = await contracts.GetPortfolioAgreementAsync(customerId, month, ct);
 
-        if (agreement?.PricingModel != PricingModel.HourBank || agreement.HourBankHoursPerMonth is null)
+        // Two rules, one act. §11.1 gates work once a portfolio's hour bank is spent;
+        // §12 gates it once an application passes the monthly ceiling the customer set for
+        // it. Model B has no bank, so for a long time this returned zero for it and a cap
+        // an operator had typed into the contract form did nothing at all.
+        return agreement?.PricingModel switch
+        {
+            PricingModel.HourBank => await BeyondTheBankAsync(
+                db, customerId, month, agreement, passes, entries, ct),
+            PricingModel.TimeAndMaterials => await BeyondTheCapsAsync(
+                db, customerId, month, passes, entries, ct),
+            _ => 0m,
+        };
+    }
+
+    /// <summary>§11.1: hours drawn past the portfolio's bank, without approval.</summary>
+    private static async Task<decimal> BeyondTheBankAsync(
+        ApplicationDbContext db,
+        Guid customerId,
+        DateTime month,
+        PortfolioAgreement agreement,
+        IReadOnlyList<WorkPass> passes,
+        List<TimeEntry> entries,
+        CancellationToken ct)
+    {
+        if (agreement.HourBankHoursPerMonth is null)
         {
             return 0m;
         }
@@ -344,6 +368,106 @@ public class TimeService(
             if (!excused && !entryAuthorised)
             {
                 unauthorised += beyond;
+            }
+        }
+
+        return unauthorised;
+    }
+
+    /// <summary>
+    /// §12: hours billed past the monthly ceiling the customer set for an application,
+    /// without approval.
+    ///
+    /// <para>Per application rather than per portfolio, which is the whole difference from
+    /// the bank — a customer capping one system says nothing about the others. An
+    /// application with no ceiling has none, and is not silently given one.</para>
+    ///
+    /// <para>Counted chronologically, like the bank, so that a P1 raised after the ceiling
+    /// was already passed is excused and the ordinary work that passed it is not. Doing it
+    /// by totals would let one urgent hour excuse a month of them.</para>
+    /// </summary>
+    private static async Task<decimal> BeyondTheCapsAsync(
+        ApplicationDbContext db,
+        Guid customerId,
+        DateTime month,
+        IReadOnlyList<WorkPass> passes,
+        List<TimeEntry> entries,
+        CancellationToken ct)
+    {
+        (DateTime from, DateTime to) = MonthBounds(month);
+
+        Dictionary<Guid, decimal> caps = await db.ApplicationContracts.AsNoTracking()
+            .Where(c => c.App.CustomerId == customerId && c.MonthlyWorkCapHours != null)
+            .ToDictionaryAsync(c => c.AppId, c => c.MonthlyWorkCapHours!.Value, ct);
+
+        if (caps.Count == 0)
+        {
+            return 0m;
+        }
+
+        List<WorkAuthorisation> authorisations = await db.WorkAuthorisations.AsNoTracking()
+            .Where(a => a.CustomerId == customerId && a.Month >= from && a.Month < to)
+            .ToListAsync(ct);
+
+        // Nothing named at all is a blanket approval for the month, as it is for the bank.
+        if (authorisations.Any(a => a.TicketId is null && a.AppId is null))
+        {
+            return 0m;
+        }
+
+        HashSet<Guid> authorisedTickets =
+            [.. authorisations.Where(a => a.TicketId is not null).Select(a => a.TicketId!.Value)];
+
+        HashSet<Guid> authorisedApps =
+            [.. authorisations.Where(a => a.AppId is not null && a.TicketId is null)
+                              .Select(a => a.AppId!.Value)];
+
+        HashSet<Guid> urgentTickets = [.. await db.Tickets.AsNoTracking()
+            .Where(t => t.CustomerId == customerId
+                        && (t.Priority == TicketPriority.P1 || t.Priority == TicketPriority.P2))
+            .Select(t => t.Id)
+            .ToListAsync(ct)];
+
+        HashSet<Guid> authorisedEntries =
+            [.. entries.Where(e => e.AuthorisationId is not null).Select(e => e.Id)];
+
+        decimal unauthorised = 0m;
+
+        foreach (IGrouping<Guid, WorkPass> perApp in passes
+                     .Where(p => p.AppId is not null && caps.ContainsKey(p.AppId.Value))
+                     .GroupBy(p => p.AppId!.Value))
+        {
+            decimal cap = caps[perApp.Key];
+
+            if (authorisedApps.Contains(perApp.Key))
+            {
+                continue;
+            }
+
+            decimal billed = 0m;
+
+            foreach (WorkPass pass in perApp.OrderBy(p => p.StartedAt))
+            {
+                decimal before = billed;
+                billed += pass.BilledHours;
+
+                decimal beyond = Math.Max(0m, billed - Math.Max(before, cap));
+
+                if (beyond <= 0m)
+                {
+                    continue;
+                }
+
+                bool excused = pass.TicketId is Guid id
+                    && (urgentTickets.Contains(id) || authorisedTickets.Contains(id));
+
+                bool entryAuthorised = entries.Any(e =>
+                    e.TicketId == pass.TicketId && authorisedEntries.Contains(e.Id));
+
+                if (!excused && !entryAuthorised)
+                {
+                    unauthorised += beyond;
+                }
             }
         }
 

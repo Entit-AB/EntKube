@@ -150,6 +150,12 @@ at the §20 granularity and draws it against the hour bank. Unused hours expire 
 month end (§11.1); once the bank is spent, further work needs the customer's
 approval, which the portal collects and records by name.
 
+§12 is the same act for Model B: the customer may set a **monthly ceiling per
+application**, and work past it needs their approval — except P1 and P2, which proceed
+without delay, because a ceiling that stopped an emergency is one nobody could agree to.
+Both rules are counted chronologically rather than by totals, so an emergency raised after
+the line was already crossed excuses itself and not the ordinary work that crossed it.
+
 **Billing is reports only.** How much of the bank is spent, how many hours were
 committed. Invoicing happens in a different system and nothing here tries to
 produce one.
