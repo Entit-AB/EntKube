@@ -38,6 +38,28 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
             return Task.FromResult<IReadOnlyList<MailSuggestion>>(suggestions);
         }
 
+        // Our own server says the From address is not who it claims to be. Flagged, not
+        // refused: a forwarded message and a mailing list both fail this honestly, and a
+        // rule that dropped mail would drop a genuine P1 sooner or later. What it must not
+        // do is stay quiet, because the registers that placed this message read the very
+        // header that failed.
+        if (message.SenderAuthenticity == SenderAuthenticity.Failed)
+        {
+            suggestions.Add(Suggestion(
+                message.Id, MailSuggestionKind.FlagForgedSender,
+                $"Our mail server could not verify that this came from {message.FromAddress}",
+                context.PlacedOnTheFromAddress
+                    ? $"SPF, DKIM or DMARC failed — and the only thing placing this with "
+                      + $"{context.Customer.Name} is that same From address, matched against "
+                      + "the §23 contacts or their registered domains. Anybody can write that "
+                      + "header. A forward or a mailing list fails this innocently; so does "
+                      + "somebody writing as a person named in the agreement."
+                    : "SPF, DKIM or DMARC failed, so the sender may not be who the message "
+                      + "says. The customer was placed by where the message was delivered "
+                      + "rather than by this address, so the routing stands — but a ticket "
+                      + "is about to be opened in this person's name."));
+        }
+
         if (context.PlacedOnTheSendersWord)
         {
             // Placed, but on a header the sender wrote. Worth a second look rather than a

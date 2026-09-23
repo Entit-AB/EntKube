@@ -3743,6 +3743,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<DateTime>("ReceivedAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("SenderAuthenticity")
+                        .HasColumnType("INTEGER");
+
                     b.Property<DateTime>("SentAt")
                         .HasColumnType("TEXT");
 
@@ -6883,6 +6886,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("INTEGER");
 
                     b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TrustedAuthenticationServer")
                         .HasColumnType("TEXT");
 
                     b.Property<DateTime>("UpdatedAt")

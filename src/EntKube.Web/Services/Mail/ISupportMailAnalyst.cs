@@ -16,6 +16,15 @@ namespace EntKube.Web.Services.Mail;
 /// support alias in them is a claim and not evidence — and a placement resting on one
 /// must not silence the prompt that would have had somebody look twice.</para>
 /// </param>
+/// <param name="PlacedOnTheFromAddress">
+/// Whether the customer was decided by the From address — a §23 contact or a registered
+/// domain — rather than by where the message was actually delivered.
+///
+/// <para>Both of those registers are exact and were written by somebody who knew what they
+/// were saying, which is why a match on one carries no caveat. They match on a header the
+/// sender wrote, though, so what they are worth depends entirely on whether that header was
+/// ever checked. See <see cref="InboundMailMessage.SenderAuthenticity"/>.</para>
+/// </param>
 public readonly record struct MailContext(
     InboundMailMessage Message,
     Customer? Customer,
@@ -23,7 +32,8 @@ public readonly record struct MailContext(
     IReadOnlyList<Ticket> OpenTickets,
     bool TimebankExhausted,
     MailTriageRuleSet Rules,
-    bool PlacedOnTheSendersWord = false);
+    bool PlacedOnTheSendersWord = false,
+    bool PlacedOnTheFromAddress = false);
 
 /// <summary>
 /// Reads an inbound support message and proposes what to do with it.

@@ -109,6 +109,35 @@ public class MailMessageReaderTests
         row.State.Should().Be(MailTriageState.Received);
     }
 
+    /// <summary>
+    /// The receiving server's verdict is carried onto the row, because the registers that
+    /// place a message read the very header it is a verdict about — and by the time
+    /// anybody looks at the queue, the message itself is long gone.
+    /// </summary>
+    [Fact]
+    public void The_trusted_servers_verdict_is_recorded()
+    {
+        MimeMessage message = Message();
+        message.Headers.Add("Authentication-Results", "mx.entit.se; dmarc=fail");
+
+        MailMessageReader.Read(message, Tenant, Fetched, trustedServer: "mx.entit.se")
+            .SenderAuthenticity.Should().Be(SenderAuthenticity.Failed);
+    }
+
+    /// <summary>
+    /// With no server named, nothing checked the sender — which is recorded as not knowing
+    /// rather than as a pass, and is the state every tenant is in until they say otherwise.
+    /// </summary>
+    [Fact]
+    public void Without_a_trusted_server_the_sender_is_unchecked()
+    {
+        MimeMessage message = Message();
+        message.Headers.Add("Authentication-Results", "mx.entit.se; dmarc=pass");
+
+        MailMessageReader.Read(message, Tenant, Fetched)
+            .SenderAuthenticity.Should().Be(SenderAuthenticity.Unknown);
+    }
+
     /// <summary>A subject can be absent; the column cannot.</summary>
     [Fact]
     public void A_message_with_no_subject_gets_an_empty_one() =>

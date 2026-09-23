@@ -299,6 +299,27 @@ mail would otherwise be triaged straight into a customer's queue.
 and tested, and refuses to register a public provider: handing gmail.com to one customer
 would place every stranger's mail with them, and the mistake is invisible afterwards.
 
+**From is written by the sender too — and it is what the two strongest registers read.**
+A §23 contact match places a message with no caveat at all, which is right when the address
+really is the person named in the agreement and badly wrong when somebody has typed it.
+Nothing in the message can settle that; only the server that received it can, in the
+`Authentication-Results` header where it records what SPF, DKIM and DMARC said.
+
+That header is itself a header, so a sender is free to add one saying their own mail passed
+everything. Only a verdict stamped by a server we actually trust counts, identified by its
+`authserv-id` — which the tenant names on the mailbox, because it cannot be worked out from
+a message. Left empty, every sender is reported as unchecked, and the mailbox screen says
+plainly what that means rather than leaving the field looking optional.
+[`SenderAuthentication`](../src/EntKube.Web/Services/Mail/SenderAuthentication.cs) is that
+parser: pure, and mostly a set of refusals.
+
+The verdict is **flagged, never enforced**. A forwarded message and a mailing list both fail
+these checks honestly, and a rule that dropped mail would drop a genuine P1 sooner or later.
+So a failure raises `FlagForgedSender` — the only red badge in the inbox — and says more when
+the placement rested on the very header that failed than when the message was placed by where
+it was delivered. A pass and an unchecked sender raise nothing at all: most tenants will never
+name a server, and a caveat on every message would be ignored inside a week.
+
 **Placing the customer is what makes everything else possible.** An application name is
 recognised among *that customer's* applications, and the hour bank is theirs — so an
 unplaced message cannot be placed on an application either. That is why a message nobody

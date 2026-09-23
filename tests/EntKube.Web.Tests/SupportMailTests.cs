@@ -157,6 +157,94 @@ public class SupportMailTests : IDisposable
             SentAt = Tue(10),
         });
 
+    /// <summary>A message whose From our own server could not verify.</summary>
+    private Task<InboundMailMessage?> ReceiveFailingAuthentication(
+        string from, string? deliveredTo = null) =>
+        mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = from,
+            DeliveredTo = deliveredTo,
+            Subject = "Fel",
+            Body = "Beskrivning.",
+            SentAt = Tue(10),
+            SenderAuthenticity = SenderAuthenticity.Failed,
+        });
+
+    /// <summary>
+    /// <b>From is written by the sender too, and it is what places a message.</b> A §23
+    /// contact match carries no caveat at all — somebody named in the agreement is the
+    /// strongest statement there is about who a sender is — and it reads a header anybody
+    /// can forge. Where our own server says that header failed, the placement still stands,
+    /// because a forward and a mailing list fail it innocently; what it must not do is stay
+    /// quiet about resting on the very thing that failed.
+    /// </summary>
+    [Fact]
+    public async Task A_contact_placed_on_a_from_our_server_rejected_is_flagged()
+    {
+        InboundMailMessage? message = await ReceiveFailingAuthentication(from: KnownSender);
+
+        message!.CustomerId.Should().Be(customerId);
+
+        MailSuggestion flag = message.Suggestions
+            .Should().ContainSingle(s => s.Kind == MailSuggestionKind.FlagForgedSender)
+            .Subject;
+
+        flag.Summary.Should().Contain(KnownSender);
+        flag.Reasoning.Should().Contain("§23");
+    }
+
+    /// <summary>
+    /// The same failure, on a message placed by where our own server delivered it. The
+    /// routing does not rest on the forged header, so it is left alone — but a ticket is
+    /// about to be opened in that person's name, and §14.1 will notify a contact about it.
+    /// </summary>
+    [Fact]
+    public async Task A_failed_sender_is_flagged_even_where_the_routing_does_not_rest_on_it()
+    {
+        RegisterAddress("entit-support@entit.se");
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await ReceiveFailingAuthentication(
+            from: "stranger@nowhere.example", deliveredTo: "entit-support@entit.se");
+
+        message!.CustomerId.Should().Be(customerId);
+
+        MailSuggestion flag = message.Suggestions
+            .Should().ContainSingle(s => s.Kind == MailSuggestionKind.FlagForgedSender)
+            .Subject;
+
+        flag.Reasoning.Should().NotContain("§23");
+    }
+
+    /// <summary>
+    /// <b>Silence is the default, and has to be.</b> Most tenants will never name a server
+    /// to trust, so every message arrives unchecked — and a caveat on every one of those
+    /// would be ignored inside a week, which is worse than none at all. Only a server we
+    /// trust saying the sender is wrong is worth interrupting for.
+    /// </summary>
+    [Theory]
+    [InlineData(SenderAuthenticity.Unknown)]
+    [InlineData(SenderAuthenticity.Verified)]
+    public async Task Nothing_is_flagged_unless_a_trusted_server_rejected_the_sender(
+        SenderAuthenticity verdict)
+    {
+        InboundMailMessage? message = await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = KnownSender,
+            Subject = "Fel",
+            Body = "Beskrivning.",
+            SentAt = Tue(10),
+            SenderAuthenticity = verdict,
+        });
+
+        message!.Suggestions.Should()
+            .NotContain(s => s.Kind == MailSuggestionKind.FlagForgedSender);
+    }
+
     /// <summary>
     /// <b>To and Cc are written by the sender.</b> Naming a customer's support alias there
     /// is a claim, not evidence — so the message is still placed, because that is usually

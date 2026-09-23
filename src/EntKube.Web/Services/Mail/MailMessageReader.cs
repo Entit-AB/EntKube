@@ -26,7 +26,13 @@ public static class MailMessageReader
     /// <param name="message">The fetched message.</param>
     /// <param name="tenantId">Whose mailbox it arrived in.</param>
     /// <param name="receivedAt">When we fetched it. UTC.</param>
-    public static InboundMailMessage Read(MimeMessage message, Guid tenantId, DateTime receivedAt)
+    /// <param name="trustedServer">
+    /// The <c>authserv-id</c> whose <c>Authentication-Results</c> are believed. Absent, the
+    /// sender's authenticity is recorded as unknown rather than assumed — see
+    /// <see cref="SenderAuthentication"/> for why it cannot be worked out from the message.
+    /// </param>
+    public static InboundMailMessage Read(
+        MimeMessage message, Guid tenantId, DateTime receivedAt, string? trustedServer = null)
     {
         MailboxAddress? from = message.From.Mailboxes.FirstOrDefault();
 
@@ -44,6 +50,7 @@ public static class MailMessageReader
             Body = BodyOf(message),
             SentAt = SentAtOf(message, receivedAt),
             ReceivedAt = receivedAt,
+            SenderAuthenticity = SenderAuthentication.Of(message, trustedServer),
             State = MailTriageState.Received,
         };
     }

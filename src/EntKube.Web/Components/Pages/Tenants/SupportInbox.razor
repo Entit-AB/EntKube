@@ -379,6 +379,7 @@
         MailSuggestionKind.FlagDevelopment => "§15?",
         MailSuggestionKind.FlagTimebank => "hour bank",
         MailSuggestionKind.FlagUnknownSender => "unknown",
+        MailSuggestionKind.FlagForgedSender => "not verified",
         _ => kind.ToString(),
     };
 
@@ -387,6 +388,9 @@
         MailSuggestionKind.OpenTicket or MailSuggestionKind.AppendToTicket => "bg-primary",
         MailSuggestionKind.ProposePriority => "bg-info text-dark",
         MailSuggestionKind.FlagUnknownSender => "bg-warning text-dark",
+        // The only one in red. Everything else here is a proposal about what to do with a
+        // message; this is our own server saying the message is not from who it says.
+        MailSuggestionKind.FlagForgedSender => "bg-danger",
         MailSuggestionKind.FlagTimebank or MailSuggestionKind.FlagDevelopment => "bg-warning text-dark",
         _ => "bg-light text-dark border",
     };

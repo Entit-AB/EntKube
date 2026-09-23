@@ -171,6 +171,37 @@
             </div>
 
             <div class="col-12">
+                <label class="form-label small text-muted">
+                    Trust the sender checks from
+                </label>
+                <InputText class="form-control form-control-sm"
+                           @bind-Value="form.TrustedAuthenticationServer"
+                           placeholder="mx.example.com" />
+                <div class="form-text small">
+                    The name your own mail server stamps on its <code>Authentication-Results</code>
+                    header — usually its hostname. It is normally the first word of that header
+                    on any message already in this mailbox.
+                    @if (string.IsNullOrWhiteSpace(form.TrustedAuthenticationServer))
+                    {
+                        <span class="text-warning-emphasis">
+                            Left empty, nothing checks who a message is from. A stranger writing
+                            as one of a customer's named contacts is placed in that customer's
+                            queue with no warning — because the From address is what places it,
+                            and anybody can write that.
+                        </span>
+                    }
+                    else
+                    {
+                        <span>
+                            Only verdicts stamped by this name are believed. A sender can add
+                            that header themselves, so one from any other server is read and
+                            discarded.
+                        </span>
+                    }
+                </div>
+            </div>
+
+            <div class="col-12">
                 <div class="form-check">
                     <InputCheckbox class="form-check-input" id="mailbox-enabled"
                                    @bind-Value="form.IsEnabled" />
@@ -241,6 +272,9 @@
         [StringLength(256)]
         public string? MoveToFolder { get; set; }
 
+        [StringLength(256)]
+        public string? TrustedAuthenticationServer { get; set; }
+
         public IEnumerable<ValidationResult> Validate(ValidationContext context)
         {
             int floor = (int)SupportMailPoller.MinimumInterval.TotalSeconds;
@@ -286,6 +320,7 @@
                     PollIntervalSeconds = saved.PollIntervalSeconds,
                     Disposition = saved.Disposition,
                     MoveToFolder = saved.MoveToFolder,
+                    TrustedAuthenticationServer = saved.TrustedAuthenticationServer,
                 };
         }
         catch (Exception ex)
@@ -325,6 +360,10 @@
                     IsEnabled = form.IsEnabled,
                     PollIntervalSeconds = form.PollIntervalSeconds,
                     Disposition = form.Disposition,
+                    TrustedAuthenticationServer =
+                        string.IsNullOrWhiteSpace(form.TrustedAuthenticationServer)
+                            ? null
+                            : form.TrustedAuthenticationServer.Trim(),
                     MoveToFolder = string.IsNullOrWhiteSpace(form.MoveToFolder)
                         ? null
                         : form.MoveToFolder.Trim(),

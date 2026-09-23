@@ -59,6 +59,20 @@ public class SupportMailbox
     public string Folder { get; set; } = "INBOX";
 
     /// <summary>
+    /// The <c>authserv-id</c> of the mail server whose <c>Authentication-Results</c> we
+    /// believe — normally the hostname of the server this mailbox is on.
+    ///
+    /// <para><b>Nothing is checked without it.</b> That header is a header like any other:
+    /// a sender is free to include one saying their own mail passed everything, so the only
+    /// ones worth reading are those stamped by a server we actually trust, and only the
+    /// tenant can say which that is. Left empty, every sender's authenticity is reported as
+    /// unknown — which means a forged From is indistinguishable from a real one, and a
+    /// stranger writing as a customer's named §23 contact is placed in their queue with no
+    /// caveat at all.</para>
+    /// </summary>
+    public string? TrustedAuthenticationServer { get; set; }
+
+    /// <summary>
     /// Off until someone has tested the connection and switched it on, deliberately.
     /// </summary>
     public bool IsEnabled { get; set; }

@@ -63,16 +63,18 @@ public class SupportMailService(
 
         message.Id = message.Id == Guid.Empty ? Guid.NewGuid() : message.Id;
         bool placedOnTheSendersWord = false;
+        bool placedOnTheFromAddress = false;
 
         if (message.CustomerId is null)
         {
-            (message.CustomerId, placedOnTheSendersWord) = await MatchCustomerAsync(
-                db, message.TenantId, message.FromAddress,
-                message.DeliveredTo, message.ToAddresses, ct);
+            (message.CustomerId, placedOnTheSendersWord, placedOnTheFromAddress) =
+                await MatchCustomerAsync(
+                    db, message.TenantId, message.FromAddress,
+                    message.DeliveredTo, message.ToAddresses, ct);
         }
 
         message.Suggestions.AddRange(
-            await ProposeAsync(db, message, ct, placedOnTheSendersWord));
+            await ProposeAsync(db, message, ct, placedOnTheSendersWord, placedOnTheFromAddress));
 
         message.State = message.Suggestions.Count > 0
             ? MailTriageState.Proposed
@@ -97,9 +99,13 @@ public class SupportMailService(
     /// Whether the customer was decided only by an address the sender typed. False when a
     /// person said so, which is the other way a message gets placed.
     /// </param>
+    /// <param name="placedOnTheFromAddress">
+    /// Whether the customer was decided by the From address. Also false when a person said
+    /// so — their judgement does not rest on a header.
+    /// </param>
     private async Task<IReadOnlyList<MailSuggestion>> ProposeAsync(
         ApplicationDbContext db, InboundMailMessage message, CancellationToken ct,
-        bool placedOnTheSendersWord = false)
+        bool placedOnTheSendersWord = false, bool placedOnTheFromAddress = false)
     {
         Customer? customer = message.CustomerId is Guid customerId
             ? await db.Customers.AsNoTracking().FirstOrDefaultAsync(c => c.Id == customerId, ct)
@@ -129,7 +135,8 @@ public class SupportMailService(
 
         return await analyst.AnalyseAsync(
             new MailContext(
-                message, customer, apps, openTickets, bankSpent, ruleSet, placedOnTheSendersWord),
+                message, customer, apps, openTickets, bankSpent, ruleSet,
+                placedOnTheSendersWord, placedOnTheFromAddress),
             ct);
     }
 
@@ -409,7 +416,15 @@ public class SupportMailService(
     /// <para>No match is a real answer and leaves the message unplaced, where the inbox
     /// flags it and an operator says who it was.</para>
     /// </summary>
-    private static async Task<(Guid? CustomerId, bool OnTheSendersWord)> MatchCustomerAsync(
+    /// <param name="ct">Cancellation.</param>
+    /// <returns>
+    /// The customer, and which register placed them: <c>OnTheSendersWord</c> for an address
+    /// the sender typed into To or Cc, <c>OnTheFromAddress</c> for the two registers that
+    /// match on From. Both say what the placement is worth, which is not something the
+    /// customer id alone can carry.
+    /// </returns>
+    private static async Task<(Guid? CustomerId, bool OnTheSendersWord, bool OnTheFromAddress)>
+        MatchCustomerAsync(
         ApplicationDbContext db, Guid tenantId, string fromAddress,
         string? deliveredTo, string? toAddresses, CancellationToken ct)
     {
@@ -425,7 +440,7 @@ public class SupportMailService(
         // situation no ordering rescues, so the first found is as good as any.
         if (Addressed(mailboxes, deliveredTo) is CustomerSupportAddress delivered)
         {
-            return (delivered.CustomerId, false);
+            return (delivered.CustomerId, false, false);
         }
 
         ContractContact? contact = await db.ContractContacts.AsNoTracking()
@@ -434,7 +449,7 @@ public class SupportMailService(
 
         if (contact is not null)
         {
-            return (contact.CustomerId, false);
+            return (contact.CustomerId, false, true);
         }
 
         string? domain = SenderDomain.Of(address);
@@ -447,7 +462,7 @@ public class SupportMailService(
 
         if (SenderDomain.BestMatch(registered, d => d.Domain, domain) is CustomerEmailDomain byDomain)
         {
-            return (byDomain.CustomerId, false);
+            return (byDomain.CustomerId, false, true);
         }
 
         // Last: an address the sender put in To or Cc. Usually true, and not evidence —
@@ -455,8 +470,8 @@ public class SupportMailService(
         // Placing on it is still right more often than not, but the placement is flagged
         // so it does not silence the prompt that would have invited a second look.
         return Addressed(mailboxes, toAddresses) is CustomerSupportAddress claimed
-            ? (claimed.CustomerId, true)
-            : (null, false);
+            ? (claimed.CustomerId, true, false)
+            : (null, false, false);
     }
 
     /// <summary>Which of our registered support addresses appears among a recipient list.</summary>

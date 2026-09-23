@@ -3748,6 +3748,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<DateTime>("ReceivedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<int>("SenderAuthenticity")
+                        .HasColumnType("integer");
+
                     b.Property<DateTime>("SentAt")
                         .HasColumnType("timestamp with time zone");
 
@@ -6889,6 +6892,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uuid");
+
+                    b.Property<string>("TrustedAuthenticationServer")
+                        .HasColumnType("text");
 
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("timestamp with time zone");

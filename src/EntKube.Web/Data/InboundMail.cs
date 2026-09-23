@@ -1,5 +1,21 @@
 namespace EntKube.Web.Data;
 
+/// <summary>What the receiving server concluded about who sent a message.</summary>
+public enum SenderAuthenticity
+{
+    /// <summary>
+    /// Nothing was checked. Either no trusted server was named in the mailbox settings, or
+    /// it added no verdict. <b>Not the same as a pass</b> — it means we do not know.
+    /// </summary>
+    Unknown = 0,
+
+    /// <summary>The server we trust said the sender is who the From header says.</summary>
+    Verified = 1,
+
+    /// <summary>The server we trust said it is not, or could not confirm it.</summary>
+    Failed = 2,
+}
+
 /// <summary>Where an inbound message got to in triage.</summary>
 public enum MailTriageState
 {
@@ -67,6 +83,19 @@ public class InboundMailMessage
 
     public string? FromName { get; set; }
 
+    /// <summary>
+    /// What our own mail server concluded about whether the sender is who
+    /// <see cref="FromAddress"/> says — SPF, DKIM and DMARC, as it reported them.
+    ///
+    /// <para><b>Kept, because From drives the strongest placement there is.</b> A §23
+    /// contact match puts a message in a customer's queue with no caveat at all, on the
+    /// strength of a header anybody can write. This is the only thing that can say whether
+    /// that header was checked, and it is <see cref="SenderAuthenticity.Unknown"/> unless
+    /// the tenant named a server whose verdicts we trust — which is honest rather than
+    /// reassuring, and deliberately not the same as a pass.</para>
+    /// </summary>
+    public SenderAuthenticity SenderAuthenticity { get; set; } = SenderAuthenticity.Unknown;
+
     public required string Subject { get; set; }
 
     public string Body { get; set; } = "";
@@ -124,6 +153,9 @@ public enum MailSuggestionKind
 
     /// <summary>The sender was not recognised.</summary>
     FlagUnknownSender = 7,
+
+    /// <summary>Our own mail server says the From address is not who it claims to be.</summary>
+    FlagForgedSender = 8,
 }
 
 /// <summary>Whether a suggestion has been acted on.</summary>

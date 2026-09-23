@@ -124,6 +124,7 @@ public class SupportMailboxService(
             existing.PollIntervalSeconds = settings.PollIntervalSeconds;
             existing.Disposition = settings.Disposition;
             existing.MoveToFolder = settings.MoveToFolder;
+            existing.TrustedAuthenticationServer = settings.TrustedAuthenticationServer;
             existing.UpdatedAt = DateTime.UtcNow;
 
             if (movedMailbox)
@@ -332,7 +333,8 @@ public class SupportMailboxService(
 
             MimeMessage message = await folder.GetMessageAsync(id, ct);
 
-            InboundMailMessage row = MailMessageReader.Read(message, mailbox.TenantId, DateTime.UtcNow);
+            InboundMailMessage row = MailMessageReader.Read(
+                message, mailbox.TenantId, DateTime.UtcNow, mailbox.TrustedAuthenticationServer);
 
             if (await mail.IngestAsync(row, ct) is not null)
             {
