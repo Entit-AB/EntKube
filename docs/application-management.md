@@ -183,6 +183,19 @@ history.
 Rendering uses Markdig with **`DisableHtml()`**. This text is written by operators
 and shown to customers; Markdig passes raw HTML through by default, which would
 make a knowledge section a script-injection point against everyone who reads it.
+That matters more than it looks, because the intended way to fill a section is to
+paste a document written somewhere else — which is exactly where a stray tag comes
+from.
+
+**Pasting a whole document has to work**, and for a while it did not. Blazor Server
+caps anything a browser sends over the circuit at 32 KB by default, and the editor
+was bound on `oninput`, so the entire body went over the wire on every keystroke. A
+pasted architecture guide exceeded the cap, the hub refused the message, the text
+never reached the server, and the section saved as though nothing had been typed —
+with no error anywhere. The cap is now sized for a document
+(`Program.MaximumDocumentBytes`), and the body binds on change, so editing a large
+section does not re-send it per character. The cost is that the preview catches up
+when you click out of the box rather than as you type.
 
 ## The support mailbox
 
