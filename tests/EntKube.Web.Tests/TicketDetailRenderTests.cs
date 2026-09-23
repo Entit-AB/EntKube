@@ -27,13 +27,14 @@ namespace EntKube.Web.Tests;
 /// </summary>
 public class TicketDetailRenderTests : BunitContext, IDisposable
 {
-    private static DateTime Swedish(int year, int month, int day, int hour) =>
+    private static DateTime Swedish(int year, int month, int day, int hour, int minute = 0) =>
         TimeZoneInfo.ConvertTimeToUtc(
-            new DateTime(year, month, day, hour, 0, 0, DateTimeKind.Unspecified),
+            new DateTime(year, month, day, hour, minute, 0, DateTimeKind.Unspecified),
             BusinessCalendar.SwedishTime);
 
     /// <summary>Tuesday 22 September 2026, inside S1.</summary>
-    private static DateTime Tue(int hour) => Swedish(2026, 9, 22, hour);
+    private static DateTime Tue(int hour, int minute = 0) =>
+        Swedish(2026, 9, 22, hour, minute);
 
     private readonly SqliteConnection connection;
     private readonly ApplicationDbContext db;
@@ -274,5 +275,89 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
         await tickets.AssignAsync(ticket.Id, "karin", "karin", Tue(10));
 
         RenderDetail(ticket.Id).Markup.Should().Contain("Take it from karin");
+    }
+
+    // ---- §14.4 on the screen ---------------------------------------------------------------
+
+    /// <summary>
+    /// Enforcing a rule and showing it are one piece of work. A computed obligation nobody
+    /// can see is the same as no obligation — which is what §14.4's update interval was
+    /// for the whole life of this branch.
+    /// </summary>
+    [Fact]
+    public async Task A_P1_shows_when_its_next_update_is_due()
+    {
+        await Raise(TicketPriority.P1);
+
+        RenderDetail(db.Tickets.Single().Id).Markup.Should()
+            .Contain("Next update").And.Contain("§14.4");
+    }
+
+    /// <summary>
+    /// Telling the customer resets the silence. A note they can see is what §14.4 counts,
+    /// and an internal one is not.
+    /// </summary>
+    [Fact]
+    public async Task Telling_the_customer_something_pushes_the_next_update_out()
+    {
+        Ticket ticket = await Raise(TicketPriority.P1);
+
+        TicketSlaStatus before = TicketService.StatusOf(
+            (await tickets.GetAsync(ticket.Id))!, Tue(10));
+
+        await tickets.AddEventAsync(
+            ticket.Id, TicketEventKind.Note, "Still working on it.", "nils", Tue(10),
+            customerVisible: true);
+
+        TicketSlaStatus after = TicketService.StatusOf(
+            (await tickets.GetAsync(ticket.Id))!, Tue(10));
+
+        after.UpdateDue.Should().BeAfter(before.UpdateDue!.Value);
+        after.LastUpdateAt.Should().Be(Tue(10));
+    }
+
+    /// <summary>
+    /// <b>Through the queue, which is the path that was wrong.</b> The queue loaders did
+    /// not fetch the events, so every ticket there looked as though nobody had said
+    /// anything since it arrived — a whole column of red on tickets being handled
+    /// perfectly well. Nothing failed; it was simply untrue.
+    /// </summary>
+    [Fact]
+    public async Task The_queue_sees_that_the_customer_was_told()
+    {
+        Ticket ticket = await Raise(TicketPriority.P1);
+
+        await tickets.AddEventAsync(
+            ticket.Id, TicketEventKind.Note, "Still working on it.", "nils", Tue(11),
+            customerVisible: true);
+
+        TicketSlaStatus fromQueue = (await tickets.GetOpenQueueAsync(customerId, Tue(12)))
+            .Single(t => t.Ticket.Id == ticket.Id);
+
+        fromQueue.LastUpdateAt.Should().Be(Tue(11), "the queue has to read the same events");
+        fromQueue.UpdateOverdue(Tue(11, 30)).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// A note the customer cannot see does not count. Writing to ourselves is not keeping
+    /// them informed, and treating it as such would let the obligation be discharged in
+    /// private.
+    /// </summary>
+    [Fact]
+    public async Task A_note_the_customer_cannot_see_does_not_reset_the_clock()
+    {
+        Ticket ticket = await Raise(TicketPriority.P1);
+
+        TicketSlaStatus before = TicketService.StatusOf(
+            (await tickets.GetAsync(ticket.Id))!, Tue(10));
+
+        await tickets.AddEventAsync(
+            ticket.Id, TicketEventKind.Note, "Asked the supplier.", "nils", Tue(10),
+            customerVisible: false);
+
+        TicketSlaStatus after = TicketService.StatusOf(
+            (await tickets.GetAsync(ticket.Id))!, Tue(10));
+
+        after.UpdateDue.Should().Be(before.UpdateDue);
     }
 }

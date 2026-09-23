@@ -59,6 +59,7 @@ else
                         <th>Status</th>
                         <th>Response</th>
                         <th>Resolution</th>
+                        <th>Update</th>
                         <th>Escalation</th>
                     </tr>
                 </thead>
@@ -112,6 +113,23 @@ else
                             </td>
                             <td>@ClockCell(row.Response, "responded")</td>
                             <td>@ClockCell(row.Resolution, "resolved")</td>
+                            <td class="small">
+                                @if (row.UpdateDue is null)
+                                {
+                                    <span class="text-muted">—</span>
+                                }
+                                else if (row.UpdateOverdue(now))
+                                {
+                                    <span class="badge bg-danger"
+                                          title="@($"§14.4: the customer has heard nothing since {row.LastUpdateAt.ToLocalTime():MMM d HH:mm}")">
+                                        update due
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">@Remaining(row.UpdateDue)</span>
+                                }
+                            </td>
                             <td class="small">
                                 @if (row.EscalationDue is not null)
                                 {

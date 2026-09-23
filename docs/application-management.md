@@ -118,6 +118,18 @@ in one place — a second copy of it somewhere else is a copy that will be wrong
 | Status update | hourly | 4-hourly | on change | on change |
 | Escalate to level 2 | 4 h | 16 h | — | — |
 
+The update interval is counted from **the last thing the customer was actually told** — a
+customer-visible event — not from registration, because the obligation is that they are not
+left in silence and it resets whenever the silence is broken. A note we write to ourselves
+does not discharge it. P3 and P4 have no fixed interval (§14.4 gives them "at a change of
+status"), so inventing one would put a red badge on half the queue.
+
+It is the one clock here paused along with resolution. Everywhere else this subsystem takes
+the reading that does not excuse us, but the point of an update is that the customer is not
+left wondering — and while a pause is theirs, they are the one holding the information.
+Demanding hourly updates meanwhile would fill the queue with red and teach everybody to
+ignore the colour, which costs more than it protects.
+
 [`TicketClock`](../src/EntKube.Web/Services/Tickets/TicketClock.cs) counts against
 these. Three rules do all the work:
 

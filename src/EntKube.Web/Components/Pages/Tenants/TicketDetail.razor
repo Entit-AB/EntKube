@@ -58,6 +58,33 @@
         <div class="col-md-4">@ClockCard("Resolution time", status.Resolution, "§14.4 calls this a goal — overrunning it is not a penalty")</div>
         <div class="col-md-4">
             <div class="border rounded p-3 h-100">
+                <div class="small text-muted">Next update (§14.4)</div>
+                @if (status.UpdateDue is DateTime updateDue)
+                {
+                    <div class="fs-6 fw-semibold @(status.UpdateOverdue(now) ? "text-danger" : "")">
+                        @updateDue.ToLocalTime().ToString("MMM d HH:mm")
+                    </div>
+                    <div class="small text-muted">
+                        @if (status.UpdateOverdue(now))
+                        {
+                            <span>overdue — the customer has heard nothing since
+                                @status.LastUpdateAt.ToLocalTime().ToString("HH:mm")</span>
+                        }
+                        else
+                        {
+                            <span>last told @status.LastUpdateAt.ToLocalTime().ToString("MMM d HH:mm")</span>
+                        }
+                    </div>
+                }
+                else
+                {
+                    <div class="text-muted">—</div>
+                    <div class="small text-muted">no fixed interval at this priority</div>
+                }
+            </div>
+        </div>
+        <div class="col-sm-6 col-lg-3">
+            <div class="border rounded p-3 h-100">
                 <div class="small text-muted">Escalation (§14.5)</div>
                 @if (status.EscalationDue is not null)
                 {

@@ -332,4 +332,69 @@ public class TicketClockTests
     [InlineData(TicketPriority.P4, false)]
     public void Only_P1_and_P2_response_breaches_carry_a_penalty(TicketPriority priority, bool carries) =>
         TicketSla.ResponseBreachCarriesPenalty(priority).Should().Be(carries);
+
+    // ---- §14.4: keeping the customer informed --------------------------------------------
+
+    /// <summary>
+    /// The interval sat in the SLA table from the beginning and nothing read it, so the
+    /// obligation existed on paper and nowhere else. A customer's experience of a P1 that
+    /// nobody is reminded to report on is silence.
+    /// </summary>
+    [Fact]
+    public void A_P1_owes_an_update_every_hour()
+    {
+        TicketClock.UpdateDue(Tue(9), TicketPriority.P1, SupportWindow.S1, [], settledAt: null)
+            .Should().Be(Tue(10));
+    }
+
+    [Fact]
+    public void A_P2_owes_one_every_four_hours() =>
+        TicketClock.UpdateDue(Tue(9), TicketPriority.P2, SupportWindow.S1, [], settledAt: null)
+            .Should().Be(Tue(13));
+
+    /// <summary>
+    /// §14.4 gives P3 "at a change of status, at least every other working day" and P4 "at
+    /// a change of status" — neither is an interval, and inventing one would put a red
+    /// badge on half the queue.
+    /// </summary>
+    [Theory]
+    [InlineData(TicketPriority.P3)]
+    [InlineData(TicketPriority.P4)]
+    public void A_priority_with_no_fixed_interval_owes_no_timed_update(TicketPriority priority) =>
+        TicketClock.UpdateDue(Tue(9), priority, SupportWindow.S1, [], settledAt: null)
+            .Should().BeNull();
+
+    /// <summary>
+    /// Counted inside the support window like every other clock here. An update falling due
+    /// at two in the morning under S1 is not an obligation anybody agreed to.
+    /// </summary>
+    [Fact]
+    public void An_update_falls_due_inside_the_support_window()
+    {
+        // Four hours after 16:00 on a Friday is Monday morning under S1, not Friday night.
+        TicketClock.UpdateDue(Fri(16), TicketPriority.P2, SupportWindow.S1, [], settledAt: null)
+            .Should().Be(Mon(11));
+    }
+
+    /// <summary>A settled ticket owes nothing; the silence it might leave is over.</summary>
+    [Fact]
+    public void A_resolved_ticket_owes_no_further_updates() =>
+        TicketClock.UpdateDue(Tue(9), TicketPriority.P1, SupportWindow.S1, [], settledAt: Tue(10))
+            .Should().BeNull();
+
+    /// <summary>
+    /// Paused with the resolution clock — the one place this subsystem takes the reading
+    /// that favours us. The point of §14.4's updates is that the customer is not left
+    /// wondering, and while the pause is theirs they hold the information. Demanding
+    /// hourly updates meanwhile would fill the queue with red and teach everyone to ignore
+    /// the colour.
+    /// </summary>
+    [Fact]
+    public void A_pause_pushes_the_update_out()
+    {
+        ClockPause waiting = new(Tue(9, 30), Tue(11, 30));
+
+        TicketClock.UpdateDue(Tue(9), TicketPriority.P1, SupportWindow.S1, [waiting], null)
+            .Should().Be(Tue(12), "the two hours waiting on them do not count");
+    }
 }

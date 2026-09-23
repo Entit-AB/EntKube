@@ -11,12 +11,22 @@ namespace EntKube.Web.Services.Tickets;
 /// <param name="Resolution">Resolution time, which §14.4 calls a goal.</param>
 /// <param name="EscalationDue">When §14.5 escalation to level 2 falls due, if it applies.</param>
 /// <param name="IncidentReportDue">For a closed P1, when §14.6's written report is due.</param>
+/// <param name="UpdateDue">
+/// When §14.4's next status update falls due — hourly on a P1, four-hourly on a P2.
+///
+/// <para>The interval was in the SLA table from the beginning and nothing ever read it, so
+/// the obligation existed on paper and nowhere else. A customer's experience of a P1 that
+/// nobody is reminded to report on is silence.</para>
+/// </param>
+/// <param name="LastUpdateAt">When the customer was last told anything.</param>
 public readonly record struct TicketSlaStatus(
     Ticket Ticket,
     ClockStatus Response,
     ClockStatus Resolution,
     DateTime? EscalationDue,
-    DateTime? IncidentReportDue)
+    DateTime? IncidentReportDue,
+    DateTime? UpdateDue,
+    DateTime LastUpdateAt)
 {
     /// <summary>
     /// Whether this counts as a deviation for §14.6. Only a missed response time on a P1 or
@@ -26,6 +36,9 @@ public readonly record struct TicketSlaStatus(
         !Ticket.ExcludedFromSla
         && Response.Breached
         && TicketSla.ResponseBreachCarriesPenalty(Ticket.Priority);
+
+    /// <summary>Whether §14.4's update is overdue as of the moment the status was taken.</summary>
+    public bool UpdateOverdue(DateTime now) => UpdateDue is DateTime due && due <= now;
 }
 
 /// <summary>
@@ -244,6 +257,9 @@ public class TicketService(
 
         Ticket? ticket = await db.Tickets
             .Include(t => t.Pauses)
+            // §14.4's update clock reads the customer-visible events; without them
+            // every ticket looks as though nobody has said anything since it arrived.
+            .Include(t => t.Events)
             .FirstOrDefaultAsync(t => t.Id == ticketId, ct);
 
         if (ticket is null || ticket.Pauses.Any(p => p.EndedAt is null))
@@ -282,6 +298,9 @@ public class TicketService(
 
         Ticket? ticket = await db.Tickets
             .Include(t => t.Pauses)
+            // §14.4's update clock reads the customer-visible events; without them
+            // every ticket looks as though nobody has said anything since it arrived.
+            .Include(t => t.Events)
             .FirstOrDefaultAsync(t => t.Id == ticketId, ct);
 
         TicketPause? open = ticket?.Pauses.FirstOrDefault(p => p.EndedAt is null);
@@ -313,6 +332,9 @@ public class TicketService(
 
         Ticket? ticket = await db.Tickets
             .Include(t => t.Pauses)
+            // §14.4's update clock reads the customer-visible events; without them
+            // every ticket looks as though nobody has said anything since it arrived.
+            .Include(t => t.Events)
             .FirstOrDefaultAsync(t => t.Id == ticketId, ct);
 
         if (ticket is null)
@@ -536,7 +558,21 @@ public class TicketService(
                     ticket.ClosedAt.Value, TicketSla.IncidentReportWorkingDays)
                 : null;
 
-        return new TicketSlaStatus(ticket, response, resolution, escalation, reportDue);
+        // The last thing the customer was actually told. Registration counts as the start
+        // of the silence: from their side, reporting a fault and hearing nothing is the
+        // case §14.4 exists for.
+        DateTime lastUpdate = ticket.Events
+            .Where(e => e.CustomerVisible)
+            .Select(e => e.At)
+            .DefaultIfEmpty(ticket.ClockStartsAt)
+            .Max();
+
+        DateTime? updateDue = TicketClock.UpdateDue(
+            lastUpdate, ticket.Priority, ticket.SupportWindow, pauses,
+            ticket.ResolvedAt ?? ticket.ClosedAt);
+
+        return new TicketSlaStatus(
+            ticket, response, resolution, escalation, reportDue, updateDue, lastUpdate);
     }
 
     /// <summary>
@@ -549,6 +585,9 @@ public class TicketService(
 
         List<Ticket> open = await db.Tickets
             .Include(t => t.Pauses)
+            // §14.4's update clock reads the customer-visible events; without them
+            // every ticket looks as though nobody has said anything since it arrived.
+            .Include(t => t.Events)
             .AsNoTracking()
             .Where(t => t.CustomerId == customerId
                         && t.Status != TicketStatus.Closed
@@ -571,6 +610,9 @@ public class TicketService(
 
         List<Ticket> tickets = await db.Tickets
             .Include(t => t.Pauses)
+            // §14.4's update clock reads the customer-visible events; without them
+            // every ticket looks as though nobody has said anything since it arrived.
+            .Include(t => t.Events)
             .AsNoTracking()
             .Where(t => t.CustomerId == customerId && t.ReportedAt >= from && t.ReportedAt < to)
             .OrderBy(t => t.ReportedAt)

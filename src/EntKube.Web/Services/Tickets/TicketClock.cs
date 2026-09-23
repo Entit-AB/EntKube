@@ -110,6 +110,40 @@ public static class TicketClock
     }
 
     /// <summary>
+    /// When the next status update falls due under §14.4 — hourly on a P1, every four hours
+    /// on a P2 — or null when the priority has no fixed interval or the ticket is settled.
+    ///
+    /// <para><b>Counted from the last thing the customer was actually told</b>, not from
+    /// registration. The obligation is that they are not left in silence, and it resets
+    /// every time the silence is broken.</para>
+    ///
+    /// <para><b>Paused with the resolution clock</b>, which is the one judgement here.
+    /// Elsewhere this subsystem takes the reading that does not excuse us — but the point
+    /// of §14.4's updates is that the customer is not left wondering, and while a pause is
+    /// theirs they are the one holding the information. Demanding hourly updates from us
+    /// in the meantime would fill the queue with red and teach everybody to ignore the
+    /// colour, which costs more than it protects.</para>
+    /// </summary>
+    public static DateTime? UpdateDue(
+        DateTime lastUpdateAt,
+        TicketPriority priority,
+        SupportWindow window,
+        IReadOnlyList<ClockPause> pauses,
+        DateTime? settledAt)
+    {
+        if (settledAt is not null)
+        {
+            return null;
+        }
+
+        TimeSpan? interval = TicketSla.UpdateInterval(priority);
+
+        return interval is null
+            ? null
+            : DeadlineFor(lastUpdateAt, new SlaBudget(interval, null), window, pauses);
+    }
+
+    /// <summary>
     /// Time counted against a target between two instants: window time, less any window time
     /// that fell inside a pause.
     /// </summary>
