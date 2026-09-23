@@ -98,6 +98,9 @@ public class TicketNotifier(
         }
         catch (Exception ex)
         {
+            // The outer net, for everything that is not the sending itself — resolving the
+            // SMTP settings, reading the contacts, asking who is on call. Sending has its
+            // own guard per recipient, which is the one that catches a dead mail server.
             logger.LogError(
                 ex, "Could not announce ticket #{Number}; the ticket stands.", ticket.Number);
         }

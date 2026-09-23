@@ -408,6 +408,14 @@ theories), each named after the clause it defends —
 the mail reader are all pure, so they are tested directly rather than through a
 database.
 
+Outbound mail is tested over a real socket. `SmtpSink` is a listener on loopback
+that speaks the handful of verbs MailKit needs and keeps what it is given, so the
+tests can check that a message actually leaves, that everybody who should hear
+does, and that one stale address in the contact register does not cost the on-call
+engineer their notification. The code under test constructs its own `SmtpClient`,
+so the alternative was an abstraction whose only user is the test — and the
+abstraction would then be the thing that was verified.
+
 What is **not** covered: nothing here has run against a real IMAP server, and the
 monthly report has not been reconciled against an invoice produced by the billing
 system it is meant to feed.
