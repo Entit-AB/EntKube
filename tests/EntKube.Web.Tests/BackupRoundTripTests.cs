@@ -102,11 +102,11 @@ public class BackupRoundTripTests : IDisposable
         db.MeshMtlsPolicies.Add(new MeshMtlsPolicy
         {
             Id = Guid.NewGuid(), TenantId = tenantId, ClusterId = clusterId,
-            Namespace = "capio-prod",
+            Namespace = "entit-prod",
         });
 
         // The support agreement.
-        Customer customer = new() { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Capio" };
+        Customer customer = new() { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Entit AB" };
         db.Customers.Add(customer);
         db.PortfolioAgreements.Add(new PortfolioAgreement
         {

@@ -50,7 +50,7 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
         db.Database.EnsureCreated();
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
-        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Capio" });
+        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Entit AB" });
         db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "Journalportalen" });
         db.SaveChanges();
 
@@ -124,12 +124,12 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
             Party = ContractParty.Customer,
             Role = ContractContactRole.TechnicalContact,
             Name = "Karin",
-            Email = "karin@capio.example",
+            Email = "karin@entit.example",
         });
         await db.SaveChangesAsync();
 
         InboundMailMessage? message = await Receive(
-            "Journalportalen svarar inte", "Ingen kommer in.", "karin@capio.example");
+            "Journalportalen svarar inte", "Ingen kommer in.", "karin@entit.example");
 
         IRenderedComponent<SupportInbox> inbox = RenderInbox();
 
@@ -165,7 +165,7 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
 
         inbox.Markup.Should().Contain("Nobody recognised this sender");
         inbox.FindAll("select").Should().NotBeEmpty("there has to be a customer to choose");
-        inbox.Markup.Should().Contain("Capio", "the tenant's customers are offered");
+        inbox.Markup.Should().Contain("Entit AB", "the tenant's customers are offered");
     }
 
     /// <summary>
@@ -180,11 +180,11 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
             Id = Guid.NewGuid(),
             TenantId = tenantId,
             CustomerId = customerId,
-            Domain = "capio.example",
+            Domain = "entit.example",
         });
         await db.SaveChangesAsync();
 
-        await Receive("Fel", "Beskrivning.", "anyone@capio.example");
+        await Receive("Fel", "Beskrivning.", "anyone@entit.example");
 
         RenderInbox().Markup.Should().NotContain("Nobody recognised this sender");
     }

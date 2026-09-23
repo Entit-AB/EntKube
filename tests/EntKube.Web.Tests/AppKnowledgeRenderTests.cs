@@ -42,7 +42,7 @@ public class AppKnowledgeRenderTests : BunitContext, IDisposable
         app = new App { Id = Guid.NewGuid(), CustomerId = customerId, Name = "Journalportalen" };
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
-        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Capio" });
+        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Entit AB" });
         db.Apps.Add(app);
         db.SaveChanges();
 

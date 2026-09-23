@@ -36,7 +36,7 @@ public class SupportMailTests : IDisposable
     private readonly Guid customerId = Guid.NewGuid();
     private readonly Guid appId = Guid.NewGuid();
 
-    private const string KnownSender = "tech@capio.example";
+    private const string KnownSender = "tech@entit.example";
 
     public SupportMailTests()
     {
@@ -48,7 +48,7 @@ public class SupportMailTests : IDisposable
         db.Database.EnsureCreated();
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
-        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Capio" });
+        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Entit AB" });
         db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "Journalportalen" });
 
         db.ContractContacts.Add(new ContractContact
@@ -190,7 +190,7 @@ public class SupportMailTests : IDisposable
             FromAddress = KnownSender,
             Subject = "Ett helt annat fel",
             Body = "Beskrivning.",
-            InReplyTo = "kollega@capio.example",
+            InReplyTo = "kollega@entit.example",
             SentAt = Tue(11),
         });
 
@@ -230,11 +230,11 @@ public class SupportMailTests : IDisposable
     [Fact]
     public async Task A_message_sent_to_a_customers_own_address_is_placed_with_them()
     {
-        RegisterAddress("capio-support@entit.se");
+        RegisterAddress("entit-support@entit.se");
         await db.SaveChangesAsync();
 
         InboundMailMessage? message = await ReceiveAddressedTo(
-            "capio-support@entit.se", from: "consultant@thirdparty.example");
+            "entit-support@entit.se", from: "consultant@thirdparty.example");
 
         message!.CustomerId.Should().Be(customerId);
     }
@@ -250,12 +250,12 @@ public class SupportMailTests : IDisposable
         Guid other = Guid.NewGuid();
         db.Customers.Add(new Customer { Id = other, TenantId = tenantId, Name = "Other" });
 
-        RegisterDomain("capio.example");                        // the sender is Capio's
+        RegisterDomain("entit.example");                        // the sender is Entit AB's
         RegisterAddress("other-support@entit.se", forCustomer: other);
         await db.SaveChangesAsync();
 
         InboundMailMessage? message = await ReceiveAddressedTo(
-            "other-support@entit.se", from: "karin@capio.example");
+            "other-support@entit.se", from: "karin@entit.example");
 
         message!.CustomerId.Should().Be(other, "they wrote to the other customer's address");
     }
@@ -267,11 +267,11 @@ public class SupportMailTests : IDisposable
     [Fact]
     public async Task The_address_is_found_among_the_other_recipients()
     {
-        RegisterAddress("capio-support@entit.se");
+        RegisterAddress("entit-support@entit.se");
         await db.SaveChangesAsync();
 
         InboundMailMessage? message = await ReceiveAddressedTo(
-            "kollega@capio.example support@entit.se capio-support@entit.se",
+            "kollega@entit.example support@entit.se entit-support@entit.se",
             from: "stranger@nowhere.example");
 
         message!.CustomerId.Should().Be(customerId);
@@ -284,11 +284,11 @@ public class SupportMailTests : IDisposable
     [Fact]
     public async Task The_address_is_matched_whatever_case_it_arrives_in()
     {
-        RegisterAddress("capio-support@entit.se");
+        RegisterAddress("entit-support@entit.se");
         await db.SaveChangesAsync();
 
         InboundMailMessage? message = await ReceiveAddressedTo(
-            "Capio-Support@Entit.SE", from: "stranger@nowhere.example");
+            "Entit-Support@Entit.SE", from: "stranger@nowhere.example");
 
         message!.CustomerId.Should().Be(customerId);
     }
@@ -300,11 +300,11 @@ public class SupportMailTests : IDisposable
     [Fact]
     public async Task Without_a_matching_address_the_sender_still_places_it()
     {
-        RegisterDomain("capio.example");
+        RegisterDomain("entit.example");
         await db.SaveChangesAsync();
 
         InboundMailMessage? message = await ReceiveAddressedTo(
-            "support@entit.se", from: "anyone@capio.example");
+            "support@entit.se", from: "anyone@entit.example");
 
         message!.CustomerId.Should().Be(customerId);
     }
@@ -320,11 +320,11 @@ public class SupportMailTests : IDisposable
     [Fact]
     public async Task A_sender_at_a_registered_domain_is_placed()
     {
-        RegisterDomain("capio.example");
+        RegisterDomain("entit.example");
         await db.SaveChangesAsync();
 
         InboundMailMessage? message = await Receive(
-            "Fel i systemet", "Det gar inte att logga in.", from: "someone.else@capio.example");
+            "Fel i systemet", "Det gar inte att logga in.", from: "someone.else@entit.example");
 
         message!.CustomerId.Should().Be(customerId);
     }
@@ -334,27 +334,27 @@ public class SupportMailTests : IDisposable
     [Fact]
     public async Task A_sender_at_a_subdomain_of_a_registered_domain_is_placed()
     {
-        RegisterDomain("capio.example");
+        RegisterDomain("entit.example");
         await db.SaveChangesAsync();
 
         InboundMailMessage? message = await Receive(
-            "Fel", "Beskrivning.", from: "helpdesk@it.capio.example");
+            "Fel", "Beskrivning.", from: "helpdesk@it.entit.example");
 
         message!.CustomerId.Should().Be(customerId);
     }
 
     /// <summary>
     /// A domain that merely ends the same is somebody else's — anybody can register
-    /// notcapio.example, and its mail would otherwise be triaged into this customer's queue.
+    /// notentit.example, and its mail would otherwise be triaged into this customer's queue.
     /// </summary>
     [Fact]
     public async Task A_lookalike_domain_is_not_placed()
     {
-        RegisterDomain("capio.example");
+        RegisterDomain("entit.example");
         await db.SaveChangesAsync();
 
         InboundMailMessage? message = await Receive(
-            "Fel", "Beskrivning.", from: "attacker@notcapio.example");
+            "Fel", "Beskrivning.", from: "attacker@notentit.example");
 
         message!.CustomerId.Should().BeNull();
     }
@@ -371,7 +371,7 @@ public class SupportMailTests : IDisposable
         db.Customers.Add(new Customer { Id = otherCustomer, TenantId = tenantId, Name = "Other" });
 
         // The known contact's own domain is registered to somebody else entirely.
-        RegisterDomain("capio.example", forCustomer: otherCustomer);
+        RegisterDomain("entit.example", forCustomer: otherCustomer);
         await db.SaveChangesAsync();
 
         InboundMailMessage? message = await Receive("Fel", "Beskrivning.", from: KnownSender);
@@ -389,13 +389,13 @@ public class SupportMailTests : IDisposable
     [Fact]
     public async Task A_message_placed_by_domain_can_also_be_placed_on_an_application()
     {
-        RegisterDomain("capio.example");
+        RegisterDomain("entit.example");
         await db.SaveChangesAsync();
 
         InboundMailMessage? message = await Receive(
             "Journalportalen svarar inte",
             "Ingen kommer in.",
-            from: "someone.else@capio.example");
+            from: "someone.else@entit.example");
 
         message!.Suggestions.Should().Contain(s => s.AppId == appId);
     }

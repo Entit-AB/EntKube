@@ -54,7 +54,7 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
         db.Database.EnsureCreated();
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
-        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Capio" });
+        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Entit AB" });
         db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "Journalportalen" });
 
         ApplicationContract contract = new()
@@ -111,7 +111,7 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
     private Task<Ticket> Raise(TicketPriority priority = TicketPriority.P3) =>
         tickets.CreateAsync(
             tenantId, customerId, appId, "Journalen svarar inte", "Ingen kommer in.",
-            TicketChannel.Email, priority, Tue(9), "Karin", "karin@capio.example");
+            TicketChannel.Email, priority, Tue(9), "Karin", "karin@entit.example");
 
     /// <summary>
     /// Rendered as the queue renders it: an id and two callbacks, and no actor — which is

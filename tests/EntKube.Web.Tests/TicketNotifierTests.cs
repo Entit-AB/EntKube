@@ -51,7 +51,7 @@ public class TicketNotifierTests : IDisposable
         db.Database.EnsureCreated();
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
-        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Capio" });
+        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Entit AB" });
         db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "Journalportalen" });
 
         ApplicationContract contract = new()
@@ -107,7 +107,7 @@ public class TicketNotifierTests : IDisposable
 
     private Task<Ticket> Raise(
         TicketPriority priority = TicketPriority.P2,
-        string? reporter = "karin@capio.example") =>
+        string? reporter = "karin@entit.example") =>
         Tickets().CreateAsync(
             tenantId, customerId, appId, "Journalen svarar inte", "Ingen kommer in.",
             TicketChannel.Portal, priority, Tue(9), "Karin", reporter);
@@ -163,7 +163,7 @@ public class TicketNotifierTests : IDisposable
         Ticket ticket = await Raise();
 
         SentMail receipt = sink.Received.Should()
-            .ContainSingle(m => m.To == "karin@capio.example").Subject;
+            .ContainSingle(m => m.To == "karin@entit.example").Subject;
 
         receipt.Message.Subject.Should().StartWith($"[#{ticket.Number}]");
         receipt.Message.TextBody.Should().Contain("We have received your report");
@@ -179,7 +179,7 @@ public class TicketNotifierTests : IDisposable
     {
         Ticket ticket = await Raise();
 
-        sink.Received.Single(m => m.To == "karin@capio.example")
+        sink.Received.Single(m => m.To == "karin@entit.example")
             .Message.MessageId.Should().StartWith($"ticket-{ticket.Number}.");
     }
 
@@ -190,14 +190,14 @@ public class TicketNotifierTests : IDisposable
     [Fact]
     public async Task The_designated_contact_and_the_deputy_are_told()
     {
-        AddContact(ContractContactRole.TechnicalContact, "tech@capio.example");
-        AddContact(ContractContactRole.Deputy, "deputy@capio.example");
+        AddContact(ContractContactRole.TechnicalContact, "tech@entit.example");
+        AddContact(ContractContactRole.Deputy, "deputy@entit.example");
         await db.SaveChangesAsync();
 
         await Raise();
 
         sink.Received.Select(m => m.To).Should()
-            .Contain("tech@capio.example").And.Contain("deputy@capio.example");
+            .Contain("tech@entit.example").And.Contain("deputy@entit.example");
     }
 
     /// <summary>
@@ -207,12 +207,12 @@ public class TicketNotifierTests : IDisposable
     [Fact]
     public async Task Somebody_who_is_both_reporter_and_contact_is_told_once()
     {
-        AddContact(ContractContactRole.TechnicalContact, "karin@capio.example");
+        AddContact(ContractContactRole.TechnicalContact, "karin@entit.example");
         await db.SaveChangesAsync();
 
-        await Raise(reporter: "karin@capio.example");
+        await Raise(reporter: "karin@entit.example");
 
-        sink.Received.Count(m => m.To == "karin@capio.example").Should().Be(1);
+        sink.Received.Count(m => m.To == "karin@entit.example").Should().Be(1);
     }
 
     /// <summary>
@@ -279,14 +279,14 @@ public class TicketNotifierTests : IDisposable
             Id = Guid.NewGuid(),
             TenantId = tenantId,
             CustomerId = customerId,
-            Address = "capio-support@entit.se",
+            Address = "entit-support@entit.se",
             ReplyFromThis = true,
         });
         await db.SaveChangesAsync();
 
         await Raise();
 
-        sink.Received.Should().OnlyContain(m => m.From == "capio-support@entit.se");
+        sink.Received.Should().OnlyContain(m => m.From == "entit-support@entit.se");
     }
 
     /// <summary>
@@ -301,7 +301,7 @@ public class TicketNotifierTests : IDisposable
             Id = Guid.NewGuid(),
             TenantId = tenantId,
             CustomerId = customerId,
-            Address = "old-helpdesk@capio.example",
+            Address = "old-helpdesk@entit.example",
             ReplyFromThis = false,
         });
         await db.SaveChangesAsync();
@@ -329,16 +329,16 @@ public class TicketNotifierTests : IDisposable
     [Fact]
     public async Task One_bad_address_does_not_stop_the_others_being_told()
     {
-        AddContact(ContractContactRole.TechnicalContact, "gone@capio.example");
+        AddContact(ContractContactRole.TechnicalContact, "gone@entit.example");
         PutOnCall("jour@entit.se");
         await db.SaveChangesAsync();
 
-        sink.Reject.Add("gone@capio.example");
+        sink.Reject.Add("gone@entit.example");
 
         await Raise();
 
         sink.Received.Select(m => m.To).Should()
-            .Contain("karin@capio.example").And.Contain("jour@entit.se");
+            .Contain("karin@entit.example").And.Contain("jour@entit.se");
     }
 
     /// <summary>
@@ -382,7 +382,7 @@ public class TicketNotifierTests : IDisposable
 
         Ticket ticket = await tickets.CreateAsync(
             tenantId, customerId, appId, "Journalen svarar inte", "Ingen kommer in.",
-            TicketChannel.Portal, TicketPriority.P1, Tue(9), "Karin", "karin@capio.example");
+            TicketChannel.Portal, TicketPriority.P1, Tue(9), "Karin", "karin@entit.example");
 
         ticket.Number.Should().BeGreaterThan(0);
         db.Tickets.Should().ContainSingle(t => t.Id == ticket.Id);
@@ -402,7 +402,7 @@ public class TicketNotifierTests : IDisposable
 
         Ticket ticket = await tickets.CreateAsync(
             tenantId, customerId, appId, "Journalen svarar inte", "Ingen kommer in.",
-            TicketChannel.Portal, TicketPriority.P1, Tue(9), "Karin", "karin@capio.example");
+            TicketChannel.Portal, TicketPriority.P1, Tue(9), "Karin", "karin@entit.example");
 
         ticket.Number.Should().BeGreaterThan(0);
     }

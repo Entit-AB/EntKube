@@ -78,14 +78,14 @@ public class CurrentActorTests
 
     /// <summary>
     /// In the portal an action is the customer's even when their user cannot be named, so
-    /// the ledger says "Capio" rather than "unattributed".
+    /// the ledger says "Entit AB" rather than "unattributed".
     /// </summary>
     [Fact]
     public async Task The_portal_falls_back_to_the_customers_name()
     {
         CurrentActor actor = new(new Stub(() => Task.FromResult(Anonymous())));
 
-        (await actor.NameOrAsync("Capio")).Should().Be("Capio");
+        (await actor.NameOrAsync("Entit AB")).Should().Be("Entit AB");
     }
 
     [Fact]
@@ -93,6 +93,6 @@ public class CurrentActorTests
     {
         CurrentActor actor = new(new Stub(() => Task.FromResult(SignedInAs("anna"))));
 
-        (await actor.NameOrAsync("Capio")).Should().Be("anna");
+        (await actor.NameOrAsync("Entit AB")).Should().Be("anna");
     }
 }

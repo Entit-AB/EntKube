@@ -24,11 +24,11 @@ public class CustomerEmailDomain
     public Guid CustomerId { get; set; }
 
     /// <summary>
-    /// The domain, lower-cased and without the @ — "capio.se".
+    /// The domain, lower-cased and without the @ — "entit.example".
     ///
-    /// <para>Matches that domain exactly and any subdomain of it, so "capio.se" also
-    /// places mail from "it.capio.se". The boundary is a dot, which is what stops
-    /// "notcapio.se" matching.</para>
+    /// <para>Matches that domain exactly and any subdomain of it, so "entit.example" also
+    /// places mail from "it.entit.example". The boundary is a dot, which is what stops
+    /// "notentit.example" matching.</para>
     /// </summary>
     public required string Domain { get; set; }
 

@@ -36,7 +36,7 @@ public class SupportMessageIdTests
     /// ticket.
     /// </summary>
     [Theory]
-    [InlineData("CAB1234@mail.capio.example")]
+    [InlineData("CAB1234@mail.entit.example")]
     [InlineData("ticket-1042@some-other-helpdesk.example")]
     [InlineData("ticket-1042.notahexguid@entkube")]
     [InlineData("ticket-.abcdef01234567890123456789abcdef@entkube")]
@@ -57,10 +57,10 @@ public class SupportMessageIdTests
         string ours = SupportMessageId.For(1042);
 
         SupportMessageId.OursIn(
-            ["first@capio.example", ours, "reply@capio.example"]).Should().Be(ours);
+            ["first@entit.example", ours, "reply@entit.example"]).Should().Be(ours);
     }
 
     [Fact]
     public void A_chain_with_none_of_ours_gives_nothing() =>
-        SupportMessageId.OursIn(["a@capio.example", "b@capio.example"]).Should().BeNull();
+        SupportMessageId.OursIn(["a@entit.example", "b@entit.example"]).Should().BeNull();
 }

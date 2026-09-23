@@ -4,9 +4,10 @@ EntKube as the system of record for an application-management agreement: what wa
 agreed, what was done under it, how long it took, and what that comes to at the
 end of the month.
 
-Built against the *Avtal om applikationsförvaltning och support* between ENTIT AB
-and Capio Sverige AB. Clause numbers in the code and below (§14.4, §10.2.1, …)
-are that agreement's.
+Built against ENTIT AB's *Avtal om applikationsförvaltning och support*. Clause
+numbers in the code and below (§14.4, §10.2.1, …) are that agreement's; the
+customer it was first signed with is not named here or anywhere in the code, and
+examples use ENTIT's own name and the reserved `entit.example` domain instead.
 
 ## The problem
 
@@ -233,7 +234,7 @@ start a response clock before the message existed.
 Three registers, in order.
 
 **The address it was sent to**, when the customer has one of their own —
-`capio-support@entit.se`. That is a choice somebody made about this message, and it
+`customer-support@entit.se`. That is a choice somebody made about this message, and it
 outranks anything inferred about the sender: a consultant at a third company reporting a
 fault on a customer's system has a domain that identifies nobody useful, and a supplier's
 engineer has one that identifies the wrong customer entirely. The same address is what
@@ -252,8 +253,8 @@ strongest statement there is about who a *sender* is, and it beats a domain.
 **Then the customer's registered mail domains**, longest match first, for the eighty people
 at a customer who write in once and were never going to be listed individually.
 
-A registered domain covers its subdomains, on a dot boundary — `capio.se` places
-`it.capio.se` but not `notcapio.se`, which anybody in the world can register and whose
+A registered domain covers its subdomains, on a dot boundary — `entit.example` places
+`it.entit.example` but not `notentit.example`, which anybody in the world can register and whose
 mail would otherwise be triaged straight into a customer's queue.
 [`SenderDomain`](../src/EntKube.Web/Services/Mail/SenderDomain.cs) holds that rule, pure
 and tested, and refuses to register a public provider: handing gmail.com to one customer

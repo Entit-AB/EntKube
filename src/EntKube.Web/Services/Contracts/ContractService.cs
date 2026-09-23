@@ -392,7 +392,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
         if (domain is null)
         {
-            return (null, "That is not a mail domain — it needs at least one dot, as in capio.se.");
+            return (null, "That is not a mail domain — it needs at least one dot, as in entit.example.");
         }
 
         if (SenderDomain.PublicProviders.Contains(domain))

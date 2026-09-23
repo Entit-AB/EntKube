@@ -378,7 +378,7 @@ public class SupportMailService(
     /// <para><b>The address it was sent to first</b>, when the customer has one of their
     /// own. That is a choice somebody made about this message, and it outranks anything
     /// inferred about the sender — a consultant at a third company writing to
-    /// <c>capio-support@</c> has a domain that identifies nobody useful, and a supplier's
+    /// <c>entit-support@</c> has a domain that identifies nobody useful, and a supplier's
     /// engineer has one that identifies the wrong customer entirely.</para>
     ///
     /// <para><b>Then the §23 contacts</b>, by exact address. Somebody named in the

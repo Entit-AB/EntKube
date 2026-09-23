@@ -45,7 +45,7 @@ public class TicketServiceTests : IDisposable
         db.Database.EnsureCreated();
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
-        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Capio" });
+        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Entit AB" });
         db.Apps.AddRange(
             new App { Id = s1AppId, CustomerId = customerId, Name = "Booking" },
             new App { Id = s4AppId, CustomerId = customerId, Name = "Records" },

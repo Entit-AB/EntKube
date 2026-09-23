@@ -4,8 +4,8 @@ namespace EntKube.Web.Services.Mail;
 /// Reading the domain off a sender, and deciding which registered domain claims it.
 ///
 /// <para>Pure, and separate from the database work, because the rule is where the mistakes
-/// are: a suffix match that forgets the dot boundary places <c>notcapio.se</c> with
-/// <c>capio.se</c>, and two customers registering overlapping domains has to resolve the
+/// are: a suffix match that forgets the dot boundary places <c>notentit.example</c> with
+/// <c>entit.example</c>, and two customers registering overlapping domains has to resolve the
 /// same way every time or the same sender lands in different places on different days.</para>
 /// </summary>
 public static class SenderDomain
@@ -93,7 +93,7 @@ public static class SenderDomain
     /// Whether a registered domain claims a sender's domain: the same domain, or a
     /// subdomain of it.
     ///
-    /// <para>The dot matters. Without it, <c>capio.se</c> would claim <c>notcapio.se</c> —
+    /// <para>The dot matters. Without it, <c>entit.example</c> would claim <c>notentit.example</c> —
     /// a domain anybody can register, which would then be triaged straight into a
     /// customer's queue.</para>
     /// </summary>
@@ -103,8 +103,8 @@ public static class SenderDomain
 
     /// <summary>
     /// Which of several registered domains claims a sender. The longest wins, so a customer
-    /// who registers <c>it.capio.se</c> keeps their subdomain's mail even where another
-    /// holds <c>capio.se</c> — and, more importantly, the answer does not depend on the
+    /// who registers <c>it.entit.example</c> keeps their subdomain's mail even where another
+    /// holds <c>entit.example</c> — and, more importantly, the answer does not depend on the
     /// order rows came back in.
     /// </summary>
     public static T? BestMatch<T>(

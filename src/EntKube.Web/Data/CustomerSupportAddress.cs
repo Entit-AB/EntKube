@@ -1,7 +1,7 @@
 namespace EntKube.Web.Data;
 
 /// <summary>
-/// A support address of a customer's own — <c>capio-support@entit.se</c> — which routes
+/// A support address of a customer's own — <c>customer-support@entit.se</c> — which routes
 /// anything sent to it to that customer, and which their replies come back from.
 ///
 /// <para><b>Why this beats knowing who sent it.</b> A domain says who somebody is; an

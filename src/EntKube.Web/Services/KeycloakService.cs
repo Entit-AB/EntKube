@@ -1755,7 +1755,7 @@ public class KeycloakService(
 
     /// <summary>
     /// Derives a valid Keycloak theme provider name (slug) from a human-readable theme name.
-    /// Example: "Capio Blue" → "capio-blue".
+    /// Example: "Entit Blue" → "entit-blue".
     /// </summary>
     private static string ToThemeSlug(string name)
     {

@@ -48,7 +48,7 @@ public class TimeServiceTests : IDisposable
         db.Database.EnsureCreated();
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
-        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Capio" });
+        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Entit AB" });
         db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "Journal" });
         db.SaveChanges();
 
@@ -484,7 +484,7 @@ public class TimeServiceTests : IDisposable
             TicketId = ticketId,
             AppId = forAppId,
             Month = TimeService.MonthBounds(September).From,
-            ApprovedBy = "Capio",
+            ApprovedBy = "Entit AB",
         });
         db.SaveChanges();
     }

@@ -22,12 +22,12 @@ public class MailMessageReaderTests
     private static readonly DateTime Fetched = new(2026, 9, 22, 9, 0, 0, DateTimeKind.Utc);
 
     private static MimeMessage Message(
-        string from = "anna@capio.se",
+        string from = "anna@entit.example",
         string? fromName = "Anna Lindqvist",
         string? subject = "Journalen svarar inte",
         string? text = "Vi kommer inte in i journalsystemet.",
         string? html = null,
-        string? messageId = "<abc123@capio.se>",
+        string? messageId = "<abc123@entit.example>",
         string? inReplyTo = null,
         IEnumerable<string>? references = null,
         DateTimeOffset? date = null)
@@ -99,8 +99,8 @@ public class MailMessageReaderTests
             Message(date: new DateTimeOffset(Fetched.AddMinutes(-4))), Tenant, Fetched);
 
         row.TenantId.Should().Be(Tenant);
-        row.MessageId.Should().Be("abc123@capio.se");
-        row.FromAddress.Should().Be("anna@capio.se");
+        row.MessageId.Should().Be("abc123@entit.example");
+        row.FromAddress.Should().Be("anna@entit.example");
         row.FromName.Should().Be("Anna Lindqvist");
         row.Subject.Should().Be("Journalen svarar inte");
         row.Body.Should().Be("Vi kommer inte in i journalsystemet.");
@@ -131,10 +131,10 @@ public class MailMessageReaderTests
     public void The_addresses_it_was_sent_to_are_kept()
     {
         MimeMessage message = Message();
-        message.Cc.Add(new MailboxAddress("Capio", "capio-support@entit.se"));
+        message.Cc.Add(new MailboxAddress("Entit AB", "entit-support@entit.se"));
 
         MailMessageReader.Read(message, Tenant, Fetched).ToAddresses
-            .Should().Contain("support@entit.se").And.Contain("capio-support@entit.se");
+            .Should().Contain("support@entit.se").And.Contain("entit-support@entit.se");
     }
 
     /// <summary>
@@ -147,9 +147,9 @@ public class MailMessageReaderTests
     public void An_address_that_survives_only_in_the_envelope_is_kept()
     {
         MimeMessage message = Message();
-        message.Headers.Add("Delivered-To", "capio-support@entit.se");
+        message.Headers.Add("Delivered-To", "entit-support@entit.se");
 
-        MailMessageReader.RecipientsOf(message).Should().Contain("capio-support@entit.se");
+        MailMessageReader.RecipientsOf(message).Should().Contain("entit-support@entit.se");
     }
 
     [Theory]
@@ -158,9 +158,9 @@ public class MailMessageReaderTests
     public void The_other_envelope_headers_are_read_too(string header)
     {
         MimeMessage message = Message();
-        message.Headers.Add(header, "capio-support@entit.se");
+        message.Headers.Add(header, "entit-support@entit.se");
 
-        MailMessageReader.RecipientsOf(message).Should().Contain("capio-support@entit.se");
+        MailMessageReader.RecipientsOf(message).Should().Contain("entit-support@entit.se");
     }
 
     /// <summary>A server may write a display name into one; parse it rather than store it raw.</summary>
@@ -168,9 +168,9 @@ public class MailMessageReaderTests
     public void An_envelope_header_with_a_display_name_is_parsed()
     {
         MimeMessage message = Message();
-        message.Headers.Add("Delivered-To", "Capio Support <capio-support@entit.se>");
+        message.Headers.Add("Delivered-To", "Entit AB Support <entit-support@entit.se>");
 
-        MailMessageReader.RecipientsOf(message).Should().Contain("capio-support@entit.se");
+        MailMessageReader.RecipientsOf(message).Should().Contain("entit-support@entit.se");
     }
 
     /// <summary>Compared case-insensitively later, so stored lower-cased and once.</summary>
@@ -178,11 +178,11 @@ public class MailMessageReaderTests
     public void Recipients_are_lower_cased_and_not_repeated()
     {
         MimeMessage message = Message();
-        message.Cc.Add(new MailboxAddress(null, "CAPIO-Support@Entit.SE"));
-        message.Headers.Add("Delivered-To", "capio-support@entit.se");
+        message.Cc.Add(new MailboxAddress(null, "ENTIT-Support@Entit.SE"));
+        message.Headers.Add("Delivered-To", "entit-support@entit.se");
 
         MailMessageReader.RecipientsOf(message)
-            .Count(a => a == "capio-support@entit.se").Should().Be(1);
+            .Count(a => a == "entit-support@entit.se").Should().Be(1);
     }
 
     // ---- Identity -------------------------------------------------------------------------
@@ -218,8 +218,8 @@ public class MailMessageReaderTests
 
     [Fact]
     public void A_reply_names_what_it_replies_to() =>
-        MailMessageReader.Read(Message(inReplyTo: "<first@capio.se>"), Tenant, Fetched)
-            .InReplyTo.Should().Be("first@capio.se");
+        MailMessageReader.Read(Message(inReplyTo: "<first@entit.example>"), Tenant, Fetched)
+            .InReplyTo.Should().Be("first@entit.example");
 
     /// <summary>
     /// Some clients send only References. Without reading its last entry, a reply from
@@ -228,8 +228,8 @@ public class MailMessageReaderTests
     [Fact]
     public void A_reply_with_only_References_still_threads() =>
         MailMessageReader.Read(
-            Message(references: ["<first@capio.se>", "<second@capio.se>"]), Tenant, Fetched)
-            .InReplyTo.Should().Be("second@capio.se");
+            Message(references: ["<first@entit.example>", "<second@entit.example>"]), Tenant, Fetched)
+            .InReplyTo.Should().Be("second@entit.example");
 
     [Fact]
     public void A_message_that_starts_a_thread_replies_to_nothing() =>

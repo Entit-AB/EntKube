@@ -23,7 +23,7 @@ namespace EntKube.Web.Tests;
 /// customer's <em>company</em> name when it could not name the person, which is the right
 /// answer — but it reached that fallback every single time, because the parameter carrying
 /// the person was never passed. Every reply and every approval on a customer's portal was
-/// filed as "Capio" rather than as whoever at Capio actually did it.</para>
+/// filed as "Entit AB" rather than as whoever at Entit AB actually did it.</para>
 ///
 /// <para>§14.4 makes accepting a resolution something the customer does, and §11.1 makes
 /// approving work beyond the hour bank a commitment of their money. Both deserve a person.</para>
@@ -54,7 +54,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
             new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(connection).Options);
         db.Database.EnsureCreated();
 
-        customer = new Customer { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Capio" };
+        customer = new Customer { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Entit AB" };
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
         db.Customers.Add(customer);
@@ -121,7 +121,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
     private Task<Ticket> Raise() =>
         tickets.CreateAsync(
             tenantId, customer.Id, appId, "Journalen svarar inte", "Ingen kommer in.",
-            TicketChannel.Portal, TicketPriority.P3, Tue(9), "Karin", "karin@capio.example");
+            TicketChannel.Portal, TicketPriority.P3, Tue(9), "Karin", "karin@entit.example");
 
     // ---- Attribution --------------------------------------------------------------------------
 
@@ -133,7 +133,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
     [Fact]
     public async Task A_reply_is_recorded_against_the_person_who_wrote_it()
     {
-        SignIn("karin@capio.example");
+        SignIn("karin@entit.example");
 
         Ticket ticket = await Raise();
 
@@ -153,12 +153,12 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
 
         db.Set<TicketEvent>()
             .Where(e => e.TicketId == ticket.Id && e.Kind == TicketEventKind.Note)
-            .Should().Contain(e => e.Actor == "karin@capio.example");
+            .Should().Contain(e => e.Actor == "karin@entit.example");
     }
 
     /// <summary>
     /// The company name is still the right answer when nobody can be named — an action by
-    /// somebody at Capio is better recorded as Capio's than as nobody's.
+    /// somebody at Entit AB is better recorded as Entit AB's than as nobody's.
     /// </summary>
     [Fact]
     public async Task An_unnamed_portal_user_falls_back_to_the_customers_name()
@@ -183,7 +183,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
 
         db.Set<TicketEvent>()
             .Where(e => e.TicketId == ticket.Id && e.Kind == TicketEventKind.Note)
-            .Should().Contain(e => e.Actor == "Capio")
+            .Should().Contain(e => e.Actor == "Entit AB")
             .And.NotContain(e => e.Actor == CurrentActor.Unattributed);
     }
 
@@ -195,13 +195,13 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
     /// commitment of their money, so the record has to name the person who made it.
     ///
     /// <para>This was the one screen left uncovered when the attribution fix went in, and
-    /// covering it last was the wrong order: an approval filed as "Capio" says a company
+    /// covering it last was the wrong order: an approval filed as "Entit AB" says a company
     /// agreed to pay, which is not something a company can do.</para>
     /// </summary>
     [Fact]
     public async Task Approving_work_beyond_the_bank_names_the_person_who_approved_it()
     {
-        SignIn("ekonomi@capio.example");
+        SignIn("ekonomi@entit.example");
 
         // A bank of two hours, with three booked against it: one hour needs approval.
         db.PortfolioAgreements.Add(new PortfolioAgreement
@@ -250,8 +250,8 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
         WorkAuthorisation approval = db.Set<WorkAuthorisation>()
             .Single(a => a.CustomerId == customer.Id);
 
-        approval.ApprovedBy.Should().Be("ekonomi@capio.example");
-        approval.ApprovedBy.Should().NotBe("Capio", "a company cannot agree to pay; a person does");
+        approval.ApprovedBy.Should().Be("ekonomi@entit.example");
+        approval.ApprovedBy.Should().NotBe("Entit AB", "a company cannot agree to pay; a person does");
         approval.ApprovedBy.Should().NotBe(CurrentActor.Unattributed);
     }
 
@@ -264,7 +264,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
     [Fact]
     public async Task A_customer_billed_by_the_hour_is_told_when_an_application_hits_its_limit()
     {
-        SignIn("ekonomi@capio.example");
+        SignIn("ekonomi@entit.example");
 
         db.PortfolioAgreements.Add(new PortfolioAgreement
         {
@@ -310,7 +310,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
     [Fact]
     public void A_viewer_cannot_approve_work_beyond_the_bank()
     {
-        SignIn("lasse@capio.example");
+        SignIn("lasse@entit.example");
 
         IRenderedComponent<CustomerHoursPanel> viewer = Render<CustomerHoursPanel>(p => p
             .Add(c => c.Customer, customer)
@@ -328,7 +328,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
     [Fact]
     public async Task A_viewer_is_not_offered_the_actions_an_operator_gets()
     {
-        SignIn("lasse@capio.example");
+        SignIn("lasse@entit.example");
         await Raise();
 
         IRenderedComponent<CustomerTicketsPanel> viewer = Render<CustomerTicketsPanel>(p => p
@@ -341,7 +341,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
     [Fact]
     public void An_empty_queue_says_so()
     {
-        SignIn("karin@capio.example");
+        SignIn("karin@entit.example");
 
         RenderTickets().Markup.Should().NotContain("Journalen svarar inte");
     }
