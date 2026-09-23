@@ -84,7 +84,7 @@ public class SupportMailTests : IDisposable
 
         TestDbContextFactory factory = new(connection);
         ContractService contracts = new(factory);
-        tickets = new TicketService(factory, contracts);
+        tickets = new TicketService(factory, contracts, SilentTicketNotifier.For(factory));
         MailTriageRuleService ruleService = new(factory);
         mail = new SupportMailService(
             factory, new RuleBasedMailAnalyst(), ruleService, tickets,

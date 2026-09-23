@@ -56,7 +56,8 @@ public class TicketServiceTests : IDisposable
         db.SaveChanges();
 
         TestDbContextFactory factory = new(connection);
-        tickets = new TicketService(factory, new ContractService(factory));
+        tickets = new TicketService(
+            factory, new ContractService(factory), SilentTicketNotifier.For(factory));
     }
 
     public void Dispose()
@@ -511,5 +512,82 @@ public class TicketServiceTests : IDisposable
             TicketEventKind.Resolved,
             TicketEventKind.Closed,
         ]);
+    }
+
+    // ---- Who is working on it ------------------------------------------------------------
+
+    /// <summary>
+    /// The column existed from the start and nothing ever wrote to it. A queue without
+    /// ownership does not produce idleness — it produces two people working the same fault
+    /// without either knowing.
+    /// </summary>
+    [Fact]
+    public async Task A_ticket_can_be_claimed()
+    {
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P3, Tue(9));
+
+        Ticket? claimed = await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(10));
+
+        claimed!.Assignee.Should().Be("nils");
+    }
+
+    [Fact]
+    public async Task A_ticket_can_be_put_back()
+    {
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P3, Tue(9));
+
+        await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(10));
+        Ticket? released = await tickets.AssignAsync(ticket.Id, null, "nils", Tue(11));
+
+        released!.Assignee.Should().BeNull();
+    }
+
+    /// <summary>
+    /// Who held it and when is part of the ticket's history, since "why did nobody look at
+    /// this for two days" is answered by the handovers.
+    /// </summary>
+    [Fact]
+    public async Task Claiming_and_handing_over_are_both_recorded()
+    {
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P3, Tue(9));
+
+        await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(10));
+        await tickets.AssignAsync(ticket.Id, "karin", "nils", Tue(11));
+
+        List<TicketEvent> notes = [.. db.Set<TicketEvent>()
+            .Where(e => e.TicketId == ticket.Id && e.Kind == TicketEventKind.Note)];
+
+        notes.Should().Contain(e => e.Detail!.Contains("Assigned to nils"));
+        notes.Should().Contain(e => e.Detail!.Contains("Reassigned from nils to karin"));
+    }
+
+    /// <summary>
+    /// Our rota is not the customer's business. §14.1 promises them a named contact of
+    /// theirs, not a view of who at ENTIT is holding the ticket this afternoon.
+    /// </summary>
+    [Fact]
+    public async Task A_handover_is_not_shown_to_the_customer()
+    {
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P3, Tue(9));
+
+        await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(10));
+
+        db.Set<TicketEvent>()
+            .Where(e => e.TicketId == ticket.Id && e.Detail!.Contains("Assigned to"))
+            .Should().OnlyContain(e => !e.CustomerVisible);
+    }
+
+    /// <summary>Claiming what you already hold should not fill the history with noise.</summary>
+    [Fact]
+    public async Task Claiming_it_twice_records_nothing_the_second_time()
+    {
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P3, Tue(9));
+
+        await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(10));
+        await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(11));
+
+        db.Set<TicketEvent>()
+            .Count(e => e.TicketId == ticket.Id && e.Detail!.Contains("Assigned to nils"))
+            .Should().Be(1);
     }
 }

@@ -144,6 +144,26 @@
                 <button class="btn btn-sm btn-outline-secondary" @onclick="() => showNote = !showNote">
                     <i class="bi bi-chat-left-text me-1"></i>Add a note
                 </button>
+
+                @* Claim, hand over, or put it back. Nobody is assigned work by the system. *@
+                @if (ticket.Assignee is null)
+                {
+                    <AsyncButton CssClass="btn-sm btn-outline-primary" OnClick="ClaimAsync">
+                        <i class="bi bi-person-check me-1"></i>Take this
+                    </AsyncButton>
+                }
+                else if (ticket.Assignee == Actor)
+                {
+                    <AsyncButton CssClass="btn-sm btn-outline-secondary" OnClick="ReleaseAsync">
+                        <i class="bi bi-person-dash me-1"></i>Put it back
+                    </AsyncButton>
+                }
+                else
+                {
+                    <AsyncButton CssClass="btn-sm btn-outline-warning" OnClick="ClaimAsync">
+                        <i class="bi bi-person-up me-1"></i>Take it from @ticket.Assignee
+                    </AsyncButton>
+                }
             </div>
 
             @if (showPriority)
@@ -357,6 +377,22 @@
         formParty = null;
 
         Toasts.Success(message);
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+    }
+
+    private async Task ClaimAsync()
+    {
+        await Tickets.AssignAsync(TicketId, Actor, Actor, DateTime.UtcNow);
+        Toasts.Success("Yours.");
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+    }
+
+    private async Task ReleaseAsync()
+    {
+        await Tickets.AssignAsync(TicketId, null, Actor, DateTime.UtcNow);
+        Toasts.Info("Back in the queue.");
         await LoadAsync();
         await OnChanged.InvokeAsync();
     }

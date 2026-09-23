@@ -263,6 +263,49 @@ every call site a place to forget. Reading the name also never fails: an action
 that cannot be taken because the identity could not be read is an outage made out
 of bookkeeping.
 
+## Telling people a ticket exists
+
+Three audiences, from inside `TicketService.CreateAsync` rather than from its callers. A
+ticket arrives by three routes — the portal, the mailbox, monitoring — and "remember to
+tell somebody" at three call sites is how it ends up done at none.
+
+- **The reporter** gets a receipt: the reference, what they reported, the support hours,
+  and when they will hear back. See below.
+- **The customer's designated contact**, whom §14.1 requires be told of every incident.
+  The agreement has said so from the beginning; nothing sent them anything until now.
+- **Whoever is on call**, with the number, the clock and the description — not the
+  customer's receipt, which explains things they already know.
+
+Failing to reach any of them never fails the ticket. A P1 that cannot be recorded because
+a mail server is refusing connections is an outage made out of bookkeeping.
+
+### The one thing sent without a person
+
+Everything else the machine could say to a customer is a judgement — what priority this
+is, whether it is resolved — and §14.3 and §14.4 make those written acts by a person. A
+receipt is not a judgement. It is a fact about the past: a message arrived, at this time,
+and is now numbered. §14.6 makes those timestamps the record between the parties, which
+argues for telling the customer what we recorded rather than for keeping it.
+
+So [`TicketAcknowledgement`](../src/EntKube.Web/Services/Tickets/TicketAcknowledgement.cs)
+is pure and its wording is tested. The rule it keeps: **the priority is given as reported,
+never as decided.** Until the first assessment §14.3 gives the customer's own assessment
+precedence, and a receipt announcing "Priority: P2" reads as our decision — binding us to
+something nobody assessed, or looking like a downgrade of what they told us. It also tells
+them the confirmation is still coming and that they may disagree with it, because a
+precedence nobody knows they have is worth nothing.
+
+The response target is the useful sentence: a deadline computed inside the support window
+is the one thing the customer cannot work out for themselves.
+
+## Who is working on it
+
+`Ticket.Assignee` is a claim, not a dispatch — nobody is assigned work by the system.
+What ownership prevents is two people working the same fault without either knowing, which
+is the failure an unowned queue actually produces. Handovers are recorded on the ticket and
+are **not** customer-visible: §14.1 promises them a named contact of theirs, not a view of
+our rota.
+
 ## Maintenance and availability
 
 Time under an agreed maintenance window is **excluded from measured availability**

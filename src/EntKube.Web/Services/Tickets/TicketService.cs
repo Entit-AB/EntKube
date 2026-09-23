@@ -38,7 +38,12 @@ public readonly record struct TicketSlaStatus(
 /// </summary>
 public class TicketService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    ContractService contracts)
+    ContractService contracts,
+    // Required, not optional, and called from inside CreateAsync rather than left to
+    // callers. A ticket arrives by three routes — the portal, the mailbox and monitoring —
+    // and "remember to tell somebody" at three call sites is how it ends up done at none.
+    // Tests that do not care pass a notifier that says nothing.
+    TicketNotifier notifier)
 {
     /// <summary>
     /// Registers a ticket and starts its clocks.
@@ -145,6 +150,16 @@ public class TicketService(
 
         db.Tickets.Add(ticket);
         await db.SaveChangesAsync(ct);
+
+        // After the save, deliberately: the ticket exists whether or not anybody can be
+        // reached, and AnnounceAsync never throws.
+        await notifier.AnnounceAsync(
+            ticket,
+            window,
+            TicketClock.Response(
+                ticket.ClockStartsAt, ticket.PriorityEffectiveFrom, ticket.Priority, window,
+                firstResponseAt: null, now: reportedAt).Deadline,
+            ct);
 
         return ticket;
     }
@@ -434,6 +449,52 @@ public class TicketService(
 
         db.TicketEvents.Add(Event(ticket.Id, TicketEventKind.Note, at, actor,
             $"Excluded from SLA measurement: {reason}", customerVisible: false));
+
+        await db.SaveChangesAsync(ct);
+        return ticket;
+    }
+
+    /// <summary>
+    /// Says who is working on a ticket, or clears it.
+    ///
+    /// <para>A claim rather than a dispatch: nobody is assigned work by the system. What
+    /// this prevents is two people working the same fault without either knowing, which is
+    /// the failure a queue without ownership actually produces — not idleness.</para>
+    /// </summary>
+    /// <param name="assignee">The person taking it, or null to put it back.</param>
+    public async Task<Ticket?> AssignAsync(
+        Guid ticketId, string? assignee, string actor, DateTime at,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+
+        if (ticket is null)
+        {
+            return null;
+        }
+
+        string? previous = ticket.Assignee;
+        string? next = string.IsNullOrWhiteSpace(assignee) ? null : assignee.Trim();
+
+        if (previous == next)
+        {
+            return ticket;
+        }
+
+        ticket.Assignee = next;
+
+        // Not customer-visible: who at ENTIT is holding it is our business, and §14.1
+        // promises the customer a named contact, not our rota.
+        db.Set<TicketEvent>().Add(Event(
+            ticket.Id, TicketEventKind.Note, at, actor,
+            next is null
+                ? $"Unassigned (was {previous})."
+                : previous is null
+                    ? $"Assigned to {next}."
+                    : $"Reassigned from {previous} to {next}.",
+            customerVisible: false));
 
         await db.SaveChangesAsync(ct);
         return ticket;

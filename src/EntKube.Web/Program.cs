@@ -554,6 +554,8 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.Mail.MailTriageRuleService>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailService>();
         builder.Services.AddScoped<EntKube.Web.Services.CurrentActor>();
+        builder.Services.AddScoped<EntKube.Web.Services.Mail.SmtpSettingsResolver>();
+        builder.Services.AddScoped<EntKube.Web.Services.Tickets.TicketNotifier>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailboxService>();
 
         // Fetches support mail into the triage queue. Does nothing until a tenant has

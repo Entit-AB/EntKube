@@ -82,7 +82,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
 
         TestDbContextFactory factory = new(connection);
         ContractService contracts = new(factory);
-        tickets = new TicketService(factory, contracts);
+        tickets = new TicketService(factory, contracts, SilentTicketNotifier.For(factory));
 
         Services.AddSingleton<IDbContextFactory<ApplicationDbContext>>(factory);
         Services.AddSingleton(contracts);

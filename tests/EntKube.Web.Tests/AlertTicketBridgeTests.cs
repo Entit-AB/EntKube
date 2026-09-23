@@ -84,7 +84,7 @@ public class AlertTicketBridgeTests : IDisposable
 
         TestDbContextFactory factory = new(connection);
         ContractService contracts = new(factory);
-        tickets = new TicketService(factory, contracts);
+        tickets = new TicketService(factory, contracts, SilentTicketNotifier.For(factory));
         bridge = new AlertTicketBridge(
             factory, contracts, tickets, NullLogger<AlertTicketBridge>.Instance);
     }

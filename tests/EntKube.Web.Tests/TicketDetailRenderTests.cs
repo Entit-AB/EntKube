@@ -78,7 +78,7 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
 
         TestDbContextFactory factory = new(connection);
         ContractService contracts = new(factory);
-        tickets = new TicketService(factory, contracts);
+        tickets = new TicketService(factory, contracts, SilentTicketNotifier.For(factory));
 
         Services.AddSingleton<IDbContextFactory<ApplicationDbContext>>(factory);
         Services.AddSingleton(contracts);
@@ -223,4 +223,56 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
     [Fact]
     public void A_ticket_that_is_not_there_says_so() =>
         RenderDetail(Guid.NewGuid()).Markup.Should().NotContain("Journalen svarar inte");
+
+    // ---- Who is holding it ---------------------------------------------------------------
+
+    /// <summary>
+    /// Taking a ticket records the person who took it, through the same wiring as
+    /// everything else — and the column it writes to sat unused from the day it was added.
+    /// </summary>
+    [Fact]
+    public async Task Taking_a_ticket_records_who_took_it()
+    {
+        Ticket ticket = await Raise();
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        detail.Markup.Should().Contain("Take this");
+
+        await detail.InvokeAsync(() => ButtonSaying(detail, "Take this").Click());
+
+        db.ChangeTracker.Clear();
+        db.Tickets.Single(t => t.Id == ticket.Id).Assignee.Should().Be("nils");
+    }
+
+    /// <summary>
+    /// And it can be put back. A queue where taking something is irreversible is a queue
+    /// people stop taking things from.
+    /// </summary>
+    [Fact]
+    public async Task A_ticket_can_be_put_back_from_the_screen()
+    {
+        Ticket ticket = await Raise();
+        await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(10));
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        await detail.InvokeAsync(() => ButtonSaying(detail, "Put it back").Click());
+
+        db.ChangeTracker.Clear();
+        db.Tickets.Single(t => t.Id == ticket.Id).Assignee.Should().BeNull();
+    }
+
+    /// <summary>
+    /// Somebody else holding it is shown by name, and taking it says so plainly rather
+    /// than quietly reassigning.
+    /// </summary>
+    [Fact]
+    public async Task A_ticket_somebody_else_holds_says_whose_it_is()
+    {
+        Ticket ticket = await Raise();
+        await tickets.AssignAsync(ticket.Id, "karin", "karin", Tue(10));
+
+        RenderDetail(ticket.Id).Markup.Should().Contain("Take it from karin");
+    }
 }

@@ -75,7 +75,7 @@ public class MonthlyReportTests : IDisposable
 
         TestDbContextFactory factory = new(connection);
         ContractService contracts = new(factory);
-        tickets = new TicketService(factory, contracts);
+        tickets = new TicketService(factory, contracts, SilentTicketNotifier.For(factory));
         time = new TimeService(factory, contracts);
         reports = new MonthlyReportService(factory, tickets, time, contracts);
     }

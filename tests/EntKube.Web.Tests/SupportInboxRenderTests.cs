@@ -56,7 +56,7 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
 
         TestDbContextFactory factory = new(connection);
         ContractService contracts = new(factory);
-        TicketService tickets = new(factory, contracts);
+        TicketService tickets = new(factory, contracts, SilentTicketNotifier.For(factory));
         mail = new SupportMailService(
             factory, new RuleBasedMailAnalyst(), new MailTriageRuleService(factory), tickets,
             new TimeService(factory, contracts));
