@@ -88,6 +88,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
         Services.AddSingleton(contracts);
         Services.AddSingleton(tickets);
         Services.AddSingleton(new TimeService(factory, contracts));
+        Services.AddSingleton(new OnCallService(factory));
         Services.AddSingleton(new ToastService());
         Services.AddScoped<CurrentActor>();
     }
@@ -317,6 +318,131 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
             .Add(c => c.AccessRole, CustomerAccessRole.Viewer));
 
         viewer.Markup.Should().NotContain("Approve further work");
+    }
+
+    // ---- §18 from the customer's side ---------------------------------------------------
+
+    private Subconsultant Engage(
+        string name, Guid? forCustomer, DateTime? notified = null, DateTime? approved = null)
+    {
+        Subconsultant person = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = forCustomer,
+            Name = name,
+            Company = "Konsult AB",
+            NotifiedAt = notified,
+            ApprovedAt = approved,
+            ConfidentialitySignedAt = DateTime.UtcNow.AddYears(-1),
+            DataProcessingBoundAt = DateTime.UtcNow.AddYears(-1),
+        };
+
+        db.Subconsultants.Add(person);
+        db.SaveChanges();
+
+        return person;
+    }
+
+    private IRenderedComponent<CustomerSubconsultantsPanel> RenderWhoWorksOnThis(
+        CustomerAccessRole role = CustomerAccessRole.Operator) =>
+        Render<CustomerSubconsultantsPanel>(p => p
+            .Add(c => c.Customer, customer)
+            .Add(c => c.AccessRole, role));
+
+    /// <summary>
+    /// §18 promises a current list available on request. Asking is the customer's right;
+    /// making them ask was our choice, and not an obviously good one when the list is
+    /// already here.
+    /// </summary>
+    [Fact]
+    public void The_customer_can_see_who_works_on_their_systems()
+    {
+        SignIn("ekonomi@entit.example");
+        Engage("Anna Berg", forCustomer: customer.Id,
+               notified: DateTime.UtcNow.AddDays(-30), approved: DateTime.UtcNow.AddDays(-20));
+
+        RenderWhoWorksOnThis().Markup.Should().Contain("Anna Berg").And.Contain("approved");
+    }
+
+    /// <summary>
+    /// Somebody engaged for another customer is not theirs to know about. A subconsultant
+    /// list is a list of people, and showing one customer another's is the same mistake as
+    /// naming their maintenance windows.
+    /// </summary>
+    [Fact]
+    public void Another_customers_subconsultant_is_not_shown()
+    {
+        SignIn("ekonomi@entit.example");
+
+        Customer theirs = new() { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Entit Europe" };
+        db.Customers.Add(theirs);
+        db.SaveChanges();
+
+        Engage("Anna Berg", forCustomer: theirs.Id, approved: DateTime.UtcNow);
+
+        RenderWhoWorksOnThis().Markup.Should().NotContain("Anna Berg");
+    }
+
+    /// <summary>Somebody engaged across the tenant could work on anybody's systems.</summary>
+    [Fact]
+    public void A_tenant_wide_subconsultant_is_shown()
+    {
+        SignIn("ekonomi@entit.example");
+        Engage("Anna Berg", forCustomer: null, approved: DateTime.UtcNow);
+
+        RenderWhoWorksOnThis().Markup.Should().Contain("Anna Berg");
+    }
+
+    /// <summary>
+    /// The ten working days are the agreement's default, not a deadline we invented, and
+    /// the date matters more than the fact — it is counted on the §9 calendar.
+    /// </summary>
+    [Fact]
+    public void Somebody_awaiting_the_customer_says_when_silence_becomes_approval()
+    {
+        SignIn("ekonomi@entit.example");
+        Engage("Anna Berg", forCustomer: customer.Id, notified: DateTime.UtcNow);
+
+        string markup = RenderWhoWorksOnThis().Markup;
+
+        markup.Should().Contain("awaiting you");
+        markup.Should().Contain("unless you object");
+    }
+
+    /// <summary>
+    /// §18 says approval may not be unreasonably withheld, which makes the reason the
+    /// substance of the objection rather than a note attached to it.
+    /// </summary>
+    [Fact]
+    public async Task An_objection_without_a_reason_is_refused()
+    {
+        Subconsultant person = Engage(
+            "Anna Berg", forCustomer: customer.Id, notified: DateTime.UtcNow);
+
+        OnCallService onCall = new(new TestDbContextFactory(connection));
+
+        Func<Task> objecting =
+            () => onCall.ObjectToSubconsultantAsync(person.Id, "   ", DateTime.UtcNow);
+
+        await objecting.Should().ThrowAsync<ArgumentException>().WithMessage("*§18*");
+    }
+
+    /// <summary>
+    /// Approving or objecting commits the customer under the agreement, so it follows the
+    /// same gate as approving work beyond the hour bank.
+    /// </summary>
+    [Fact]
+    public void A_viewer_can_read_the_list_and_cannot_decide()
+    {
+        SignIn("lasse@entit.example");
+        Engage("Anna Berg", forCustomer: customer.Id, notified: DateTime.UtcNow);
+
+        IRenderedComponent<CustomerSubconsultantsPanel> viewer =
+            RenderWhoWorksOnThis(CustomerAccessRole.Viewer);
+
+        viewer.Markup.Should().Contain("Anna Berg");
+        viewer.Markup.Should().NotContain(">Object<");
     }
 
     // ---- What a customer is allowed to see ----------------------------------------------------

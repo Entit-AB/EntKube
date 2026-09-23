@@ -424,6 +424,15 @@ All of this was written and tested when the subsystem was, and none of it was re
 no way to register a person, no way to record that the customer had been told, and the list
 §18 requires could only ever be empty. The rules were never the gap; the door was.
 
+**The customer sees this too.** §18 gives them a current list available on request and ten
+working days to object to a new name; the portal's "Who works on this" shows the list,
+which ones are waiting on them and the date silence becomes approval, and lets an operator
+approve or object. An objection needs a reason — §18 says approval may not be unreasonably
+withheld, which makes the reason the substance of the objection rather than a note attached
+to it. The list is narrowed to the people engaged for that customer plus those engaged
+across the tenant: showing one customer another's subconsultants is the same mistake as
+naming another customer's maintenance windows.
+
 A shift can now say who is covering it and how to reach them. `AddShiftAsync` took a name
 and an address, while the entity's own comment observed that at three in the morning an
 address is not a way to reach a person — correct, and there was no field for anything else.

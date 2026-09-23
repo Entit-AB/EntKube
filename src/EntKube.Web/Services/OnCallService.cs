@@ -167,6 +167,85 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
     }
 
     /// <summary>
+    /// The subconsultants a customer is entitled to see — those engaged for them, and
+    /// those engaged across the tenant who could therefore work on their systems.
+    ///
+    /// <para>§18 requires a current list available on request. Asking is the customer's
+    /// right; making them ask is a choice, and not an obviously good one when the list is
+    /// already here.</para>
+    /// </summary>
+    public async Task<List<Subconsultant>> GetSubconsultantsForCustomerAsync(
+        Guid tenantId, Guid customerId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.Subconsultants.AsNoTracking()
+            .Where(c => c.TenantId == tenantId
+                        && (c.CustomerId == null || c.CustomerId == customerId))
+            .OrderByDescending(c => c.IsActive)
+            .ThenBy(c => c.Name)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Records the customer's approval of a subconsultant. §18 makes this explicit approval;
+    /// silence for ten working days does the same thing on its own.
+    /// </summary>
+    public async Task ApproveSubconsultantAsync(
+        Guid id, DateTime at, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        Subconsultant? person = await db.Subconsultants.FirstOrDefaultAsync(c => c.Id == id, ct);
+
+        if (person is null)
+        {
+            return;
+        }
+
+        person.ApprovedAt = at;
+        person.ObjectedAt = null;
+        person.ObjectionReason = null;
+        person.UpdatedAt = DateTime.UtcNow;
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Records the customer's objection, with the reason.
+    ///
+    /// <para>§18 says approval may not be unreasonably withheld, which makes the reason the
+    /// substance of the objection rather than a note attached to it — it is what the
+    /// objection would be argued against. So it is required.</para>
+    /// </summary>
+    public async Task ObjectToSubconsultantAsync(
+        Guid id, string reason, DateTime at, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            throw new ArgumentException(
+                "§18 allows an objection with a reason; approval may not be unreasonably withheld.",
+                nameof(reason));
+        }
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        Subconsultant? person = await db.Subconsultants.FirstOrDefaultAsync(c => c.Id == id, ct);
+
+        if (person is null)
+        {
+            return;
+        }
+
+        person.ObjectedAt = at;
+        person.ObjectionReason = reason.Trim();
+        person.ApprovedAt = null;
+        person.UpdatedAt = DateTime.UtcNow;
+
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
     /// When §18's objection period runs out — ten working days after the customer was
     /// notified. Null when no notification has been sent.
     /// </summary>

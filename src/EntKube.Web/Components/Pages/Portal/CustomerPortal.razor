@@ -330,6 +330,15 @@ else
                 </div>
                 <MonthlyReportPanel CustomerId="selectedCustomer.Id" Customer="true" />
             }
+            else if (selectedCustomerOp == "subconsultants")
+            {
+                <div class="d-flex align-items-center mb-3">
+                    <span class="bi bi-people fs-4 me-2 text-primary"></span>
+                    <h4 class="mb-0">Who works on this — @selectedCustomer.Name</h4>
+                </div>
+                <CustomerSubconsultantsPanel Customer="selectedCustomer"
+                                             AccessRole="currentAccessRole" />
+            }
             else if (selectedCustomerOp == "monitoring")
             {
                 <div class="d-flex align-items-center mb-3">
@@ -597,7 +606,7 @@ else
     private KeycloakRealm? selectedIdentityRealm;
     private HarborProject? selectedRegistryProject;
     private Data.App? selectedRoutesApp;
-    private string? selectedCustomerOp;             // "tickets" | "report" | "hours" | "monitoring" | "logs" | "observability" | "notifications" | "cost"
+    private string? selectedCustomerOp;             // "tickets" | "report" | "subconsultants" | "hours" | "monitoring" | "logs" | "observability" | "notifications" | "cost"
     private Guid? activeAppId;                       // app whose service leaf is active (for tree highlight)
     private string? activeAppServiceKey;
 
@@ -999,6 +1008,9 @@ else
             // penalty credit that can be claimed. It sat third on the Monitoring page,
             // behind two live dashboards — findable only by somebody who already knew.
             ("report", "Service report", "bi-file-earmark-bar-graph"),
+            // §18 gives them a current list available on request and ten working days to
+            // object to a new name. Both were their right and neither was reachable.
+            ("subconsultants", "Who works on this", "bi-people"),
             ("monitoring", "Monitoring", "bi-heart-pulse"),
             ("logs", "Logs", "bi-journal-text"),
         };
