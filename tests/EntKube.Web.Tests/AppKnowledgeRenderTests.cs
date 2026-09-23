@@ -91,11 +91,10 @@ public class AppKnowledgeRenderTests : BunitContext, IDisposable
             .Click());
 
         // Selected by placeholder, not by class: "input.form-control" matched something
-        // else on the page entirely. And the two fields bind on different events — the
-        // title on change, the body on input so its preview keeps up. Neither of those is
-        // visible anywhere but in a render.
+        // else on the page entirely. Both fields bind on change — the body used to bind on
+        // input, which re-sent the whole document over the circuit on every keystroke.
         panel.Find("input[placeholder='Title']").Change("Restarting the journal service");
-        panel.Find("textarea").Input("Scale the deployment to zero and back.");
+        panel.Find("textarea").Change("Scale the deployment to zero and back.");
 
         await panel.InvokeAsync(() => panel.FindAll("button")
             .First(b => b.TextContent.Trim() == "Save").Click());
@@ -131,7 +130,7 @@ public class AppKnowledgeRenderTests : BunitContext, IDisposable
         await panel.InvokeAsync(() => panel.FindAll("button")
             .First(b => b.TextContent.Contains("Edit", StringComparison.OrdinalIgnoreCase)).Click());
 
-        panel.Find("textarea").Input("Scale the deployment to zero and back.");
+        panel.Find("textarea").Change("Scale the deployment to zero and back.");
 
         await panel.InvokeAsync(() => panel.FindAll("button")
             .First(b => b.TextContent.Trim() == "Save").Click());
@@ -157,5 +156,88 @@ public class AppKnowledgeRenderTests : BunitContext, IDisposable
 
         markup.Should().Contain("Add a section");
         markup.Should().Contain("Journalportalen");
+    }
+
+    // ---- A whole document, pasted -------------------------------------------------------
+
+    /// <summary>
+    /// A realistic architecture guide: headings, prose, tables, fenced code, and well past
+    /// the 32 KB a Blazor circuit accepts by default.
+    /// </summary>
+    private static string AnArchitectureGuide()
+    {
+        System.Text.StringBuilder md = new();
+        md.AppendLine("# Journalportalen — architecture");
+
+        for (int section = 1; section <= 200; section++)
+        {
+            md.AppendLine().AppendLine($"## {section}. Component {section}");
+            md.AppendLine("Runs in its own namespace and talks to the record store over mTLS.");
+            md.AppendLine();
+            md.AppendLine("| Setting | Value |");
+            md.AppendLine("|---|---|");
+            md.AppendLine($"| Replicas | {section % 5 + 1} |");
+            md.AppendLine();
+            md.AppendLine("```bash");
+            md.AppendLine($"kubectl -n journal rollout restart deploy/component-{section}");
+            md.AppendLine("```");
+        }
+
+        return md.ToString();
+    }
+
+    /// <summary>
+    /// <b>The bug.</b> Pasting a document into a section did not save it. The circuit
+    /// refuses a message over 32 KB by default, and the editor sent the whole body on every
+    /// keystroke — so the text never reached the server and there was nothing to save, with
+    /// no error anywhere to explain it.
+    ///
+    /// <para>This test cannot see the transport; bUnit does not have one. What it pins is
+    /// the half that is ours: nothing in the save path truncates, rejects or mangles a
+    /// document of that size, so once the circuit lets it through it arrives intact.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_pasted_architecture_guide_is_saved_whole()
+    {
+        string guide = AnArchitectureGuide();
+        guide.Length.Should().BeGreaterThan(32 * 1024, "otherwise this is not the case that broke");
+
+        IRenderedComponent<AppKnowledgePanel> panel = RenderPanel();
+
+        await panel.InvokeAsync(() => panel.FindAll("button")
+            .First(b => b.TextContent.Contains("Add a section", StringComparison.Ordinal))
+            .Click());
+
+        panel.Find("input[placeholder='Title']").Change("Architecture");
+        panel.Find("textarea").Change(guide);
+
+        await panel.InvokeAsync(() => panel.FindAll("button")
+            .First(b => b.TextContent.Trim() == "Save").Click());
+
+        db.ChangeTracker.Clear();
+
+        KnowledgeSection saved = db.KnowledgeSections.Single(s => s.AppId == app.Id);
+
+        saved.Body.Should().Be(guide, "every byte of it, not a truncation");
+        saved.Body.Should().Contain("```bash", "fenced code survives");
+        saved.Body.Should().Contain("| Setting | Value |", "so do tables");
+    }
+
+    /// <summary>
+    /// And it renders. Markdig is given the whole thing, and raw HTML stays disabled — a
+    /// document pasted from somewhere else is exactly where a stray script tag comes from.
+    /// </summary>
+    [Fact]
+    public void A_pasted_document_renders_without_letting_html_through()
+    {
+        string withHtml = AnArchitectureGuide()
+            + "\n\n<script>alert('x')</script>\n\n<b>not bold</b>\n";
+
+        Microsoft.AspNetCore.Components.MarkupString rendered =
+            EntKube.Web.Services.Knowledge.KnowledgeMarkdown.Render(withHtml);
+
+        rendered.Value.Should().NotContain("<script>");
+        rendered.Value.Should().Contain("&lt;script&gt;", "it is shown as text, not run");
+        rendered.Value.Should().Contain("<h1", "the document itself still renders");
     }
 }

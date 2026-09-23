@@ -225,14 +225,24 @@
                     <div class="pane-body">
                         <div class="kb-edit">
                             <div>
-                                <label class="form-label small text-muted">Markdown</label>
-                                <textarea class="form-control" @bind="editing.Body"
-                                          @bind:event="oninput"></textarea>
+                                <label class="form-label small text-muted">
+                                    Markdown
+                                    <span class="text-muted">— paste a whole document if you have one</span>
+                                </label>
+                                @* Bound on change rather than on input. Every keystroke used to
+                                   send the entire document over the circuit, which for a pasted
+                                   architecture guide means re-sending hundreds of kilobytes per
+                                   character typed. The cost is that the preview catches up when
+                                   you click out of the box instead of as you type. *@
+                                <textarea class="form-control" @bind="editing.Body"></textarea>
                                 <input class="form-control form-control-sm mt-2" @bind="changeSummary"
                                        placeholder="What changed — kept with the previous version" />
                             </div>
                             <div>
-                                <label class="form-label small text-muted">How it will read</label>
+                                <label class="form-label small text-muted">
+                                    How it will read
+                                    <span class="text-muted">— updates when you click out</span>
+                                </label>
                                 <div class="kb-preview kb-prose">
                                     @KnowledgeMarkdown.Render(editing.Body)
                                 </div>
