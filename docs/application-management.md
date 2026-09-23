@@ -147,6 +147,23 @@ and says nothing about response time. Since a missed response time is the only
 thing that carries a penalty, the narrower reading is the one that cannot be
 accused of excusing our own lateness.
 
+### Before the SLA starts
+
+§4.1 and §8 begin the response and resolution times at a **signed start protocol**. A
+ticket raised before that date is handled on a best-effort basis with no guaranteed
+response, and nothing before it is reported as a breach or counted as a §14.6 deviation.
+The clocks still run and are still shown — a red one that carries no penalty should say
+which it is.
+
+The answer is recorded on the ticket when it is created, like the support window, because
+what counts is the terms in force when it arrived. A protocol signed afterwards must not
+turn a best-effort week into a month of breaches.
+
+**A contract with no protocol date is not an exemption.** It is ambiguous between "not
+started" and "nobody filled it in", and it resolves against us: claiming best-effort on the
+strength of a blank field would let our own missing paperwork excuse a breach. The
+exemption is taken only where a date says so.
+
 ### What the penalty actually attaches to
 
 Only a missed **response** time, and only on P1 or P2. An overrun resolution time

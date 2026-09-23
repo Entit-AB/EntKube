@@ -55,9 +55,14 @@ public class ApplicationContract
     public Guid? ParentAppId { get; set; }
 
     /// <summary>
-    /// When SLA times begin to apply — the signed start protocol (§4.1, §8). Until this is
-    /// set, §4.1 says tickets are handled on a best-effort basis with no guaranteed response, so
-    /// nothing should be reported as a breach before it.
+    /// When SLA times begin to apply — the signed start protocol (§4.1, §8). A ticket
+    /// raised before this date is handled on a best-effort basis with no guaranteed
+    /// response, and nothing before it is reported as a breach.
+    ///
+    /// <para><b>Null does not mean "not started".</b> It means nobody has recorded the
+    /// protocol, which is ambiguous — and resolved against ourselves, because claiming
+    /// best-effort on the strength of a blank field would let missing paperwork excuse a
+    /// breach. The exemption is taken only where a date says so.</para>
     /// </summary>
     public DateTime? SlaStartsAt { get; set; }
 

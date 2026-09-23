@@ -181,7 +181,10 @@ public class MonthlyReportService(
                 band.Count,
                 resolved.Count,
                 band.Count(t => t.IsPenaltyDeviation),
-                band.Count(t => t.Resolution.Breached && !t.Ticket.ExcludedFromSla),
+                // §4.1 again: a resolution target that did not apply was not overrun.
+                band.Count(t => t.Ticket.SlaApplied
+                                && t.Resolution.Breached
+                                && !t.Ticket.ExcludedFromSla),
                 average));
         }
 

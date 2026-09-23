@@ -7191,6 +7191,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<DateTime?>("ResolvedAt")
                         .HasColumnType("datetime2");
 
+                    b.Property<bool>("SlaApplied")
+                        .HasColumnType("bit");
+
                     b.Property<string>("SlaExclusionReason")
                         .HasColumnType("nvarchar(max)");
 

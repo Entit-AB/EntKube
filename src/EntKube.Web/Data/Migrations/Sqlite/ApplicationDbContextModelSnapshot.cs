@@ -7183,6 +7183,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<DateTime?>("ResolvedAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("SlaApplied")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("SlaExclusionReason")
                         .HasColumnType("TEXT");
 

@@ -30,12 +30,26 @@ public readonly record struct TicketSlaStatus(
 {
     /// <summary>
     /// Whether this counts as a deviation for §14.6. Only a missed response time on a P1 or
-    /// P2 does, and only when it has not been excluded with a documented reason.
+    /// P2 does, only when it has not been excluded with a documented reason, and only when
+    /// the agreement's times applied at all.
+    ///
+    /// <para>That last condition is §4.1's: before the start protocol is signed there is no
+    /// guaranteed response to miss. It was written on the field and nowhere else, so an
+    /// application still being on-boarded was measured against targets nobody had agreed
+    /// to — and §14.6 turns a deviation into ten percent of the window fee.</para>
     /// </summary>
     public bool IsPenaltyDeviation =>
-        !Ticket.ExcludedFromSla
+        Ticket.SlaApplied
+        && !Ticket.ExcludedFromSla
         && Response.Breached
         && TicketSla.ResponseBreachCarriesPenalty(Ticket.Priority);
+
+    /// <summary>
+    /// Whether the agreement's times were only advisory when this arrived — §4.1's
+    /// best-effort period. Shown rather than hidden: the clocks are still worth running,
+    /// and a red one that carries no penalty should say which it is.
+    /// </summary>
+    public bool BestEffortOnly => !Ticket.SlaApplied;
 
     /// <summary>Whether §14.4's update is overdue as of the moment the status was taken.</summary>
     public bool UpdateOverdue(DateTime now) => UpdateDue is DateTime due && due <= now;
@@ -83,9 +97,20 @@ public class TicketService(
         SupportWindow window = SupportWindow.S1;
         bool windowKnown = false;
 
+        // §4.1 and §8: until the start protocol is signed, tickets are handled on a
+        // best-effort basis with no guaranteed response. Assumed true for a ticket with no
+        // application, which is where the agreement's terms cannot be looked up at all —
+        // holding ourselves to them is the safe direction to be wrong in.
+        bool slaApplied = true;
+
         if (appId is not null)
         {
             ResolvedServiceLevel? level = await contracts.ResolveServiceLevelAsync(appId.Value, reportedAt, ct);
+
+            if (level is not null)
+            {
+                slaApplied = level.Value.SlaApplies;
+            }
 
             if (level?.Window is not null)
             {
@@ -119,6 +144,7 @@ public class TicketService(
             // §9.1: registered on arrival, but the clock starts when the window next opens.
             ClockStartsAt = open ? reportedAt : BusinessCalendar.NextOpening(reportedAt, window),
             SupportWindow = window,
+            SlaApplied = slaApplied,
 
             // §13: a P1 worked outside the bought window is a call-out, billed at the
             // callout rate with a two-hour minimum.

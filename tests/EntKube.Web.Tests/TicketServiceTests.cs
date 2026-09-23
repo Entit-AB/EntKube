@@ -590,4 +590,88 @@ public class TicketServiceTests : IDisposable
             .Count(e => e.TicketId == ticket.Id && e.Detail!.Contains("Assigned to nils"))
             .Should().Be(1);
     }
+
+    // ---- §4.1: before the SLA starts -------------------------------------------------------
+
+    /// <summary>
+    /// <b>The rule was written on the field and nowhere else.</b> §4.1 and §8 start the
+    /// response and resolution times at a signed start protocol; until then work is
+    /// best-effort with no guaranteed response. Nothing read the date, so an application
+    /// still being on-boarded was measured against targets nobody had agreed to — and
+    /// §14.6 turns a missed response into ten percent of the window fee.
+    /// </summary>
+    [Fact]
+    public async Task A_ticket_raised_before_the_sla_starts_carries_no_penalty()
+    {
+        db.ApplicationContracts.Single(c => c.AppId == s1AppId).SlaStartsAt = Tue(9).AddDays(30);
+        await db.SaveChangesAsync();
+
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
+
+        // Long past any response target.
+        TicketSlaStatus status = TicketService.StatusOf(
+            (await tickets.GetAsync(ticket.Id))!, Tue(9).AddDays(2));
+
+        status.Response.Breached.Should().BeTrue("the clock still runs and is still worth seeing");
+        status.IsPenaltyDeviation.Should().BeFalse("but there was no guaranteed response to miss");
+        status.BestEffortOnly.Should().BeTrue();
+    }
+
+    /// <summary>Once the protocol date has passed, the targets are real again.</summary>
+    [Fact]
+    public async Task A_ticket_raised_after_the_sla_starts_carries_the_penalty()
+    {
+        db.ApplicationContracts.Single(c => c.AppId == s1AppId).SlaStartsAt = Tue(9).AddDays(-30);
+        await db.SaveChangesAsync();
+
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
+
+        TicketSlaStatus status = TicketService.StatusOf(
+            (await tickets.GetAsync(ticket.Id))!, Tue(9).AddDays(2));
+
+        status.IsPenaltyDeviation.Should().BeTrue();
+        status.BestEffortOnly.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// <b>The decision worth arguing with.</b> A contract with no protocol date recorded is
+    /// ambiguous between "not started" and "nobody filled it in", and it is resolved
+    /// against ourselves: claiming best-effort on the strength of a blank field would let
+    /// our own missing paperwork excuse a breach.
+    /// </summary>
+    [Fact]
+    public async Task A_contract_with_no_protocol_date_does_not_excuse_us()
+    {
+        db.ApplicationContracts.Single(c => c.AppId == s1AppId).SlaStartsAt = null;
+        await db.SaveChangesAsync();
+
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
+
+        TicketSlaStatus status = TicketService.StatusOf(
+            (await tickets.GetAsync(ticket.Id))!, Tue(9).AddDays(2));
+
+        status.IsPenaltyDeviation.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The terms in force when it arrived are what count. A protocol signed afterwards must
+    /// not turn a best-effort week into a month of breaches, which is why the answer is
+    /// recorded on the ticket rather than looked up later.
+    /// </summary>
+    [Fact]
+    public async Task Signing_the_protocol_later_does_not_reach_back()
+    {
+        db.ApplicationContracts.Single(c => c.AppId == s1AppId).SlaStartsAt = Tue(9).AddDays(30);
+        await db.SaveChangesAsync();
+
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
+
+        db.ApplicationContracts.Single(c => c.AppId == s1AppId).SlaStartsAt = Tue(9).AddDays(-1);
+        await db.SaveChangesAsync();
+
+        TicketSlaStatus status = TicketService.StatusOf(
+            (await tickets.GetAsync(ticket.Id))!, Tue(9).AddDays(2));
+
+        status.IsPenaltyDeviation.Should().BeFalse();
+    }
 }

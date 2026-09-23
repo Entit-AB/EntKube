@@ -205,6 +205,17 @@ public class Ticket
     public DateTime? IncidentReportDeliveredAt { get; set; }
 
     /// <summary>
+    /// Whether the agreement's response and resolution times applied when this arrived.
+    ///
+    /// <para>§4.1 and §8 start the SLA at a signed start protocol, and until that date
+    /// tickets are handled on a best-effort basis with no guaranteed response. Recorded on
+    /// the ticket rather than looked up later, for the same reason the support window is:
+    /// what matters is the terms that were in force when it was reported, and a contract
+    /// signed afterwards must not turn a best-effort week into a month of breaches.</para>
+    /// </summary>
+    public bool SlaApplied { get; set; } = true;
+
+    /// <summary>
     /// Deviations are judged per ticket and reported monthly. Recording the judgement — with
     /// its reason — keeps §14.6's "waiting time, force majeure or a 14.7 exemption explains it"
     /// out of a spreadsheet.

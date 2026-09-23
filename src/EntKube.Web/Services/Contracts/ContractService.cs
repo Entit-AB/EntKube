@@ -17,11 +17,20 @@ namespace EntKube.Web.Services.Contracts;
 /// </param>
 /// <param name="WindowInherited">True when the window came from the parent application (§10.2.1).</param>
 /// <param name="EffectiveFrom">When this classification took effect.</param>
+/// <param name="SlaApplies">
+/// Whether the agreement's response and resolution times were in force at that moment.
+///
+/// <para>§4.1 and §8 start them at a signed start protocol, and until that date tickets
+/// are handled on a best-effort basis with no guaranteed response. Somebody has to ask, or
+/// an application still being on-boarded is measured against targets nobody has agreed
+/// to — and §14.6 turns those into money.</para>
+/// </param>
 public readonly record struct ResolvedServiceLevel(
     ManagementLevel Level,
     SupportWindow? Window,
     bool WindowInherited,
-    DateTime EffectiveFrom);
+    DateTime EffectiveFrom,
+    bool SlaApplies);
 
 /// <summary>
 /// Reads the agreement: which terms applied to an application or a portfolio on a given
@@ -829,9 +838,21 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
             return null;
         }
 
+        // §4.1 starts the SLA at a signed start protocol, so a ticket raised before that
+        // date is best-effort. The interesting case is a contract with no date recorded at
+        // all, which is ambiguous between "not started" and "nobody filled it in" — and
+        // resolved against ourselves: claiming best-effort on the strength of our own
+        // missing paperwork would let a blank field excuse a breach. We only take the
+        // exemption where we can point at a protocol date that says so.
+        //
+        // The date is the contract's, not the service level's: a reclassification does not
+        // restart the SLA.
+        bool slaApplies = contract.SlaStartsAt is not DateTime starts || starts <= asOf;
+
         if (level.SupportWindow is not null)
         {
-            return new ResolvedServiceLevel(level.Level, level.SupportWindow, false, level.EffectiveFrom);
+            return new ResolvedServiceLevel(
+                level.Level, level.SupportWindow, false, level.EffectiveFrom, slaApplies);
         }
 
         // §10.2.1: an instance inherits its parent application's window unless it states one.
@@ -852,13 +873,15 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
             if (parentLevel?.SupportWindow is not null)
             {
+                // The window is inherited from the parent (§10.2.1); the start protocol is
+                // not. An application's own SLA begins when its own protocol is signed.
                 return new ResolvedServiceLevel(
-                    level.Level, parentLevel.SupportWindow, true, level.EffectiveFrom);
+                    level.Level, parentLevel.SupportWindow, true, level.EffectiveFrom, slaApplies);
             }
 
             parentAppId = parent.ParentAppId == parentAppId ? null : parent.ParentAppId;
         }
 
-        return new ResolvedServiceLevel(level.Level, null, false, level.EffectiveFrom);
+        return new ResolvedServiceLevel(level.Level, null, false, level.EffectiveFrom, slaApplies);
     }
 }
