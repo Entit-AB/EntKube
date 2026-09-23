@@ -48,10 +48,22 @@ public class InboundMailMessage
     /// evidence for why a message was routed where it was, which is the first question
     /// asked when it lands in the wrong queue.</para>
     ///
-    /// <para>Includes the envelope headers a forwarding alias leaves behind, because an
-    /// address that was aliased into the mailbox may survive nowhere else.</para>
+    /// <para><b>Written by the sender, so not evidence of anything.</b> Anybody can put any
+    /// address in To or Cc; a message naming a customer's support alias was not necessarily
+    /// sent to it. See <see cref="DeliveredTo"/> for the half that is trustworthy.</para>
     /// </summary>
     public string? ToAddresses { get; set; }
+
+    /// <summary>
+    /// The addresses our own delivering server recorded — Delivered-To, X-Original-To,
+    /// X-Envelope-To — lower-cased and separated by spaces.
+    ///
+    /// <para>This is where an alias survives: it is expanded before the message is written,
+    /// so an address a customer was given appears in no header the sender composed. It is
+    /// also the only recipient evidence a sender cannot forge, which is why routing prefers
+    /// it and treats To and Cc as a claim rather than a fact.</para>
+    /// </summary>
+    public string? DeliveredTo { get; set; }
 
     public string? FromName { get; set; }
 

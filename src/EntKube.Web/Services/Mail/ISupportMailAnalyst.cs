@@ -9,13 +9,21 @@ namespace EntKube.Web.Services.Mail;
 /// <param name="OpenTickets">Their open tickets, for threading a reply onto one.</param>
 /// <param name="TimebankExhausted">Whether §11.1's approval gate is already in force.</param>
 /// <param name="Rules">The phrases this tenant watches for, configured or built-in.</param>
+/// <param name="PlacedOnTheSendersWord">
+/// Whether the customer was decided only by an address the sender put in To or Cc.
+///
+/// <para>Those headers are written by whoever sent the message, so naming a customer's
+/// support alias in them is a claim and not evidence — and a placement resting on one
+/// must not silence the prompt that would have had somebody look twice.</para>
+/// </param>
 public readonly record struct MailContext(
     InboundMailMessage Message,
     Customer? Customer,
     IReadOnlyList<App> Apps,
     IReadOnlyList<Ticket> OpenTickets,
     bool TimebankExhausted,
-    MailTriageRuleSet Rules);
+    MailTriageRuleSet Rules,
+    bool PlacedOnTheSendersWord = false);
 
 /// <summary>
 /// Reads an inbound support message and proposes what to do with it.

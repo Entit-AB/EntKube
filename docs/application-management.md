@@ -277,6 +277,15 @@ the message is written, so the address often survives in no header the sender wr
 in `Delivered-To` or `X-Original-To`, which is why the reader keeps those too. Miss them
 and a customer's own address routes nothing.
 
+**To and Cc are written by the sender, and are treated as a claim.** Anybody can name a
+customer's support alias in Cc without the message going anywhere near it, so routing on
+those headers alone would let a stranger put their mail into a chosen customer's queue —
+and, worse, silence the "nobody recognised this sender" prompt that would have invited a
+second look. The two facts are kept in separate fields: `DeliveredTo` is what our own
+server recorded and places a message outright; `ToAddresses` is what the sender typed and
+places it *with a flag*, because naming the address is also exactly what a consultant
+reporting on the customer's behalf would do.
+
 **Then the §23 contacts** by exact address — somebody named in the agreement is the
 strongest statement there is about who a *sender* is, and it beats a domain.
 

@@ -3722,6 +3722,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid?>("CustomerId")
                         .HasColumnType("uuid");
 
+                    b.Property<string>("DeliveredTo")
+                        .HasColumnType("text");
+
                     b.Property<string>("FromAddress")
                         .IsRequired()
                         .HasColumnType("text");

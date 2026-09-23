@@ -3717,6 +3717,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<Guid?>("CustomerId")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("DeliveredTo")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("FromAddress")
                         .IsRequired()
                         .HasColumnType("TEXT");

@@ -128,13 +128,35 @@ public class MailMessageReaderTests
     /// routes, so it has to survive into the row.
     /// </summary>
     [Fact]
-    public void The_addresses_it_was_sent_to_are_kept()
+    public void The_addresses_the_sender_named_are_kept()
     {
         MimeMessage message = Message();
         message.Cc.Add(new MailboxAddress("Entit AB", "entit-support@entit.se"));
 
         MailMessageReader.Read(message, Tenant, Fetched).ToAddresses
             .Should().Contain("support@entit.se").And.Contain("entit-support@entit.se");
+    }
+
+    /// <summary>
+    /// <b>The two are different facts and are kept apart.</b> To and Cc are written by the
+    /// sender; Delivered-To is written by our own server. Routing a customer's mail on the
+    /// first would let a stranger put their message in a chosen customer's queue by naming
+    /// the address.
+    /// </summary>
+    [Fact]
+    public void What_the_sender_claimed_is_not_mixed_with_what_our_server_recorded()
+    {
+        MimeMessage message = Message();
+        message.Cc.Add(new MailboxAddress(null, "claimed@entit.se"));
+        message.Headers.Add("Delivered-To", "real@entit.se");
+
+        InboundMailMessage row = MailMessageReader.Read(message, Tenant, Fetched);
+
+        row.ToAddresses.Should().Contain("claimed@entit.se");
+        row.ToAddresses.Should().NotContain("real@entit.se");
+
+        row.DeliveredTo.Should().Contain("real@entit.se");
+        row.DeliveredTo.Should().NotContain("claimed@entit.se");
     }
 
     /// <summary>
@@ -149,7 +171,7 @@ public class MailMessageReaderTests
         MimeMessage message = Message();
         message.Headers.Add("Delivered-To", "entit-support@entit.se");
 
-        MailMessageReader.RecipientsOf(message).Should().Contain("entit-support@entit.se");
+        MailMessageReader.EnvelopeRecipientsOf(message).Should().Contain("entit-support@entit.se");
     }
 
     [Theory]
@@ -160,7 +182,7 @@ public class MailMessageReaderTests
         MimeMessage message = Message();
         message.Headers.Add(header, "entit-support@entit.se");
 
-        MailMessageReader.RecipientsOf(message).Should().Contain("entit-support@entit.se");
+        MailMessageReader.EnvelopeRecipientsOf(message).Should().Contain("entit-support@entit.se");
     }
 
     /// <summary>A server may write a display name into one; parse it rather than store it raw.</summary>
@@ -170,7 +192,7 @@ public class MailMessageReaderTests
         MimeMessage message = Message();
         message.Headers.Add("Delivered-To", "Entit AB Support <entit-support@entit.se>");
 
-        MailMessageReader.RecipientsOf(message).Should().Contain("entit-support@entit.se");
+        MailMessageReader.EnvelopeRecipientsOf(message).Should().Contain("entit-support@entit.se");
     }
 
     /// <summary>Compared case-insensitively later, so stored lower-cased and once.</summary>
@@ -181,7 +203,7 @@ public class MailMessageReaderTests
         message.Cc.Add(new MailboxAddress(null, "ENTIT-Support@Entit.SE"));
         message.Headers.Add("Delivered-To", "entit-support@entit.se");
 
-        MailMessageReader.RecipientsOf(message)
+        MailMessageReader.EnvelopeRecipientsOf(message)
             .Count(a => a == "entit-support@entit.se").Should().Be(1);
     }
 

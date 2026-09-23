@@ -62,10 +62,18 @@ public class SupportMailService(
         }
 
         message.Id = message.Id == Guid.Empty ? Guid.NewGuid() : message.Id;
-        message.CustomerId ??= await MatchCustomerAsync(
-            db, message.TenantId, message.FromAddress, message.ToAddresses, ct);
+        bool placedOnTheSendersWord = false;
 
-        message.Suggestions.AddRange(await ProposeAsync(db, message, ct));
+        if (message.CustomerId is null)
+        {
+            (message.CustomerId, placedOnTheSendersWord) = await MatchCustomerAsync(
+                db, message.TenantId, message.FromAddress,
+                message.DeliveredTo, message.ToAddresses, ct);
+        }
+
+        message.Suggestions.AddRange(
+            await ProposeAsync(db, message, ct, placedOnTheSendersWord));
+
         message.State = message.Suggestions.Count > 0
             ? MailTriageState.Proposed
             : MailTriageState.Received;
@@ -85,8 +93,13 @@ public class SupportMailService(
     /// the hour bank is theirs — so a message that arrives unplaced and is assigned by hand
     /// afterwards deserves the analysis it could not have had the first time.</para>
     /// </summary>
+    /// <param name="placedOnTheSendersWord">
+    /// Whether the customer was decided only by an address the sender typed. False when a
+    /// person said so, which is the other way a message gets placed.
+    /// </param>
     private async Task<IReadOnlyList<MailSuggestion>> ProposeAsync(
-        ApplicationDbContext db, InboundMailMessage message, CancellationToken ct)
+        ApplicationDbContext db, InboundMailMessage message, CancellationToken ct,
+        bool placedOnTheSendersWord = false)
     {
         Customer? customer = message.CustomerId is Guid customerId
             ? await db.Customers.AsNoTracking().FirstOrDefaultAsync(c => c.Id == customerId, ct)
@@ -115,7 +128,9 @@ public class SupportMailService(
         MailTriageRuleSet ruleSet = await rules.GetEffectiveAsync(message.TenantId, ct);
 
         return await analyst.AnalyseAsync(
-            new MailContext(message, customer, apps, openTickets, bankSpent, ruleSet), ct);
+            new MailContext(
+                message, customer, apps, openTickets, bankSpent, ruleSet, placedOnTheSendersWord),
+            ct);
     }
 
     /// <summary>
@@ -394,33 +409,23 @@ public class SupportMailService(
     /// <para>No match is a real answer and leaves the message unplaced, where the inbox
     /// flags it and an operator says who it was.</para>
     /// </summary>
-    private static async Task<Guid?> MatchCustomerAsync(
-        ApplicationDbContext db, Guid tenantId, string fromAddress, string? toAddresses,
-        CancellationToken ct)
+    private static async Task<(Guid? CustomerId, bool OnTheSendersWord)> MatchCustomerAsync(
+        ApplicationDbContext db, Guid tenantId, string fromAddress,
+        string? deliveredTo, string? toAddresses, CancellationToken ct)
     {
         string address = fromAddress.Trim().ToLowerInvariant();
 
-        if (!string.IsNullOrWhiteSpace(toAddresses))
+        List<CustomerSupportAddress> mailboxes = await db.CustomerSupportAddresses
+            .AsNoTracking()
+            .Where(a => a.TenantId == tenantId)
+            .ToListAsync(ct);
+
+        // What our own server recorded, first. A reply-all can carry several of ours; any
+        // one places the message, and two customers' addresses on one message is a
+        // situation no ordering rescues, so the first found is as good as any.
+        if (Addressed(mailboxes, deliveredTo) is CustomerSupportAddress delivered)
         {
-            List<CustomerSupportAddress> mailboxes = await db.CustomerSupportAddresses
-                .AsNoTracking()
-                .Where(a => a.TenantId == tenantId)
-                .ToListAsync(ct);
-
-            // A reply-all can carry several of ours; any one of them places the message,
-            // and two different customers' addresses on one message is a situation no
-            // ordering can rescue, so the first found is as good as any.
-            HashSet<string> recipients = new(
-                toAddresses.Split(' ', StringSplitOptions.RemoveEmptyEntries),
-                StringComparer.OrdinalIgnoreCase);
-
-            CustomerSupportAddress? addressed =
-                mailboxes.FirstOrDefault(a => recipients.Contains(a.Address));
-
-            if (addressed is not null)
-            {
-                return addressed.CustomerId;
-            }
+            return (delivered.CustomerId, false);
         }
 
         ContractContact? contact = await db.ContractContacts.AsNoTracking()
@@ -429,20 +434,44 @@ public class SupportMailService(
 
         if (contact is not null)
         {
-            return contact.CustomerId;
+            return (contact.CustomerId, false);
         }
 
         string? domain = SenderDomain.Of(address);
 
-        if (domain is null)
+        List<CustomerEmailDomain> registered = domain is null
+            ? []
+            : await db.CustomerEmailDomains.AsNoTracking()
+                .Where(d => d.TenantId == tenantId)
+                .ToListAsync(ct);
+
+        if (SenderDomain.BestMatch(registered, d => d.Domain, domain) is CustomerEmailDomain byDomain)
+        {
+            return (byDomain.CustomerId, false);
+        }
+
+        // Last: an address the sender put in To or Cc. Usually true, and not evidence —
+        // anybody can name a customer's alias there without the message going near it.
+        // Placing on it is still right more often than not, but the placement is flagged
+        // so it does not silence the prompt that would have invited a second look.
+        return Addressed(mailboxes, toAddresses) is CustomerSupportAddress claimed
+            ? (claimed.CustomerId, true)
+            : (null, false);
+    }
+
+    /// <summary>Which of our registered support addresses appears among a recipient list.</summary>
+    private static CustomerSupportAddress? Addressed(
+        List<CustomerSupportAddress> mailboxes, string? addresses)
+    {
+        if (string.IsNullOrWhiteSpace(addresses))
         {
             return null;
         }
 
-        List<CustomerEmailDomain> registered = await db.CustomerEmailDomains.AsNoTracking()
-            .Where(d => d.TenantId == tenantId)
-            .ToListAsync(ct);
+        HashSet<string> recipients = new(
+            addresses.Split(' ', StringSplitOptions.RemoveEmptyEntries),
+            StringComparer.OrdinalIgnoreCase);
 
-        return SenderDomain.BestMatch(registered, d => d.Domain, domain)?.CustomerId;
+        return mailboxes.FirstOrDefault(a => recipients.Contains(a.Address));
     }
 }

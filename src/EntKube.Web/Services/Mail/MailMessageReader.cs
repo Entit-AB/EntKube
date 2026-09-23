@@ -37,7 +37,8 @@ public static class MailMessageReader
             MessageId = IdentityOf(message),
             InReplyTo = ThreadParentOf(message),
             FromAddress = from?.Address ?? "",
-            ToAddresses = string.Join(' ', RecipientsOf(message)),
+            ToAddresses = string.Join(' ', ClaimedRecipientsOf(message)),
+            DeliveredTo = string.Join(' ', EnvelopeRecipientsOf(message)),
             FromName = string.IsNullOrWhiteSpace(from?.Name) ? null : from.Name,
             Subject = message.Subject ?? "",
             Body = BodyOf(message),
@@ -48,17 +49,15 @@ public static class MailMessageReader
     }
 
     /// <summary>
-    /// Every address a message was sent to, lower-cased, in no particular order and without
+    /// The addresses the <em>sender</em> put in To and Cc, lower-cased and without
     /// duplicates.
     ///
-    /// <para>To and Cc are the obvious ones. <c>Delivered-To</c> and <c>X-Original-To</c>
-    /// are here because an address that is an alias for the support mailbox often appears
-    /// in neither — the alias is expanded before the message is written, and the only
-    /// record of which address was actually used is the envelope header the delivering
-    /// server left behind. Losing that means losing the whole point of giving a customer
-    /// their own address.</para>
+    /// <para><b>A claim, not a fact.</b> Anybody can name any address there, including a
+    /// customer's own support alias, and the message need never have gone near it. Kept
+    /// because it is usually true and always evidence of what was intended — but routing
+    /// on it alone would let a stranger place their mail in a chosen customer's queue.</para>
     /// </summary>
-    public static IReadOnlyList<string> RecipientsOf(MimeMessage message)
+    public static IReadOnlyList<string> ClaimedRecipientsOf(MimeMessage message)
     {
         HashSet<string> addresses = new(StringComparer.OrdinalIgnoreCase);
 
@@ -69,6 +68,20 @@ public static class MailMessageReader
                 addresses.Add(mailbox.Address.Trim().ToLowerInvariant());
             }
         }
+
+        return [.. addresses];
+    }
+
+    /// <summary>
+    /// The addresses our own delivering server recorded.
+    ///
+    /// <para>This is where an alias survives — it is expanded before the message is
+    /// written, so an address a customer was given appears in no header the sender
+    /// composed. It is also the only recipient evidence a sender cannot forge.</para>
+    /// </summary>
+    public static IReadOnlyList<string> EnvelopeRecipientsOf(MimeMessage message)
+    {
+        HashSet<string> addresses = new(StringComparer.OrdinalIgnoreCase);
 
         foreach (string header in (string[])["Delivered-To", "X-Original-To", "X-Envelope-To"])
         {

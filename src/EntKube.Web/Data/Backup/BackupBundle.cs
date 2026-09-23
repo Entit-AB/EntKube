@@ -2,6 +2,7 @@ namespace EntKube.Web.Data.Backup;
 
 public class BackupBundle
 {
+    // Version 7 added the envelope recipients kept beside the claimed ones.
     // Version 6 added each customer's own support addresses.
     // Version 5 added the customer mail-domain register.
     // Version 4 added the platform configuration a coverage test found missing: API
@@ -24,7 +25,7 @@ public class BackupBundle
     /// literal here and a second literal in the import's guard, which is how a bundle
     /// this very code wrote came to be rejected by it.</para>
     /// </summary>
-    public const int CurrentVersion = 6;
+    public const int CurrentVersion = 7;
 
     public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;

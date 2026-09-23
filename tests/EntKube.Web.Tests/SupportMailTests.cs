@@ -129,6 +129,7 @@ public class SupportMailTests : IDisposable
             Address = address,
         });
 
+    /// <summary>A message our own server recorded as delivered to an address.</summary>
     private Task<InboundMailMessage?> ReceiveAddressedTo(
         string to, string from, string subject = "Fel", string body = "Beskrivning.") =>
         mail.IngestAsync(new InboundMailMessage
@@ -136,11 +137,78 @@ public class SupportMailTests : IDisposable
             TenantId = tenantId,
             MessageId = Guid.NewGuid().ToString("N"),
             FromAddress = from,
+            DeliveredTo = to,
             ToAddresses = to,
             Subject = subject,
             Body = body,
             SentAt = Tue(10),
         });
+
+    /// <summary>A message that merely names an address in To or Cc, which anybody may do.</summary>
+    private Task<InboundMailMessage?> ReceiveClaimingTo(string to, string from) =>
+        mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = from,
+            ToAddresses = to,
+            Subject = "Fel",
+            Body = "Beskrivning.",
+            SentAt = Tue(10),
+        });
+
+    /// <summary>
+    /// <b>To and Cc are written by the sender.</b> Naming a customer's support alias there
+    /// is a claim, not evidence — so the message is still placed, because that is usually
+    /// what a consultant writing on their behalf does, but the prompt that would have had
+    /// somebody look twice is not silenced by it.
+    /// </summary>
+    [Fact]
+    public async Task An_address_only_claimed_in_the_headers_is_placed_but_flagged()
+    {
+        RegisterAddress("entit-support@entit.se");
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await ReceiveClaimingTo(
+            "entit-support@entit.se", from: "stranger@nowhere.example");
+
+        message!.CustomerId.Should().Be(customerId);
+        message.Suggestions.Should().Contain(s => s.Kind == MailSuggestionKind.FlagUnknownSender);
+    }
+
+    /// <summary>
+    /// What our own server recorded is not a claim, so it places the message without a
+    /// caveat. This is the ordinary case — an alias expands before the message is written.
+    /// </summary>
+    [Fact]
+    public async Task An_address_our_server_recorded_is_placed_without_a_caveat()
+    {
+        RegisterAddress("entit-support@entit.se");
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await ReceiveAddressedTo(
+            "entit-support@entit.se", from: "stranger@nowhere.example");
+
+        message!.CustomerId.Should().Be(customerId);
+        message.Suggestions.Should().NotContain(s => s.Kind == MailSuggestionKind.FlagUnknownSender);
+    }
+
+    /// <summary>
+    /// A sender we already recognise needs no caveat either: the claim added nothing,
+    /// because the contact register had already answered.
+    /// </summary>
+    [Fact]
+    public async Task A_known_sender_naming_the_address_gets_no_caveat()
+    {
+        RegisterAddress("entit-support@entit.se");
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await ReceiveClaimingTo(
+            "entit-support@entit.se", from: KnownSender);
+
+        message!.CustomerId.Should().Be(customerId);
+        message.Suggestions.Should().NotContain(s => s.Kind == MailSuggestionKind.FlagUnknownSender);
+    }
 
     // ---- Threading a reply onto its ticket ---------------------------------------------------
 

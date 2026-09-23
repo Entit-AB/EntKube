@@ -38,6 +38,22 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
             return Task.FromResult<IReadOnlyList<MailSuggestion>>(suggestions);
         }
 
+        if (context.PlacedOnTheSendersWord)
+        {
+            // Placed, but on a header the sender wrote. Worth a second look rather than a
+            // refusal: naming a customer's address in Cc is what a consultant reporting on
+            // their behalf does, and also what somebody would do to put their message in
+            // front of that customer's queue.
+            suggestions.Add(Suggestion(
+                message.Id, MailSuggestionKind.FlagUnknownSender,
+                $"Placed with {context.Customer.Name} because their address is in To or Cc",
+                $"{message.FromAddress} is not a recorded contact and their domain is not "
+                + "registered, so the only thing connecting this message to the customer is "
+                + "an address the sender typed. Our own server did not record it as delivered "
+                + "there. Usually genuine; worth confirming before a ticket is opened in "
+                + "their name."));
+        }
+
         // A reply to an existing ticket, by reference number or by mail threading.
         Ticket? existing = MatchTicket(message, context.OpenTickets);
         App? app = MatchApp(text, context.Apps);
