@@ -263,19 +263,62 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task AddShiftAsync(Guid scheduleId, string assigneeName, string? assigneeEmail,
-        DateTime startsAt, DateTime endsAt, string? notes, CancellationToken ct = default)
+    /// <summary>
+    /// Puts somebody on the roster.
+    /// </summary>
+    /// <param name="assigneePhone">
+    /// How to actually reach them. The roster carried a name and an address for a long
+    /// time, while the entity's own comment observed that at three in the morning an
+    /// address is not a way to reach a person — which was true, and there was no field on
+    /// the form to do anything about it.
+    /// </param>
+    /// <param name="assigneeTeamsHandle">§14.3 makes Teams a contact channel for P1 and P2.</param>
+    /// <param name="subconsultantId">
+    /// Whoever is covering, when it is not our own staff. §18 requires them to be in the
+    /// register, bound by §17's terms and approved before they go near the customer's
+    /// environments — <see cref="MayAccessCustomerEnvironments"/> is that test, and this
+    /// refuses rather than quietly rostering somebody who fails it.
+    /// </param>
+    public async Task AddShiftAsync(
+        Guid scheduleId, string assigneeName, string? assigneeEmail,
+        DateTime startsAt, DateTime endsAt, string? notes,
+        string? assigneePhone = null,
+        string? assigneeTeamsHandle = null,
+        OnCallAffiliation affiliation = OnCallAffiliation.Employee,
+        Guid? subconsultantId = null,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (subconsultantId is Guid id)
+        {
+            Subconsultant? person = await db.Subconsultants
+                .FirstOrDefaultAsync(c => c.Id == id, ct)
+                ?? throw new InvalidOperationException("That subconsultant is not registered.");
+
+            if (!MayAccessCustomerEnvironments(person, startsAt))
+            {
+                throw new InvalidOperationException(
+                    $"§18 does not yet allow {person.Name} into the customer's environments. "
+                    + "They must be bound by confidentiality and data-processing terms and "
+                    + "approved by the customer before taking a shift.");
+            }
+        }
+
         db.OnCallShifts.Add(new OnCallShift
         {
             ScheduleId = scheduleId,
             AssigneeName = assigneeName,
             AssigneeEmail = assigneeEmail,
+            AssigneePhone = assigneePhone,
+            AssigneeTeamsHandle = assigneeTeamsHandle,
+            Affiliation = affiliation,
+            SubconsultantId = subconsultantId,
             StartsAt = startsAt,
             EndsAt = endsAt,
             Notes = notes
         });
+
         await db.SaveChangesAsync(ct);
     }
 

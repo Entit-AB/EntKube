@@ -394,6 +394,14 @@ All of this was written and tested when the subsystem was, and none of it was re
 no way to register a person, no way to record that the customer had been told, and the list
 §18 requires could only ever be empty. The rules were never the gap; the door was.
 
+A shift can now say who is covering it and how to reach them. `AddShiftAsync` took a name
+and an address, while the entity's own comment observed that at three in the morning an
+address is not a way to reach a person — correct, and there was no field for anything else.
+It carries a phone number and a Teams handle (§14.3's contact channels for P1 and P2), and
+names the subconsultant when one is covering. That last one **refuses** rather than warns:
+a roster is consulted at three in the morning by somebody who will not be re-reading the
+register, so the check belongs where the shift is created.
+
 ## Maintenance and availability
 
 Time under an agreed maintenance window is **excluded from measured availability**

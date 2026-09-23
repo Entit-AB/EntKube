@@ -334,4 +334,134 @@ public class OnCallCoverageTests : IDisposable
 
         register.Should().ContainSingle().Which.Company.Should().Be("Partner AB");
     }
+
+    // ---- Putting somebody on the roster -------------------------------------------------
+
+    /// <summary>
+    /// The roster carried a name and an address, while the entity's own comment observed
+    /// that at three in the morning an address is not a way to reach a person. It was
+    /// right, and there was no way to record anything else — AddShiftAsync had no
+    /// parameter for a phone number.
+    /// </summary>
+    [Fact]
+    public async Task A_shift_can_carry_a_way_to_actually_reach_somebody()
+    {
+        Guid scheduleId = await AddSchedule();
+
+        await onCall.AddShiftAsync(
+            scheduleId, "Alice Smith", "alice@entit.se",
+            Tue(8), Tue(20), notes: null,
+            assigneePhone: "+46 70 123 45 67",
+            assigneeTeamsHandle: "alice@entit.se");
+
+        OnCallShift shift = db.OnCallShifts.Single();
+
+        shift.AssigneePhone.Should().Be("+46 70 123 45 67");
+        shift.AssigneeTeamsHandle.Should().Be("alice@entit.se");
+    }
+
+    /// <summary>
+    /// §18 allows subconsultants for on-call duty, and SubconsultantId existed to say
+    /// which one — with nothing able to set it, because the register had no door and the
+    /// shift had no field.
+    /// </summary>
+    [Fact]
+    public async Task A_shift_can_name_the_subconsultant_covering_it()
+    {
+        Guid scheduleId = await AddSchedule();
+        Subconsultant person = await Registered(cleared: true);
+
+        await onCall.AddShiftAsync(
+            scheduleId, person.Name, person.Email,
+            Tue(8), Tue(20), notes: null,
+            affiliation: OnCallAffiliation.Subconsultant,
+            subconsultantId: person.Id);
+
+        OnCallShift shift = db.OnCallShifts.Single();
+
+        shift.SubconsultantId.Should().Be(person.Id);
+        shift.Affiliation.Should().Be(OnCallAffiliation.Subconsultant);
+    }
+
+    /// <summary>
+    /// <b>The gate.</b> §18 wants the §17 undertakings in place and the customer's approval
+    /// <em>before</em> somebody goes near the environment, and on-call duty is going near
+    /// it. Refused rather than warned about, because a roster is consulted at three in the
+    /// morning by somebody who will not be re-reading the register.
+    /// </summary>
+    [Fact]
+    public async Task Somebody_the_agreement_does_not_yet_allow_cannot_be_rostered()
+    {
+        Guid scheduleId = await AddSchedule();
+        Subconsultant person = await Registered(cleared: false);
+
+        Func<Task> roster = () => onCall.AddShiftAsync(
+            scheduleId, person.Name, person.Email,
+            Tue(8), Tue(20), notes: null,
+            affiliation: OnCallAffiliation.Subconsultant,
+            subconsultantId: person.Id);
+
+        await roster.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*§18*");
+
+        db.OnCallShifts.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task A_subconsultant_who_is_not_registered_at_all_is_refused()
+    {
+        Guid scheduleId = await AddSchedule();
+
+        Func<Task> roster = () => onCall.AddShiftAsync(
+            scheduleId, "Somebody", null, Tue(8), Tue(20), notes: null,
+            affiliation: OnCallAffiliation.Subconsultant,
+            subconsultantId: Guid.NewGuid());
+
+        await roster.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    /// <summary>Our own staff need no §18 clearance, and the gate must not ask for one.</summary>
+    [Fact]
+    public async Task Our_own_staff_are_rostered_without_a_register_entry()
+    {
+        Guid scheduleId = await AddSchedule();
+
+        await onCall.AddShiftAsync(
+            scheduleId, "Alice Smith", "alice@entit.se", Tue(8), Tue(20), notes: null);
+
+        db.OnCallShifts.Single().Affiliation.Should().Be(OnCallAffiliation.Employee);
+    }
+
+    private async Task<Guid> AddSchedule()
+    {
+        Guid id = Guid.NewGuid();
+
+        db.OnCallSchedules.Add(new OnCallSchedule
+        {
+            Id = id, TenantId = tenantId, Name = "Primary", IsEnabled = true,
+        });
+        await db.SaveChangesAsync();
+
+        return id;
+    }
+
+    private async Task<Subconsultant> Registered(bool cleared)
+    {
+        Subconsultant person = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            Name = "Anna Berg",
+            Email = "anna@partner.example",
+            ConfidentialitySignedAt = cleared ? Tue(0).AddYears(-1) : null,
+            DataProcessingBoundAt = cleared ? Tue(0).AddYears(-1) : null,
+            NotifiedAt = cleared ? Tue(0).AddMonths(-2) : null,
+            ApprovedAt = cleared ? Tue(0).AddMonths(-2) : null,
+        };
+
+        db.Subconsultants.Add(person);
+        await db.SaveChangesAsync();
+
+        return person;
+    }
 }

@@ -279,6 +279,19 @@ else
 
     private List<OnCallSchedule> schedules = [];
     private OnCallShift? currentShift;
+
+    /// <summary>
+    /// The §18 register, for the "covered by" picker. Only those the agreement already
+    /// allows near a customer's environment are offered; the rest are counted, so somebody
+    /// understands why a colleague is missing rather than assuming a bug.
+    /// </summary>
+    private List<Subconsultant> subconsultants = [];
+
+    private List<Subconsultant> EligibleSubconsultants =>
+        [.. subconsultants.Where(c =>
+            OnCallService.MayAccessCustomerEnvironments(c, DateTime.UtcNow))];
+
+    private int BlockedSubconsultants => subconsultants.Count - EligibleSubconsultants.Count;
     private bool isLoading = true;
     private Guid? expandedScheduleId;
 
@@ -350,9 +363,11 @@ else
         isLoading = true;
         Task<List<OnCallSchedule>> schedulesTask = OnCallService.GetSchedulesAsync(TenantId);
         Task<OnCallShift?> currentTask = OnCallService.GetCurrentOnCallAsync(TenantId);
-        await Task.WhenAll(schedulesTask, currentTask);
+        Task<List<Subconsultant>> registerTask = OnCallService.GetSubconsultantsAsync(TenantId);
+        await Task.WhenAll(schedulesTask, currentTask, registerTask);
         schedules = schedulesTask.Result;
         currentShift = currentTask.Result;
+        subconsultants = registerTask.Result;
         isLoading = false;
     }
 
