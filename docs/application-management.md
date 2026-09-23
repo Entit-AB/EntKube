@@ -308,24 +308,26 @@ listed maintenance on somebody else's cluster.
 
 ## Where it appears
 
-**Tenant view.** The tree separates what an operator *does* from what they
-*watch*, and this subsystem is almost entirely the former. Under **Operations**,
-the first four groups are the path a problem travels:
+**Tenant view.** This subsystem is almost all of one section — **Support**, which
+is where somebody is waiting for an answer:
 
 ```
-Operations
-  Priorities        the advisor's "what needs doing"
+Support
   Alerting          alerts, rules, routing, notification channels
   Incidents         on-call rota, incidents
-  Support           support inbox, mailbox connection, triage phrases
-  Reliability       SLA, maintenance windows, secret expiry
-  …
+  Mail              support inbox, mailbox connection, triage phrases
+  Service levels    SLA
 ```
 
-Alerting leads because an alert that fires becomes an incident somebody is on
-call for and then a customer writing in. Filing the alert rules under
-**Observability** with the dashboards they were written against is true of how
-they are authored and useless for how they are used.
+The order is the path a problem travels: something fires, it becomes an incident
+somebody is on call for, and a customer writes in about it. Alerting leads for
+that reason — filing the alert rules under **Observability** with the dashboards
+they were written against is true of how they are authored and useless for how
+they are used.
+
+What is left in **Operations** is work on the platform rather than for a person:
+the advisor's priorities, maintenance windows, the VPN mesh, disaster recovery,
+lifecycle, delivery, access and cost.
 
 The per-record panels hang off what they describe: Annex A on the application,
 Annex B/C and the §23 contacts on the customer, the knowledge panel on the
