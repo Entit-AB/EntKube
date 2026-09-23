@@ -322,6 +322,30 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
         await db.SaveChangesAsync(ct);
     }
 
+    /// <summary>
+    /// What is running hot as a shift ends, written by whoever is handing over.
+    ///
+    /// <para>The field and the place it is displayed have existed from the start; nothing
+    /// could write to it. A handover note is the one thing the next person actually needs
+    /// and the one thing a rota cannot infer — which incident is still live, what was tried
+    /// at two in the morning, who has already been rung.</para>
+    /// </summary>
+    public async Task RecordHandoverAsync(
+        Guid shiftId, string? notes, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        OnCallShift? shift = await db.OnCallShifts.FirstOrDefaultAsync(sh => sh.Id == shiftId, ct);
+
+        if (shift is null)
+        {
+            return;
+        }
+
+        shift.HandoverNotes = string.IsNullOrWhiteSpace(notes) ? null : notes.Trim();
+        await db.SaveChangesAsync(ct);
+    }
+
     public async Task DeleteShiftAsync(Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();

@@ -202,7 +202,13 @@ else
                                                     <span class="badge bg-info text-dark">Upcoming</span>
                                                 }
                                             </td>
-                                            <td>
+                                            <td class="text-nowrap">
+                                                <button class="btn btn-sm btn-outline-secondary me-1"
+                                                        aria-label="@($"Handover note for {shift.AssigneeName}")"
+                                                        title="What is running hot as this shift ends"
+                                                        @onclick="() => StartHandover(shift)">
+                                                    <span class="bi bi-arrow-left-right"></span>
+                                                </button>
                                                 <button class="btn btn-sm btn-outline-danger"
                                                         aria-label="@($"Delete shift for {shift.AssigneeName}")"
                                                         @onclick='() => pendingConfirm = new PendingConfirm($"Delete the on-call shift for \"{shift.AssigneeName}\"? This cannot be undone.", "Delete shift", () => DeleteShift(shift))'>
@@ -210,6 +216,34 @@ else
                                                 </button>
                                             </td>
                                         </tr>
+
+                                        @if (handoverShiftId == shift.Id)
+                                        {
+                                            <tr>
+                                                <td colspan="6" class="bg-light">
+                                                    <label class="form-label small mb-1">
+                                                        Handing over — what is running hot?
+                                                    </label>
+                                                    <div class="row g-2 align-items-end">
+                                                        <div class="col-md-9">
+                                                            <input class="form-control form-control-sm"
+                                                                   @bind="handoverText"
+                                                                   placeholder="Which incident is still live, what was tried, who has been rung" />
+                                                            <div class="form-text small">
+                                                                The one thing the next person needs and
+                                                                the one thing a rota cannot infer.
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-3 text-end">
+                                                            <button class="btn btn-sm btn-outline-secondary me-1"
+                                                                    @onclick="() => handoverShiftId = null">Cancel</button>
+                                                            <AsyncButton CssClass="btn-sm btn-primary"
+                                                                         OnClick="SaveHandoverAsync">Save</AsyncButton>
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        }
                                     }
                                 </tbody>
                             </table>
@@ -303,6 +337,36 @@ else
     // Add shift form
     private Guid? addShiftScheduleId;
     private bool savingShift;
+
+    /// <summary>The shift whose handover note is open for editing, if any.</summary>
+    private Guid? handoverShiftId;
+    private string? handoverText;
+
+    private void StartHandover(OnCallShift shift)
+    {
+        handoverShiftId = handoverShiftId == shift.Id ? null : shift.Id;
+        handoverText = shift.HandoverNotes;
+    }
+
+    private async Task SaveHandoverAsync()
+    {
+        if (handoverShiftId is not Guid id)
+        {
+            return;
+        }
+
+        try
+        {
+            await OnCallService.RecordHandoverAsync(id, handoverText);
+            handoverShiftId = null;
+            await Load();
+            Toasts.Success("Handover noted.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not save the handover note: {ex.Message}");
+        }
+    }
     private ShiftForm shiftForm = new();
 
     private sealed class ScheduleForm

@@ -432,6 +432,57 @@ public class OnCallCoverageTests : IDisposable
         db.OnCallShifts.Single().Affiliation.Should().Be(OnCallAffiliation.Employee);
     }
 
+    /// <summary>
+    /// The field and the row that displays it both existed from the start, and nothing
+    /// could write to it. A handover note is the one thing the next person on call
+    /// actually needs and the one thing a rota cannot infer.
+    /// </summary>
+    [Fact]
+    public async Task A_shift_can_be_handed_over_with_a_note()
+    {
+        Guid scheduleId = await AddSchedule();
+
+        await onCall.AddShiftAsync(
+            scheduleId, "Alice Smith", "alice@entit.se", Tue(8), Tue(20), notes: null);
+
+        Guid shiftId = db.OnCallShifts.Single().Id;
+
+        await onCall.RecordHandoverAsync(shiftId, "  Ticket #41 still live; supplier rung at 02:00.  ");
+
+        db.ChangeTracker.Clear();
+
+        db.OnCallShifts.Single().HandoverNotes
+            .Should().Be("Ticket #41 still live; supplier rung at 02:00.");
+    }
+
+    /// <summary>Clearing it is a real act: the thing that was running hot no longer is.</summary>
+    [Fact]
+    public async Task A_handover_note_can_be_cleared()
+    {
+        Guid scheduleId = await AddSchedule();
+
+        await onCall.AddShiftAsync(
+            scheduleId, "Alice Smith", null, Tue(8), Tue(20), notes: null);
+
+        Guid shiftId = db.OnCallShifts.Single().Id;
+
+        await onCall.RecordHandoverAsync(shiftId, "Something.");
+        await onCall.RecordHandoverAsync(shiftId, "   ");
+
+        db.ChangeTracker.Clear();
+
+        db.OnCallShifts.Single().HandoverNotes.Should().BeNull();
+    }
+
+    /// <summary>A shift that has gone must not take the call down with it.</summary>
+    [Fact]
+    public async Task Handing_over_a_shift_that_is_not_there_does_nothing()
+    {
+        Func<Task> handover = () => onCall.RecordHandoverAsync(Guid.NewGuid(), "Anything.");
+
+        await handover.Should().NotThrowAsync();
+    }
+
     private async Task<Guid> AddSchedule()
     {
         Guid id = Guid.NewGuid();
