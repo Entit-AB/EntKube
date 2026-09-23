@@ -179,12 +179,22 @@ IMAP  →  SupportMailPoller  →  MailMessageReader  →  SupportMailService.In
                                           a person accepts, by name  →  ticket
 ```
 
+A reply is threaded onto its ticket by the Message-Id we sent, which carries the ticket
+number —
+[`SupportMessageId`](../src/EntKube.Web/Services/Mail/SupportMessageId.cs) writes that
+format and is the only thing that reads it. The number is in the identifier so a reply
+needs no lookup table and nothing stored: the thread carries the answer back. Subjects are
+also matched on `[#1042]`, but subjects get edited, translated by clients and lost to
+forwards, and the thread headers survive all three. Only our own identifiers are read — a
+reply pointing at a colleague's message must not be mined for a number that merely looks
+like one.
+
 [`MailMessageReader`](../src/EntKube.Web/Services/Mail/MailMessageReader.cs) is
 separate because it needs no mail server and is where the mistakes are: a missing
 Message-Id gets a *derived* digest rather than a fresh guid (a synthesised id that
 differed between polls would re-ingest the message every two minutes), a reply
-carrying only `References` threads on its last entry, and the `Date` header is not
-trusted past our own clock — it is written by the sender, and a future date would
+carrying only `References` threads on ours anywhere in the chain rather than blindly on
+its last entry, and the `Date` header is not trusted past our own clock — it is written by the sender, and a future date would
 start a response clock before the message existed.
 
 ### Placing a message

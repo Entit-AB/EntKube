@@ -142,6 +142,84 @@ public class SupportMailTests : IDisposable
             SentAt = Tue(10),
         });
 
+    // ---- Threading a reply onto its ticket ---------------------------------------------------
+
+    /// <summary>
+    /// <b>The case a comment claimed was covered and was not.</b> A reply whose subject has
+    /// been edited, translated by a client or lost to a forward still belongs on its
+    /// ticket — and used to open a second one about the fault already being worked.
+    /// </summary>
+    [Fact]
+    public async Task A_reply_with_a_mangled_subject_is_still_placed_on_its_ticket()
+    {
+        Ticket ticket = await tickets.CreateAsync(
+            tenantId, customerId, appId, "Journalen svarar inte", "Ingen kommer in.",
+            TicketChannel.Email, TicketPriority.P3, Tue(9), "Karin", KnownSender);
+
+        InboundMailMessage? reply = await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = KnownSender,
+            // Nothing of the original subject survives.
+            Subject = "SV: nagot annat",
+            Body = "Det gäller fortfarande avdelning 4.",
+            InReplyTo = SupportMessageId.For(ticket.Number),
+            SentAt = Tue(11),
+        });
+
+        reply!.Suggestions.Should().Contain(s =>
+            s.Kind == MailSuggestionKind.AppendToTicket && s.TicketId == ticket.Id);
+    }
+
+    /// <summary>
+    /// A reply that threads on somebody else's message is not mined for a number. Placing
+    /// it on a stranger's ticket would be worse than leaving it unplaced.
+    /// </summary>
+    [Fact]
+    public async Task A_reply_threading_on_somebody_elses_message_opens_its_own_ticket()
+    {
+        await tickets.CreateAsync(
+            tenantId, customerId, appId, "Journalen svarar inte", "Ingen kommer in.",
+            TicketChannel.Email, TicketPriority.P3, Tue(9), "Karin", KnownSender);
+
+        InboundMailMessage? reply = await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = KnownSender,
+            Subject = "Ett helt annat fel",
+            Body = "Beskrivning.",
+            InReplyTo = "kollega@capio.example",
+            SentAt = Tue(11),
+        });
+
+        reply!.Suggestions.Should().Contain(s => s.Kind == MailSuggestionKind.OpenTicket);
+        reply.Suggestions.Should().NotContain(s => s.Kind == MailSuggestionKind.AppendToTicket);
+    }
+
+    /// <summary>The subject reference still works; the thread header is an addition.</summary>
+    [Fact]
+    public async Task A_reply_that_only_keeps_the_reference_in_the_subject_still_threads()
+    {
+        Ticket ticket = await tickets.CreateAsync(
+            tenantId, customerId, appId, "Journalen svarar inte", "Ingen kommer in.",
+            TicketChannel.Email, TicketPriority.P3, Tue(9), "Karin", KnownSender);
+
+        InboundMailMessage? reply = await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = KnownSender,
+            Subject = $"Re: [#{ticket.Number}] Journalen svarar inte",
+            Body = "Fortfarande nere.",
+            SentAt = Tue(11),
+        });
+
+        reply!.Suggestions.Should().Contain(s =>
+            s.Kind == MailSuggestionKind.AppendToTicket && s.TicketId == ticket.Id);
+    }
+
     // ---- Matching by the address it was sent to ---------------------------------------------
 
     /// <summary>

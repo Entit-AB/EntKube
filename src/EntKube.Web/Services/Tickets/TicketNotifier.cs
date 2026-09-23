@@ -189,9 +189,11 @@ public class TicketNotifier(
             mail.Subject = message.Subject;
             mail.Body = new TextPart("plain") { Text = message.Body };
 
-            // A reply carries this back as In-Reply-To, which threads it onto the ticket
-            // even where the subject has been mangled by a client or a forward.
-            mail.MessageId = $"ticket-{ticket.Number}.{Guid.NewGuid():N}@entkube";
+            // A reply carries this back as In-Reply-To, which is how it is threaded onto
+            // the ticket even where the subject has been mangled by a client or a forward.
+            // SupportMessageId is the only thing that writes this format and the only thing
+            // that reads it.
+            mail.MessageId = SupportMessageId.For(ticket.Number);
 
             using SmtpClient client = new();
             await client.ConnectAsync(

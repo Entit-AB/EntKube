@@ -139,6 +139,15 @@ public static class MailMessageReader
     /// </summary>
     public static string? ThreadParentOf(MimeMessage message)
     {
+        // One of ours anywhere in the chain wins. In a long conversation the immediate
+        // parent is often a colleague's message, and answering "what is this a reply to"
+        // with that loses the only thing in the thread that names a ticket.
+        if (SupportMessageId.OursIn(
+                [message.InReplyTo, .. message.References ?? []]) is string ours)
+        {
+            return ours.Trim();
+        }
+
         if (!string.IsNullOrWhiteSpace(message.InReplyTo))
         {
             return message.InReplyTo.Trim();

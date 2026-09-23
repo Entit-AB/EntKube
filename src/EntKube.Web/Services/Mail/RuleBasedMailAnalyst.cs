@@ -123,6 +123,20 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
     /// </summary>
     public static Ticket? MatchTicket(InboundMailMessage message, IReadOnlyList<Ticket> open)
     {
+        // What the message is a reply to, first. A subject can be edited, translated by a
+        // client, or lost to a forward; the thread headers survive all three, and a reply
+        // that opens a second ticket about the fault already being worked is the failure
+        // this exists to prevent.
+        if (SupportMessageId.TicketNumberIn(message.InReplyTo) is int threaded)
+        {
+            Ticket? byThread = open.FirstOrDefault(t => t.Number == threaded);
+
+            if (byThread is not null)
+            {
+                return byThread;
+            }
+        }
+
         Match reference = TicketReference().Match(message.Subject);
 
         if (reference.Success && int.TryParse(reference.Groups[1].Value, out int number))
