@@ -221,9 +221,18 @@ one until somebody picks would be worse than the ticket.
 [`SupportMailboxService`](../src/EntKube.Web/Services/Mail/SupportMailboxService.cs)
 stores settings per tenant with the password in the tenant's vault. A new mailbox
 starts **switched off**; five failed polls in a row stop it, because presenting a
-rejected password over and over is how a service account gets locked. Progress is
-tracked by IMAP UID rather than the read flag, so a mailbox configured to touch
-nothing still reads each message once.
+rejected password over and over is how a service account gets locked.
+
+Progress is tracked by IMAP UID rather than the read flag, so a mailbox configured
+to touch nothing still reads each message once, and a shared mailbox a person also
+reads does not have messages marked seen out from under them.
+[`MailboxCursor`](../src/EntKube.Web/Services/Mail/MailboxCursor.cs) holds that
+decision on its own, because it is the half that goes wrong quietly: UIDs are only
+unique within one UIDVALIDITY, and a cursor carried across a rebuilt mailbox skips
+whatever now sits below it — permanently, with no error, looking exactly like a
+quiet week from that customer. On a change of validity the cursor is dropped and
+the folder read again; the message-id check is what stops that becoming a second
+set of tickets.
 
 ### Why there is no language model behind the analyst
 

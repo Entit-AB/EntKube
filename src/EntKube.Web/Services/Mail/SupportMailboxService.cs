@@ -307,15 +307,23 @@ public class SupportMailboxService(
 
         await folder.OpenAsync(access, ct);
 
-        // A rebuilt mailbox renumbers everything, so the old cursor means nothing.
-        bool cursorValid = mailbox.LastUidValidity == folder.UidValidity;
-        uint after = cursorValid ? mailbox.LastSeenUid ?? 0 : 0;
+        MailboxResumePoint resume = MailboxCursor.Resume(
+            mailbox.LastSeenUid, mailbox.LastUidValidity, folder.UidValidity);
+
+        if (resume.Reset)
+        {
+            logger.LogWarning(
+                "Support mailbox for tenant {Tenant} was rebuilt (UIDVALIDITY {Was} → {Now}); "
+                + "reading the folder again. Messages already taken in are recognised by "
+                + "their message id and will not be duplicated.",
+                mailbox.TenantId, mailbox.LastUidValidity, folder.UidValidity);
+        }
 
         IList<UniqueId> ids = await folder.SearchAsync(
-            SearchQuery.Uids(new UniqueIdRange(new UniqueId(after + 1), UniqueId.MaxValue)), ct);
+            SearchQuery.Uids(new UniqueIdRange(new UniqueId(resume.FirstUid), UniqueId.MaxValue)),
+            ct);
 
         int taken = 0;
-        uint highest = after;
         List<UniqueId> handled = [];
 
         foreach (UniqueId id in ids)
@@ -332,14 +340,13 @@ public class SupportMailboxService(
             }
 
             handled.Add(id);
-            highest = Math.Max(highest, id.Id);
         }
 
         await DisposeOfAsync(folder, handled, mailbox, ct);
 
         // Written only after the messages are in: a crash between fetching and saving
         // should re-read them, which dedupe makes harmless, rather than skip them.
-        mailbox.LastSeenUid = highest;
+        mailbox.LastSeenUid = MailboxCursor.Advance(resume.After, handled.Select(u => u.Id));
         mailbox.LastUidValidity = folder.UidValidity;
 
         await folder.CloseAsync(false, ct);
