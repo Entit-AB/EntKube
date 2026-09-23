@@ -495,6 +495,69 @@ public class MonthlyReportTests : IDisposable
         row.UptimePercent.Should().Be(0.0);
     }
 
+    // ---- §14.6's written report ---------------------------------------------------------
+
+    /// <summary>
+    /// The deadline was computed and shown from the beginning and there was no way to say
+    /// it had been met, so the obligation could not be discharged — only ignored. A closed
+    /// ticket also leaves the queue, which makes the monthly report the last place it can
+    /// be noticed at all.
+    /// </summary>
+    [Fact]
+    public async Task A_closed_P1_with_no_report_is_named_in_the_report()
+    {
+        Ticket ticket = await Raise(TicketPriority.P1, Tue(9));
+        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+
+        MonthlyReport report = await reports.BuildAsync(customerId, September);
+
+        OutstandingIncidentReport owed =
+            report.OutstandingReports.Should().ContainSingle().Subject;
+
+        owed.Number.Should().Be(ticket.Number);
+        owed.Due.Should().Be(
+            BusinessCalendar.WorkingDaysDeadline(Tue(12), TicketSla.IncidentReportWorkingDays));
+    }
+
+    [Fact]
+    public async Task A_report_that_has_been_delivered_is_not_still_owed()
+    {
+        Ticket ticket = await Raise(TicketPriority.P1, Tue(9));
+        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+
+        await tickets.RecordIncidentReportAsync(ticket.Id, "nils", Tue(13));
+
+        MonthlyReport report = await reports.BuildAsync(customerId, September);
+
+        report.OutstandingReports.Should().BeEmpty();
+    }
+
+    /// <summary>§14.6 asks for a report on a P1. Nothing else carries the obligation.</summary>
+    [Fact]
+    public async Task A_closed_P2_owes_no_written_report()
+    {
+        Ticket ticket = await Raise(TicketPriority.P2, Tue(9));
+        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+
+        MonthlyReport report = await reports.BuildAsync(customerId, September);
+
+        report.OutstandingReports.Should().BeEmpty();
+    }
+
+    /// <summary>A P1 still open owes nothing yet — the five days run from closing it.</summary>
+    [Fact]
+    public async Task An_open_P1_owes_no_report_yet()
+    {
+        await Raise(TicketPriority.P1, Tue(9));
+
+        MonthlyReport report = await reports.BuildAsync(customerId, September);
+
+        report.OutstandingReports.Should().BeEmpty();
+    }
+
     // ---- Maintenance notice ---------------------------------------------------------------
 
     /// <summary>

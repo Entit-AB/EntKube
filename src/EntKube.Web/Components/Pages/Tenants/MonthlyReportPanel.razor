@@ -48,6 +48,26 @@
         </div>
     }
 
+    @if (report.OutstandingReports.Count > 0)
+    {
+        <div class="alert @(Customer ? "alert-info" : "alert-warning") py-2 small">
+            <span class="bi bi-file-earmark-text me-1"></span>
+            <strong>Incident reports still owed.</strong>
+            §14.6 asks for a written report within
+            @TicketSla.IncidentReportWorkingDays working days of closing a P1.
+            <ul class="mb-0 mt-1">
+                @foreach (OutstandingIncidentReport owed in report.OutstandingReports)
+                {
+                    <li>
+                        <strong>#@owed.Number</strong> @owed.Title — closed
+                        @owed.ClosedAt.ToLocalTime().ToString("d MMM"), report due
+                        @owed.Due.ToLocalTime().ToString("d MMM")
+                    </li>
+                }
+            </ul>
+        </div>
+    }
+
     @if (report.ShortNoticeMaintenance.Count > 0)
     {
         <div class="alert alert-warning py-2 small">

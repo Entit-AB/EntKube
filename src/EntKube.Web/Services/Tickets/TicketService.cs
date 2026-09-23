@@ -53,6 +53,15 @@ public readonly record struct TicketSlaStatus(
 
     /// <summary>Whether §14.4's update is overdue as of the moment the status was taken.</summary>
     public bool UpdateOverdue(DateTime now) => UpdateDue is DateTime due && due <= now;
+
+    /// <summary>
+    /// Whether §14.6's written report for a closed P1 is still owed, and the five working
+    /// days have run out.
+    /// </summary>
+    public bool IncidentReportOverdue(DateTime now) =>
+        IncidentReportDue is DateTime due
+        && due <= now
+        && Ticket.IncidentReportDeliveredAt is null;
 }
 
 /// <summary>
@@ -543,6 +552,38 @@ public class TicketService(
                     ? $"Assigned to {next}."
                     : $"Reassigned from {previous} to {next}.",
             customerVisible: false));
+
+        await db.SaveChangesAsync(ct);
+        return ticket;
+    }
+
+    /// <summary>
+    /// Records that §14.6's written incident report for a closed P1 has gone to the
+    /// customer.
+    ///
+    /// <para>The deadline was computed and displayed from the beginning and there was no
+    /// way to say it had been met — so the line stayed amber for ever and the obligation
+    /// could not be discharged, only ignored. The report itself is a deliverable to the
+    /// customer, so the event is theirs to see.</para>
+    /// </summary>
+    public async Task<Ticket?> RecordIncidentReportAsync(
+        Guid ticketId, string actor, DateTime at, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+
+        if (ticket is null || ticket.IncidentReportDeliveredAt is not null)
+        {
+            return ticket;
+        }
+
+        ticket.IncidentReportDeliveredAt = at;
+
+        db.Set<TicketEvent>().Add(Event(
+            ticket.Id, TicketEventKind.Note, at, actor,
+            "§14.6 incident report delivered.",
+            customerVisible: true));
 
         await db.SaveChangesAsync(ct);
         return ticket;

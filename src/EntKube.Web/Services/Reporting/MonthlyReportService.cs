@@ -48,6 +48,17 @@ public readonly record struct PriorityRow(
     int ResolutionOverruns,
     TimeSpan? AverageResolution);
 
+/// <summary>A P1 whose §14.6 written report has not been delivered.</summary>
+/// <param name="Number">The ticket, as the customer refers to it.</param>
+/// <param name="Title">What it was about.</param>
+/// <param name="ClosedAt">When it was closed, which is what the five working days run from.</param>
+/// <param name="Due">When the report was owed.</param>
+public readonly record struct OutstandingIncidentReport(
+    int Number,
+    string Title,
+    DateTime ClosedAt,
+    DateTime Due);
+
 /// <summary>Planned maintenance that went ahead on short notice.</summary>
 /// <param name="Title">What the window was called.</param>
 /// <param name="StartsAt">When it began.</param>
@@ -78,6 +89,10 @@ public readonly record struct ShortNoticeWindow(
 /// <param name="ActionPlanRequired">
 /// Whether §14.6's action plan is owed — more than two P1/P2 deviations in the quarter.
 /// </param>
+/// <param name="OutstandingReports">
+/// P1s closed by the end of the month whose §14.6 written report is still owed. A closed
+/// ticket leaves the queue, so without this the obligation has nowhere left to be seen.
+/// </param>
 /// <param name="ShortNoticeMaintenance">
 /// Planned maintenance in the month that went ahead on less than the agreed notice. Its
 /// downtime is excluded from availability like any other window — the exclusion is about
@@ -97,7 +112,8 @@ public readonly record struct MonthlyReport(
     decimal WindowFee,
     int PenaltiesAlreadyThisYear,
     bool ActionPlanRequired,
-    IReadOnlyList<ShortNoticeWindow> ShortNoticeMaintenance)
+    IReadOnlyList<ShortNoticeWindow> ShortNoticeMaintenance,
+    IReadOnlyList<OutstandingIncidentReport> OutstandingReports)
 {
     public int TotalRaised => ByPriority.Sum(p => p.Raised);
 
@@ -154,7 +170,7 @@ public class MonthlyReportService(
         if (customer is null)
         {
             return new MonthlyReport(
-                "", from, [], [], 0, default, default, 0, 0m, 0m, 0, false, []);
+                "", from, [], [], 0, default, default, 0, 0m, 0m, 0, false, [], []);
         }
 
         List<TicketSlaStatus> inMonth = await tickets.GetForPeriodAsync(customerId, from, to, to, ct);
@@ -235,7 +251,38 @@ public class MonthlyReportService(
             fees.WindowFee,
             await PenaltiesEarlierThisYearAsync(customerId, from, ct),
             await ActionPlanRequiredAsync(customerId, from, ct),
-            ShortNotice(maintenance));
+            ShortNotice(maintenance),
+            await OutstandingReportsAsync(db, customerId, to, ct));
+    }
+
+    /// <summary>
+    /// P1s closed by the end of the month whose §14.6 report is still owed.
+    ///
+    /// <para>Counted against the whole history rather than the month, because an
+    /// undelivered report does not stop being owed when the month turns over — and a
+    /// closed ticket is out of the queue, so this is the last place it can be noticed.</para>
+    /// </summary>
+    private static async Task<List<OutstandingIncidentReport>> OutstandingReportsAsync(
+        ApplicationDbContext db, Guid customerId, DateTime to, CancellationToken ct)
+    {
+        List<Ticket> closed = await db.Tickets.AsNoTracking()
+            .Where(t => t.CustomerId == customerId
+                        && t.Priority == TicketPriority.P1
+                        && t.ClosedAt != null
+                        && t.ClosedAt < to
+                        && t.IncidentReportDeliveredAt == null)
+            .OrderBy(t => t.ClosedAt)
+            .ToListAsync(ct);
+
+        return
+        [
+            .. closed.Select(t => new OutstandingIncidentReport(
+                t.Number,
+                t.Title,
+                t.ClosedAt!.Value,
+                BusinessCalendar.WorkingDaysDeadline(
+                    t.ClosedAt.Value, TicketSla.IncidentReportWorkingDays)))
+        ];
     }
 
     /// <summary>

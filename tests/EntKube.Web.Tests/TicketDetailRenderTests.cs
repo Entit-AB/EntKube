@@ -225,6 +225,65 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
     public void A_ticket_that_is_not_there_says_so() =>
         RenderDetail(Guid.NewGuid()).Markup.Should().NotContain("Journalen svarar inte");
 
+    // ---- §14.6's written report on the screen ----------------------------------------------
+
+    /// <summary>
+    /// The deadline was shown and nothing could say it had been met, so the line stayed
+    /// amber for ever. Recording the delivery is the act §14.6 asks for; writing the report
+    /// is not something this screen pretends to do.
+    /// </summary>
+    [Fact]
+    public async Task A_closed_P1_offers_to_record_that_the_report_went()
+    {
+        Ticket ticket = await Raise(TicketPriority.P1);
+        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+
+        IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
+
+        detail.Markup.Should().Contain("P1 report");
+
+        await detail.InvokeAsync(() => ButtonSaying(detail, "Report delivered").Click());
+
+        db.ChangeTracker.Clear();
+        db.Tickets.Single(t => t.Id == ticket.Id).IncidentReportDeliveredAt.Should().NotBeNull();
+    }
+
+    /// <summary>
+    /// The report is a deliverable to the customer, so that it went is theirs to see.
+    /// </summary>
+    [Fact]
+    public async Task Delivering_the_report_is_recorded_where_the_customer_can_see_it()
+    {
+        Ticket ticket = await Raise(TicketPriority.P1);
+        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+
+        await tickets.RecordIncidentReportAsync(ticket.Id, "nils", Tue(13));
+
+        db.ChangeTracker.Clear();
+
+        db.Set<TicketEvent>()
+            .Where(e => e.TicketId == ticket.Id && e.Detail!.Contains("incident report"))
+            .Should().ContainSingle().Which.CustomerVisible.Should().BeTrue();
+    }
+
+    /// <summary>Recording it twice must not rewrite the date it actually went.</summary>
+    [Fact]
+    public async Task Recording_the_report_again_changes_nothing()
+    {
+        Ticket ticket = await Raise(TicketPriority.P1);
+        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+
+        await tickets.RecordIncidentReportAsync(ticket.Id, "nils", Tue(13));
+        await tickets.RecordIncidentReportAsync(ticket.Id, "karin", Tue(15));
+
+        db.ChangeTracker.Clear();
+
+        db.Tickets.Single(t => t.Id == ticket.Id).IncidentReportDeliveredAt.Should().Be(Tue(13));
+    }
+
     // ---- Who is holding it ---------------------------------------------------------------
 
     /// <summary>

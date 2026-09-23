@@ -97,12 +97,27 @@
                 {
                     <div class="fs-6 text-muted">—</div>
                 }
-                @if (status.IncidentReportDue is not null)
+                @if (status.IncidentReportDue is DateTime reportDue)
                 {
-                    <div class="small mt-2 @(ticket.IncidentReportDeliveredAt is null ? "text-warning" : "text-success")">
-                        <i class="bi bi-file-earmark-text me-1"></i>
-                        P1 report due @status.IncidentReportDue.Value.ToLocalTime().ToString("MMM d")
-                    </div>
+                    @if (ticket.IncidentReportDeliveredAt is DateTime delivered)
+                    {
+                        <div class="small mt-2 text-success">
+                            <i class="bi bi-file-earmark-check me-1"></i>
+                            P1 report delivered @delivered.ToLocalTime().ToString("MMM d")
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="small mt-2 @(status.IncidentReportOverdue(now) ? "text-danger" : "text-warning")">
+                            <i class="bi bi-file-earmark-text me-1"></i>
+                            P1 report @(status.IncidentReportOverdue(now) ? "overdue since" : "due")
+                            @reportDue.ToLocalTime().ToString("MMM d")
+                        </div>
+                        <AsyncButton CssClass="btn-sm btn-outline-secondary mt-2"
+                                     OnClick="RecordIncidentReportAsync">
+                            <i class="bi bi-file-earmark-check me-1"></i>Report delivered
+                        </AsyncButton>
+                    }
                 }
             </div>
         </div>
@@ -404,6 +419,18 @@
         formParty = null;
 
         Toasts.Success(message);
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+    }
+
+    /// <summary>
+    /// §14.6 wants a written report within five working days of closing a P1. This records
+    /// that it went — it does not write it, and nothing here pretends to.
+    /// </summary>
+    private async Task RecordIncidentReportAsync()
+    {
+        await Tickets.RecordIncidentReportAsync(TicketId, Actor, DateTime.UtcNow);
+        Toasts.Success("Recorded. §14.6's report is no longer outstanding for this ticket.");
         await LoadAsync();
         await OnChanged.InvokeAsync();
     }

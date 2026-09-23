@@ -164,6 +164,19 @@ started" and "nobody filled it in", and it resolves against us: claiming best-ef
 strength of a blank field would let our own missing paperwork excuse a breach. The
 exemption is taken only where a date says so.
 
+### The written report §14.6 asks for
+
+Closing a P1 starts five working days in which a written report is owed. The deadline was
+computed and displayed from the beginning, and nothing could say it had been met — so the
+line stayed amber for ever and the obligation could be ignored but not discharged. It can
+now be recorded as delivered, which is a customer-visible event, because the report is a
+deliverable to them.
+
+It is also listed in the monthly report while it is outstanding. A closed ticket leaves the
+queue, so without that the obligation has nowhere left to be seen — and it is counted
+against the whole history rather than the month, since an undelivered report does not stop
+being owed when the month turns over.
+
 ### What the penalty actually attaches to
 
 Only a missed **response** time, and only on P1 or P2. An overrun resolution time
