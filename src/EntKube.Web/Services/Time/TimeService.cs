@@ -62,11 +62,18 @@ public readonly record struct BillingLine(
 /// exemption. Reported rather than hidden: these are the hours an invoice will be argued
 /// about.
 /// </param>
+/// <param name="CappedApps">
+/// The applications that have reached the monthly ceiling their customer set under §12,
+/// by name. Carried because "which system have we run out of budget on" is the first
+/// question somebody asks when told that work is waiting, and a portal that cannot answer
+/// it sends them to the phone.
+/// </param>
 public readonly record struct CommittedHoursStatement(
     DateTime From,
     DateTime To,
     IReadOnlyList<BillingLine> Lines,
-    decimal UnauthorisedHours)
+    decimal UnauthorisedHours,
+    IReadOnlyList<string> CappedApps)
 {
     public decimal TotalHours => Lines.Sum(l => l.BilledHours);
 
@@ -244,8 +251,9 @@ public class TimeService(
         }
 
         decimal unauthorised = await UnauthorisedHoursAsync(db, customerId, from, passes, entries, ct);
+        List<string> capped = await CappedAppsAsync(db, customerId, from, passes, ct);
 
-        return new CommittedHoursStatement(from, to, lines, unauthorised);
+        return new CommittedHoursStatement(from, to, lines, unauthorised, capped);
     }
 
     /// <summary>The work passes in a period, with the §13 rounding applied.</summary>
@@ -300,6 +308,34 @@ public class TimeService(
                 db, customerId, month, passes, entries, ct),
             _ => 0m,
         };
+    }
+
+    /// <summary>
+    /// The applications whose §12 ceiling has been reached this month, approved or not.
+    ///
+    /// <para>Separate from the unauthorised total on purpose: a customer who has already
+    /// approved the overrun should still be told which system it was, and a total of zero
+    /// would otherwise read as nothing having happened.</para>
+    /// </summary>
+    private static async Task<List<string>> CappedAppsAsync(
+        ApplicationDbContext db,
+        Guid customerId,
+        DateTime month,
+        IReadOnlyList<WorkPass> passes,
+        CancellationToken ct)
+    {
+        var caps = await db.ApplicationContracts.AsNoTracking()
+            .Where(c => c.App.CustomerId == customerId && c.MonthlyWorkCapHours != null)
+            .Select(c => new { c.AppId, Name = c.App.Name, Cap = c.MonthlyWorkCapHours!.Value })
+            .ToListAsync(ct);
+
+        return
+        [
+            .. caps
+                .Where(c => passes.Where(p => p.AppId == c.AppId).Sum(p => p.BilledHours) > c.Cap)
+                .Select(c => c.Name)
+                .Order()
+        ];
     }
 
     /// <summary>§11.1: hours drawn past the portfolio's bank, without approval.</summary>

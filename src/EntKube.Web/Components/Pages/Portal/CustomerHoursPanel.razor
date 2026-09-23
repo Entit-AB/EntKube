@@ -65,14 +65,48 @@
             </div>
         }
 
-        @if (bank.IsExhausted)
+    }
+    else
+    {
+        <div class="alert alert-light border py-2 small mb-3">
+            <i class="bi bi-info-circle me-1"></i>
+            Time and materials — work is billed per started hour as it is done.
+        </div>
+    }
+
+    @* The gate is "approval is needed", not "the bank is spent". §12's ceiling on a
+           single application does the same job for a portfolio billed by the hour, and
+           gating on the bank alone made that rule unreachable for exactly the customers
+           it applies to. *@
+        @if (NeedsApproval)
         {
             <div class="alert alert-warning">
                 <div class="d-flex justify-content-between align-items-start">
                     <div class="small">
-                        <strong>The hour bank for this month is spent.</strong>
-                        §11.1 means further work waits for your go-ahead — except P1 and P2 incidents,
-                        which we handle immediately and bill without asking.
+                        @if (bank.IsExhausted)
+                        {
+                            <strong>The hour bank for this month is spent.</strong>
+                            <span>
+                                §11.1 means further work waits for your go-ahead — except P1 and P2
+                                incidents, which we handle immediately and bill without asking.
+                            </span>
+                        }
+                        else
+                        {
+                            <strong>
+                                @(committed.CappedApps.Count == 1
+                                    ? $"{committed.CappedApps[0]} has reached its monthly limit."
+                                    : "Some applications have reached their monthly limit.")
+                            </strong>
+                            <span>
+                                §12 means further work on
+                                @(committed.CappedApps.Count == 1
+                                    ? "it"
+                                    : string.Join(", ", committed.CappedApps))
+                                waits for your go-ahead — except P1 and P2 incidents, which we
+                                handle immediately and bill without asking.
+                            </span>
+                        }
                     </div>
                     @if (CanApprove && !alreadyApproved)
                     {
@@ -115,14 +149,6 @@
                 }
             </div>
         }
-    }
-    else
-    {
-        <div class="alert alert-light border py-2 small mb-3">
-            <i class="bi bi-info-circle me-1"></i>
-            Time and materials — work is billed per started hour as it is done.
-        </div>
-    }
 
     @if (committed.Lines.Count == 0)
     {
@@ -196,6 +222,14 @@
 
     private bool CanApprove => AccessRole >= CustomerAccessRole.Operator;
 
+    /// <summary>
+    /// Whether anything is waiting on the customer. True when the bank is spent (§11.1) or
+    /// an application has passed the ceiling they set for it (§12), and stays true once
+    /// they have approved so the panel can say so rather than simply going quiet.
+    /// </summary>
+    private bool NeedsApproval =>
+        bank.IsExhausted || committed.UnauthorisedHours > 0m || committed.CappedApps.Count > 0;
+
     private bool IsCurrentMonth => month == ThisMonth;
 
     protected override async Task OnParametersSetAsync() => await LoadAsync();
@@ -220,7 +254,11 @@
 
             // A blanket approval for the month is what clears the gate; the service treats
             // it the same way when it decides which hours went ahead unauthorised.
-            alreadyApproved = committed.UnauthorisedHours == 0m && bank.OverspillHours > 0m;
+            // Approved means somebody said yes, not that the arithmetic happens to be zero.
+            // The old test used the bank's overspill, which is always zero for a portfolio
+            // that has no bank — so a Model B customer who had approved was told nothing.
+            alreadyApproved = committed.UnauthorisedHours == 0m
+                && (bank.OverspillHours > 0m || committed.CappedApps.Count > 0);
         }
         catch (Exception ex)
         {

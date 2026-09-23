@@ -256,6 +256,54 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
     }
 
     /// <summary>
+    /// <b>The half I shipped broken.</b> §12's ceiling was enforced in the arithmetic while
+    /// the whole approval block sat behind "the hour bank is spent" — and a portfolio
+    /// billed by the hour has no bank, so the customers the rule applies to were told
+    /// nothing and given no way to say yes.
+    /// </summary>
+    [Fact]
+    public async Task A_customer_billed_by_the_hour_is_told_when_an_application_hits_its_limit()
+    {
+        SignIn("ekonomi@capio.example");
+
+        db.PortfolioAgreements.Add(new PortfolioAgreement
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customer.Id,
+            PricingModel = PricingModel.TimeAndMaterials,
+            EffectiveFrom = Swedish(2026, 1, 1, 0),
+        });
+        // One contract per application, enforced by a unique index — so the ceiling goes
+        // on the one the fixture already made.
+        db.ApplicationContracts.Single(c => c.AppId == appId).MonthlyWorkCapHours = 1m;
+
+        Ticket ticket = await Raise();
+
+        db.TimeEntries.Add(new TimeEntry
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customer.Id,
+            TicketId = ticket.Id,
+            AppId = appId,
+            StartedAt = Tue(9),
+            EndedAt = Tue(12),
+            Description = "Investigating",
+            PerformedBy = "nils",
+        });
+        await db.SaveChangesAsync();
+
+        IRenderedComponent<CustomerHoursPanel> panel = Render<CustomerHoursPanel>(p => p
+            .Add(c => c.Customer, customer)
+            .Add(c => c.AccessRole, CustomerAccessRole.Operator));
+
+        panel.Markup.Should().Contain("Journalportalen has reached its monthly limit",
+            "the customer is told which system it was, not merely that something is waiting");
+        panel.Markup.Should().Contain("Approve further work");
+    }
+
+    /// <summary>
     /// A viewer can read the hours and cannot commit the money. §11.1's approval is the
     /// clearest case there is for the role gate meaning something.
     /// </summary>
