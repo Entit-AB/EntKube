@@ -3254,7 +3254,7 @@ public static class ComponentCatalog
                     Key = "redis-password", Label = "Coordinator Redis Password",
                     YamlPath = "stalwart:redis-password", Type = FormFieldType.Password,
                     DependsOnKey = "ha-enabled", DependsOnValue = "true",
-                    HelpText = "Only needed for a Redis EntKube does not manage — for one picked above, its own stored password is used and anything typed here is ignored. Leave blank for a Redis with no authentication. A Redis Cluster reads this from the pod's environment, so it stays out of the applied configuration; a single server has nowhere to put it but the connection URL, where it is visible — so a network-isolated coordinator with no password is the better shape for that case."
+                    HelpText = "Only needed for a Redis EntKube does not manage — for one picked above, its own stored password is used and anything typed here is ignored. Leave blank for a Redis with no authentication. Whichever kind it is, the password ends up in the coordinator URL inside the applied configuration, because that is the only place the client reads it from when it opens its first connection — so a coordinator reachable only from inside the cluster is the shape this assumes."
                 },
                 new ComponentFormField
                 {

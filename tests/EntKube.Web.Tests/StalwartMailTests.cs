@@ -1268,8 +1268,9 @@ public class StalwartMailTests
             urls.ValueKind.Should().Be(JsonValueKind.Object);
             urls.GetProperty("redis://redis-leader.redis.svc.cluster.local:6379").GetBoolean().Should().BeTrue();
 
-            // Only the cluster store has a secret field, so this is the one shape where the password
-            // can stay out of the applied plan.
+            // Only the cluster store has a secret field, and the plan still sets it — but it is not
+            // what opens the connection, so it is set beside an inline credential rather than
+            // instead of one. See TheClusterCoordinatorUrlCarriesThePasswordInline.
             v.GetProperty("authSecret").GetProperty("@type").GetString().Should().Be("EnvironmentVariable");
             v.GetProperty("authSecret").GetProperty("variableName").GetString()
                 .Should().Be(StalwartPlanBuilder.RedisPasswordEnv);
@@ -1279,6 +1280,37 @@ public class StalwartMailTests
         // …and the pod has to be given it.
         string manifest = StalwartManifestBuilder.Build(config, "stalwart", "stalwart", ha: ha);
         manifest.Should().Contain(StalwartPlanBuilder.RedisPasswordEnv);
+    }
+
+    [Fact]
+    public void TheClusterCoordinatorUrlCarriesThePasswordInline()
+    {
+        // The whole point of authSecret was to keep the credential out of the plan, and it does not
+        // work: the client authenticates its seed connection from the URL, so a URL with no
+        // credentials sends no password however correct the environment variable is. A live cluster
+        // had the right store, the right variable and the right value in it, redis-cli authenticated
+        // with that same value, and every task still failed with "Failed to create initial
+        // connections … Password authentication failed". So the URL carries it too.
+        StalwartPlanBuilder.BuildRedisUrl("redis-leader.cache.svc.cluster.local:6379", "s3cr3t")
+            .Should().Be("redis://:s3cr3t@redis-leader.cache.svc.cluster.local:6379");
+    }
+
+    [Fact]
+    public void ACoordinatorPasswordWithUrlPunctuationSurvivesTheUrl()
+    {
+        // A generated password contains whatever the generator emits, and an unescaped '@' or ':'
+        // would re-point the URL at a different host entirely rather than merely failing to parse.
+        StalwartPlanBuilder.BuildRedisUrl("redis:6379", "p@ss:w/rd?#")
+            .Should().Be("redis://:p%40ss%3Aw%2Frd%3F%23@redis:6379");
+    }
+
+    [Fact]
+    public void ACoordinatorWithNoPasswordGetsABareUrl()
+    {
+        // An empty credential must not produce "redis://:@host", which is a password of zero length
+        // rather than no password at all.
+        StalwartPlanBuilder.BuildRedisUrl("redis:6379", null).Should().Be("redis://redis:6379");
+        StalwartPlanBuilder.BuildRedisUrl("redis:6379", "   ").Should().Be("redis://redis:6379");
     }
 
     [Fact]
