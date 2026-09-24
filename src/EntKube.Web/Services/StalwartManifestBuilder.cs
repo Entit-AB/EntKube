@@ -349,6 +349,16 @@ public static class StalwartManifestBuilder
     private const int CoordinatorPort = 6379;
 
     /// <summary>
+    /// The <c>redis</c> user inside <see cref="CoordinatorImage"/>. Named explicitly because
+    /// <c>runAsNonRoot</c> without a uid is a pod that fails admission rather than a pod that runs
+    /// safely — the image sets no numeric USER of its own.
+    /// </summary>
+    private const int CoordinatorUid = 999;
+
+    /// <summary>The <c>redis</c> group. 1000 on Alpine, unlike Debian's 999 — verified, not assumed.</summary>
+    private const int CoordinatorGid = 1000;
+
+    /// <summary>
     /// The Redis an HA deployment coordinates through, deployed as part of the mail server rather
     /// than chosen by an operator.
     ///
@@ -425,7 +435,15 @@ public static class StalwartManifestBuilder
         y.Add("              memory: 256Mi");
         y.Add("          securityContext:");
         y.Add("            allowPrivilegeEscalation: false");
+        // runAsNonRoot is a promise the kubelet checks and cannot verify on its own: the Redis
+        // image declares no numeric USER (it starts as root and drops privileges in its own
+        // entrypoint), so the flag alone fails admission with "container has runAsNonRoot and image
+        // will run as root" and the pod never starts. The uid has to be named here. 999/1000 is the
+        // redis user in the official image — confirmed against redis:7.4-alpine rather than assumed,
+        // because the two variants disagree: Debian's redis is 999:999, Alpine's is 999:1000.
         y.Add("            runAsNonRoot: true");
+        y.Add($"            runAsUser: {CoordinatorUid}");
+        y.Add($"            runAsGroup: {CoordinatorGid}");
         y.Add("            capabilities:");
         y.Add("              drop: [ALL]");
         y.Add("---");
