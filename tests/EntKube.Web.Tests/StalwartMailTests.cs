@@ -1311,6 +1311,15 @@ public class StalwartMailTests
             && Scalar(d.RootNode, "metadata", "name") == "stalwart-coordinator");
         Scalar(service.RootNode, "spec", "type").Should().Be("ClusterIP");
 
+        // runAsNonRoot without a uid does not harden the pod, it stops it existing: the Redis image
+        // declares no numeric USER, so the kubelet refuses it with "container has runAsNonRoot and
+        // image will run as root" and nothing ever starts. The flag and the uid are one decision.
+        YamlNode container = ((YamlSequenceNode)At(
+            deployment.RootNode, "spec", "template", "spec", "containers")!).Children.Single();
+        Scalar(container, "securityContext", "runAsNonRoot").Should().Be("true");
+        Scalar(container, "securityContext", "runAsUser").Should().Be("999");
+        Scalar(container, "securityContext", "runAsGroup").Should().Be("1000");
+
         // Having no password is only safe because nothing else may reach it. The two decisions are
         // one decision, so a manifest that drops the policy must fail here.
         YamlDocument policy = docs.First(d => Scalar(d.RootNode, "kind") == "NetworkPolicy");
