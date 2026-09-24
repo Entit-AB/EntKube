@@ -619,6 +619,37 @@ public class StalwartService(
     // ── High availability ──────────────────────────────────────────────────────
 
     /// <summary>
+    /// The coordinator Redis behind the configured endpoint, and the password that actually opens it.
+    ///
+    /// <para>For a Redis EntKube manages, that password is the one EntKube generated when it created
+    /// the cluster — never whatever was typed into the component form. Making an operator re-key a
+    /// 32-character generated secret into a password box, for a Redis they picked from a dropdown,
+    /// can only ever produce the value being absent or wrong; and both spell the same thing, because
+    /// the env var the <c>RedisCluster</c> store reads is mounted <c>optional: true</c>. An absent
+    /// key is no env var, which Stalwart sends as an empty password, which Redis rejects exactly like
+    /// a wrong one: every task lock fails with <c>Password authentication failed</c> and the web
+    /// interface answers a login with a bare "temporary server failure" that names nothing.</para>
+    ///
+    /// <para>The typed value is still honoured for an endpoint EntKube does not manage — there it is
+    /// the only source there is — and as a fallback for a managed one whose vault entry has gone
+    /// missing.</para>
+    /// </summary>
+    private async Task<(RedisEndpointOption? Managed, string? Password)> ResolveCoordinatorRedisAsync(
+        Guid tenantId, Guid clusterComponentId, Guid kubernetesClusterId, string endpoint, CancellationToken ct)
+    {
+        RedisEndpointOption? managed =
+            await redisService.ResolveManagedEndpointAsync(kubernetesClusterId, endpoint, ct);
+
+        string? password = managed?.RedisClusterId is Guid redisClusterId
+            ? await vaultService.GetRedisClusterSecretValueAsync(tenantId, redisClusterId, "REDIS_PASSWORD", ct)
+            : null;
+
+        password ??= await Secret(tenantId, clusterComponentId, "STALWART_COORDINATOR_REDIS_PASSWORD", ct);
+
+        return (managed, string.IsNullOrWhiteSpace(password) ? null : password);
+    }
+
+    /// <summary>
     /// Resolves the config's HA selections (CNPG database, S3 storage link, coordinator Redis) into
     /// the backend the builders consume, and mirrors the three backend secrets — the PostgreSQL
     /// password, the S3 secret key, the Redis password — into the component's credentials Secret so
@@ -691,11 +722,9 @@ public class StalwartService(
         // can honestly say: the resolve is database-only by design, and guessing from a live probe
         // on the install path would make the answer depend on whether Redis happened to be up.
         string endpoint = $"{config.CoordinatorRedisHost!.Trim()}:{config.CoordinatorRedisPort}";
-        RedisEndpointOption? managedRedis =
-            await redisService.ResolveManagedEndpointAsync(kubernetesClusterId, endpoint, ct);
+        (RedisEndpointOption? managedRedis, string? redisPassword) =
+            await ResolveCoordinatorRedisAsync(tenantId, clusterComponentId, kubernetesClusterId, endpoint, ct);
         bool redisIsCluster = managedRedis?.ClusterMode == true;
-
-        string? redisPassword = await Secret(tenantId, clusterComponentId, "STALWART_COORDINATOR_REDIS_PASSWORD", ct);
 
         string redisUrl;
         if (redisIsCluster)
@@ -1273,6 +1302,38 @@ public class StalwartService(
                     "Pick a coordinator Redis in this component's settings on the cluster's Components tab. "
                     + "The nodes share state and stay in step through it; without one they cannot form a "
                     + "cluster."));
+            }
+            else
+            {
+                // A coordinator that rejects the password is the worst of these to diagnose from the
+                // outside: the pods go Ready, the listeners open, and the only symptom is that every
+                // login answers "temporary server failure" while the log fills with one
+                // AuthenticationFailed per queued task. Ask the question here, where it can be
+                // answered by name, rather than after two restarts.
+                Guid redisClusterId = await db.ClusterComponents
+                    .Where(c => c.Id == clusterComponentId)
+                    .Select(c => c.ClusterId)
+                    .FirstOrDefaultAsync(ct);
+
+                string endpoint = $"{config.CoordinatorRedisHost!.Trim()}:{config.CoordinatorRedisPort}";
+                (RedisEndpointOption? managedRedis, string? redisPassword) =
+                    await ResolveCoordinatorRedisAsync(tenantId, clusterComponentId, redisClusterId, endpoint, ct);
+
+                if (redisPassword is null)
+                {
+                    issues.Add(new(true,
+                        $"No password is known for the coordinator Redis at {endpoint}.",
+                        managedRedis is null
+                            ? "That address is not a Redis EntKube manages, so the only password it can "
+                              + "use is the one entered on the Components tab. Set “Coordinator Redis "
+                              + "password” there — or pick a managed Redis instead, whose password "
+                              + "EntKube already holds. Without it every node authenticates with an empty "
+                              + "password and every login fails with a temporary server error."
+                            : $"{managedRedis.Label} is managed by EntKube but has no REDIS_PASSWORD in the "
+                              + "tenant vault, so nothing can authenticate to it. Check the cluster on the "
+                              + "Cache page; it was created with a generated password that should be stored "
+                              + "there."));
+                }
             }
             if (config.Replicas < 2)
             {

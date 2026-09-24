@@ -3243,16 +3243,18 @@ public static class ComponentCatalog
                     YamlPath = "stalwart:ha-coordinator-redis", Type = FormFieldType.RedisSelector,
                     Placeholder = "redis.redis.svc.cluster.local:6379",
                     DependsOnKey = "ha-enabled", DependsOnValue = "true",
-                    HelpText = "How the nodes stay in step, and where rate limits and caches live. The same Redis rspamd uses is fine; picking one EntKube manages fills its password in below and is configured as a Redis Cluster, which is what those are. An endpoint typed by hand is treated as a single server — if it is in fact a sharded cluster, the server will start, authenticate a login and then fail every lookup behind it with a MOVED redirection."
+                    HelpText = "How the nodes stay in step, and where rate limits and caches live. The same Redis rspamd uses is fine; picking one EntKube manages means its own stored password is used on every apply — no password has to be entered below, and a rotated one follows by itself — and it is configured as a Redis Cluster, which is what those are. An endpoint typed by hand is treated as a single server, and needs its password below — if it is in fact a sharded cluster, the server will start, authenticate a login and then fail every lookup behind it with a MOVED redirection."
                 },
                 new ComponentFormField
                 {
                     // Keyed "redis-password" because that is the sibling the Redis picker fills in when
-                    // the chosen endpoint is one EntKube manages.
+                    // the chosen endpoint is one EntKube manages. That fill is a convenience, not the
+                    // source of truth: for a managed Redis the apply reads the password from the vault
+                    // entry belonging to the Redis itself, so it cannot be blank, stale or mistyped.
                     Key = "redis-password", Label = "Coordinator Redis Password",
                     YamlPath = "stalwart:redis-password", Type = FormFieldType.Password,
                     DependsOnKey = "ha-enabled", DependsOnValue = "true",
-                    HelpText = "Leave blank for a Redis with no authentication. A Redis Cluster reads this from the pod's environment, so it stays out of the applied configuration; a single server has nowhere to put it but the connection URL, where it is visible — so a network-isolated coordinator with no password is the better shape for that case."
+                    HelpText = "Only needed for a Redis EntKube does not manage — for one picked above, its own stored password is used and anything typed here is ignored. Leave blank for a Redis with no authentication. A Redis Cluster reads this from the pod's environment, so it stays out of the applied configuration; a single server has nowhere to put it but the connection URL, where it is visible — so a network-isolated coordinator with no password is the better shape for that case."
                 },
                 new ComponentFormField
                 {
