@@ -2448,9 +2448,6 @@ public class StalwartService(
             clientSecretName: RspamdManifestBuilder.SsoClientSecretName, ct);
 
         RspamdSettings settings = new(
-            RedisServers: await SecretOr(tenantId, clusterComponentId, "RSPAMD_REDIS_SERVERS",
-                $"redis.redis.svc.cluster.local:6379", ct),
-            RedisPassword: await Secret(tenantId, clusterComponentId, "RSPAMD_REDIS_PASSWORD", ct),
             ControllerPassword: await Secret(tenantId, clusterComponentId, "RSPAMD_CONTROLLER_PASSWORD", ct),
             StorageSize: await SecretOr(tenantId, clusterComponentId, "RSPAMD_STORAGE_SIZE", "2Gi", ct),
             StorageClass: await Secret(tenantId, clusterComponentId, "RSPAMD_STORAGE_CLASS", ct),

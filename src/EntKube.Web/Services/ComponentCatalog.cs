@@ -3278,21 +3278,6 @@ public static class ComponentCatalog
             [
                 new ComponentFormField
                 {
-                    Key = "redis-servers", Label = "Redis",
-                    YamlPath = "rspamd:redis-servers", Type = FormFieldType.RedisSelector,
-                    Placeholder = "redis.redis.svc.cluster.local:6379",
-                    StoreAsSecret = true, SecretName = "RSPAMD_REDIS_SERVERS",
-                    HelpText = "The Redis this filter keeps its learned state in — the Bayes classifier, greylisting, rate limits and reputation. Picked from what is actually running on this cluster; choosing one EntKube manages fills in its password too."
-                },
-                new ComponentFormField
-                {
-                    Key = "redis-password", Label = "Redis Password",
-                    YamlPath = "rspamd:redis-password", Type = FormFieldType.Password,
-                    StoreAsSecret = true, SecretName = "RSPAMD_REDIS_PASSWORD",
-                    HelpText = "Leave blank for a Redis with no authentication."
-                },
-                new ComponentFormField
-                {
                     Key = "controller-password", Label = "Web UI Password",
                     YamlPath = "rspamd:controller-password", Type = FormFieldType.Password,
                     StoreAsSecret = true, SecretName = "RSPAMD_CONTROLLER_PASSWORD",

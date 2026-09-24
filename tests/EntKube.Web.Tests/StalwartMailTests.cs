@@ -1601,27 +1601,66 @@ public class StalwartMailTests
     public void RspamdOmitsOptionalPasswordLinesEntirelyWhenUnset()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", RedisPassword: null, ControllerPassword: null),
+            new RspamdSettings(ControllerPassword: null),
             "rspamd", "rspamd");
 
         YamlDocument configMap = Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "ConfigMap");
         string redis = Scalar(configMap.RootNode, "data", "redis.conf")!;
 
-        redis.Should().Contain("servers = \"redis:6379\";");
+        redis.Should().Contain("servers = \"rspamd-redis.rspamd.svc.cluster.local:6379\";");
         // An empty password line is not the same as no password line — it is an attempt to
         // authenticate with the empty string, which a Redis with auth off will refuse.
         redis.Should().NotContain("password");
     }
 
     [Fact]
-    public void RspamdWritesRedisAndControllerCredentialsWhenTheyAreSet()
+    public void RspamdShipsItsOwnRedisAndPointsTheClassifierAtIt()
+    {
+        // The picker offered the cluster's managed Redis, which is sharded, and rspamd cannot speak
+        // to a sharded Redis. What that produced was not a connection error but a filter with
+        // nothing learned behind it — CROSSSLOT from the Bayes classifier, MOVED from the neural
+        // module, greylisting and ratelimits failing on the same backend — while mail quietly
+        // landed in the spam folder. So rspamd brings its own, and nobody chooses.
+        List<YamlDocument> docs = Parse(
+            RspamdManifestBuilder.Build(new RspamdSettings(null), "rspamd", "mail"));
+
+        YamlDocument configMap = docs.First(d => Scalar(d.RootNode, "kind") == "ConfigMap");
+        Scalar(configMap.RootNode, "data", "redis.conf")!
+            .Should().Contain("servers = \"rspamd-redis.mail.svc.cluster.local:6379\";");
+
+        YamlDocument redis = docs.First(d =>
+            Scalar(d.RootNode, "kind") == "Deployment"
+            && Scalar(d.RootNode, "metadata", "name") == "rspamd-redis");
+
+        // runAsNonRoot without a uid is a pod that fails admission, not a hardened one.
+        YamlNode container = ((YamlSequenceNode)At(
+            redis.RootNode, "spec", "template", "spec", "containers")!).Children.Single();
+        Scalar(container, "securityContext", "runAsUser").Should().Be("999");
+        Scalar(container, "securityContext", "runAsGroup").Should().Be("1000");
+
+        // Unlike the mail server's coordinator this one persists: Bayes training is what an operator
+        // spends weeks building, and it must survive the pod.
+        docs.Should().Contain(d =>
+            Scalar(d.RootNode, "kind") == "PersistentVolumeClaim"
+            && Scalar(d.RootNode, "metadata", "name") == "rspamd-redis-data");
+        Scalar(redis.RootNode, "spec", "strategy", "type").Should().Be("Recreate");
+
+        // No password, so nothing else may reach it.
+        YamlDocument policy = docs.First(d =>
+            Scalar(d.RootNode, "kind") == "NetworkPolicy"
+            && Scalar(d.RootNode, "metadata", "name") == "rspamd-redis");
+        YamlNode rule = ((YamlSequenceNode)At(policy.RootNode, "spec", "ingress")!).Children.Single();
+        YamlNode source = ((YamlSequenceNode)At(rule, "from")!).Children.Single();
+        Scalar(source, "podSelector", "matchLabels", "app").Should().Be("rspamd");
+    }
+
+    [Fact]
+    public void RspamdWritesTheControllerCredentialWhenItIsSet()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", "s3cr3t", "ui-pass"), "rspamd", "rspamd");
+            new RspamdSettings("ui-pass"), "rspamd", "rspamd");
 
         YamlDocument configMap = Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "ConfigMap");
-
-        Scalar(configMap.RootNode, "data", "redis.conf")!.Should().Contain("password = \"s3cr3t\";");
 
         string controller = Scalar(configMap.RootNode, "data", "worker-controller.inc")!;
         controller.Should().Contain("password = \"ui-pass\";");
@@ -1632,7 +1671,7 @@ public class StalwartMailTests
     public void RspamdWithoutSingleSignOnHasNoProxyAndNoLoopbackTrust()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", null, "ui-pass"), "rspamd", "rspamd");
+            new RspamdSettings("ui-pass"), "rspamd", "rspamd");
 
         manifest.Should().NotContain("oauth2-proxy");
 
@@ -1660,7 +1699,7 @@ public class StalwartMailTests
     {
         string manifest = RspamdManifestBuilder.Build(
             new RspamdSettings(
-                "redis:6379", null, "ui-pass",
+                "ui-pass",
                 SsoIssuerUrl: "https://sso.example.com/realms/mail/",
                 SsoClientId: "rspamd",
                 SsoEmailDomain: "example.com",
@@ -1693,7 +1732,7 @@ public class StalwartMailTests
     {
         string manifest = RspamdManifestBuilder.Build(
             new RspamdSettings(
-                "redis:6379", null, null,
+                null,
                 SsoIssuerUrl: "https://sso.example.com/realms/mail",
                 SsoClientId: "rspamd",
                 WebUiHostname: "rspamd.example.com"),
@@ -1712,7 +1751,7 @@ public class StalwartMailTests
     public void RspamdKeepsItsLearnedStateInRedisRatherThanThePod()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", null, null), "rspamd", "rspamd");
+            new RspamdSettings(null), "rspamd", "rspamd");
 
         YamlDocument configMap = Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "ConfigMap");
         Scalar(configMap.RootNode, "data", "classifier-bayes.conf")!
@@ -1723,7 +1762,7 @@ public class StalwartMailTests
     public void RspamdExposesTheMilterPortStalwartConnectsTo()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", null, null), "rspamd", "rspamd");
+            new RspamdSettings(null), "rspamd", "rspamd");
 
         YamlDocument service = Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "Service");
         List<string?> ports = ((YamlSequenceNode)At(service.RootNode, "spec", "ports")!)
@@ -1739,7 +1778,7 @@ public class StalwartMailTests
     public void RspamdRollsByRecreatingBecauseItsVolumeIsReadWriteOnce()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", null, null), "rspamd", "rspamd");
+            new RspamdSettings(null), "rspamd", "rspamd");
 
         YamlDocument deployment = Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "Deployment");
         Scalar(deployment.RootNode, "spec", "strategy", "type").Should().Be("Recreate");
@@ -2171,7 +2210,7 @@ public class StalwartMailTests
     public void ARenderedManifestIsOne()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", null, null), "rspamd", "rspamd");
+            new RspamdSettings(null), "rspamd", "rspamd");
 
         ComponentLifecycleService.ContainsKubernetesObjects(manifest).Should().BeTrue();
     }
