@@ -50,12 +50,37 @@ public static class StalwartPlanBuilder
     public const string S3SecretKeyEnv = "STALWART_S3_SECRET_KEY";
 
     /// <summary>
-    /// Environment variable carrying the coordinator Redis password — but only for a Redis Cluster.
-    /// The two store shapes differ here: <c>RedisClusterStore.authSecret</c> is a
-    /// <c>SecretKeyOptional</c> and can name an env var, while the standalone <c>RedisStore</c> has
-    /// no secret field at all and must carry its password inside the URL.
+    /// Environment variable carrying the coordinator Redis password. <c>RedisClusterStore.authSecret</c>
+    /// is a <c>SecretKeyOptional</c> that can name it, and the plan still sets that — but it is not
+    /// what makes the connection work, so it is no longer the only place the password appears. See
+    /// <see cref="BuildRedisUrl"/>.
     /// </summary>
     public const string RedisPasswordEnv = "STALWART_REDIS_PASSWORD";
+
+    /// <summary>
+    /// The coordinator URL, carrying the password inline when there is one.
+    ///
+    /// <para>Inline for BOTH store shapes, which is not what the schema suggests. The standalone
+    /// <c>RedisStore</c> has no secret field at all, so it never had a choice. The cluster store does
+    /// have <c>authSecret</c>, and pointing it at an environment variable looked like the better
+    /// shape — the credential stays in the pod's environment and never lands in the applied plan.
+    /// It does not work: the client authenticates its seed connection from the URL alone, so a URL
+    /// with no credentials sends no password however correct the env var is, and the cluster fails
+    /// with <c>Failed to create initial connections … Password authentication failed</c>. Proven on a
+    /// live cluster, where the plan named the right store, the pod held the right password in the
+    /// right variable, <c>redis-cli</c> authenticated with that very value — and the server still
+    /// could not lock a task.</para>
+    ///
+    /// <para>So the password goes in the URL and <c>authSecret</c> is set as well: harmless where it
+    /// is honoured, load-bearing where it is not. The cost is real and deliberate — the applied plan
+    /// now contains the credential, and that plan is stored on-cluster as the
+    /// <c>&lt;release&gt;-apply-plan</c> Secret. A coordinator reachable only inside the cluster is
+    /// the shape that makes this acceptable.</para>
+    /// </summary>
+    public static string BuildRedisUrl(string endpoint, string? password) =>
+        string.IsNullOrWhiteSpace(password)
+            ? $"redis://{endpoint}"
+            : $"redis://:{Uri.EscapeDataString(password)}@{endpoint}";
 
     /// <summary>
     /// The single cluster role EntKube gives every node: run every task and every listener. Real
@@ -79,11 +104,12 @@ public static class StalwartPlanBuilder
     /// <param name="S3Bucket">Bucket holding message bodies and attachments.</param>
     /// <param name="S3AccessKey">S3 access key (public half; the secret half is an env var).</param>
     /// <param name="RedisUrl">
-    /// Coordinator / in-memory Redis URL, e.g. <c>redis://redis.redis.svc:6379</c>. Stalwart's
-    /// standalone-Redis store has no separate secret field — unlike the datastore and blob store —
-    /// so a password, when there is one, is carried inline in this URL
-    /// (<c>redis://:password@host:port</c>). That means it is visible in the applied plan; a
-    /// network-isolated Redis with no password is the cleaner choice for an in-cluster coordinator.
+    /// Coordinator / in-memory Redis URL, e.g. <c>redis://redis.redis.svc:6379</c>. A password, when
+    /// there is one, is carried inline (<c>redis://:password@host:port</c>) for BOTH store shapes —
+    /// the standalone one has no secret field to put it in, and the cluster one has a secret field
+    /// that does not govern the connection. Built by <see cref="BuildRedisUrl"/>, whose remarks say
+    /// why. It is therefore visible in the applied plan, which is what makes an in-cluster-only
+    /// coordinator the assumed shape.
     /// </param>
     /// <param name="Replicas">Node count.</param>
     public sealed record StalwartHaBackend(

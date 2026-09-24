@@ -726,26 +726,17 @@ public class StalwartService(
             await ResolveCoordinatorRedisAsync(tenantId, clusterComponentId, kubernetesClusterId, endpoint, ct);
         bool redisIsCluster = managedRedis?.ClusterMode == true;
 
-        string redisUrl;
-        if (redisIsCluster)
+        // Both store shapes carry the password in the URL, because that is the only place either
+        // client reads it from when it opens its first connection. The cluster store's authSecret is
+        // still set beside it — see StalwartPlanBuilder.BuildRedisUrl for what that env var does and
+        // does not achieve, and for the credential-in-the-plan cost this accepts.
+        string redisUrl = StalwartPlanBuilder.BuildRedisUrl(endpoint, redisPassword);
+
+        if (redisIsCluster && !string.IsNullOrWhiteSpace(redisPassword))
         {
-            // The cluster store reads its password from the environment, so the URL stays clean and
-            // the credential never lands in the applied plan.
-            redisUrl = $"redis://{endpoint}";
-            if (!string.IsNullOrWhiteSpace(redisPassword))
-            {
-                await vaultService.SetComponentSecretAsync(
-                    tenantId, clusterComponentId, StalwartPlanBuilder.RedisPasswordEnv, redisPassword, ct,
-                    k8sSecretName: credentialsSecret, k8sNamespace: ns);
-            }
-        }
-        else
-        {
-            // The standalone store carries no secret field, so a password rides in the URL.
-            string redisAuth = string.IsNullOrWhiteSpace(redisPassword)
-                ? ""
-                : $":{Uri.EscapeDataString(redisPassword)}@";
-            redisUrl = $"redis://{redisAuth}{endpoint}";
+            await vaultService.SetComponentSecretAsync(
+                tenantId, clusterComponentId, StalwartPlanBuilder.RedisPasswordEnv, redisPassword, ct,
+                k8sSecretName: credentialsSecret, k8sNamespace: ns);
         }
 
         return new StalwartPlanBuilder.StalwartHaBackend(
