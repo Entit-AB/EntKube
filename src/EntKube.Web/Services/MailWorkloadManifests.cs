@@ -6,8 +6,6 @@ namespace EntKube.Web.Services;
 /// <em>absent</em> when unset: an rspamd told <c>password = ""</c> is not the same as an rspamd
 /// told nothing, and a placeholder left unsubstituted becomes a literal password.
 /// </summary>
-/// <param name="RedisServers">Redis endpoint, <c>host:port</c>.</param>
-/// <param name="RedisPassword">Redis password, or null for an unauthenticated Redis.</param>
 /// <param name="ControllerPassword">Password for rspamd's web UI, or null to leave it open.</param>
 /// <param name="StorageSize">Size of the volume holding rspamd's local state.</param>
 /// <param name="StorageClass">Storage class for that volume, or null for the cluster default.</param>
@@ -16,8 +14,6 @@ namespace EntKube.Web.Services;
 /// <param name="SsoEmailDomain">Email domain allowed to sign in; <c>*</c> for any the issuer authenticates.</param>
 /// <param name="WebUiHostname">Public hostname the UI is published on — the OIDC redirect URL is built from it.</param>
 public sealed record RspamdSettings(
-    string RedisServers,
-    string? RedisPassword,
     string? ControllerPassword,
     string StorageSize = "2Gi",
     string? StorageClass = null,
@@ -57,6 +53,34 @@ public static class RspamdManifestBuilder
 
     /// <summary>The uid/gid the upstream image runs its workers as.</summary>
     public const int RunAsGroup = 11333;
+
+    /// <summary>The name of rspamd's own Redis, in rspamd's namespace.</summary>
+    public static string RedisName(string releaseName) => $"{releaseName}-redis";
+
+    /// <summary>In-cluster address of that Redis.</summary>
+    public static string RedisEndpoint(string releaseName, string ns) =>
+        $"{RedisName(releaseName)}.{ns}.svc.cluster.local:{RedisPort}";
+
+    /// <summary>Redis image backing the classifier. Pinned, like every other image here.</summary>
+    public const string RedisImage = "redis:7.4-alpine";
+
+    private const int RedisPort = 6379;
+
+    /// <summary>
+    /// The <c>redis</c> user in <see cref="RedisImage"/>: 999:1000 on Alpine, where Debian's is
+    /// 999:999. <c>runAsNonRoot</c> without a uid does not harden the pod, it stops it being
+    /// admitted at all, because the image declares no numeric USER of its own.
+    /// </summary>
+    private const int RedisUid = 999;
+
+    private const int RedisGid = 1000;
+
+    /// <summary>
+    /// Volume for the Bayes training, ratelimit counters and reputation. Not an operator setting:
+    /// what lives here is counters and token weights, which stay small however much mail is scanned,
+    /// and a number nobody has a basis to choose is a number better not asked for.
+    /// </summary>
+    private const string RedisStorageSize = "2Gi";
 
     /// <summary>
     /// Where the OIDC proxy listens when single sign-on is on. This — not the controller — is the port the
@@ -104,12 +128,8 @@ public static class RspamdManifestBuilder
         y.Add("    app.kubernetes.io/managed-by: entkube");
         y.Add("data:");
 
-        List<string> redis = [$"servers = \"{settings.RedisServers}\";"];
-        if (!string.IsNullOrWhiteSpace(settings.RedisPassword))
-        {
-            redis.Add($"password = \"{Escape(settings.RedisPassword!)}\";");
-        }
-        AddFile(y, "redis.conf", redis);
+        // Its own Redis, in this namespace, with no credential — see AppendRedis.
+        AddFile(y, "redis.conf", [$"servers = \"{RedisEndpoint(releaseName, ns)}\";"]);
 
         AddFile(y, "worker-proxy.inc",
         [
@@ -334,8 +354,151 @@ public static class RspamdManifestBuilder
             y.Add($"      port: {SsoProxyPort}");
             y.Add($"      targetPort: {SsoProxyPort}");
         }
+        y.Add("---");
+
+        AppendRedis(y, releaseName, ns, settings);
 
         return string.Join("\n", y) + "\n";
+    }
+
+    /// <summary>
+    /// The Redis rspamd keeps its learned state in, deployed with it rather than chosen.
+    ///
+    /// <para>It used to be a picker, and the picker offered the cluster's managed Redis — which is
+    /// sharded, and which rspamd cannot talk to. The symptom was not a connection error but a
+    /// filter that scored every message with nothing learned behind it: <c>CROSSSLOT Keys in
+    /// request don't hash to the same slot</c> from the Bayes classifier, <c>MOVED</c> from the
+    /// neural module, and greylisting, ratelimits and reputation failing on the same backend, all
+    /// at log level that nobody reads until the mail is already in the spam folder.</para>
+    ///
+    /// <para>Unlike the mail server's coordinator this one persists. What it holds is the Bayes
+    /// training — the thing an operator spends weeks teaching — so it gets a volume and an append-only
+    /// log, and losing the pod costs nothing. Recreate rather than RollingUpdate because that volume
+    /// is ReadWriteOnce and a second pod would wait for a mount the first still holds.</para>
+    /// </summary>
+    private static void AppendRedis(List<string> y, string releaseName, string ns, RspamdSettings settings)
+    {
+        string name = RedisName(releaseName);
+
+        y.Add("apiVersion: v1");
+        y.Add("kind: PersistentVolumeClaim");
+        y.Add("metadata:");
+        y.Add($"  name: {name}-data");
+        y.Add($"  namespace: {ns}");
+        y.Add("  labels:");
+        y.Add("    app.kubernetes.io/managed-by: entkube");
+        y.Add("spec:");
+        y.Add("  accessModes: [ReadWriteOnce]");
+        if (!string.IsNullOrWhiteSpace(settings.StorageClass))
+        {
+            y.Add($"  storageClassName: {settings.StorageClass!.Trim()}");
+        }
+        y.Add("  resources:");
+        y.Add("    requests:");
+        y.Add($"      storage: {RedisStorageSize}");
+        y.Add("---");
+
+        y.Add("apiVersion: apps/v1");
+        y.Add("kind: Deployment");
+        y.Add("metadata:");
+        y.Add($"  name: {name}");
+        y.Add($"  namespace: {ns}");
+        y.Add("  labels:");
+        y.Add($"    app: {name}");
+        y.Add("    app.kubernetes.io/managed-by: entkube");
+        y.Add("spec:");
+        y.Add("  replicas: 1");
+        y.Add("  strategy:");
+        y.Add("    type: Recreate");
+        y.Add("  selector:");
+        y.Add("    matchLabels:");
+        y.Add($"      app: {name}");
+        y.Add("  template:");
+        y.Add("    metadata:");
+        y.Add("      labels:");
+        y.Add($"        app: {name}");
+        y.Add("    spec:");
+        // The volume has to be writable by the redis user, which is not uid 0.
+        y.Add("      securityContext:");
+        y.Add($"        fsGroup: {RedisGid}");
+        y.Add("      containers:");
+        y.Add("        - name: redis");
+        y.Add($"          image: {RedisImage}");
+        y.Add("          args: [\"--appendonly\", \"yes\", \"--dir\", \"/data\"]");
+        y.Add("          ports:");
+        y.Add("            - name: redis");
+        y.Add($"              containerPort: {RedisPort}");
+        y.Add("          readinessProbe:");
+        y.Add("            exec:");
+        y.Add("              command: [\"redis-cli\", \"ping\"]");
+        y.Add("            periodSeconds: 5");
+        y.Add("          livenessProbe:");
+        y.Add("            exec:");
+        y.Add("              command: [\"redis-cli\", \"ping\"]");
+        y.Add("            periodSeconds: 30");
+        y.Add("          volumeMounts:");
+        y.Add("            - name: data");
+        y.Add("              mountPath: /data");
+        y.Add("          resources:");
+        y.Add("            requests:");
+        y.Add("              cpu: 25m");
+        y.Add("              memory: 64Mi");
+        y.Add("            limits:");
+        y.Add("              memory: 512Mi");
+        y.Add("          securityContext:");
+        y.Add("            allowPrivilegeEscalation: false");
+        y.Add("            runAsNonRoot: true");
+        y.Add($"            runAsUser: {RedisUid}");
+        y.Add($"            runAsGroup: {RedisGid}");
+        y.Add("            capabilities:");
+        y.Add("              drop: [ALL]");
+        y.Add("      volumes:");
+        y.Add("        - name: data");
+        y.Add("          persistentVolumeClaim:");
+        y.Add($"            claimName: {name}-data");
+        y.Add("---");
+
+        y.Add("apiVersion: v1");
+        y.Add("kind: Service");
+        y.Add("metadata:");
+        y.Add($"  name: {name}");
+        y.Add($"  namespace: {ns}");
+        y.Add("  labels:");
+        y.Add($"    app: {name}");
+        y.Add("    app.kubernetes.io/managed-by: entkube");
+        y.Add("spec:");
+        y.Add("  type: ClusterIP");
+        y.Add("  selector:");
+        y.Add($"    app: {name}");
+        y.Add("  ports:");
+        y.Add("    - name: redis");
+        y.Add($"      port: {RedisPort}");
+        y.Add($"      targetPort: {RedisPort}");
+        y.Add("---");
+
+        // Having no password is only safe because nothing else may open a connection. The two
+        // decisions are one decision.
+        y.Add("apiVersion: networking.k8s.io/v1");
+        y.Add("kind: NetworkPolicy");
+        y.Add("metadata:");
+        y.Add($"  name: {name}");
+        y.Add($"  namespace: {ns}");
+        y.Add("  labels:");
+        y.Add("    app.kubernetes.io/managed-by: entkube");
+        y.Add("spec:");
+        y.Add("  podSelector:");
+        y.Add("    matchLabels:");
+        y.Add($"      app: {name}");
+        y.Add("  policyTypes: [Ingress]");
+        y.Add("  ingress:");
+        y.Add("    - from:");
+        y.Add("        - podSelector:");
+        y.Add("            matchLabels:");
+        y.Add($"              app: {releaseName}");
+        y.Add("      ports:");
+        y.Add("        - protocol: TCP");
+        y.Add($"          port: {RedisPort}");
+        y.Add("---");
     }
 
     private static void AddFile(List<string> y, string name, IEnumerable<string> lines)
