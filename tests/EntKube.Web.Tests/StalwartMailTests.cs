@@ -1288,6 +1288,51 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void AnHaDeploymentShipsItsOwnCoordinatorBehindANetworkPolicy()
+    {
+        // The coordinator stopped being a choice because every way of choosing it was wrong: the
+        // picker listed several near-identical Services belonging to one Redis, only one of which
+        // resolved as managed; the password had to be re-keyed by hand; and the managed shape —
+        // a sharded cluster with a password — could not be authenticated by Stalwart 0.16.21 in any
+        // spelling its schema allows. One node, no password, nothing to choose.
+        List<YamlDocument> docs = Parse(
+            StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart", ha: Ha()));
+
+        YamlDocument deployment = docs.First(d => Scalar(d.RootNode, "kind") == "Deployment");
+        Scalar(deployment.RootNode, "metadata", "name").Should().Be("stalwart-coordinator");
+
+        // Exactly one, always, and never two at once: a second coordinator is a second view of who
+        // holds which lock, so the rollout replaces rather than overlaps.
+        Scalar(deployment.RootNode, "spec", "replicas").Should().Be("1");
+        Scalar(deployment.RootNode, "spec", "strategy", "type").Should().Be("Recreate");
+
+        YamlDocument service = docs.First(d =>
+            Scalar(d.RootNode, "kind") == "Service"
+            && Scalar(d.RootNode, "metadata", "name") == "stalwart-coordinator");
+        Scalar(service.RootNode, "spec", "type").Should().Be("ClusterIP");
+
+        // Having no password is only safe because nothing else may reach it. The two decisions are
+        // one decision, so a manifest that drops the policy must fail here.
+        YamlDocument policy = docs.First(d => Scalar(d.RootNode, "kind") == "NetworkPolicy");
+        Scalar(policy.RootNode, "spec", "podSelector", "matchLabels", "app")
+            .Should().Be("stalwart-coordinator");
+        YamlNode rule = ((YamlSequenceNode)At(policy.RootNode, "spec", "ingress")!).Children.Single();
+        YamlNode source = ((YamlSequenceNode)At(rule, "from")!).Children.Single();
+        Scalar(source, "podSelector", "matchLabels", "app").Should().Be("stalwart");
+    }
+
+    [Fact]
+    public void WithoutHighAvailabilityThereIsNoCoordinatorToShip()
+    {
+        // A single node coordinates with nobody. Shipping a Redis beside it would be a pod, a
+        // Service and a NetworkPolicy that exist to serve no reader.
+        string manifest = StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart");
+
+        manifest.Should().NotContain("stalwart-coordinator");
+        manifest.Should().NotContain("kind: NetworkPolicy");
+    }
+
+    [Fact]
     public void TheClusterCoordinatorUrlCarriesThePasswordInline()
     {
         // The whole point of authSecret was to keep the credential out of the plan, and it does not
@@ -1924,15 +1969,12 @@ public class StalwartMailTests
             ["ha-replicas"] = "3",
             ["ha-database"] = database.ToString(),
             ["ha-blob-store"] = bucket.ToString(),
-            ["ha-coordinator-redis"] = "redis.redis.svc.cluster.local:6380",
         });
 
         config.HighAvailability.Should().BeTrue();
         config.Replicas.Should().Be(3);
         config.CnpgDatabaseId.Should().Be(database);
         config.BlobStorageLinkId.Should().Be(bucket);
-        config.CoordinatorRedisHost.Should().Be("redis.redis.svc.cluster.local");
-        config.CoordinatorRedisPort.Should().Be(6380);
 
         // A picker put back to "choose one…" is an instruction, not silence: leaving the old id in
         // place would keep the component attached to a database the operator has just detached.
@@ -1941,13 +1983,11 @@ public class StalwartMailTests
             ["ha-enabled"] = "false",
             ["ha-database"] = "",
             ["ha-blob-store"] = "",
-            ["ha-coordinator-redis"] = "",
         });
 
         config.HighAvailability.Should().BeFalse();
         config.CnpgDatabaseId.Should().BeNull();
         config.BlobStorageLinkId.Should().BeNull();
-        config.CoordinatorRedisHost.Should().BeNull();
     }
 
     [Fact]
@@ -1964,8 +2004,6 @@ public class StalwartMailTests
             c.Replicas = 3;
             c.CnpgDatabaseId = database;
             c.BlobStorageLinkId = bucket;
-            c.CoordinatorRedisHost = "redis.redis.svc.cluster.local";
-            c.CoordinatorRedisPort = 6380;
         });
 
         Dictionary<string, string> form = StalwartService.BuildFormValues(config);
@@ -1974,15 +2012,17 @@ public class StalwartMailTests
         form["ha-replicas"].Should().Be("3");
         form["ha-database"].Should().Be(database.ToString());
         form["ha-blob-store"].Should().Be(bucket.ToString());
-        form["ha-coordinator-redis"].Should().Be("redis.redis.svc.cluster.local:6380");
+
+        // The coordinator is deliberately absent: it ships with the deployment, so there is no
+        // form field to read back and nothing an operator could have entered.
+        form.Should().NotContainKey("ha-coordinator-redis");
 
         // And what comes back out reproduces the configuration it came from.
         StalwartComponentConfig reopened = Config();
         StalwartService.ApplyFormValues(reopened, form);
         reopened.Should().BeEquivalentTo(config, o => o
             .Including(c => c.HighAvailability).Including(c => c.Replicas)
-            .Including(c => c.CnpgDatabaseId).Including(c => c.BlobStorageLinkId)
-            .Including(c => c.CoordinatorRedisHost).Including(c => c.CoordinatorRedisPort));
+            .Including(c => c.CnpgDatabaseId).Including(c => c.BlobStorageLinkId));
     }
 
     [Fact]
