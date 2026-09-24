@@ -1275,6 +1275,11 @@ public class StalwartMailTests
             v.GetProperty("authSecret").GetProperty("variableName").GetString()
                 .Should().Be(StalwartPlanBuilder.RedisPasswordEnv);
             v.TryGetProperty("url", out _).Should().BeFalse();
+
+            // The username has to travel with the secret. Sent alone, the secret goes out under an
+            // empty username and Redis answers WRONGPASS — reported as "Password authentication
+            // failed", the same words as no credentials at all, which is why this cost four rounds.
+            v.GetProperty("authUsername").GetString().Should().Be(StalwartPlanBuilder.RedisUsername);
         }
 
         // …and the pod has to be given it.
