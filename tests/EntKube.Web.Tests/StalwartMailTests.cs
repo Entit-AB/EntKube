@@ -1292,7 +1292,21 @@ public class StalwartMailTests
         // with that same value, and every task still failed with "Failed to create initial
         // connections … Password authentication failed". So the URL carries it too.
         StalwartPlanBuilder.BuildRedisUrl("redis-leader.cache.svc.cluster.local:6379", "s3cr3t")
-            .Should().Be("redis://:s3cr3t@redis-leader.cache.svc.cluster.local:6379");
+            .Should().Be("redis://default:s3cr3t@redis-leader.cache.svc.cluster.local:6379");
+    }
+
+    [Fact]
+    public void TheCoordinatorUrlNamesTheDefaultUserRatherThanAnEmptyOne()
+    {
+        // "redis://:pw@host" names an EMPTY user, not an absent one, and Redis rejects that with
+        // WRONGPASS — reported by Stalwart as "Password authentication failed", exactly like a wrong
+        // password and exactly like no credentials at all. Measured against the live cluster with
+        // one correct password: `-a pw` PONG, `--user '' --pass pw` WRONGPASS, `--user default
+        // --pass pw` PONG. This is the assertion that keeps the colon from losing its username.
+        string url = StalwartPlanBuilder.BuildRedisUrl("redis:6379", "s3cr3t");
+
+        url.Should().StartWith("redis://default:");
+        url.Should().NotStartWith("redis://:");
     }
 
     [Fact]
@@ -1301,7 +1315,7 @@ public class StalwartMailTests
         // A generated password contains whatever the generator emits, and an unescaped '@' or ':'
         // would re-point the URL at a different host entirely rather than merely failing to parse.
         StalwartPlanBuilder.BuildRedisUrl("redis:6379", "p@ss:w/rd?#")
-            .Should().Be("redis://:p%40ss%3Aw%2Frd%3F%23@redis:6379");
+            .Should().Be("redis://default:p%40ss%3Aw%2Frd%3F%23@redis:6379");
     }
 
     [Fact]
