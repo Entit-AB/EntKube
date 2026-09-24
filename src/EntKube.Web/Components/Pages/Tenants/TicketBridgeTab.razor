@@ -1,0 +1,384 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets.Bridge
+@using Microsoft.EntityFrameworkCore
+@inject TicketBridgeAdmin Bridge
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject ToastService Toasts
+@inject NavigationManager Nav
+
+@* ═══════════════════════════════════════════════════════════════════
+   The customers' own ticketing systems.
+
+   Inbound only: they push to us, and nothing here holds credentials
+   into anybody's production ITSM. What the screen mostly has to do is
+   be honest — about the secret being shown once, and about what a
+   delivery is allowed to do when it arrives.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-start mb-3">
+        <div class="text-muted small" style="max-width: 58rem">
+            A customer's Jira, ServiceNow or Ivanti can raise tickets here directly. Their
+            system posts to an address of its own and presents a secret; nothing of ours
+            reaches into theirs.
+            <div class="mt-1">
+                <strong>A delivery may open a ticket and add to its history, and nothing
+                else.</strong> An arriving priority is a proposal for the first assessment
+                to confirm (§14.3), and their closing their own copy does not resolve or
+                close ours — §14.4 makes that ours to record and the customer's to accept.
+            </div>
+        </div>
+        <button class="btn btn-sm btn-primary text-nowrap" @onclick="StartNew">
+            <span class="bi bi-plus-lg me-1"></span>Add a connection
+        </button>
+    </div>
+
+    @if (issued is not null)
+    {
+        <div class="alert alert-success">
+            <div class="fw-semibold mb-1">
+                <span class="bi bi-key me-1"></span>The secret for @issuedFor
+            </div>
+            <div class="small mb-2">
+                Copy it now — it is stored as a hash we cannot reverse, so this is the only
+                time anybody sees it. Paste it into their system as an
+                <code>X-EntKube-Token</code> header (or <code>Authorization: Bearer</code>).
+            </div>
+            <code class="user-select-all d-block p-2 bg-white border rounded">@issued</code>
+            <button class="btn btn-sm btn-outline-secondary mt-2" @onclick="() => issued = null">
+                Done
+            </button>
+        </div>
+    }
+
+    @if (connections.Count == 0 && editing is null)
+    {
+        <EmptyState Icon="bi-plug"
+                    Title="No customer system is connected"
+                    Message="Tickets arrive through the portal, the mailbox and monitoring." />
+    }
+
+    @if (connections.Count > 0)
+    {
+        <div class="table-responsive mb-3">
+            <table class="table table-sm align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Customer</th>
+                        <th>System</th>
+                        <th>Tickets</th>
+                        <th>Status</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (BridgeConnectionSummary row in connections)
+                    {
+                        <tr class="@(row.Connection.IsEnabled ? "" : "text-muted")">
+                            <td class="small fw-semibold">@row.CustomerName</td>
+                            <td class="small">
+                                @row.Connection.System
+                                <div class="text-muted" style="font-size: .75rem">
+                                    @row.Connection.Instance
+                                </div>
+                            </td>
+                            <td class="small">
+                                @row.TicketsRaised
+                                @if (row.LastTicketAt is DateTime last)
+                                {
+                                    <div class="text-muted" style="font-size: .75rem">
+                                        last @last.ToLocalTime().ToString("d MMM HH:mm")
+                                    </div>
+                                }
+                            </td>
+                            <td class="small">
+                                @if (!row.Connection.IsEnabled)
+                                {
+                                    <span class="badge bg-secondary">off</span>
+                                }
+                                else if (string.IsNullOrEmpty(row.Connection.SecretHash))
+                                {
+                                    <span class="badge bg-warning text-dark">no secret</span>
+                                }
+                                else
+                                {
+                                    <span class="badge bg-success">on</span>
+                                }
+
+                                @if (!string.IsNullOrWhiteSpace(row.Connection.LastError))
+                                {
+                                    <div class="text-danger" style="font-size: .75rem">
+                                        @row.Connection.LastError
+                                    </div>
+                                }
+                            </td>
+                            <td class="text-end text-nowrap">
+                                <button class="btn btn-sm btn-outline-secondary me-1"
+                                        @onclick="() => Edit(row.Connection)">Edit</button>
+                                <AsyncButton CssClass="btn-sm btn-outline-primary me-1"
+                                             OnClick="() => IssueAsync(row)">
+                                    New secret
+                                </AsyncButton>
+                                @if (row.TicketsRaised == 0)
+                                {
+                                    <AsyncButton CssClass="btn-sm btn-outline-danger"
+                                                 OnClick="() => DeleteAsync(row.Connection)">
+                                        Delete
+                                    </AsyncButton>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+
+    @if (editing is not null)
+    {
+        <div class="card">
+            <div class="card-body">
+                <EditForm Model="editing" OnValidSubmit="SaveAsync">
+                    <DataAnnotationsValidator />
+
+                    <div class="row g-3">
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Customer</label>
+                            <InputSelect class="form-select form-select-sm"
+                                         @bind-Value="editing.CustomerId">
+                                <option value="@Guid.Empty">Choose…</option>
+                                @foreach (Customer customer in customers)
+                                {
+                                    <option value="@customer.Id">@customer.Name</option>
+                                }
+                            </InputSelect>
+                            <div class="form-text small">
+                                Whose tickets arrive here. A delivery cannot name a customer —
+                                this is what decides.
+                            </div>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Their system</label>
+                            <InputSelect class="form-select form-select-sm" @bind-Value="editing.System">
+                                <option value="@TicketSystem.Jira">Jira</option>
+                                <option value="@TicketSystem.ServiceNow">ServiceNow</option>
+                            </InputSelect>
+                        </div>
+
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Their instance</label>
+                            <InputText class="form-control form-control-sm" @bind-Value="editing.Instance"
+                                       placeholder="acme.service-now.com" />
+                            <div class="form-text small">Used to link back to the ticket there.</div>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label small text-muted">
+                                Application, when their payload does not say
+                            </label>
+                            <InputSelect class="form-select form-select-sm"
+                                         @bind-Value="editing.DefaultAppId">
+                                <option value="">None — decide per ticket</option>
+                                @foreach (EntKube.Web.Data.App app in AppsFor(editing.CustomerId))
+                                {
+                                    <option value="@app.Id">@app.Name</option>
+                                }
+                            </InputSelect>
+                            <div class="form-text small">
+                                Worth leaving empty for a customer with several: a ticket with no
+                                application has no support window and says so, whereas one on the
+                                wrong application is measured against the wrong window and looks fine.
+                            </div>
+                        </div>
+
+                        <div class="col-md-6">
+                            <label class="form-label small text-muted">Their priorities, as ours</label>
+                            <InputTextArea class="form-control form-control-sm" rows="5"
+                                           @bind-Value="editing.PriorityMap"
+                                           placeholder="@PriorityPlaceholder" />
+                            <div class="form-text small">
+                                One <code>theirs=P1</code> per line. Anything unmapped proposes no
+                                priority at all, and the first assessment decides it — which is
+                                §14.3's answer and better than a guess, because a P1 carries a
+                                two-hour response and 10% of the window fee if it is missed.
+                            </div>
+                        </div>
+
+                        <div class="col-12">
+                            <div class="form-check">
+                                <InputCheckbox class="form-check-input" id="bridge-enabled"
+                                               @bind-Value="editing.IsEnabled" />
+                                <label class="form-check-label small" for="bridge-enabled">
+                                    <strong>Accept tickets on this connection.</strong>
+                                    It needs a secret before anything can be delivered.
+                                </label>
+                            </div>
+                        </div>
+
+                        @if (editing.Id != Guid.Empty)
+                        {
+                            <div class="col-12">
+                                <label class="form-label small text-muted">They post to</label>
+                                <code class="user-select-all d-block p-2 bg-light border rounded small">
+                                    POST @Endpoint(editing.Id)
+                                </code>
+                            </div>
+                        }
+
+                        <div class="col-12 text-end">
+                            <button type="button" class="btn btn-sm btn-outline-secondary me-1"
+                                    @onclick="() => editing = null">Cancel</button>
+                            <button type="submit" class="btn btn-sm btn-primary">Save</button>
+                        </div>
+                    </div>
+                </EditForm>
+            </div>
+        </div>
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private string? error;
+
+    private List<BridgeConnectionSummary> connections = [];
+    private List<Customer> customers = [];
+    private List<EntKube.Web.Data.App> apps = [];
+
+    private TicketBridgeConnection? editing;
+    private string? issued;
+    private string? issuedFor;
+
+    private const string PriorityPlaceholder = "1=P1\n2=P2\n3=P3";
+
+    private IEnumerable<EntKube.Web.Data.App> AppsFor(Guid customerId) =>
+        apps.Where(a => a.CustomerId == customerId).OrderBy(a => a.Name);
+
+    private string Endpoint(Guid connectionId) =>
+        $"{Nav.BaseUri.TrimEnd('/')}/api/tickets/inbound/{connectionId}";
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+
+            customers = await db.Customers.AsNoTracking()
+                .Where(c => c.TenantId == TenantId)
+                .OrderBy(c => c.Name)
+                .ToListAsync();
+
+            apps = await db.Apps.AsNoTracking()
+                .Where(a => a.Customer!.TenantId == TenantId)
+                .ToListAsync();
+
+            connections = await Bridge.ListAsync(TenantId);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private void StartNew() => editing = new TicketBridgeConnection
+    {
+        TenantId = TenantId,
+        Instance = "",
+        System = TicketSystem.ServiceNow,
+    };
+
+    private void Edit(TicketBridgeConnection connection) => editing = new TicketBridgeConnection
+    {
+        Id = connection.Id,
+        TenantId = connection.TenantId,
+        CustomerId = connection.CustomerId,
+        System = connection.System,
+        Instance = connection.Instance,
+        IsEnabled = connection.IsEnabled,
+        DefaultAppId = connection.DefaultAppId,
+        PriorityMap = connection.PriorityMap,
+        SecretHash = connection.SecretHash,
+    };
+
+    private async Task SaveAsync()
+    {
+        if (editing is null)
+        {
+            return;
+        }
+
+        if (editing.CustomerId == Guid.Empty || string.IsNullOrWhiteSpace(editing.Instance))
+        {
+            Toasts.Error("A customer and their instance are both needed.");
+            return;
+        }
+
+        try
+        {
+            bool isNew = editing.Id == Guid.Empty;
+            editing.Instance = editing.Instance.Trim();
+
+            TicketBridgeConnection saved = await Bridge.SaveAsync(editing);
+
+            // A new connection is useless without one, and asking somebody to press a
+            // second button to make the thing they just made work is not a decision worth
+            // offering.
+            if (isNew)
+            {
+                issued = await Bridge.IssueSecretAsync(saved.Id);
+                issuedFor = customers.FirstOrDefault(c => c.Id == saved.CustomerId)?.Name;
+            }
+
+            Toasts.Success("Connection saved.");
+            editing = null;
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not save: {ex.Message}");
+        }
+    }
+
+    private async Task IssueAsync(BridgeConnectionSummary row)
+    {
+        issued = await Bridge.IssueSecretAsync(row.Connection.Id);
+        issuedFor = row.CustomerName;
+
+        if (issued is not null)
+        {
+            Toasts.Success("A new secret was issued. The old one stopped working.");
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task DeleteAsync(TicketBridgeConnection connection)
+    {
+        string? refused = await Bridge.DeleteAsync(connection.Id);
+
+        if (refused is not null)
+        {
+            Toasts.Error(refused);
+            return;
+        }
+
+        Toasts.Success("Connection removed.");
+        await LoadAsync();
+    }
+}

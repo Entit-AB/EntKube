@@ -207,6 +207,8 @@ public class BackupService(
             CustomerSupportAddresses = await db.CustomerSupportAddresses.AsNoTracking().ToListAsync(),
             MailTriageRules = await db.MailTriageRules.AsNoTracking().ToListAsync(),
             InboundMailMessages = await db.InboundMailMessages.AsNoTracking().ToListAsync(),
+            TicketBridgeConnections = await db.TicketBridgeConnections.AsNoTracking().ToListAsync(),
+            ExternalTicketLinks = await db.ExternalTicketLinks.AsNoTracking().ToListAsync(),
             MailSuggestions = await db.MailSuggestions.AsNoTracking().ToListAsync(),
 
             // Platform configuration nothing live recreates.
@@ -539,6 +541,9 @@ public class BackupService(
             await InsertEntities(db, db.MailTriageRules, bundle.MailTriageRules);
             await InsertEntities(db, db.InboundMailMessages, bundle.InboundMailMessages);
             await InsertEntities(db, db.MailSuggestions, bundle.MailSuggestions);
+            await InsertEntities(db, db.TicketBridgeConnections, bundle.TicketBridgeConnections);
+            // After the connections and the tickets both: a link points at each.
+            await InsertEntities(db, db.ExternalTicketLinks, bundle.ExternalTicketLinks);
 
             // Platform configuration. Everything these point at — tenants and their roles,
             // clusters and components, apps and deployments, storage links, the Postgres

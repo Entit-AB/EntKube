@@ -15,6 +15,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services;
 using EntKube.Web.Services.Agents;
 using EntKube.Web.Services.Telemetry;
+using EntKube.Web.Services.Tickets.Bridge;
 using StackExchange.Redis;
 
 namespace EntKube.Web;
@@ -578,6 +579,13 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.Tickets.TicketNotifier>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailboxService>();
 
+        // The inbound ticket bridge. One adapter per system, registered as the interface —
+        // so adding Ivanti is a class and a line here, which is the whole point of the seam.
+        builder.Services.AddScoped<IInboundTicketAdapter, JiraAdapter>();
+        builder.Services.AddScoped<IInboundTicketAdapter, ServiceNowAdapter>();
+        builder.Services.AddScoped<TicketBridgeService>();
+        builder.Services.AddScoped<TicketBridgeAdmin>();
+
         // Fetches support mail into the triage queue. Does nothing until a tenant has
         // configured a mailbox and switched it on.
         builder.Services.AddHostedService<EntKube.Web.Services.Mail.SupportMailPoller>();
@@ -839,6 +847,76 @@ public class Program
 
             string result = await webhookService.HandleAsync(tenantSlug, body, signature, ct);
             return Results.Ok(result);
+        });
+
+        // Inbound ticket bridge — a customer's own Jira/ServiceNow/Ivanti posts here when
+        // their service desk raises something for us.
+        // Route: POST /api/tickets/inbound/{connectionId}
+        //
+        // Unauthenticated in the user sense and authorised by a per-connection shared
+        // secret, because the caller is a machine in somebody else's estate. The connection
+        // id in the path is not the credential: it is public enough to appear in their
+        // configuration screen, so the secret is what decides, and it is compared against a
+        // hash we cannot reverse. A request cannot name a customer — the connection already
+        // says which one, which is what stops a leaked secret reaching anybody else's
+        // tickets.
+        app.MapPost("/api/tickets/inbound/{connectionId:guid}", async (
+            Guid connectionId,
+            HttpContext httpContext,
+            TicketBridgeService bridge,
+            IDbContextFactory<ApplicationDbContext> dbFactory,
+            CancellationToken ct) =>
+        {
+            const int MaxDelivery = 1024 * 1024;
+
+            string? presented =
+                httpContext.Request.Headers["X-EntKube-Token"].FirstOrDefault()
+                ?? (httpContext.Request.Headers.Authorization.FirstOrDefault() is string auth
+                    && auth.StartsWith("Bearer ", StringComparison.OrdinalIgnoreCase)
+                        ? auth["Bearer ".Length..]
+                        : null);
+
+            using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+            string? stored = await db.TicketBridgeConnections
+                .Where(c => c.Id == connectionId)
+                .Select(c => c.SecretHash)
+                .FirstOrDefaultAsync(ct);
+
+            // The same answer for a connection that does not exist and a secret that is
+            // wrong. Telling them apart would turn this into a way to enumerate customers.
+            if (!BridgeSecret.Matches(presented, stored))
+            {
+                return Results.Unauthorized();
+            }
+
+            if (httpContext.Request.ContentLength > MaxDelivery)
+            {
+                return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+            }
+
+            using StreamReader reader = new(httpContext.Request.Body);
+            string body = await reader.ReadToEndAsync(ct);
+
+            if (body.Length > MaxDelivery)
+            {
+                return Results.StatusCode(StatusCodes.Status413PayloadTooLarge);
+            }
+
+            BridgeDelivery delivery = await bridge.DeliverAsync(
+                connectionId, body, DateTime.UtcNow, ct);
+
+            // 400 rather than 500 for something we could not read: it is their payload that
+            // is wrong, and a 5xx would have them retry it forever.
+            return delivery.Accepted
+                ? Results.Ok(new
+                {
+                    accepted = true,
+                    ticket = delivery.TicketNumber,
+                    created = delivery.Created,
+                    detail = delivery.Detail,
+                })
+                : Results.BadRequest(new { accepted = false, detail = delivery.Detail });
         });
 
         // OTLP/JSON ingest — the OpenTelemetry Collector's otlphttp exporter (encoding: json) pushes

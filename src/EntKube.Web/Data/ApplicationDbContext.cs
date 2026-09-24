@@ -49,6 +49,10 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<MailSuggestion> MailSuggestions => Set<MailSuggestion>();
     public DbSet<MailTriageRule> MailTriageRules => Set<MailTriageRule>();
     public DbSet<SupportMailbox> SupportMailboxes => Set<SupportMailbox>();
+
+    public DbSet<TicketBridgeConnection> TicketBridgeConnections => Set<TicketBridgeConnection>();
+
+    public DbSet<ExternalTicketLink> ExternalTicketLinks => Set<ExternalTicketLink>();
     public DbSet<CustomerEmailDomain> CustomerEmailDomains => Set<CustomerEmailDomain>();
     public DbSet<CustomerSupportAddress> CustomerSupportAddresses => Set<CustomerSupportAddress>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
@@ -796,6 +800,73 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                   .WithMany()
                   .HasForeignKey(a => a.CustomerId)
                   .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ---- The inbound ticket bridge -----------------------------------------------------
+
+        builder.Entity<TicketBridgeConnection>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.HasIndex(c => new { c.TenantId, c.CustomerId });
+
+            entity.Property(c => c.Instance).HasMaxLength(256);
+            entity.Property(c => c.PriorityMap).HasMaxLength(2000);
+            entity.Property(c => c.LastError).HasMaxLength(2000);
+
+            entity.HasOne(c => c.Tenant)
+                  .WithMany()
+                  .HasForeignKey(c => c.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(c => c.Customer)
+                  .WithMany()
+                  .HasForeignKey(c => c.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict: an application still receiving tickets from a customer's own system
+            // is not one to delete out from under the connection quietly.
+            entity.HasOne(c => c.DefaultApp)
+                  .WithMany()
+                  .HasForeignKey(c => c.DefaultAppId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<ExternalTicketLink>(entity =>
+        {
+            entity.HasKey(l => l.Id);
+
+            // What actually stops a resent incident becoming a second ticket. A sending
+            // system retries, and delivers the same thing again on every field change; a
+            // check in code would be a race between two deliveries, and this is not.
+            entity.HasIndex(l => new { l.TenantId, l.System, l.Instance, l.ExternalId })
+                  .IsUnique();
+
+            entity.HasIndex(l => l.TicketId);
+            entity.HasIndex(l => new { l.TenantId, l.ExternalKey });
+
+            entity.Property(l => l.Instance).HasMaxLength(256);
+            entity.Property(l => l.ExternalId).HasMaxLength(256);
+            entity.Property(l => l.ExternalKey).HasMaxLength(256);
+            entity.Property(l => l.Url).HasMaxLength(1000);
+
+            entity.HasOne(l => l.Tenant)
+                  .WithMany()
+                  .HasForeignKey(l => l.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Cascade from the ticket: the link says what this ticket mirrors, and means
+            // nothing without it.
+            entity.HasOne(l => l.Ticket)
+                  .WithMany()
+                  .HasForeignKey(l => l.TicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict from the connection: deleting a connection must not quietly erase
+            // the record of where a customer's tickets came from. Disable it instead.
+            entity.HasOne(l => l.Connection)
+                  .WithMany()
+                  .HasForeignKey(l => l.ConnectionId)
+                  .OnDelete(DeleteBehavior.Restrict);
         });
 
         builder.Entity<SupportMailbox>(entity =>
