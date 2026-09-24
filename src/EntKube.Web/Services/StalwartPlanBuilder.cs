@@ -58,6 +58,23 @@ public static class StalwartPlanBuilder
     public const string RedisPasswordEnv = "STALWART_REDIS_PASSWORD";
 
     /// <summary>
+    /// The Redis user the coordinator authenticates as, named explicitly because the alternative is
+    /// not "no user" but the empty one.
+    ///
+    /// <para>Every Stalwart store that authenticates carries a username beside its secret — the
+    /// PostgreSQL datastore has <c>authUsername</c> and <c>authSecret</c>, the S3 blob store
+    /// <c>accessKey</c> and <c>secretKey</c>. The Redis cluster store was given only the secret, so
+    /// it sent the password with an empty username, and Redis rejects that with <c>WRONGPASS
+    /// invalid username-password pair</c> — which Stalwart reports as <c>Password authentication
+    /// failed</c>, word for word what it says when there is no password at all.</para>
+    ///
+    /// <para>Measured on the live cluster with the one correct password: <c>-a pw</c> PONG,
+    /// <c>--user '' --pass pw</c> WRONGPASS, <c>--user default --pass pw</c> PONG. <c>default</c> is
+    /// the user <c>requirepass</c> configures, so naming it is what the working invocation does.</para>
+    /// </summary>
+    public const string RedisUsername = "default";
+
+    /// <summary>
     /// The coordinator URL, carrying the password inline when there is one.
     ///
     /// <para>Inline for BOTH store shapes, which is not what the schema suggests. The standalone
@@ -306,6 +323,10 @@ public static class StalwartPlanBuilder
                 {
                     ["@type"] = "RedisCluster",
                     ["urls"] = Set([ha.RedisUrl]),
+                    // Beside the secret, never without it: a secret with no username is sent as a
+                    // username of "", which Redis refuses exactly as it refuses a wrong password.
+                    // See RedisUsername.
+                    ["authUsername"] = RedisUsername,
                     ["authSecret"] = new Dictionary<string, object?>
                     {
                         ["@type"] = "EnvironmentVariable",
