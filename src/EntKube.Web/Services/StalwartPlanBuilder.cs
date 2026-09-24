@@ -76,11 +76,24 @@ public static class StalwartPlanBuilder
     /// now contains the credential, and that plan is stored on-cluster as the
     /// <c>&lt;release&gt;-apply-plan</c> Secret. A coordinator reachable only inside the cluster is
     /// the shape that makes this acceptable.</para>
+    ///
+    /// <para>The username is spelled out as <c>default</c>, and that word is the entire fix. The
+    /// obvious spelling — <c>redis://:password@host</c> — names an EMPTY username, not an absent
+    /// one, and Redis answers that with <c>WRONGPASS invalid username-password pair</c>: the same
+    /// rejection as a wrong password, and indistinguishable from it in Stalwart's log. Measured
+    /// against the live cluster, one password and three spellings: <c>-a pw</c> gave PONG,
+    /// <c>--user '' --pass pw</c> gave WRONGPASS, <c>--user default --pass pw</c> gave PONG. Both
+    /// failing shapes — no credentials at all, and an empty username — surface identically as
+    /// <c>Password authentication failed</c>, which is why this cost three attempts to find.</para>
+    ///
+    /// <para>Naming a user at all requires the two-argument <c>AUTH</c> of Redis 6 (2020), which
+    /// every Redis the operator builds is well past. A pre-6 server reached as an unmanaged endpoint
+    /// would reject it — the one case this deliberately does not serve.</para>
     /// </summary>
     public static string BuildRedisUrl(string endpoint, string? password) =>
         string.IsNullOrWhiteSpace(password)
             ? $"redis://{endpoint}"
-            : $"redis://:{Uri.EscapeDataString(password)}@{endpoint}";
+            : $"redis://default:{Uri.EscapeDataString(password)}@{endpoint}";
 
     /// <summary>
     /// The single cluster role EntKube gives every node: run every task and every listener. Real
