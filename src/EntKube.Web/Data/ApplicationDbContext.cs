@@ -27,6 +27,30 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<ApiToken> ApiTokens => Set<ApiToken>();
     public DbSet<JitGrant> JitGrants => Set<JitGrant>();
     public DbSet<ClusterCostRate> ClusterCostRates => Set<ClusterCostRate>();
+    public DbSet<ApplicationContract> ApplicationContracts => Set<ApplicationContract>();
+    public DbSet<ApplicationServiceLevel> ApplicationServiceLevels => Set<ApplicationServiceLevel>();
+    public DbSet<PortfolioAgreement> PortfolioAgreements => Set<PortfolioAgreement>();
+    public DbSet<ContractContact> ContractContacts => Set<ContractContact>();
+    public DbSet<PriceList> PriceLists => Set<PriceList>();
+    public DbSet<PriceListEntry> PriceListEntries => Set<PriceListEntry>();
+    public DbSet<Ticket> Tickets => Set<Ticket>();
+    public DbSet<TicketEvent> TicketEvents => Set<TicketEvent>();
+    public DbSet<TicketPause> TicketPauses => Set<TicketPause>();
+    public DbSet<TicketAffectedApp> TicketAffectedApps => Set<TicketAffectedApp>();
+    public DbSet<TimeEntry> TimeEntries => Set<TimeEntry>();
+    public DbSet<WorkAuthorisation> WorkAuthorisations => Set<WorkAuthorisation>();
+    public DbSet<KnowledgeSection> KnowledgeSections => Set<KnowledgeSection>();
+    public DbSet<KnowledgeRevision> KnowledgeRevisions => Set<KnowledgeRevision>();
+    public DbSet<AppKnowledgeProfile> AppKnowledgeProfiles => Set<AppKnowledgeProfile>();
+    public DbSet<AppServiceDependency> AppServiceDependencies => Set<AppServiceDependency>();
+    public DbSet<EndOfLifeNotice> EndOfLifeNotices => Set<EndOfLifeNotice>();
+    public DbSet<Subconsultant> Subconsultants => Set<Subconsultant>();
+    public DbSet<InboundMailMessage> InboundMailMessages => Set<InboundMailMessage>();
+    public DbSet<MailSuggestion> MailSuggestions => Set<MailSuggestion>();
+    public DbSet<MailTriageRule> MailTriageRules => Set<MailTriageRule>();
+    public DbSet<SupportMailbox> SupportMailboxes => Set<SupportMailbox>();
+    public DbSet<CustomerEmailDomain> CustomerEmailDomains => Set<CustomerEmailDomain>();
+    public DbSet<CustomerSupportAddress> CustomerSupportAddresses => Set<CustomerSupportAddress>();
     public DbSet<CostLedgerEntry> CostLedgerEntries => Set<CostLedgerEntry>();
     public DbSet<CostLedgerCoverage> CostLedgerCoverages => Set<CostLedgerCoverage>();
     public DbSet<CostLedgerCursor> CostLedgerCursors => Set<CostLedgerCursor>();
@@ -307,6 +331,492 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(e => e.Tenant)
                   .WithMany()
                   .HasForeignKey(e => e.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ---- The management agreement: Annex A, B and C as data -------------------------
+
+        builder.Entity<ApplicationContract>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+
+            // One set of terms per application. Annex A is signed per application, and two
+            // live contracts for the same one would make "what was agreed" unanswerable.
+            entity.HasIndex(c => c.AppId).IsUnique();
+            entity.HasIndex(c => c.TenantId);
+
+            // Instances are found by their parent application often enough to index: the
+            // reduced fee from the twenty-first instance and §14.3's collapsing of one
+            // incident across many instances both count them.
+            entity.HasIndex(c => c.ParentAppId);
+
+            entity.Property(c => c.MonthlyWorkCapHours).HasPrecision(18, 2);
+            entity.Property(c => c.OnboardingFee).HasPrecision(18, 2);
+
+            entity.HasOne(c => c.Tenant)
+                  .WithMany()
+                  .HasForeignKey(c => c.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // A plain FK plus the unique index above, deliberately not a required one-to-one.
+            // EF treats a second dependent on a required 1:1 as replacing the first and
+            // silently marks the old row deleted; for a signed Annex A that is the wrong
+            // failure mode. As a normal reference, a duplicate hits the unique index and
+            // fails loudly instead.
+            entity.HasOne(c => c.App)
+                  .WithMany()
+                  .HasForeignKey(c => c.AppId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict, not cascade: removing a parent application from EntKube must not
+            // silently delete the terms of every instance that was built on it. §10.2.1
+            // makes the instances depend on it, so the dependency has to be dealt with
+            // deliberately rather than by a delete rule.
+            entity.HasOne(c => c.ParentApp)
+                  .WithMany()
+                  .HasForeignKey(c => c.ParentAppId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<ApplicationServiceLevel>(entity =>
+        {
+            entity.HasKey(l => l.Id);
+
+            // Resolving the level in force on a date reads exactly this shape.
+            entity.HasIndex(l => new { l.ApplicationContractId, l.EffectiveFrom });
+
+            entity.HasOne(l => l.Contract)
+                  .WithMany(c => c.ServiceLevels)
+                  .HasForeignKey(l => l.ApplicationContractId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<PortfolioAgreement>(entity =>
+        {
+            entity.HasKey(a => a.Id);
+            entity.HasIndex(a => new { a.CustomerId, a.EffectiveFrom });
+
+            entity.Property(a => a.HourBankHoursPerMonth).HasPrecision(18, 2);
+
+            entity.HasOne(a => a.Tenant)
+                  .WithMany()
+                  .HasForeignKey(a => a.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(a => a.Customer)
+                  .WithMany()
+                  .HasForeignKey(a => a.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ContractContact>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.HasIndex(c => new { c.CustomerId, c.Party, c.Role });
+            entity.HasIndex(c => c.AppId);
+
+            entity.HasOne(c => c.Tenant)
+                  .WithMany()
+                  .HasForeignKey(c => c.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(c => c.Customer)
+                  .WithMany()
+                  .HasForeignKey(c => c.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // An application-specific contact outlives the application only as a row to be
+            // tidied up; cascading would be fine, but Restrict keeps the delete explicit and
+            // matches how the contract itself treats a parent application.
+            entity.HasOne(c => c.App)
+                  .WithMany()
+                  .HasForeignKey(c => c.AppId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<PriceList>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => new { p.TenantId, p.CustomerId, p.EffectiveFrom });
+
+            entity.HasOne(p => p.Tenant)
+                  .WithMany()
+                  .HasForeignKey(p => p.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(p => p.Customer)
+                  .WithMany()
+                  .HasForeignKey(p => p.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<PriceListEntry>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+
+            // One amount per key within a list — a second row for the same fee would make
+            // the price ambiguous, which is the one thing a price list may not be.
+            entity.HasIndex(e => new { e.PriceListId, e.Kind, e.Key }).IsUnique();
+
+            entity.Property(e => e.Amount).HasPrecision(18, 2);
+            entity.Property(e => e.Hours).HasPrecision(18, 2);
+
+            entity.HasOne(e => e.PriceList)
+                  .WithMany(p => p.Entries)
+                  .HasForeignKey(e => e.PriceListId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ---- Ticketing (§14) ------------------------------------------------------------
+
+        builder.Entity<Ticket>(entity =>
+        {
+            entity.HasKey(t => t.Id);
+
+            // The human reference people quote. Unique per tenant, not globally: two tenants
+            // each having a ticket 1042 is normal and neither should have to care.
+            entity.HasIndex(t => new { t.TenantId, t.Number }).IsUnique();
+
+            // The queue: open tickets for a customer, worst first. Also the shape the
+            // monthly report reads for a period.
+            entity.HasIndex(t => new { t.CustomerId, t.Status, t.Priority });
+            entity.HasIndex(t => new { t.TenantId, t.ReportedAt });
+            entity.HasIndex(t => t.AppId);
+
+            entity.HasOne(t => t.Tenant)
+                  .WithMany()
+                  .HasForeignKey(t => t.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(t => t.Customer)
+                  .WithMany()
+                  .HasForeignKey(t => t.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict: removing an application from EntKube must not delete the history of
+            // what went wrong with it. §14.6 makes these timestamps the record between the
+            // parties, and a record that disappears with its subject is not a record.
+            entity.HasOne(t => t.App)
+                  .WithMany()
+                  .HasForeignKey(t => t.AppId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<TicketEvent>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+            entity.HasIndex(e => new { e.TicketId, e.At });
+
+            entity.HasOne(e => e.Ticket)
+                  .WithMany(t => t.Events)
+                  .HasForeignKey(e => e.TicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketPause>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.HasIndex(p => new { p.TicketId, p.StartedAt });
+
+            entity.HasOne(p => p.Ticket)
+                  .WithMany(t => t.Pauses)
+                  .HasForeignKey(p => p.TicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TicketAffectedApp>(entity =>
+        {
+            entity.HasKey(a => new { a.TicketId, a.AppId });
+
+            entity.HasOne(a => a.Ticket)
+                  .WithMany(t => t.AffectedApps)
+                  .HasForeignKey(a => a.TicketId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(a => a.App)
+                  .WithMany()
+                  .HasForeignKey(a => a.AppId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ---- Worked time (§11, §13) -------------------------------------------------------
+
+        builder.Entity<TimeEntry>(entity =>
+        {
+            entity.HasKey(e => e.Id);
+
+            // The shape both reports read: a customer's entries over a period.
+            entity.HasIndex(e => new { e.CustomerId, e.StartedAt });
+            entity.HasIndex(e => e.TicketId);
+            entity.HasIndex(e => e.AppId);
+
+            entity.HasOne(e => e.Tenant)
+                  .WithMany()
+                  .HasForeignKey(e => e.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(e => e.Customer)
+                  .WithMany()
+                  .HasForeignKey(e => e.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict on both: removing an application or a ticket must not quietly delete
+            // the record of hours that were worked and may already have been invoiced.
+            entity.HasOne(e => e.App)
+                  .WithMany()
+                  .HasForeignKey(e => e.AppId)
+                  .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Ticket)
+                  .WithMany()
+                  .HasForeignKey(e => e.TicketId)
+                  .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(e => e.Authorisation)
+                  .WithMany(a => a.Entries)
+                  .HasForeignKey(e => e.AuthorisationId)
+                  .OnDelete(DeleteBehavior.SetNull);
+        });
+
+        builder.Entity<WorkAuthorisation>(entity =>
+        {
+            entity.HasKey(a => a.Id);
+            entity.HasIndex(a => new { a.CustomerId, a.Month });
+
+            entity.Property(a => a.Hours).HasPrecision(18, 2);
+
+            entity.HasOne(a => a.Tenant)
+                  .WithMany()
+                  .HasForeignKey(a => a.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(a => a.Customer)
+                  .WithMany()
+                  .HasForeignKey(a => a.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(a => a.Ticket)
+                  .WithMany()
+                  .HasForeignKey(a => a.TicketId)
+                  .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(a => a.App)
+                  .WithMany()
+                  .HasForeignKey(a => a.AppId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        // ---- Knowledge: what we know about an application (§10.2) ---------------------------
+
+        builder.Entity<KnowledgeSection>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => new { s.AppId, s.Kind });
+
+            entity.HasOne(s => s.Tenant)
+                  .WithMany()
+                  .HasForeignKey(s => s.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            // Cascade here, unlike tickets and time: this is documentation about the
+            // application, not a record of what was done to it or billed for it. When the
+            // application goes, §19 has already handed the runbook over.
+            entity.HasOne(s => s.App)
+                  .WithMany()
+                  .HasForeignKey(s => s.AppId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<KnowledgeRevision>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => new { r.SectionId, r.SavedAt });
+
+            entity.HasOne(r => r.Section)
+                  .WithMany(s => s.Revisions)
+                  .HasForeignKey(r => r.SectionId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<AppKnowledgeProfile>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+
+            // One classification per application; two would make "does this hold patient
+            // data" unanswerable, which §24 needs answered.
+            entity.HasIndex(p => p.AppId).IsUnique();
+
+            entity.HasOne(p => p.Tenant)
+                  .WithMany()
+                  .HasForeignKey(p => p.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(p => p.App)
+                  .WithMany()
+                  .HasForeignKey(p => p.AppId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<AppServiceDependency>(entity =>
+        {
+            entity.HasKey(d => d.Id);
+            entity.HasIndex(d => d.AppId);
+
+            entity.HasOne(d => d.Tenant)
+                  .WithMany()
+                  .HasForeignKey(d => d.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(d => d.App)
+                  .WithMany()
+                  .HasForeignKey(d => d.AppId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<EndOfLifeNotice>(entity =>
+        {
+            entity.HasKey(n => n.Id);
+            entity.HasIndex(n => new { n.AppId, n.UpgradedAt });
+
+            entity.HasOne(n => n.Tenant)
+                  .WithMany()
+                  .HasForeignKey(n => n.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(n => n.App)
+                  .WithMany()
+                  .HasForeignKey(n => n.AppId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // ---- The support mailbox (§14.3) ---------------------------------------------------
+
+        builder.Entity<InboundMailMessage>(entity =>
+        {
+            entity.HasKey(m => m.Id);
+
+            // A mailbox poll hands over the same message repeatedly; this is what makes
+            // ingestion idempotent rather than duplicating tickets.
+            entity.HasIndex(m => new { m.TenantId, m.MessageId }).IsUnique();
+            entity.Property(m => m.ToAddresses).HasMaxLength(2000);
+            entity.HasIndex(m => new { m.TenantId, m.State });
+
+            entity.HasOne(m => m.Tenant)
+                  .WithMany()
+                  .HasForeignKey(m => m.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(m => m.Customer)
+                  .WithMany()
+                  .HasForeignKey(m => m.CustomerId)
+                  .OnDelete(DeleteBehavior.SetNull);
+
+            // Restrict: the message is the evidence of when a request actually arrived,
+            // which §14.6 makes the record between the parties.
+            entity.HasOne(m => m.Ticket)
+                  .WithMany()
+                  .HasForeignKey(m => m.TicketId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<MailSuggestion>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => new { s.MessageId, s.Kind });
+
+            entity.HasOne(s => s.Message)
+                  .WithMany(m => m.Suggestions)
+                  .HasForeignKey(s => s.MessageId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<MailTriageRule>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => new { r.TenantId, r.Signal, r.SortOrder });
+
+            // One phrase per signal per tenant. Two rows for the same words would make the
+            // proposal depend on which one the ordering happened to reach first.
+            entity.HasIndex(r => new { r.TenantId, r.Signal, r.Phrase }).IsUnique();
+
+            entity.Property(r => r.Phrase).HasMaxLength(200);
+            entity.Property(r => r.Criterion).HasMaxLength(300);
+
+            entity.HasOne(r => r.Tenant)
+                  .WithMany()
+                  .HasForeignKey(r => r.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<CustomerEmailDomain>(entity =>
+        {
+            entity.HasKey(d => d.Id);
+
+            // One claim per domain per tenant. Two customers claiming the same domain would
+            // make a sender's customer depend on which row a query returned first, and the
+            // same person would land in different queues on different days.
+            entity.HasIndex(d => new { d.TenantId, d.Domain }).IsUnique();
+            entity.HasIndex(d => d.CustomerId);
+
+            entity.Property(d => d.Domain).HasMaxLength(253);
+            entity.Property(d => d.Notes).HasMaxLength(500);
+            entity.Property(d => d.AddedBy).HasMaxLength(256);
+
+            entity.HasOne(d => d.Tenant)
+                  .WithMany()
+                  .HasForeignKey(d => d.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(d => d.Customer)
+                  .WithMany()
+                  .HasForeignKey(d => d.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<CustomerSupportAddress>(entity =>
+        {
+            entity.HasKey(a => a.Id);
+
+            // One customer per address. Two claiming the same one would make routing depend
+            // on which row came back first, and the same message would land in different
+            // queues on different days.
+            entity.HasIndex(a => new { a.TenantId, a.Address }).IsUnique();
+            entity.HasIndex(a => a.CustomerId);
+
+            entity.Property(a => a.Address).HasMaxLength(320);
+            entity.Property(a => a.Notes).HasMaxLength(500);
+            entity.Property(a => a.AddedBy).HasMaxLength(256);
+
+            entity.HasOne(a => a.Tenant)
+                  .WithMany()
+                  .HasForeignKey(a => a.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(a => a.Customer)
+                  .WithMany()
+                  .HasForeignKey(a => a.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<SupportMailbox>(entity =>
+        {
+            entity.HasKey(m => m.Id);
+
+            // One support mailbox per tenant. Two would race each other for the same
+            // messages and produce the duplicate tickets the message-id check exists to
+            // prevent — only it would not, because both would win their own insert.
+            entity.HasIndex(m => m.TenantId).IsUnique();
+
+            entity.Property(m => m.Host).HasMaxLength(256);
+            entity.Property(m => m.Username).HasMaxLength(256);
+            entity.Property(m => m.Address).HasMaxLength(256);
+            entity.Property(m => m.Folder).HasMaxLength(256);
+            entity.Property(m => m.MoveToFolder).HasMaxLength(256);
+            entity.Property(m => m.LastError).HasMaxLength(2000);
+
+            entity.HasOne(m => m.Tenant)
+                  .WithMany()
+                  .HasForeignKey(m => m.TenantId)
                   .OnDelete(DeleteBehavior.Cascade);
         });
 
@@ -685,6 +1195,13 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasOne(s => s.OwnerCluster)
                 .WithMany()
                 .HasForeignKey(s => s.OwnerClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // The support mailbox's IMAP password. Deleting the mailbox takes the
+            // credential with it rather than leaving it in the vault unreferenced.
+            entity.HasOne<SupportMailbox>()
+                .WithMany()
+                .HasForeignKey(s => s.SupportMailboxId)
                 .OnDelete(DeleteBehavior.Cascade);
 
             entity.HasMany(s => s.Versions)
@@ -2547,6 +3064,33 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(sh => sh.AssigneeName).HasMaxLength(256).IsRequired();
             entity.Property(sh => sh.AssigneeEmail).HasMaxLength(256);
             entity.Property(sh => sh.Notes).HasMaxLength(1000);
+            entity.Property(sh => sh.AssigneePhone).HasMaxLength(64);
+            entity.Property(sh => sh.AssigneeTeamsHandle).HasMaxLength(256);
+            entity.Property(sh => sh.HandoverNotes).HasMaxLength(2000);
+
+            // Restrict: removing somebody from the §18 register must not erase the record of
+            // the shifts they covered, which is part of what that register is for.
+            entity.HasOne(sh => sh.Subconsultant)
+                  .WithMany()
+                  .HasForeignKey(sh => sh.SubconsultantId)
+                  .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<Subconsultant>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.HasIndex(c => new { c.TenantId, c.IsActive });
+            entity.HasIndex(c => c.CustomerId);
+
+            entity.HasOne(c => c.Tenant)
+                  .WithMany()
+                  .HasForeignKey(c => c.TenantId)
+                  .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(c => c.Customer)
+                  .WithMany()
+                  .HasForeignKey(c => c.CustomerId)
+                  .OnDelete(DeleteBehavior.Cascade);
         });
 
         // AlertRoutingRule — tenant-specific rules that map alert criteria to a notification channel.

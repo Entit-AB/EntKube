@@ -1,0 +1,350 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Reporting
+@using EntKube.Web.Services.Tickets
+@using EntKube.Web.Services.Time
+@inject MonthlyReportService Reports
+
+@* ═══════════════════════════════════════════════════════════════════
+   The §16.1 monthly report. §28 makes what it says binding unless the
+   customer disputes it within thirty days, so it is worth reading
+   before it goes out.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h6 class="mb-0">Monthly report — @report.Month.ToString("MMMM yyyy")</h6>
+            <div class="text-muted small">
+                Due @MonthlyReportService.DueDate(month).ToLocalTime().ToString("d MMMM")
+                @if (!Customer)
+                {
+                    <span>· §16.1</span>
+                }
+            </div>
+        </div>
+        <div class="btn-group btn-group-sm">
+            <button class="btn btn-outline-secondary" @onclick="() => ShiftMonth(-1)">
+                <i class="bi bi-chevron-left"></i>
+            </button>
+            <button class="btn btn-outline-secondary" @onclick="() => ShiftMonth(1)"
+                    disabled="@(month >= ThisMonth)">
+                <i class="bi bi-chevron-right"></i>
+            </button>
+        </div>
+    </div>
+
+    @if (!Customer && report.ActionPlanRequired)
+    {
+        <div class="alert alert-danger py-2 small">
+            <i class="bi bi-exclamation-octagon me-1"></i>
+            <strong>An action plan is owed.</strong>
+            More than @TicketSla.DeviationsBeforeActionPlan P1–P2 deviations in this quarter.
+            §14.6 requires a written plan at the next quarterly meeting — and if the next quarter
+            goes the same way, the customer may force the support window down to S1 on a month's
+            notice regardless of any bindningstid.
+        </div>
+    }
+
+    @if (report.OutstandingReports.Count > 0)
+    {
+        <div class="alert @(Customer ? "alert-info" : "alert-warning") py-2 small">
+            <span class="bi bi-file-earmark-text me-1"></span>
+            <strong>Incident reports still owed.</strong>
+            §14.6 asks for a written report within
+            @TicketSla.IncidentReportWorkingDays working days of closing a P1.
+            <ul class="mb-0 mt-1">
+                @foreach (OutstandingIncidentReport owed in report.OutstandingReports)
+                {
+                    <li>
+                        <strong>#@owed.Number</strong> @owed.Title — closed
+                        @owed.ClosedAt.ToLocalTime().ToString("d MMM"), report due
+                        @owed.Due.ToLocalTime().ToString("d MMM")
+                    </li>
+                }
+            </ul>
+        </div>
+    }
+
+    @if (report.ShortNoticeMaintenance.Count > 0)
+    {
+        <div class="alert alert-warning py-2 small">
+            <span class="bi bi-calendar-x me-1"></span>
+            <strong>Maintenance on short notice.</strong> These went ahead with less than the
+            agreed notice. Their downtime is excluded from availability like any other window
+            — the exclusion is what the customer is owed — but the shortfall belongs in the
+            report.
+            <ul class="mb-0 mt-1">
+                @foreach (ShortNoticeWindow w in report.ShortNoticeMaintenance)
+                {
+                    <li>
+                        <strong>@w.Title</strong>, @w.StartsAt.ToLocalTime().ToString("MMM d HH:mm")
+                        — @w.Notice.Describe()@(Customer ? "" : $", scheduled by {w.ScheduledBy}")
+                    </li>
+                }
+            </ul>
+        </div>
+    }
+
+    @* ───────────── Availability ───────────── *@
+    <h6 class="small text-muted mt-3 mb-2">Availability</h6>
+    @if (report.Availability.Count == 0)
+    {
+        <div class="text-muted small mb-3">No deployments to measure.</div>
+    }
+    else
+    {
+        <div class="table-responsive mb-4">
+            <table class="table table-sm align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Application</th>
+                        <th class="text-end">Uptime</th>
+                        <th class="text-end">Target</th>
+                        <th class="text-end">Samples</th>
+                        <th class="text-end">Excluded</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (AvailabilityRow row in report.Availability)
+                    {
+                        <tr>
+                            <td class="small fw-semibold">@row.AppName</td>
+                            <td class="text-end small">
+                                @(row.UptimePercent is double up ? $"{up:F2}%" : "—")
+                            </td>
+                            <td class="text-end small text-muted">
+                                @(row.TargetPercent is double t ? $"{t:F1}%" : "—")
+                            </td>
+                            <td class="text-end small text-muted">@row.SampleCount</td>
+                            <td class="text-end small text-muted">
+                                @if (row.ExcludedSamples == 0)
+                                {
+                                    <span>—</span>
+                                }
+                                else
+                                {
+                                    <span title="Samples taken during maintenance, left out of the figure">
+                                        @row.ExcludedSamples
+                                    </span>
+                                }
+                            </td>
+                            <td class="text-end">
+                                @if (row.TargetMet is true)
+                                {
+                                    <span class="badge bg-success">met</span>
+                                }
+                                else if (row.TargetMet is false)
+                                {
+                                    <span class="badge bg-danger">missed</span>
+                                }
+                                else
+                                {
+                                    <span class="badge bg-light text-dark border">no data</span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        <div class="text-muted small mb-3">
+            Time under an agreed maintenance window is left out of these figures. What was
+            left out is counted in the Excluded column, so a near-perfect month resting on
+            very little measurement is visible as one.
+        </div>
+    }
+
+    @* ───────────── Tickets ───────────── *@
+    <h6 class="small text-muted mb-2">Tickets</h6>
+    @if (report.ByPriority.Count == 0)
+    {
+        <div class="text-muted small mb-3">Nothing was reported this month.</div>
+    }
+    else
+    {
+        <div class="table-responsive mb-4">
+            <table class="table table-sm align-middle mb-0">
+                <thead class="table-light">
+                    <tr>
+                        <th>Prio</th>
+                        <th class="text-end">Raised</th>
+                        <th class="text-end">Resolved</th>
+                        <th class="text-end">Avg. resolution</th>
+                        <th class="text-end">Response missed</th>
+                        <th class="text-end">Resolution overrun</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (PriorityRow row in report.ByPriority)
+                    {
+                        <tr>
+                            <td><span class="badge @PriorityClass(row.Priority)">@row.Priority</span></td>
+                            <td class="text-end small">@row.Raised</td>
+                            <td class="text-end small">@row.Resolved</td>
+                            <td class="text-end small text-muted">
+                                @(row.AverageResolution is TimeSpan avg ? $"{avg.TotalHours:F1} h" : "—")
+                            </td>
+                            <td class="text-end small @(row.ResponseBreaches > 0 ? "text-danger fw-semibold" : "")">
+                                @row.ResponseBreaches
+                            </td>
+                            <td class="text-end small @(row.ResolutionOverruns > 0 ? "text-warning" : "")">
+                                @row.ResolutionOverruns
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+                <tfoot class="table-light">
+                    <tr>
+                        <th class="small">Total</th>
+                        <th class="text-end small">@report.TotalRaised</th>
+                        <th class="text-end small">@report.TotalResolved</th>
+                        <th colspan="3" class="text-end small text-muted">
+                            @report.OpenAtMonthEnd still open at month end
+                        </th>
+                    </tr>
+                </tfoot>
+            </table>
+        </div>
+    }
+
+    @* ───────────── SLA and the penalty ───────────── *@
+    @if (report.PenaltyDeviations > 0)
+    {
+        <div class="alert @(Customer ? "alert-info" : "alert-warning") py-2 small mb-4">
+            <i class="bi bi-cash-coin me-1"></i>
+            <strong>
+                @report.PenaltyDeviations response-time
+                @(report.PenaltyDeviations == 1 ? "deviation" : "deviations")
+                on P1/P2 — @report.PenaltyAmount.ToString("N0") kr.
+            </strong>
+            §14.6 sets this at @((int)(TicketSla.PenaltyFractionOfWindowFee * 100))% of the month's
+            window fee (@report.WindowFee.ToString("N0") kr) per deviation, up to
+            @TicketSla.MaxPenaltiesPerYear a calendar year.
+            @if (Customer)
+            {
+                <span>
+                    It is credited on the next invoice if you request it in writing within thirty
+                    days of this report.
+                </span>
+            }
+            else
+            {
+                <span>
+                    @report.PenaltiesAlreadyThisYear already this year;
+                    @report.PenaltiesRemainingThisYear remaining under the cap.
+                </span>
+            }
+        </div>
+    }
+    else
+    {
+        <div class="alert alert-success py-2 small mb-4">
+            <i class="bi bi-check2-circle me-1"></i>
+            No response-time deviations on P1 or P2 this month.
+        </div>
+    }
+
+    @* ───────────── Hours ───────────── *@
+    <h6 class="small text-muted mb-2">Hours consumed</h6>
+    <div class="row g-3 mb-2">
+        @if (report.Timebank.EntitledHours is decimal entitled)
+        {
+            <div class="col-sm-3">
+                <div class="border rounded text-center p-2">
+                    <div class="fs-5 fw-bold">@Hours(entitled)</div>
+                    <div class="small text-muted">Hour bank</div>
+                </div>
+            </div>
+            <div class="col-sm-3">
+                <div class="border rounded text-center p-2">
+                    <div class="fs-5 fw-bold text-primary">@Hours(report.Timebank.DrawnHours)</div>
+                    <div class="small text-muted">Drawn</div>
+                </div>
+            </div>
+            <div class="col-sm-3">
+                <div class="border rounded text-center p-2">
+                    <div class="fs-5 fw-bold">@Hours(report.Timebank.ExpiringHours)</div>
+                    <div class="small text-muted">Expired unused (§11.1)</div>
+                </div>
+            </div>
+            <div class="col-sm-3">
+                <div class="border rounded text-center p-2">
+                    <div class="fs-5 fw-bold">@Hours(report.Timebank.OverspillHours)</div>
+                    <div class="small text-muted">Beyond the bank</div>
+                </div>
+            </div>
+        }
+        else
+        {
+            <div class="col-sm-4">
+                <div class="border rounded text-center p-2">
+                    <div class="fs-5 fw-bold text-primary">@Hours(report.Hours.TotalHours)</div>
+                    <div class="small text-muted">Billed this month (time and materials)</div>
+                </div>
+            </div>
+        }
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid CustomerId { get; set; }
+
+    /// <summary>
+    /// Whether this is the customer's copy. The figures are the same either way — §16.1's
+    /// report is theirs — but our own counting against the penalty cap is not their
+    /// business, and the penalty is phrased as something they claim rather than something
+    /// we owe ourselves.
+    /// </summary>
+    [Parameter] public bool Customer { get; set; }
+
+    private static DateTime ThisMonth =>
+        new(DateTime.UtcNow.Year, DateTime.UtcNow.Month, 1, 0, 0, 0, DateTimeKind.Utc);
+
+    private bool loading = true;
+    private string? error;
+    private DateTime month = ThisMonth.AddMonths(-1);
+    private MonthlyReport report;
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task ShiftMonth(int months)
+    {
+        month = month.AddMonths(months);
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            report = await Reports.BuildAsync(CustomerId, month);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private static string Hours(decimal hours) => $"{hours:0.##} h";
+
+    private static string PriorityClass(TicketPriority priority) => priority switch
+    {
+        TicketPriority.P1 => "bg-danger",
+        TicketPriority.P2 => "bg-warning text-dark",
+        TicketPriority.P3 => "bg-info text-dark",
+        _ => "bg-secondary",
+    };
+}

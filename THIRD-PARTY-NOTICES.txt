@@ -71,7 +71,15 @@ COMPONENT INVENTORY
     License:   MIT
     Copyright: .NET Foundation and Contributors
     Project:   http://www.mimekit.net/
+- Markdig 1.4.0
+    License:   BSD-2-Clause
+    Copyright: Alexandre Mutel
+    Project:   https://xoofx.github.io/markdig
 - Microsoft.AspNetCore.App.Internal.Assets 10.0.1
+    License:   MIT
+    Copyright: © Microsoft Corporation. All rights reserved.
+    Project:   https://asp.net/
+- Microsoft.AspNetCore.Authentication.OpenIdConnect 10.0.1
     License:   MIT
     Copyright: © Microsoft Corporation. All rights reserved.
     Project:   https://asp.net/
@@ -191,27 +199,27 @@ COMPONENT INVENTORY
     License:   MIT
     Copyright: © Microsoft Corporation. All rights reserved.
     Project:   https://go.microsoft.com/fwlink/?linkid=844761
-- Microsoft.IdentityModel.Abstractions 7.7.1
+- Microsoft.IdentityModel.Abstractions 8.0.1
     License:   MIT
     Copyright: © Microsoft Corporation. All rights reserved.
     Project:   https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet
-- Microsoft.IdentityModel.JsonWebTokens 7.7.1
+- Microsoft.IdentityModel.JsonWebTokens 8.0.1
     License:   MIT
     Copyright: © Microsoft Corporation. All rights reserved.
     Project:   https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet
-- Microsoft.IdentityModel.Logging 7.7.1
+- Microsoft.IdentityModel.Logging 8.0.1
     License:   MIT
     Copyright: © Microsoft Corporation. All rights reserved.
     Project:   https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet
-- Microsoft.IdentityModel.Protocols 7.7.1
+- Microsoft.IdentityModel.Protocols 8.0.1
     License:   MIT
     Copyright: © Microsoft Corporation. All rights reserved.
     Project:   https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet
-- Microsoft.IdentityModel.Protocols.OpenIdConnect 7.7.1
+- Microsoft.IdentityModel.Protocols.OpenIdConnect 8.0.1
     License:   MIT
     Copyright: © Microsoft Corporation. All rights reserved.
     Project:   https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet
-- Microsoft.IdentityModel.Tokens 7.7.1
+- Microsoft.IdentityModel.Tokens 8.0.1
     License:   MIT
     Copyright: © Microsoft Corporation. All rights reserved.
     Project:   https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet
@@ -247,6 +255,10 @@ COMPONENT INVENTORY
     License:   PostgreSQL
     Copyright: Copyright 2025 © The Npgsql Development Team
     Project:   https://github.com/npgsql/efcore.pg
+- Pipelines.Sockets.Unofficial 2.2.8
+    License:   MIT
+    Copyright: Marc Gravell 2018
+    Project:   https://github.com/mgravell/Pipelines.Sockets.Unofficial
 - SQLitePCLRaw.bundle_e_sqlite3 2.1.11
     License:   Apache-2.0
     Copyright: Copyright 2014-2024 SourceGear, LLC
@@ -259,6 +271,10 @@ COMPONENT INVENTORY
 - SQLitePCLRaw.provider.e_sqlite3 2.1.11
     License:   Apache-2.0
     Copyright: Copyright 2014-2024 SourceGear, LLC
+- StackExchange.Redis 2.8.16
+    License:   MIT
+    Copyright: 2014 - 2024 Stack Exchange, Inc.
+    Project:   https://stackexchange.github.io/StackExchange.Redis/
 - System.ClientModel 1.5.1
     License:   MIT
     Copyright: © Microsoft Corporation. All rights reserved.
@@ -295,7 +311,7 @@ COMPONENT INVENTORY
     License:   MIT
     Copyright: © Microsoft Corporation. All rights reserved.
     Project:   https://dot.net/
-- System.IdentityModel.Tokens.Jwt 7.7.1
+- System.IdentityModel.Tokens.Jwt 8.0.1
     License:   MIT
     Copyright: © Microsoft Corporation. All rights reserved.
     Project:   https://github.com/AzureAD/azure-activedirectory-identitymodel-extensions-for-dotnet
@@ -315,6 +331,10 @@ COMPONENT INVENTORY
     License:   MIT
     Copyright: Copyright (c) Antoine Aubry and contributors
     Project:   https://github.com/aaubry/YamlDotNet/wiki
+- ZstdSharp.Port 0.8.1
+    License:   MIT
+    Copyright: Copyright Oleg Stepanischev 2024
+    Project:   https://github.com/oleg-st/ZstdSharp
 
 ========================================================================
 LICENSE TEXTS
@@ -332,6 +352,7 @@ The following components are licensed under the MIT License:
   - Humanizer.Core 2.14.1 — Copyright (c) .NET Foundation and Contributors
   - MailKit 4.17.0 — .NET Foundation and Contributors
   - Microsoft.AspNetCore.App.Internal.Assets 10.0.1 — © Microsoft Corporation. All rights reserved.
+  - Microsoft.AspNetCore.Authentication.OpenIdConnect 10.0.1 — © Microsoft Corporation. All rights reserved.
   - Microsoft.AspNetCore.Components.WebAssembly 10.0.1 — © Microsoft Corporation. All rights reserved.
   - Microsoft.AspNetCore.Components.WebAssembly.Server 10.0.1 — © Microsoft Corporation. All rights reserved.
   - Microsoft.AspNetCore.Diagnostics.EntityFrameworkCore 10.0.1 — © Microsoft Corporation. All rights reserved.
@@ -360,18 +381,20 @@ The following components are licensed under the MIT License:
   - Microsoft.Extensions.DependencyModel 10.0.8 — © Microsoft Corporation. All rights reserved.
   - Microsoft.Identity.Client 4.73.1 — © Microsoft Corporation. All rights reserved.
   - Microsoft.Identity.Client.Extensions.Msal 4.73.1 — © Microsoft Corporation. All rights reserved.
-  - Microsoft.IdentityModel.Abstractions 7.7.1 — © Microsoft Corporation. All rights reserved.
-  - Microsoft.IdentityModel.JsonWebTokens 7.7.1 — © Microsoft Corporation. All rights reserved.
-  - Microsoft.IdentityModel.Logging 7.7.1 — © Microsoft Corporation. All rights reserved.
-  - Microsoft.IdentityModel.Protocols 7.7.1 — © Microsoft Corporation. All rights reserved.
-  - Microsoft.IdentityModel.Protocols.OpenIdConnect 7.7.1 — © Microsoft Corporation. All rights reserved.
-  - Microsoft.IdentityModel.Tokens 7.7.1 — © Microsoft Corporation. All rights reserved.
+  - Microsoft.IdentityModel.Abstractions 8.0.1 — © Microsoft Corporation. All rights reserved.
+  - Microsoft.IdentityModel.JsonWebTokens 8.0.1 — © Microsoft Corporation. All rights reserved.
+  - Microsoft.IdentityModel.Logging 8.0.1 — © Microsoft Corporation. All rights reserved.
+  - Microsoft.IdentityModel.Protocols 8.0.1 — © Microsoft Corporation. All rights reserved.
+  - Microsoft.IdentityModel.Protocols.OpenIdConnect 8.0.1 — © Microsoft Corporation. All rights reserved.
+  - Microsoft.IdentityModel.Tokens 8.0.1 — © Microsoft Corporation. All rights reserved.
   - Microsoft.JSInterop.WebAssembly 10.0.1 — © Microsoft Corporation. All rights reserved.
   - Microsoft.SqlServer.Server 1.0.0 — © Microsoft Corporation. All rights reserved.
   - Microsoft.VisualStudio.SolutionPersistence 1.0.52 — © Microsoft Corporation. All rights reserved.
   - MimeKit 4.17.0 — .NET Foundation and Contributors
   - Mono.TextTemplating 3.0.0 — Copyright (c) Mikayla Hutchinson
   - Newtonsoft.Json 13.0.3 — Copyright © James Newton-King 2008
+  - Pipelines.Sockets.Unofficial 2.2.8 — Marc Gravell 2018
+  - StackExchange.Redis 2.8.16 — 2014 - 2024 Stack Exchange, Inc.
   - System.ClientModel 1.5.1 — © Microsoft Corporation. All rights reserved.
   - System.CodeDom 6.0.0 — © Microsoft Corporation. All rights reserved.
   - System.Composition 9.0.0 — © Microsoft Corporation. All rights reserved.
@@ -381,11 +404,12 @@ The following components are licensed under the MIT License:
   - System.Composition.Runtime 9.0.0 — © Microsoft Corporation. All rights reserved.
   - System.Composition.TypedParts 9.0.0 — © Microsoft Corporation. All rights reserved.
   - System.Configuration.ConfigurationManager 9.0.4 — © Microsoft Corporation. All rights reserved.
-  - System.IdentityModel.Tokens.Jwt 7.7.1 — © Microsoft Corporation. All rights reserved.
+  - System.IdentityModel.Tokens.Jwt 8.0.1 — © Microsoft Corporation. All rights reserved.
   - System.Memory.Data 8.0.1 — © Microsoft Corporation. All rights reserved.
   - System.Security.Cryptography.Pkcs 10.0.0 — © Microsoft Corporation. All rights reserved.
   - System.Security.Cryptography.ProtectedData 9.0.4 — © Microsoft Corporation. All rights reserved.
   - YamlDotNet 17.1.0 — Copyright (c) Antoine Aubry and contributors
+  - ZstdSharp.Port 0.8.1 — Copyright Oleg Stepanischev 2024
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -2917,7 +2941,7 @@ falls under the following license:
 // OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 // THE SOFTWARE.
 
-### Applies to: Microsoft.AspNetCore.App.Internal.Assets 10.0.1 (THIRD-PARTY-NOTICES.TXT); Microsoft.AspNetCore.Diagnostics.EntityFrameworkCore 10.0.1 (THIRD-PARTY-NOTICES.TXT); Microsoft.AspNetCore.Identity.EntityFrameworkCore 10.0.1 (THIRD-PARTY-NOTICES.TXT)
+### Applies to: Microsoft.AspNetCore.App.Internal.Assets 10.0.1 (THIRD-PARTY-NOTICES.TXT); Microsoft.AspNetCore.Authentication.OpenIdConnect 10.0.1 (THIRD-PARTY-NOTICES.TXT); Microsoft.AspNetCore.Diagnostics.EntityFrameworkCore 10.0.1 (THIRD-PARTY-NOTICES.TXT); Microsoft.AspNetCore.Identity.EntityFrameworkCore 10.0.1 (THIRD-PARTY-NOTICES.TXT)
 .NET Core uses third-party libraries or other resources that may be
 distributed under licenses different than the .NET Core software.
 

@@ -19,9 +19,26 @@
         <span class="bi bi-person-check-fill fs-5"></span>
         <div>
             <strong>@currentShift.AssigneeName</strong> is currently on call
+            @if (currentShift.Affiliation != OnCallAffiliation.Employee)
+            {
+                <span class="badge bg-secondary ms-1"
+                      title="Covered under §18 — the register records their approval and undertakings">
+                    @currentShift.Affiliation
+                </span>
+            }
             @if (!string.IsNullOrEmpty(currentShift.AssigneeEmail))
             {
                 <span class="text-muted ms-1">— <a href="mailto:@currentShift.AssigneeEmail">@currentShift.AssigneeEmail</a></span>
+            }
+            @if (!string.IsNullOrEmpty(currentShift.AssigneePhone))
+            {
+                <span class="ms-2"><a href="tel:@currentShift.AssigneePhone">@currentShift.AssigneePhone</a></span>
+            }
+            @if (!string.IsNullOrEmpty(currentShift.AssigneeTeamsHandle))
+            {
+                <span class="text-muted ms-2" title="§14.3 requires Teams contact for P1 and P2">
+                    <i class="bi bi-microsoft-teams me-1"></i>@currentShift.AssigneeTeamsHandle
+                </span>
             }
             <span class="text-muted ms-2 small">until @currentShift.EndsAt.ToLocalTime().ToString("MMM d HH:mm")</span>
             <span class="badge bg-success ms-2 small">@currentShift.Schedule.Name</span>
@@ -145,7 +162,25 @@ else
                                         bool past = shift.EndsAt < DateTime.UtcNow;
                                         <tr class="@(active ? "table-success" : past ? "text-muted" : "")">
                                             <td>
-                                                <div class="fw-semibold small">@shift.AssigneeName</div>
+                                                <div class="fw-semibold small">
+                                                    @shift.AssigneeName
+                                                    @if (shift.Affiliation != OnCallAffiliation.Employee)
+                                                    {
+                                                        <span class="badge bg-light text-dark border ms-1"
+                                                              style="font-size:.65rem">@shift.Affiliation</span>
+                                                    }
+                                                </div>
+                                                @if (!string.IsNullOrEmpty(shift.AssigneePhone))
+                                                {
+                                                    <div class="text-muted" style="font-size:.77rem">@shift.AssigneePhone</div>
+                                                }
+                                                @if (!string.IsNullOrEmpty(shift.HandoverNotes))
+                                                {
+                                                    <div class="text-warning" style="font-size:.77rem"
+                                                         title="Handover note">
+                                                        <i class="bi bi-arrow-left-right me-1"></i>@shift.HandoverNotes
+                                                    </div>
+                                                }
                                                 @if (!string.IsNullOrEmpty(shift.AssigneeEmail))
                                                 {
                                                     <div class="text-muted" style="font-size:.77rem">@shift.AssigneeEmail</div>
@@ -167,7 +202,13 @@ else
                                                     <span class="badge bg-info text-dark">Upcoming</span>
                                                 }
                                             </td>
-                                            <td>
+                                            <td class="text-nowrap">
+                                                <button class="btn btn-sm btn-outline-secondary me-1"
+                                                        aria-label="@($"Handover note for {shift.AssigneeName}")"
+                                                        title="What is running hot as this shift ends"
+                                                        @onclick="() => StartHandover(shift)">
+                                                    <span class="bi bi-arrow-left-right"></span>
+                                                </button>
                                                 <button class="btn btn-sm btn-outline-danger"
                                                         aria-label="@($"Delete shift for {shift.AssigneeName}")"
                                                         @onclick='() => pendingConfirm = new PendingConfirm($"Delete the on-call shift for \"{shift.AssigneeName}\"? This cannot be undone.", "Delete shift", () => DeleteShift(shift))'>
@@ -175,6 +216,34 @@ else
                                                 </button>
                                             </td>
                                         </tr>
+
+                                        @if (handoverShiftId == shift.Id)
+                                        {
+                                            <tr>
+                                                <td colspan="6" class="bg-light">
+                                                    <label class="form-label small mb-1">
+                                                        Handing over — what is running hot?
+                                                    </label>
+                                                    <div class="row g-2 align-items-end">
+                                                        <div class="col-md-9">
+                                                            <input class="form-control form-control-sm"
+                                                                   @bind="handoverText"
+                                                                   placeholder="Which incident is still live, what was tried, who has been rung" />
+                                                            <div class="form-text small">
+                                                                The one thing the next person needs and
+                                                                the one thing a rota cannot infer.
+                                                            </div>
+                                                        </div>
+                                                        <div class="col-md-3 text-end">
+                                                            <button class="btn btn-sm btn-outline-secondary me-1"
+                                                                    @onclick="() => handoverShiftId = null">Cancel</button>
+                                                            <AsyncButton CssClass="btn-sm btn-primary"
+                                                                         OnClick="SaveHandoverAsync">Save</AsyncButton>
+                                                        </div>
+                                                    </div>
+                                                </td>
+                                            </tr>
+                                        }
                                     }
                                 </tbody>
                             </table>
@@ -244,6 +313,19 @@ else
 
     private List<OnCallSchedule> schedules = [];
     private OnCallShift? currentShift;
+
+    /// <summary>
+    /// The §18 register, for the "covered by" picker. Only those the agreement already
+    /// allows near a customer's environment are offered; the rest are counted, so somebody
+    /// understands why a colleague is missing rather than assuming a bug.
+    /// </summary>
+    private List<Subconsultant> subconsultants = [];
+
+    private List<Subconsultant> EligibleSubconsultants =>
+        [.. subconsultants.Where(c =>
+            OnCallService.MayAccessCustomerEnvironments(c, DateTime.UtcNow))];
+
+    private int BlockedSubconsultants => subconsultants.Count - EligibleSubconsultants.Count;
     private bool isLoading = true;
     private Guid? expandedScheduleId;
 
@@ -255,6 +337,36 @@ else
     // Add shift form
     private Guid? addShiftScheduleId;
     private bool savingShift;
+
+    /// <summary>The shift whose handover note is open for editing, if any.</summary>
+    private Guid? handoverShiftId;
+    private string? handoverText;
+
+    private void StartHandover(OnCallShift shift)
+    {
+        handoverShiftId = handoverShiftId == shift.Id ? null : shift.Id;
+        handoverText = shift.HandoverNotes;
+    }
+
+    private async Task SaveHandoverAsync()
+    {
+        if (handoverShiftId is not Guid id)
+        {
+            return;
+        }
+
+        try
+        {
+            await OnCallService.RecordHandoverAsync(id, handoverText);
+            handoverShiftId = null;
+            await Load();
+            Toasts.Success("Handover noted.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not save the handover note: {ex.Message}");
+        }
+    }
     private ShiftForm shiftForm = new();
 
     private sealed class ScheduleForm
@@ -315,9 +427,11 @@ else
         isLoading = true;
         Task<List<OnCallSchedule>> schedulesTask = OnCallService.GetSchedulesAsync(TenantId);
         Task<OnCallShift?> currentTask = OnCallService.GetCurrentOnCallAsync(TenantId);
-        await Task.WhenAll(schedulesTask, currentTask);
+        Task<List<Subconsultant>> registerTask = OnCallService.GetSubconsultantsAsync(TenantId);
+        await Task.WhenAll(schedulesTask, currentTask, registerTask);
         schedules = schedulesTask.Result;
         currentShift = currentTask.Result;
+        subconsultants = registerTask.Result;
         isLoading = false;
     }
 

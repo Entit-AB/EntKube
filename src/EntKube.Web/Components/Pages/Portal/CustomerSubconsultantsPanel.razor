@@ -1,0 +1,234 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject OnCallService OnCall
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   §18 from the customer's side.
+
+   The agreement gives them two things here and they had neither: a
+   current list of everybody outside our payroll who works on their
+   systems, and ten working days to object to a new one. The list was
+   "available on request" — which is their right to ask, and our
+   choice to make them, and not an obviously good one when the list
+   is already in front of us.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="mb-3">
+        <div class="text-muted small">
+            Everybody outside ENTIT's own payroll who may work on your systems. We answer
+            for their work as for our own (§18), and each of them is bound by the same
+            confidentiality and data-processing terms we are (§17).
+        </div>
+    </div>
+
+    @if (AwaitingYou.Count > 0)
+    {
+        <div class="alert alert-info py-2 small">
+            <span class="bi bi-hourglass-split me-1"></span>
+            <strong>Waiting on you.</strong>
+            §18 gives you @OnCallService.SubconsultantObjectionWorkingDays working days to
+            object. If we do not hear from you they are approved, which is the agreement's
+            default rather than a deadline we set.
+        </div>
+    }
+
+    @if (people.Count == 0)
+    {
+        <EmptyState Icon="bi-people"
+                    Title="Nobody outside our own staff"
+                    Message="No subconsultant is engaged on your systems." />
+    }
+    else
+    {
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Name</th>
+                        <th>Company</th>
+                        <th>Status</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (Subconsultant person in people)
+                    {
+                        SubconsultantApproval approval = OnCallService.ApprovalStatus(person, now);
+
+                        <tr class="@(person.IsActive ? "" : "text-muted")">
+                            <td class="small fw-semibold">
+                                @person.Name
+                                @if (!person.IsActive)
+                                {
+                                    <span class="badge bg-light text-dark border ms-1">
+                                        no longer engaged
+                                    </span>
+                                }
+                            </td>
+                            <td class="small text-muted">@person.Company</td>
+                            <td class="small">
+                                @switch (approval)
+                                {
+                                    case SubconsultantApproval.Approved:
+                                        <span class="badge bg-success">approved</span>
+                                        break;
+
+                                    case SubconsultantApproval.AwaitingResponse:
+                                        <span class="badge bg-info text-dark">awaiting you</span>
+                                        @if (OnCallService.ObjectionDeadline(person) is DateTime by)
+                                        {
+                                            <div class="text-muted" style="font-size: .75rem">
+                                                approved on @by.ToLocalTime().ToString("d MMMM")
+                                                unless you object
+                                            </div>
+                                        }
+                                        break;
+
+                                    case SubconsultantApproval.Objected:
+                                        <span class="badge bg-danger">you objected</span>
+                                        @if (!string.IsNullOrWhiteSpace(person.ObjectionReason))
+                                        {
+                                            <div class="text-muted" style="font-size: .75rem">
+                                                @person.ObjectionReason
+                                            </div>
+                                        }
+                                        break;
+
+                                    default:
+                                        <span class="badge bg-secondary">not yet proposed</span>
+                                        break;
+                                }
+                            </td>
+                            <td class="text-end text-nowrap">
+                                @if (CanDecide && approval == SubconsultantApproval.AwaitingResponse)
+                                {
+                                    <AsyncButton CssClass="btn-sm btn-outline-success me-1"
+                                                 OnClick="() => ApproveAsync(person)">
+                                        Approve
+                                    </AsyncButton>
+                                    <button class="btn btn-sm btn-outline-danger"
+                                            @onclick="() => StartObjection(person)">
+                                        Object
+                                    </button>
+                                }
+                            </td>
+                        </tr>
+
+                        @if (objecting?.Id == person.Id)
+                        {
+                            <tr>
+                                <td colspan="4" class="bg-light">
+                                    <label class="form-label small mb-1">
+                                        Why are you objecting to @person.Name?
+                                    </label>
+                                    <div class="row g-2 align-items-end">
+                                        <div class="col-md-9">
+                                            <input class="form-control form-control-sm"
+                                                   @bind="objectionReason" />
+                                            <div class="form-text small">
+                                                §18 says approval may not be unreasonably withheld,
+                                                so the reason is the substance of the objection
+                                                rather than a note attached to it.
+                                            </div>
+                                        </div>
+                                        <div class="col-md-3 text-end">
+                                            <button class="btn btn-sm btn-outline-secondary me-1"
+                                                    @onclick="() => objecting = null">Cancel</button>
+                                            <AsyncButton CssClass="btn-sm btn-danger"
+                                                         OnClick="ObjectAsync">Object</AsyncButton>
+                                        </div>
+                                    </div>
+                                </td>
+                            </tr>
+                        }
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
+    [Parameter] public CustomerAccessRole AccessRole { get; set; } = CustomerAccessRole.Viewer;
+
+    private bool loading = true;
+    private string? error;
+
+    private List<Subconsultant> people = [];
+    private Subconsultant? objecting;
+    private string? objectionReason;
+    private DateTime now = DateTime.UtcNow;
+
+    /// <summary>
+    /// Approving or objecting is an act under the agreement, so it follows the same gate as
+    /// approving work beyond the hour bank rather than being open to anybody who can read.
+    /// </summary>
+    private bool CanDecide => AccessRole >= CustomerAccessRole.Operator;
+
+    private List<Subconsultant> AwaitingYou =>
+        [.. people.Where(p => OnCallService.ApprovalStatus(p, now)
+                              == SubconsultantApproval.AwaitingResponse)];
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+        now = DateTime.UtcNow;
+
+        try
+        {
+            people = await OnCall.GetSubconsultantsForCustomerAsync(Customer.TenantId, Customer.Id);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private void StartObjection(Subconsultant person)
+    {
+        objecting = person;
+        objectionReason = null;
+    }
+
+    private async Task ApproveAsync(Subconsultant person)
+    {
+        await OnCall.ApproveSubconsultantAsync(person.Id, DateTime.UtcNow);
+        Toasts.Success($"Thank you — {person.Name} is approved.");
+        await LoadAsync();
+    }
+
+    private async Task ObjectAsync()
+    {
+        if (objecting is null)
+        {
+            return;
+        }
+
+        try
+        {
+            await OnCall.ObjectToSubconsultantAsync(
+                objecting.Id, objectionReason ?? "", DateTime.UtcNow);
+
+            Toasts.Success("Recorded. We will come back to you about it.");
+            objecting = null;
+            await LoadAsync();
+        }
+        catch (ArgumentException ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+    }
+}

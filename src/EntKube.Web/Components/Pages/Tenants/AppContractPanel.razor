@@ -1,0 +1,513 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Contracts
+@using Microsoft.EntityFrameworkCore
+@inject ContractService Contracts
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   Annex A for one application — the terms it is managed on.
+
+   The classification is deliberately not editable in place: §4.1 and
+   §16.2 both change it over the life of the agreement and the
+   knowledge fee follows, so a change is a new dated entry and the
+   history stays readable.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<ConfirmDialog Visible="@(pendingDeleteLevelId is not null)"
+               Message="Delete this classification entry? Use this only to correct a mistyped row — a real change is a new entry with its own effective date."
+               ConfirmText="Delete entry"
+               IsBusy="busy"
+               OnConfirm="DeleteLevelAsync"
+               OnCancel="() => pendingDeleteLevelId = null" />
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h6 class="mb-0">Annex A — management agreement</h6>
+            <div class="text-muted small">The terms this application is managed on.</div>
+        </div>
+        @if (contract is not null && current is not null)
+        {
+            <div class="text-end">
+                <span class="badge bg-primary">@LevelName(current.Value.Level)</span>
+                @if (current.Value.Window is not null)
+                {
+                    <span class="badge bg-secondary ms-1">
+                        @current.Value.Window
+                        @if (current.Value.WindowInherited)
+                        {
+                            <span class="ms-1" title="Inherited from the parent application (§10.2.1)">↑</span>
+                        }
+                    </span>
+                }
+                else
+                {
+                    <span class="badge bg-warning text-dark ms-1">No support window</span>
+                }
+            </div>
+        }
+    </div>
+
+    @if (contract is null)
+    {
+        <EmptyState Icon="bi-file-earmark-text"
+                    Title="Not under management"
+                    Message="This application has no Annex A. Record one to bring it under the agreement." />
+        <div class="text-center mb-4">
+            <button class="btn btn-sm btn-primary" @onclick="StartNewContract">
+                <span class="bi bi-plus-lg me-1"></span>Record Annex A
+            </button>
+        </div>
+    }
+    else
+    {
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">Origin</label>
+                        <select class="form-select form-select-sm" @bind="form.Origin">
+                            <option value="@ContractOrigin.ExternallyDeveloped">Del 2 — externally developed</option>
+                            <option value="@ContractOrigin.SupplierDeveloped">Del 3 — developed by us</option>
+                        </select>
+                    </div>
+
+                    @if (form.Origin == ContractOrigin.ExternallyDeveloped)
+                    {
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Developed by</label>
+                            <input class="form-control form-control-sm" @bind="form.DevelopedBy"
+                                   placeholder="Which supplier or team" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">On-boarding fee (SEK)</label>
+                            <input type="number" step="0.01" class="form-control form-control-sm"
+                                   @bind="form.OnboardingFee" />
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Guarantee ends (§7)</label>
+                            <input type="date" class="form-control form-control-sm" @bind="form.GuaranteeEndsAt" />
+                        </div>
+                        <div class="col-md-4"></div>
+                    }
+
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">On-boarded / delivered</label>
+                        <input type="date" class="form-control form-control-sm" @bind="form.OnboardedAt" />
+                        <div class="form-text small">Billing starts from this date.</div>
+                    </div>
+
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">SLA starts (start protocol)</label>
+                        <input type="date" class="form-control form-control-sm" @bind="form.SlaStartsAt" />
+                        <div class="form-text small">Before this, §4.1 promises no response times.</div>
+                    </div>
+
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">Left management (§19)</label>
+                        <input type="date" class="form-control form-control-sm" @bind="form.ManagementEndedAt" />
+                    </div>
+
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">Parent application</label>
+                        <select class="form-select form-select-sm" @bind="form.ParentAppId">
+                            <option value="">— none (not an instance) —</option>
+                            @foreach (Data.App candidate in siblingApps)
+                            {
+                                <option value="@candidate.Id">@candidate.Name</option>
+                            }
+                        </select>
+                        <div class="form-text small">Required at level Instance (§10.2.1).</div>
+                    </div>
+
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">Monthly work cap (hours)</label>
+                        <input type="number" step="0.5" class="form-control form-control-sm"
+                               @bind="form.MonthlyWorkCapHours" />
+                        <div class="form-text small">Model B only (§12). Blank = no cap.</div>
+                    </div>
+
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted">Criticality (1–5)</label>
+                        <input type="number" min="1" max="5" class="form-control form-control-sm"
+                               @bind="form.Criticality" />
+                    </div>
+
+                    <div class="col-12">
+                        <label class="form-label small text-muted">Notes</label>
+                        <textarea class="form-control form-control-sm" rows="2" @bind="form.Notes"></textarea>
+                    </div>
+                </div>
+
+                <div class="text-end mt-3">
+                    <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveContractAsync">
+                        <span class="bi bi-save me-1"></span>Save Annex A
+                    </AsyncButton>
+                </div>
+            </div>
+        </div>
+
+        @* ───────────── Classification history ───────────── *@
+        <div class="d-flex justify-content-between align-items-center mb-2">
+            <div>
+                <h6 class="mb-0">Service level and support window</h6>
+                <div class="text-muted small">
+                    A dated series, so an invoice from an earlier month still explains itself.
+                </div>
+            </div>
+            <button class="btn btn-sm btn-outline-primary" @onclick="() => addingLevel = !addingLevel">
+                <span class="bi bi-plus-lg me-1"></span>Record a change
+            </button>
+        </div>
+
+        @if (addingLevel)
+        {
+            <div class="card shadow-sm mb-3 border-primary">
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-3">
+                            <label class="form-label small text-muted">Service level</label>
+                            <select class="form-select form-select-sm" @bind="newLevel">
+                                @foreach (ManagementLevel level in Enum.GetValues<ManagementLevel>())
+                                {
+                                    <option value="@level">@LevelName(level)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small text-muted">Support window</label>
+                            <select class="form-select form-select-sm" @bind="newWindow">
+                                <option value="">— inherit from the parent application —</option>
+                                @foreach (SupportWindow window in Enum.GetValues<SupportWindow>())
+                                {
+                                    <option value="@window">@WindowName(window)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small text-muted">Effective from</label>
+                            <input type="date" class="form-control form-control-sm" @bind="newEffectiveFrom" />
+                            <div class="form-text small">§2: a window change takes effect at a quarter boundary.</div>
+                        </div>
+                        <div class="col-md-3">
+                            <label class="form-label small text-muted">Reason</label>
+                            <input class="form-control form-control-sm" @bind="newReason"
+                                   placeholder="e.g. §16.2 quarterly review" />
+                        </div>
+                    </div>
+                    <div class="text-end mt-3">
+                        <button class="btn btn-sm btn-outline-secondary me-2" @onclick="() => addingLevel = false">Cancel</button>
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="RecordLevelAsync">
+                            Record
+                        </AsyncButton>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (levels.Count == 0)
+        {
+            <EmptyState Icon="bi-clock-history"
+                        Title="No classification yet"
+                        Message="Until a level is recorded, the application cannot be priced." />
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                    <thead class="table-light">
+                        <tr>
+                            <th>Effective from</th>
+                            <th>Level</th>
+                            <th>Window</th>
+                            <th>Reason</th>
+                            <th>Recorded</th>
+                            <th></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (ApplicationServiceLevel entry in levels)
+                        {
+                            bool inForce = ReferenceEquals(entry, InForceEntry);
+                            <tr class="@(inForce ? "table-primary" : entry.EffectiveFrom > DateTime.UtcNow ? "text-muted" : "")">
+                                <td class="fw-semibold">
+                                    @entry.EffectiveFrom.ToLocalTime().ToString("yyyy-MM-dd")
+                                    @if (inForce)
+                                    {
+                                        <span class="badge bg-primary ms-2">In force</span>
+                                    }
+                                    else if (entry.EffectiveFrom > DateTime.UtcNow)
+                                    {
+                                        <span class="badge bg-light text-dark border ms-2">Future</span>
+                                    }
+                                </td>
+                                <td>@LevelName(entry.Level)</td>
+                                <td>
+                                    @if (entry.SupportWindow is not null)
+                                    {
+                                        @entry.SupportWindow
+                                    }
+                                    else
+                                    {
+                                        <span class="text-muted small">inherited</span>
+                                    }
+                                </td>
+                                <td class="small">@entry.Reason</td>
+                                <td class="text-muted small">
+                                    @entry.RecordedAt.ToLocalTime().ToString("yyyy-MM-dd")
+                                    @if (!string.IsNullOrWhiteSpace(entry.RecordedBy))
+                                    {
+                                        <span>· @entry.RecordedBy</span>
+                                    }
+                                </td>
+                                <td class="text-end">
+                                    <button class="btn btn-sm btn-outline-danger"
+                                            aria-label="@($"Delete the classification effective {entry.EffectiveFrom:yyyy-MM-dd}")"
+                                            @onclick="() => pendingDeleteLevelId = entry.Id">
+                                        <span class="bi bi-trash"></span>
+                                    </button>
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Data.App App { get; set; } = null!;
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private bool busy;
+    private string? error;
+
+    private ApplicationContract? contract;
+    private ResolvedServiceLevel? current;
+    private List<ApplicationServiceLevel> levels = [];
+    private List<Data.App> siblingApps = [];
+
+    private ContractForm form = new();
+
+    private bool addingLevel;
+    private ManagementLevel newLevel = ManagementLevel.Standard;
+    private SupportWindow? newWindow;
+    private DateTime? newEffectiveFrom = DateTime.UtcNow.Date;
+    private string newReason = "";
+
+    private Guid? pendingDeleteLevelId;
+
+    /// <summary>The entry that governs today — the latest one that has taken effect.</summary>
+    private ApplicationServiceLevel? InForceEntry =>
+        levels.Where(l => l.EffectiveFrom <= DateTime.UtcNow)
+              .OrderByDescending(l => l.EffectiveFrom)
+              .ThenByDescending(l => l.RecordedAt)
+              .FirstOrDefault();
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            contract = await Contracts.GetContractAsync(App.Id);
+            current = await Contracts.ResolveServiceLevelAsync(App.Id, DateTime.UtcNow);
+
+            levels = contract is null ? [] : await Contracts.ListServiceLevelsAsync(contract.Id);
+
+            using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+            siblingApps = await db.Apps.AsNoTracking()
+                .Where(a => a.CustomerId == App.CustomerId && a.Id != App.Id)
+                .OrderBy(a => a.Name)
+                .ToListAsync();
+
+            form = ContractForm.From(contract);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private void StartNewContract()
+    {
+        contract = new ApplicationContract
+        {
+            Id = Guid.NewGuid(),
+            TenantId = TenantId,
+            AppId = App.Id,
+            Origin = ContractOrigin.ExternallyDeveloped,
+            OnboardedAt = DateTime.UtcNow.Date,
+        };
+
+        form = ContractForm.From(contract);
+    }
+
+    private async Task SaveContractAsync()
+    {
+        if (contract is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            form.ApplyTo(contract);
+            contract = await Contracts.SaveContractAsync(contract);
+            Toasts.Success("Annex A saved.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not save: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task RecordLevelAsync()
+    {
+        if (contract is null || newEffectiveFrom is null)
+        {
+            Toasts.Error("An effective date is required.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Contracts.RecordServiceLevelAsync(
+                contract.Id, newLevel, newWindow,
+                DateTime.SpecifyKind(newEffectiveFrom.Value.Date, DateTimeKind.Utc),
+                newReason, null);
+
+            addingLevel = false;
+            newReason = "";
+            Toasts.Success("Classification recorded.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not record: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DeleteLevelAsync()
+    {
+        if (pendingDeleteLevelId is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Contracts.DeleteServiceLevelAsync(pendingDeleteLevelId.Value);
+            pendingDeleteLevelId = null;
+            await LoadAsync();
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private static string LevelName(ManagementLevel level) => level switch
+    {
+        ManagementLevel.Simple => "Simple",
+        ManagementLevel.Standard => "Standard",
+        ManagementLevel.Complex => "Complex",
+        ManagementLevel.Instance => "Instance",
+        ManagementLevel.NeedsInvestigation => "Needs investigation",
+        _ => level.ToString(),
+    };
+
+    private static string WindowName(SupportWindow window) => window switch
+    {
+        SupportWindow.S1 => "S1 — office hours (08–17)",
+        SupportWindow.S2 => "S2 — extended, weekdays (05–22)",
+        SupportWindow.S3 => "S3 — extended, incl. weekends (05–22)",
+        SupportWindow.S4 => "S4 — around the clock",
+        _ => window.ToString(),
+    };
+
+    /// <summary>
+    /// The editable shape of Annex A. Dates bind as local <c>DateTime?</c> because that is
+    /// what an <c>input type="date"</c> produces; they are stamped back to UTC on save so a
+    /// date typed in Sweden does not drift a day.
+    /// </summary>
+    private sealed class ContractForm
+    {
+        public ContractOrigin Origin { get; set; } = ContractOrigin.ExternallyDeveloped;
+        public string? DevelopedBy { get; set; }
+        public DateTime? OnboardedAt { get; set; }
+        public DateTime? GuaranteeEndsAt { get; set; }
+        public DateTime? SlaStartsAt { get; set; }
+        public DateTime? ManagementEndedAt { get; set; }
+        public Guid? ParentAppId { get; set; }
+        public decimal? MonthlyWorkCapHours { get; set; }
+        public decimal? OnboardingFee { get; set; }
+        public int? Criticality { get; set; }
+        public string? Notes { get; set; }
+
+        public static ContractForm From(ApplicationContract? c) => c is null ? new ContractForm() : new ContractForm
+        {
+            Origin = c.Origin,
+            DevelopedBy = c.DevelopedBy,
+            OnboardedAt = c.OnboardedAt?.ToLocalTime().Date,
+            GuaranteeEndsAt = c.GuaranteeEndsAt?.ToLocalTime().Date,
+            SlaStartsAt = c.SlaStartsAt?.ToLocalTime().Date,
+            ManagementEndedAt = c.ManagementEndedAt?.ToLocalTime().Date,
+            ParentAppId = c.ParentAppId,
+            MonthlyWorkCapHours = c.MonthlyWorkCapHours,
+            OnboardingFee = c.OnboardingFee,
+            Criticality = c.Criticality,
+            Notes = c.Notes,
+        };
+
+        public void ApplyTo(ApplicationContract c)
+        {
+            c.Origin = Origin;
+            c.DevelopedBy = Origin == ContractOrigin.ExternallyDeveloped ? DevelopedBy : null;
+            c.OnboardedAt = AsUtc(OnboardedAt);
+            c.GuaranteeEndsAt = Origin == ContractOrigin.SupplierDeveloped ? AsUtc(GuaranteeEndsAt) : null;
+            c.SlaStartsAt = AsUtc(SlaStartsAt);
+            c.ManagementEndedAt = AsUtc(ManagementEndedAt);
+            c.ParentAppId = ParentAppId == Guid.Empty ? null : ParentAppId;
+            c.MonthlyWorkCapHours = MonthlyWorkCapHours;
+            c.OnboardingFee = Origin == ContractOrigin.ExternallyDeveloped ? OnboardingFee : null;
+            c.Criticality = Criticality;
+            c.Notes = Notes;
+        }
+
+        private static DateTime? AsUtc(DateTime? local) =>
+            local is null ? null : DateTime.SpecifyKind(local.Value.Date, DateTimeKind.Utc);
+    }
+}

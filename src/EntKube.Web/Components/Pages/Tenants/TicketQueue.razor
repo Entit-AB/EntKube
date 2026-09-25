@@ -1,0 +1,277 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@inject TicketService Tickets
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   The open queue for one customer, worst first, with every §14.4 clock
+   shown as time remaining rather than as a timestamp — what an operator
+   needs to know is which one runs out first.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+@if (selectedTicketId is not null)
+{
+    <TicketDetail TicketId="selectedTicketId.Value"
+                  OnBack="() => selectedTicketId = null"
+                  OnChanged="LoadAsync" />
+}
+else
+{
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h6 class="mb-0">Open tickets</h6>
+            <div class="text-muted small">
+                Response and resolution times run inside each application's support window (§14.4).
+            </div>
+        </div>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync">
+            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+        </button>
+    </div>
+
+    @if (queue.Count == 0)
+    {
+        <EmptyState Icon="bi-check2-circle" Title="Nothing open" Message="No tickets are waiting." />
+    }
+    else
+    {
+        @if (breaching.Count > 0)
+        {
+            <div class="alert alert-danger py-2 small mb-3">
+                <span class="bi bi-exclamation-octagon me-1"></span>
+                <strong>@breaching.Count</strong>
+                @(breaching.Count == 1 ? "ticket has" : "tickets have") missed a response time that
+                carries §14.6's penalty — 10% of the window fee each, up to three a year.
+            </div>
+        }
+
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>#</th>
+                        <th>Prio</th>
+                        <th>Ticket</th>
+                        <th>Status</th>
+                        <th>Response</th>
+                        <th>Resolution</th>
+                        <th>Update</th>
+                        <th>Escalation</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (TicketSlaStatus row in queue)
+                    {
+                        <tr class="@RowClass(row)" style="cursor: pointer"
+                            @onclick="() => selectedTicketId = row.Ticket.Id">
+                            <td class="text-muted small">@row.Ticket.Number</td>
+                            <td>
+                                <span class="badge @PriorityClass(row.Ticket.Priority)">@row.Ticket.Priority</span>
+                                @if (row.Ticket.PriorityConfirmedAt is null)
+                                {
+                                    <div class="text-muted" style="font-size: .7rem"
+                                         title="§14.3: the customer's view stands until the first assessment">
+                                        unconfirmed
+                                    </div>
+                                }
+                            </td>
+                            <td>
+                                <div class="fw-semibold small">@row.Ticket.Title</div>
+                                <div class="text-muted" style="font-size: .75rem">
+                                    @row.Ticket.SupportWindow
+                                    @if (row.Ticket.Channel == TicketChannel.Monitoring)
+                                    {
+                                        <span class="ms-1" title="Opened by monitoring (§14.3)">
+                                            <i class="bi bi-activity"></i>
+                                        </span>
+                                    }
+                                    @if (row.Ticket.IsCallout)
+                                    {
+                                        <span class="badge bg-warning text-dark ms-1"
+                                              title="P1 outside the bought window — call-out (§13)">call-out</span>
+                                    }
+                                </div>
+                            </td>
+                            <td>
+                                <span class="badge @StatusClass(row.Ticket.Status)">@row.Ticket.Status</span>
+                                @if (row.Ticket.Assignee is string holder)
+                                {
+                                    <span class="badge bg-light text-dark border ms-1"
+                                          title="@($"{holder} is working on this")">
+                                        <i class="bi bi-person-check me-1"></i>@holder
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span class="badge bg-light text-muted border ms-1"
+                                          title="Nobody has taken this yet">unclaimed</span>
+                                }
+                            </td>
+                            <td>@ClockCell(row.Response, "responded")</td>
+                            <td>@ClockCell(row.Resolution, "resolved")</td>
+                            <td class="small">
+                                @if (row.UpdateDue is null)
+                                {
+                                    <span class="text-muted">—</span>
+                                }
+                                else if (row.UpdateOverdue(now))
+                                {
+                                    <span class="badge bg-danger"
+                                          title="@($"§14.4: the customer has heard nothing since {row.LastUpdateAt.ToLocalTime():MMM d HH:mm}")">
+                                        update due
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">@Remaining(row.UpdateDue)</span>
+                                }
+                            </td>
+                            <td class="small">
+                                @if (row.EscalationDue is not null)
+                                {
+                                    <span class="@(row.EscalationDue <= now ? "text-danger fw-semibold" : "text-muted")">
+                                        @Remaining(row.EscalationDue)
+                                    </span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">—</span>
+                                }
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+    }
+}
+</LoadingPanel>
+}
+
+@code {
+    [Parameter, EditorRequired] public Guid CustomerId { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private DateTime now = DateTime.UtcNow;
+    private List<TicketSlaStatus> queue = [];
+    private Guid? selectedTicketId;
+
+    private List<TicketSlaStatus> breaching => [.. queue.Where(q => q.IsPenaltyDeviation)];
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            now = DateTime.UtcNow;
+            queue = await Tickets.GetOpenQueueAsync(CustomerId, now);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    /// <summary>
+    /// A clock as an operator reads it: time left, or how far past it went. A paused clock
+    /// says so rather than showing a deadline it does not have — §14.4 stops it while
+    /// someone else is being waited on, and a paused ticket is not late.
+    /// </summary>
+    private RenderFragment ClockCell(ClockStatus clock, string metVerb) => builder =>
+    {
+        int seq = 0;
+
+        if (!clock.Budget.Exists)
+        {
+            builder.OpenElement(seq++, "span");
+            builder.AddAttribute(seq++, "class", "text-muted small");
+            builder.AddAttribute(seq++, "title", "§14.4 sets no target for this priority");
+            builder.AddContent(seq++, "no target");
+            builder.CloseElement();
+            return;
+        }
+
+        if (clock.MetAt is not null)
+        {
+            builder.OpenElement(seq++, "span");
+            builder.AddAttribute(seq++, "class", clock.Breached ? "text-danger small" : "text-success small");
+            builder.AddContent(seq++, clock.Breached ? $"{metVerb} late" : metVerb);
+            builder.CloseElement();
+            return;
+        }
+
+        if (clock.Paused)
+        {
+            builder.OpenElement(seq++, "span");
+            builder.AddAttribute(seq++, "class", "text-muted small");
+            builder.AddAttribute(seq++, "title", "Waiting on another party — the clock is stopped (§14.4)");
+            builder.AddContent(seq++, "paused");
+            builder.CloseElement();
+            return;
+        }
+
+        bool late = clock.Breached;
+
+        builder.OpenElement(seq++, "span");
+        builder.AddAttribute(seq++, "class", late ? "text-danger fw-semibold small" : "small");
+        builder.AddContent(seq++, Remaining(clock.Deadline));
+        builder.CloseElement();
+    };
+
+    /// <summary>A deadline as time remaining, or how long ago it passed.</summary>
+    private string Remaining(DateTime? deadline)
+    {
+        if (deadline is null)
+        {
+            return "—";
+        }
+
+        TimeSpan left = deadline.Value - now;
+        string magnitude = Humanise(left.Duration());
+
+        return left < TimeSpan.Zero ? $"{magnitude} over" : $"{magnitude} left";
+    }
+
+    private static string Humanise(TimeSpan span) => span switch
+    {
+        { TotalMinutes: < 60 } => $"{(int)span.TotalMinutes} min",
+        { TotalHours: < 24 } => $"{(int)span.TotalHours} h",
+        _ => $"{(int)span.TotalDays} d",
+    };
+
+    private string RowClass(TicketSlaStatus row) =>
+        row.IsPenaltyDeviation ? "table-danger"
+        : row.Response is { Breached: true } ? "table-warning"
+        : "";
+
+    private static string PriorityClass(TicketPriority priority) => priority switch
+    {
+        TicketPriority.P1 => "bg-danger",
+        TicketPriority.P2 => "bg-warning text-dark",
+        TicketPriority.P3 => "bg-info text-dark",
+        _ => "bg-secondary",
+    };
+
+    private static string StatusClass(TicketStatus status) => status switch
+    {
+        TicketStatus.New => "bg-primary",
+        TicketStatus.InProgress => "bg-info text-dark",
+        TicketStatus.Waiting => "bg-secondary",
+        TicketStatus.Resolved => "bg-success",
+        TicketStatus.Rejected => "bg-dark",
+        _ => "bg-light text-dark border",
+    };
+}

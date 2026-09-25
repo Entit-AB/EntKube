@@ -2,11 +2,32 @@ namespace EntKube.Web.Data.Backup;
 
 public class BackupBundle
 {
+    // Version 7 added the envelope recipients kept beside the claimed ones.
+    // Version 6 added each customer's own support addresses.
+    // Version 5 added the customer mail-domain register.
+    // Version 4 added the platform configuration a coverage test found missing: API
+    // tokens, egress agents, cost rates, SSO group mappings, rollout policies, the
+    // client CAs and mesh mTLS policy, the Stalwart mail configuration, and the
+    // backup rows that index an object in storage.
+    // Version 3 added application management and support: the agreement's annexes, the
+    // ticket store and its clocks, worked time, the knowledge base, and the support
+    // mailbox with its triage rules.
     // Version 2 added the full set of configuration entities (routing, connectivity,
     // Kafka, governance, blueprints, CA trust, observability config, secret history, …).
-    // Version 1 bundles are still accepted on import — their missing lists deserialize
+    // Earlier bundles are still accepted on import — their missing lists deserialize
     // to empty collections.
-    public int Version { get; set; } = 2;
+    /// <summary>
+    /// The version this build writes. Import accepts anything up to it and refuses
+    /// anything beyond — a newer bundle may carry tables this build cannot place, and
+    /// restoring half of one is worse than refusing it.
+    ///
+    /// <para>Bumping this is the <em>only</em> edit a new version needs. It used to be a
+    /// literal here and a second literal in the import's guard, which is how a bundle
+    /// this very code wrote came to be rejected by it.</para>
+    /// </summary>
+    public const int CurrentVersion = 7;
+
+    public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
     public string CreatedBy { get; set; } = "";
 
@@ -117,6 +138,10 @@ public class BackupBundle
     public List<TelemetryStorageSetting> TelemetryStorageSettings { get; set; } = [];
     public List<AdvisorDigestConfig> AdvisorDigestConfigs { get; set; } = [];
 
+    // What a person decided about an advisor finding — acknowledged, snoozed, assigned,
+    // annotated. The findings themselves are recomputed on every read; these are not.
+    public List<AdvisorFindingState> AdvisorFindingStates { get; set; } = [];
+
     // Notification & secret-expiry provider config
     // NotificationProviderConfig is a GLOBAL singleton set (no TenantId) — see wipe handling on restore.
     public List<NotificationProviderConfig> NotificationProviderConfigs { get; set; } = [];
@@ -143,6 +168,69 @@ public class BackupBundle
     public List<OpenLdapUser> OpenLdapUsers { get; set; } = [];
     public List<OpenLdapGroup> OpenLdapGroups { get; set; } = [];
     public List<OpenLdapGroupMember> OpenLdapGroupMembers { get; set; } = [];
+
+    // Application management and support (the förvaltningsavtal's annexes, the work done
+    // under them, and the record of how it was reported). Migrating a server without
+    // these would lose what was agreed and every SLA timestamp §14.6 makes evidence.
+    public List<ApplicationContract> ApplicationContracts { get; set; } = [];
+    public List<ApplicationServiceLevel> ApplicationServiceLevels { get; set; } = [];
+    public List<PortfolioAgreement> PortfolioAgreements { get; set; } = [];
+    public List<ContractContact> ContractContacts { get; set; } = [];
+    public List<PriceList> PriceLists { get; set; } = [];
+    public List<PriceListEntry> PriceListEntries { get; set; } = [];
+    public List<Subconsultant> Subconsultants { get; set; } = [];
+
+    public List<Ticket> Tickets { get; set; } = [];
+    public List<TicketEvent> TicketEvents { get; set; } = [];
+    public List<TicketPause> TicketPauses { get; set; } = [];
+    public List<TicketAffectedApp> TicketAffectedApps { get; set; } = [];
+    public List<TimeEntry> TimeEntries { get; set; } = [];
+    public List<WorkAuthorisation> WorkAuthorisations { get; set; } = [];
+
+    public List<AppKnowledgeProfile> AppKnowledgeProfiles { get; set; } = [];
+    public List<KnowledgeSection> KnowledgeSections { get; set; } = [];
+    public List<KnowledgeRevision> KnowledgeRevisions { get; set; } = [];
+    public List<AppServiceDependency> AppServiceDependencies { get; set; } = [];
+    public List<EndOfLifeNotice> EndOfLifeNotices { get; set; } = [];
+
+    // The mailbox's own IMAP password rides along in VaultSecrets, like every other
+    // credential; this is only the connection settings.
+    public List<SupportMailbox> SupportMailboxes { get; set; } = [];
+    // Which domains belong to which customer. Losing it does not lose a message, but every
+    // sender who is not individually named stops being recognised — support mail quietly
+    // starts arriving unplaced and somebody has to work out why.
+    public List<CustomerEmailDomain> CustomerEmailDomains { get; set; } = [];
+    public List<CustomerSupportAddress> CustomerSupportAddresses { get; set; } = [];
+    public List<MailTriageRule> MailTriageRules { get; set; } = [];
+    public List<InboundMailMessage> InboundMailMessages { get; set; } = [];
+    public List<MailSuggestion> MailSuggestions { get; set; } = [];
+
+    // Platform configuration that nothing live recreates. Added when a coverage test was
+    // written and found them missing; see BackupCoverageTests for what is still not here.
+    public List<ApiToken> ApiTokens { get; set; } = [];
+    public List<EgressAgent> EgressAgents { get; set; } = [];
+    public List<ClusterCostRate> ClusterCostRates { get; set; } = [];
+    public List<ExternalGroupMapping> ExternalGroupMappings { get; set; } = [];
+    public List<RolloutPolicy> RolloutPolicies { get; set; } = [];
+
+    // Client certificate authorities and mesh policy. An mTLS setup that has to be
+    // rebuilt by hand is one where every partner's client certificate stops working.
+    public List<ClientCaBundle> ClientCaBundles { get; set; } = [];
+    public List<ClientCaCertificate> ClientCaCertificates { get; set; } = [];
+    public List<MeshMtlsPolicy> MeshMtlsPolicies { get; set; } = [];
+    public List<OutboundMtlsCredential> OutboundMtlsCredentials { get; set; } = [];
+
+    // The Stalwart mail stack's declarative configuration — domains and accounts are
+    // authored here and replayed onto the server, so this is the only copy.
+    public List<StalwartComponentConfig> StalwartComponentConfigs { get; set; } = [];
+    public List<StalwartMailDomain> StalwartMailDomains { get; set; } = [];
+    public List<StalwartMailAccount> StalwartMailAccounts { get; set; } = [];
+
+    // Backups whose row is the only index of an object in storage. The file survives a
+    // migration either way; without the row, nothing knows it is there.
+    public List<RegisteredPostgresDump> RegisteredPostgresDumps { get; set; } = [];
+    public List<RabbitMQBackup> RabbitMQBackups { get; set; } = [];
+    public List<KeycloakBackup> KeycloakBackups { get; set; } = [];
 
     // Secrets — stored as decrypted plaintext in the bundle.
     // On restore, fresh DEKs are generated and secrets are re-encrypted with the
@@ -200,6 +288,15 @@ public record VaultSecretRecord(
     Guid? VpnRemoteEndpointId,
     Guid? GitRepositoryId,
     Guid? CustomerGitCredentialId,
+    // These four were missing, so a restore silently unhooked every secret that used
+    // them: a cluster's kubeconfig, a Kafka cluster's credentials, an app secret's
+    // environment scoping, and the support mailbox's password. Added late, hence the
+    // position — the record is positional and the earlier fields cannot move.
+    Guid? KafkaClusterId,
+    Guid? OwnerClusterId,
+    Guid? EnvironmentId,
+    Guid? SupportMailboxId,
+    VaultSecretType SecretType,
     bool SyncToKubernetes,
     Guid? KubernetesClusterId,
     string? KubernetesSecretName,

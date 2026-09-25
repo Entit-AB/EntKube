@@ -154,6 +154,7 @@ public class AlertSyncService(
         var prometheusService = scope.ServiceProvider.GetRequiredService<PrometheusService>();
         var notificationService = scope.ServiceProvider.GetRequiredService<NotificationService>();
         var stormSuppression = scope.ServiceProvider.GetRequiredService<StormSuppressionService>();
+        var alertTickets = scope.ServiceProvider.GetRequiredService<Tickets.AlertTicketBridge>();
 
         // Fetch current alerts from Alertmanager
         KubernetesOperationResult<List<AlertInfo>> alertsResult =
@@ -285,6 +286,12 @@ public class AlertSyncService(
         await db.SaveChangesAsync(ct);
 
         KubernetesCluster cluster = clusterEarly;
+
+        // §14.3: an issue our monitoring finds is registered by us, timed at the alarm.
+        // Done before the maintenance check below, which suppresses notifications rather
+        // than the record — but only for alerts that map to an application under Annex A.
+        await alertTickets.OpenForIncidentsAsync(cluster.TenantId, newIncidents, ct);
+        await alertTickets.NoteIncidentResolvedAsync(resolvedIncidents, now, ct);
 
         // Dispatch notifications (need the saved incidents to have IDs)
         List<NotificationChannel> channels = await db.NotificationChannels

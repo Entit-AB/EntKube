@@ -37,13 +37,63 @@ else if (selectedCustomer is not null)
                 <small class="text-muted">Applications owned by this customer</small>
             </div>
         </div>
-        <button class="btn btn-sm @(customerView == "metrics" ? "btn-primary" : "btn-outline-secondary")"
-                @onclick="OpenCustomerMetrics">
-            <i class="bi bi-bar-chart-line me-1"></i>Metrics
-        </button>
+        <div class="d-flex gap-2">
+            <button class="btn btn-sm @(customerView == "tickets" ? "btn-primary" : "btn-outline-secondary")"
+                    @onclick="OpenCustomerTickets">
+                <i class="bi bi-life-preserver me-1"></i>Tickets
+            </button>
+            <button class="btn btn-sm @(customerView == "hours" ? "btn-primary" : "btn-outline-secondary")"
+                    @onclick="OpenCustomerHours">
+                <i class="bi bi-stopwatch me-1"></i>Hours
+            </button>
+            <button class="btn btn-sm @(customerView == "report" ? "btn-primary" : "btn-outline-secondary")"
+                    @onclick="OpenCustomerReport">
+                <i class="bi bi-file-earmark-bar-graph me-1"></i>Report
+            </button>
+            <button class="btn btn-sm @(customerView == "contract" ? "btn-primary" : "btn-outline-secondary")"
+                    @onclick="OpenCustomerContract">
+                <i class="bi bi-file-earmark-ruled me-1"></i>Contract
+            </button>
+            <button class="btn btn-sm @(customerView == "metrics" ? "btn-primary" : "btn-outline-secondary")"
+                    @onclick="OpenCustomerMetrics">
+                <i class="bi bi-bar-chart-line me-1"></i>Metrics
+            </button>
+        </div>
     </div>
 
-    @if (customerView == "metrics")
+    @if (customerView == "report")
+    {
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <MonthlyReportPanel CustomerId="selectedCustomer.Id" />
+            </div>
+        </div>
+    }
+    else if (customerView == "hours")
+    {
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <TimebankPanel CustomerId="selectedCustomer.Id" />
+            </div>
+        </div>
+    }
+    else if (customerView == "tickets")
+    {
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <TicketQueue CustomerId="selectedCustomer.Id" />
+            </div>
+        </div>
+    }
+    else if (customerView == "contract")
+    {
+        <div class="card shadow-sm mb-4">
+            <div class="card-body">
+                <PortfolioContractPanel Customer="selectedCustomer" />
+            </div>
+        </div>
+    }
+    else if (customerView == "metrics")
     {
         <div class="card shadow-sm mb-4">
             <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
@@ -368,7 +418,7 @@ else
     private bool showImportWizard;
     private string newAppName = "";
     private string? appError;
-    private string customerView = "apps"; // "apps" | "metrics"
+    private string customerView = "apps"; // "apps" | "metrics" | "contract" | "tickets" | "hours" | "report"
 
     // Customer metrics
     private DeploymentMetricsSummary? customerMetrics;
@@ -462,6 +512,22 @@ else
         await LoadApps();
         await LoadAccesses();
     }
+
+    /// <summary>The §16.1 monthly report, as the customer will receive it.</summary>
+    private void OpenCustomerReport() =>
+        customerView = customerView == "report" ? "apps" : "report";
+
+    /// <summary>The month's hour bank and committed hours (§11, §13, §20).</summary>
+    private void OpenCustomerHours() =>
+        customerView = customerView == "hours" ? "apps" : "hours";
+
+    /// <summary>The §14 queue for this customer — what is open and which clock runs out first.</summary>
+    private void OpenCustomerTickets() =>
+        customerView = customerView == "tickets" ? "apps" : "tickets";
+
+    /// <summary>Annex B and C for this customer's portfolio, plus the people the agreement names.</summary>
+    private void OpenCustomerContract() =>
+        customerView = customerView == "contract" ? "apps" : "contract";
 
     private async Task OpenCustomerMetrics()
     {

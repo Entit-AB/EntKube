@@ -76,6 +76,16 @@
                             title="Link or unlink environments for this app">
                         <i class="bi @(showLinkPanel ? "bi-chevron-up" : "bi-link-45deg") me-1"></i>Link / Unlink
                     </button>
+                    <button class="btn btn-sm @(showContractPanel ? "btn-secondary" : "btn-outline-secondary")"
+                            @onclick="() => showContractPanel = !showContractPanel"
+                            title="Annex A — the terms this app is managed on">
+                        <i class="bi @(showContractPanel ? "bi-chevron-up" : "bi-file-earmark-text") me-1"></i>Contract
+                    </button>
+                    <button class="btn btn-sm @(showKnowledgePanel ? "btn-secondary" : "btn-outline-secondary")"
+                            @onclick="() => showKnowledgePanel = !showKnowledgePanel"
+                            title="What we know about this app — the knowledge §10.2 charges for">
+                        <i class="bi @(showKnowledgePanel ? "bi-chevron-up" : "bi-journal-text") me-1"></i>Knowledge
+                    </button>
                     <button class="btn btn-sm btn-outline-primary" @onclick="() => showImportWizard = true"
                             title="Adopt a running workload into this app">
                         <i class="bi bi-box-arrow-in-down me-1"></i>Import Deployment
@@ -116,6 +126,26 @@
         <ImportDeploymentWizard TenantId="TenantId"
                                 TargetApp="App"
                                 OnClose="OnImportClosed" />
+    }
+
+    @* --- What we know about it: architecture, runbook, dependencies, end of life. --- *@
+    @if (showKnowledgePanel)
+    {
+        <div class="card mb-3">
+            <div class="card-body">
+                <AppKnowledgePanel App="App" TenantId="TenantId" />
+            </div>
+        </div>
+    }
+
+    @* --- Annex A — origin, dates, classification history and what it is billed on. --- *@
+    @if (showContractPanel)
+    {
+        <div class="card mb-3">
+            <div class="card-body">
+                <AppContractPanel App="App" TenantId="TenantId" />
+            </div>
+        </div>
     }
 
     @* --- Link / Unlink environments — opened from the header, available whether or
@@ -254,6 +284,8 @@
     private bool confirmClusterDelete;
     private bool deleting;
     private bool showLinkPanel;
+    private bool showContractPanel;
+    private bool showKnowledgePanel;
     private bool showImportWizard;
 
     private bool renaming;

@@ -1,6 +1,7 @@
 @using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
 @using EntKube.Web.Services
+@using EntKube.Web.Services.Support
 @using Microsoft.EntityFrameworkCore
 @inject IncidentService IncidentService
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
@@ -52,6 +53,7 @@ else
                     <th>Cluster</th>
                     <th>Starts</th>
                     <th>Ends</th>
+                    <th>Notice</th>
                     <th>Created By</th>
                     <th>Status</th>
                     <th></th>
@@ -68,6 +70,25 @@ else
                         <td class="small">@(w.Cluster?.Name ?? "All clusters")</td>
                         <td class="small">@w.StartsAt.ToLocalTime().ToString("MMM d HH:mm")</td>
                         <td class="small">@w.EndsAt.ToLocalTime().ToString("MMM d HH:mm")</td>
+                        <td class="small">
+                            @{
+                                NoticeGiven notice = MaintenanceNotice.Assess(w);
+                            }
+                            @if (notice.Exempt)
+                            {
+                                <span class="badge bg-light text-dark border">Emergency</span>
+                            }
+                            else if (notice.IsSufficient)
+                            {
+                                <span class="text-muted">@notice.Given working days</span>
+                            }
+                            else
+                            {
+                                <span class="text-danger" title="@notice.Describe()">
+                                    <span class="bi bi-exclamation-triangle me-1"></span>@notice.Given of @notice.Required
+                                </span>
+                            }
+                        </td>
                         <td class="small text-muted">@w.CreatedBy</td>
                         <td>
                             @if (active)
@@ -141,6 +162,51 @@ else
                         <InputDate Type="InputDateType.DateTimeLocal" class="form-control form-control-sm" @bind-Value="windowForm.EndsAt" />
                         <ValidationMessage For="() => windowForm.EndsAt" class="text-danger small" />
                     </div>
+                    <div class="col-md-4">
+                        <label class="form-label small">Kind</label>
+                        <InputSelect class="form-select form-select-sm" @bind-Value="windowForm.Kind">
+                            <option value="@MaintenanceKind.Planned">Planned — notice is owed</option>
+                            <option value="@MaintenanceKind.Emergency">Emergency — no notice owed</option>
+                        </InputSelect>
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small">Already announced on (local)</label>
+                        <InputDate Type="InputDateType.DateTimeLocal" class="form-control form-control-sm"
+                                   @bind-Value="windowForm.AnnouncedAt" />
+                        <div class="form-text small">
+                            Leave empty if the announcement goes out now. Fill it in when the
+                            customer was told earlier and this is only being recorded.
+                        </div>
+                    </div>
+                    <div class="col-md-4 align-self-center">
+                        @{
+                            NoticeGiven planned = windowForm.Notice();
+                        }
+                        @if (planned.Exempt)
+                        {
+                            <div class="small text-muted">
+                                No notice owed. The downtime is still excluded from availability
+                                and still shown to the customer.
+                            </div>
+                        }
+                        else if (planned.IsSufficient)
+                        {
+                            <div class="small text-success">
+                                <span class="bi bi-check-circle me-1"></span>
+                                @planned.Given working days' notice — enough.
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="small text-danger">
+                                <span class="bi bi-exclamation-triangle me-1"></span>
+                                @planned.Given working days' notice, @planned.Shortfall short of
+                                @planned.Required. Announcing today, the earliest start that gives
+                                the full notice is @windowForm.EarliestFullNoticeStart().ToString("MMM d")
+                                — or mark this an emergency.
+                            </div>
+                        }
+                    </div>
                 </div>
                 <div class="mt-3 d-flex gap-2">
                     <button type="submit" class="btn btn-sm btn-primary" disabled="@saving">
@@ -182,10 +248,39 @@ else
         [Required]
         public DateTime EndsAt { get; set; } = DateTime.Now.AddHours(2);
 
+        public MaintenanceKind Kind { get; set; } = MaintenanceKind.Planned;
+
+        /// <summary>
+        /// When the customer was told, if earlier than now. Local time, as typed.
+        /// </summary>
+        public DateTime? AnnouncedAt { get; set; }
+
+        /// <summary>
+        /// The notice this window would give if it were saved now. Shown live rather than
+        /// checked on submit: the figure is what makes someone move the date, and a
+        /// complaint that arrives only after they press Save arrives too late to be useful.
+        /// </summary>
+        public NoticeGiven Notice() => MaintenanceNotice.Assess(
+            (AnnouncedAt ?? DateTime.Now).ToUniversalTime(),
+            StartsAt.ToUniversalTime(),
+            Kind);
+
+        /// <summary>
+        /// The first date that would carry the full notice if the announcement went out
+        /// today — the answer to "then when can we do it?".
+        /// </summary>
+        public DateOnly EarliestFullNoticeStart() => SwedishHolidays.AddWorkingDays(
+            DateOnly.FromDateTime(DateTime.Now), MaintenanceNotice.DefaultWorkingDays);
+
         public IEnumerable<ValidationResult> Validate(ValidationContext validationContext)
         {
             if (EndsAt <= StartsAt)
                 yield return new ValidationResult("End time must be after start time.", new[] { nameof(EndsAt) });
+
+            if (AnnouncedAt is DateTime announced && announced > StartsAt)
+                yield return new ValidationResult(
+                    "The announcement cannot be after the maintenance starts.",
+                    new[] { nameof(AnnouncedAt) });
         }
     }
 
@@ -240,7 +335,9 @@ else
                 windowForm.ClusterId,
                 windowForm.StartsAt.ToUniversalTime(),
                 windowForm.EndsAt.ToUniversalTime(),
-                currentUser!);
+                currentUser!,
+                windowForm.Kind,
+                windowForm.AnnouncedAt?.ToUniversalTime());
 
             showAdd = false;
             await Load();

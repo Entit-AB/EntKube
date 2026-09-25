@@ -1,0 +1,391 @@
+using EntKube.Web.Data;
+using EntKube.Web.Services.Mail;
+using FluentAssertions;
+using MimeKit;
+
+namespace EntKube.Web.Tests;
+
+/// <summary>
+/// Reading a fetched message into the row we keep.
+///
+/// <para>None of this needs a mail server, and all of it is where a support mailbox goes
+/// wrong: a message with no Message-Id taken in again every two minutes, a reply that
+/// opens a second ticket about the fault already being worked, an HTML-only body that
+/// arrives as a wall of markup nothing can match a phrase against — and a Date header
+/// that starts an SLA clock before the message existed.</para>
+/// </summary>
+public class MailMessageReaderTests
+{
+    private static readonly Guid Tenant = Guid.NewGuid();
+
+    /// <summary>Tuesday 22 September 2026, 09:00 UTC.</summary>
+    private static readonly DateTime Fetched = new(2026, 9, 22, 9, 0, 0, DateTimeKind.Utc);
+
+    private static MimeMessage Message(
+        string from = "anna@entit.example",
+        string? fromName = "Anna Lindqvist",
+        string? subject = "Journalen svarar inte",
+        string? text = "Vi kommer inte in i journalsystemet.",
+        string? html = null,
+        string? messageId = "<abc123@entit.example>",
+        string? inReplyTo = null,
+        IEnumerable<string>? references = null,
+        DateTimeOffset? date = null)
+    {
+        MimeMessage message = new();
+        message.From.Add(new MailboxAddress(fromName, from));
+        message.To.Add(new MailboxAddress("Support", "support@entit.se"));
+
+        if (subject is null)
+        {
+            // MimeKit refuses a null subject, so the header is removed instead — which is
+            // what a message with no Subject: line actually looks like.
+            message.Headers.Remove(HeaderId.Subject);
+        }
+        else
+        {
+            message.Subject = subject;
+        }
+
+        if (messageId is null)
+        {
+            // MimeKit invents one on construction; a message from an appliance that omits
+            // the header has none at all.
+            message.Headers.Remove(HeaderId.MessageId);
+        }
+        else
+        {
+            message.MessageId = messageId;
+        }
+
+        if (inReplyTo is not null)
+        {
+            message.InReplyTo = inReplyTo;
+        }
+
+        foreach (string reference in references ?? [])
+        {
+            message.References.Add(reference);
+        }
+
+        if (date is DateTimeOffset when)
+        {
+            message.Date = when;
+        }
+
+        BodyBuilder body = new();
+
+        if (text is not null)
+        {
+            body.TextBody = text;
+        }
+
+        if (html is not null)
+        {
+            body.HtmlBody = html;
+        }
+
+        message.Body = body.ToMessageBody();
+
+        return message;
+    }
+
+    // ---- The plain reading --------------------------------------------------------------
+
+    [Fact]
+    public void A_message_is_read_into_the_row_we_keep()
+    {
+        InboundMailMessage row = MailMessageReader.Read(
+            Message(date: new DateTimeOffset(Fetched.AddMinutes(-4))), Tenant, Fetched);
+
+        row.TenantId.Should().Be(Tenant);
+        row.MessageId.Should().Be("abc123@entit.example");
+        row.FromAddress.Should().Be("anna@entit.example");
+        row.FromName.Should().Be("Anna Lindqvist");
+        row.Subject.Should().Be("Journalen svarar inte");
+        row.Body.Should().Be("Vi kommer inte in i journalsystemet.");
+        row.SentAt.Should().Be(Fetched.AddMinutes(-4));
+        row.ReceivedAt.Should().Be(Fetched);
+        row.State.Should().Be(MailTriageState.Received);
+    }
+
+    /// <summary>
+    /// The receiving server's verdict is carried onto the row, because the registers that
+    /// place a message read the very header it is a verdict about — and by the time
+    /// anybody looks at the queue, the message itself is long gone.
+    /// </summary>
+    [Fact]
+    public void The_trusted_servers_verdict_is_recorded()
+    {
+        MimeMessage message = Message();
+        message.Headers.Add("Authentication-Results", "mx.entit.se; dmarc=fail");
+
+        MailMessageReader.Read(message, Tenant, Fetched, trustedServer: "mx.entit.se")
+            .SenderAuthenticity.Should().Be(SenderAuthenticity.Failed);
+    }
+
+    /// <summary>
+    /// With no server named, nothing checked the sender — which is recorded as not knowing
+    /// rather than as a pass, and is the state every tenant is in until they say otherwise.
+    /// </summary>
+    [Fact]
+    public void Without_a_trusted_server_the_sender_is_unchecked()
+    {
+        MimeMessage message = Message();
+        message.Headers.Add("Authentication-Results", "mx.entit.se; dmarc=pass");
+
+        MailMessageReader.Read(message, Tenant, Fetched)
+            .SenderAuthenticity.Should().Be(SenderAuthenticity.Unknown);
+    }
+
+    /// <summary>A subject can be absent; the column cannot.</summary>
+    [Fact]
+    public void A_message_with_no_subject_gets_an_empty_one() =>
+        MailMessageReader.Read(Message(subject: null), Tenant, Fetched)
+            .Subject.Should().Be("");
+
+    /// <summary>A display name is optional, and a blank one is not a name.</summary>
+    [Fact]
+    public void A_sender_with_no_display_name_has_none_recorded() =>
+        MailMessageReader.Read(Message(fromName: ""), Tenant, Fetched)
+            .FromName.Should().BeNull();
+
+    // ---- Who it was sent to -----------------------------------------------------------------
+
+    /// <summary>
+    /// The address somebody chose to write to is how a customer's own support address
+    /// routes, so it has to survive into the row.
+    /// </summary>
+    [Fact]
+    public void The_addresses_the_sender_named_are_kept()
+    {
+        MimeMessage message = Message();
+        message.Cc.Add(new MailboxAddress("Entit AB", "entit-support@entit.se"));
+
+        MailMessageReader.Read(message, Tenant, Fetched).ToAddresses
+            .Should().Contain("support@entit.se").And.Contain("entit-support@entit.se");
+    }
+
+    /// <summary>
+    /// <b>The two are different facts and are kept apart.</b> To and Cc are written by the
+    /// sender; Delivered-To is written by our own server. Routing a customer's mail on the
+    /// first would let a stranger put their message in a chosen customer's queue by naming
+    /// the address.
+    /// </summary>
+    [Fact]
+    public void What_the_sender_claimed_is_not_mixed_with_what_our_server_recorded()
+    {
+        MimeMessage message = Message();
+        message.Cc.Add(new MailboxAddress(null, "claimed@entit.se"));
+        message.Headers.Add("Delivered-To", "real@entit.se");
+
+        InboundMailMessage row = MailMessageReader.Read(message, Tenant, Fetched);
+
+        row.ToAddresses.Should().Contain("claimed@entit.se");
+        row.ToAddresses.Should().NotContain("real@entit.se");
+
+        row.DeliveredTo.Should().Contain("real@entit.se");
+        row.DeliveredTo.Should().NotContain("claimed@entit.se");
+    }
+
+    /// <summary>
+    /// <b>The one that makes aliases work at all.</b> An address that is an alias for the
+    /// mailbox is expanded before the message is written, so it appears in no header the
+    /// sender wrote — only in the envelope header the delivering server left behind. Miss
+    /// that and a customer's own address routes nothing.
+    /// </summary>
+    [Fact]
+    public void An_address_that_survives_only_in_the_envelope_is_kept()
+    {
+        MimeMessage message = Message();
+        message.Headers.Add("Delivered-To", "entit-support@entit.se");
+
+        MailMessageReader.EnvelopeRecipientsOf(message).Should().Contain("entit-support@entit.se");
+    }
+
+    [Theory]
+    [InlineData("X-Original-To")]
+    [InlineData("X-Envelope-To")]
+    public void The_other_envelope_headers_are_read_too(string header)
+    {
+        MimeMessage message = Message();
+        message.Headers.Add(header, "entit-support@entit.se");
+
+        MailMessageReader.EnvelopeRecipientsOf(message).Should().Contain("entit-support@entit.se");
+    }
+
+    /// <summary>A server may write a display name into one; parse it rather than store it raw.</summary>
+    [Fact]
+    public void An_envelope_header_with_a_display_name_is_parsed()
+    {
+        MimeMessage message = Message();
+        message.Headers.Add("Delivered-To", "Entit AB Support <entit-support@entit.se>");
+
+        MailMessageReader.EnvelopeRecipientsOf(message).Should().Contain("entit-support@entit.se");
+    }
+
+    /// <summary>Compared case-insensitively later, so stored lower-cased and once.</summary>
+    [Fact]
+    public void Recipients_are_lower_cased_and_not_repeated()
+    {
+        MimeMessage message = Message();
+        message.Cc.Add(new MailboxAddress(null, "ENTIT-Support@Entit.SE"));
+        message.Headers.Add("Delivered-To", "entit-support@entit.se");
+
+        MailMessageReader.EnvelopeRecipientsOf(message)
+            .Count(a => a == "entit-support@entit.se").Should().Be(1);
+    }
+
+    // ---- Identity -------------------------------------------------------------------------
+
+    /// <summary>
+    /// The synthesised id has to be the same every time the same message is read, or the
+    /// check that stops one mail becoming two tickets would never fire and the message
+    /// would be taken in again on every poll for as long as it sat in the mailbox.
+    /// </summary>
+    [Fact]
+    public void A_message_with_no_id_gets_the_same_synthesised_one_every_time()
+    {
+        DateTimeOffset sent = new(2026, 9, 22, 8, 55, 0, TimeSpan.Zero);
+
+        string first = MailMessageReader.IdentityOf(Message(messageId: null, date: sent));
+        string second = MailMessageReader.IdentityOf(Message(messageId: null, date: sent));
+
+        first.Should().Be(second);
+        first.Should().StartWith("synthesised-");
+    }
+
+    [Fact]
+    public void Two_different_messages_with_no_id_are_told_apart()
+    {
+        DateTimeOffset sent = new(2026, 9, 22, 8, 55, 0, TimeSpan.Zero);
+
+        MailMessageReader.IdentityOf(Message(messageId: null, subject: "One", date: sent))
+            .Should().NotBe(
+                MailMessageReader.IdentityOf(Message(messageId: null, subject: "Two", date: sent)));
+    }
+
+    // ---- Threading --------------------------------------------------------------------------
+
+    [Fact]
+    public void A_reply_names_what_it_replies_to() =>
+        MailMessageReader.Read(Message(inReplyTo: "<first@entit.example>"), Tenant, Fetched)
+            .InReplyTo.Should().Be("first@entit.example");
+
+    /// <summary>
+    /// Some clients send only References. Without reading its last entry, a reply from
+    /// one of them opens a second ticket about the fault already being worked.
+    /// </summary>
+    [Fact]
+    public void A_reply_with_only_References_still_threads() =>
+        MailMessageReader.Read(
+            Message(references: ["<first@entit.example>", "<second@entit.example>"]), Tenant, Fetched)
+            .InReplyTo.Should().Be("second@entit.example");
+
+    [Fact]
+    public void A_message_that_starts_a_thread_replies_to_nothing() =>
+        MailMessageReader.Read(Message(), Tenant, Fetched).InReplyTo.Should().BeNull();
+
+    // ---- When it was sent ---------------------------------------------------------------------
+
+    /// <summary>
+    /// Mail sits in queues, and the customer is entitled to have the response clock run
+    /// from when they sent it.
+    /// </summary>
+    [Fact]
+    public void A_message_delayed_in_transit_counts_from_when_it_was_sent()
+    {
+        DateTime sent = Fetched.AddHours(-3);
+
+        MailMessageReader.Read(Message(date: new DateTimeOffset(sent)), Tenant, Fetched)
+            .SentAt.Should().Be(sent);
+    }
+
+    /// <summary>
+    /// The Date header is written by the sender and can be wrong or forged. A date in the
+    /// future would start a response clock before the message existed — far enough out, it
+    /// would make an answer look given before the question was asked. We certainly had it
+    /// by the time we fetched it, so that is what is used.
+    /// </summary>
+    [Fact]
+    public void A_date_in_the_future_is_not_believed()
+    {
+        MailMessageReader.Read(
+            Message(date: new DateTimeOffset(Fetched.AddDays(30))), Tenant, Fetched)
+            .SentAt.Should().Be(Fetched);
+    }
+
+    /// <summary>
+    /// Clocks disagree by a little all the time, and treating that as forgery would move
+    /// every such message's clock later — against the customer.
+    /// </summary>
+    [Fact]
+    public void A_slightly_fast_clock_is_believed()
+    {
+        DateTime sent = Fetched.AddMinutes(5);
+
+        MailMessageReader.Read(Message(date: new DateTimeOffset(sent)), Tenant, Fetched)
+            .SentAt.Should().Be(sent);
+    }
+
+    // ---- The body ------------------------------------------------------------------------------
+
+    [Fact]
+    public void A_plain_text_body_is_taken_as_it_is() =>
+        MailMessageReader.Read(Message(text: "Line one\r\nLine two"), Tenant, Fetched)
+            .Body.Should().Be("Line one\nLine two");
+
+    /// <summary>
+    /// Most mail from a corporate client is HTML only. The analyst matches phrases against
+    /// this text and an operator reads it in the queue, and neither is served by markup.
+    /// </summary>
+    [Fact]
+    public void An_HTML_only_body_is_reduced_to_its_words()
+    {
+        InboundMailMessage row = MailMessageReader.Read(
+            Message(
+                text: null,
+                html: "<html><body><p>Journalen svarar <b>inte</b>.</p><p>Akut.</p></body></html>"),
+            Tenant,
+            Fetched);
+
+        row.Body.Should().Be("Journalen svarar inte.\n\nAkut.");
+    }
+
+    /// <summary>
+    /// A marketing mail that arrived as a page of JavaScript would fill the queue entry
+    /// and give the phrase matcher a great deal of nothing to read.
+    /// </summary>
+    [Fact]
+    public void Script_and_style_are_dropped_with_their_contents()
+    {
+        MailMessageReader.PlainTextFrom(
+            "<style>.x{color:red}</style><p>Hello</p><script>alert('hi')</script>")
+            .Should().Be("Hello");
+    }
+
+    [Fact]
+    public void The_entities_that_turn_up_in_prose_are_unwrapped() =>
+        MailMessageReader.PlainTextFrom("<p>Drift &amp; underh&#229;ll &lt;akut&gt;</p>")
+            .Should().Be("Drift & underh&#229;ll <akut>");
+
+    /// <summary>
+    /// Nested markup leaves long runs of blank lines behind — six here. They collapse to
+    /// the one that separates two paragraphs, because a queue entry that is mostly
+    /// whitespace hides the line that says what broke.
+    /// </summary>
+    [Fact]
+    public void Runs_of_blank_lines_left_by_the_markup_collapse_to_one() =>
+        MailMessageReader.PlainTextFrom("<div><div><div><p>One</p></div></div></div><p>Two</p>")
+            .Should().Be("One\n\nTwo");
+
+    /// <summary>Unterminated markup should stop the reader, not run it off the end.</summary>
+    [Fact]
+    public void An_unterminated_tag_ends_the_reading() =>
+        MailMessageReader.PlainTextFrom("<p>Before</p><div class=\"unclosed")
+            .Should().Be("Before");
+
+    [Fact]
+    public void A_message_with_no_body_at_all_reads_as_empty() =>
+        MailMessageReader.Read(Message(text: null), Tenant, Fetched).Body.Should().Be("");
+}

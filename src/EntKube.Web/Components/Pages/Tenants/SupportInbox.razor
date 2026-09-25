@@ -1,0 +1,405 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Mail
+@using Microsoft.EntityFrameworkCore
+@inject SupportMailService Mail
+@inject ToastService Toasts
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject CurrentActor Actor
+
+@* ═══════════════════════════════════════════════════════════════════
+   The support mailbox, with what the analyst suggests doing about each
+   message. Everything here is a proposal: accepting one is what makes
+   it happen, and your name goes on it.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-center mb-3">
+        <div>
+            <h6 class="mb-0">Support inbox</h6>
+            <div class="text-muted small">
+                Suggestions, not decisions. §14.3 makes confirming a priority a written act — the
+                reasoning is shown so you can disagree with it.
+            </div>
+        </div>
+        <div class="d-flex gap-2 align-items-center">
+            <div class="form-check form-switch">
+                <input class="form-check-input" type="checkbox" id="handled"
+                       @bind="showHandled" @bind:after="LoadAsync" />
+                <label class="form-check-label small" for="handled">Show handled</label>
+            </div>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync">
+                <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+            </button>
+        </div>
+    </div>
+
+    @if (messages.Count == 0)
+    {
+        <EmptyState Icon="bi-inbox"
+                    Title="Nothing waiting"
+                    Message="No support mail needs triage." />
+    }
+    else
+    {
+        @foreach (InboundMailMessage message in messages)
+        {
+            <div class="card mb-3">
+                <div class="card-header bg-white py-2">
+                    <div class="d-flex justify-content-between align-items-start">
+                        <div>
+                            <div class="fw-semibold small">@message.Subject</div>
+                            <div class="text-muted" style="font-size: .75rem">
+                                @(message.FromName ?? message.FromAddress)
+                                &lt;@message.FromAddress&gt;
+                                · @message.SentAt.ToLocalTime().ToString("MMM d HH:mm")
+                                @if (message.Customer is not null)
+                                {
+                                    <span class="badge bg-light text-dark border ms-1">
+                                        @message.Customer.Name
+                                    </span>
+                                }
+                            </div>
+                        </div>
+                        <div class="text-end">
+                            <span class="badge @StateClass(message.State)">@message.State</span>
+                            @if (message.State is MailTriageState.Received or MailTriageState.Proposed)
+                            {
+                                <button class="btn btn-sm btn-link text-muted p-0 ms-2"
+                                        @onclick="() => DismissAsync(message.Id)">
+                                    dismiss
+                                </button>
+                            }
+                        </div>
+                    </div>
+                </div>
+                <div class="card-body py-2">
+                    @* ── Nobody recognised the sender ── *@
+                    @if (message.CustomerId is null
+                         && message.State is MailTriageState.Received or MailTriageState.Proposed)
+                    {
+                        <div class="alert alert-warning py-2 small">
+                            <div class="mb-2">
+                                <span class="bi bi-person-question me-1"></span>
+                                <strong>Nobody recognised this sender.</strong>
+                                Until it is placed with a customer, the analyst cannot tell which
+                                application it is about or whether their hours are spent — so
+                                everything below is what can be said without knowing who wrote in.
+                            </div>
+                            <div class="row g-2 align-items-end">
+                                <div class="col-md-5">
+                                    <label class="form-label small text-muted mb-1">It is from</label>
+                                    <select class="form-select form-select-sm"
+                                            value="@(assigning.TryGetValue(message.Id, out Guid c) ? c.ToString() : "")"
+                                            @onchange="e => assigning[message.Id] = Guid.TryParse(e.Value?.ToString(), out Guid id) ? id : Guid.Empty">
+                                        <option value="">Choose a customer…</option>
+                                        @foreach (Customer customer in customers)
+                                        {
+                                            <option value="@customer.Id">@customer.Name</option>
+                                        }
+                                    </select>
+                                </div>
+                                <div class="col-md-5">
+                                    @if (SenderDomain.Of(message.FromAddress) is string domain
+                                         && !SenderDomain.PublicProviders.Contains(domain))
+                                    {
+                                        <div class="form-check">
+                                            <input type="checkbox" class="form-check-input"
+                                                   id="@($"remember-{message.Id}")"
+                                                   checked="@remembering.Contains(message.Id)"
+                                                   @onchange="e => Remember(message.Id, (bool?)e.Value == true)" />
+                                            <label class="form-check-label small"
+                                                   for="@($"remember-{message.Id}")">
+                                                Also place future mail from <code>@domain</code>
+                                                with them
+                                            </label>
+                                        </div>
+                                    }
+                                    else
+                                    {
+                                        <div class="small text-muted">
+                                            That address is at a public provider, so only this
+                                            message is placed — a domain everybody uses cannot
+                                            belong to one customer.
+                                        </div>
+                                    }
+                                </div>
+                                <div class="col-md-2 text-end">
+                                    <AsyncButton CssClass="btn-sm btn-primary"
+                                                 OnClick="() => AssignAsync(message.Id)">Place</AsyncButton>
+                                </div>
+                            </div>
+                        </div>
+                    }
+
+                    <div class="small text-muted mb-3" style="white-space: pre-wrap">@Excerpt(message.Body)</div>
+
+                    @foreach (MailSuggestion suggestion in message.Suggestions.OrderBy(s => s.Kind))
+                    {
+                        <div class="border rounded p-2 mb-2 @(suggestion.State == MailSuggestionState.Pending ? "" : "opacity-50")">
+                            <div class="d-flex justify-content-between align-items-start">
+                                <div class="small">
+                                    <span class="badge @KindClass(suggestion.Kind) me-2">
+                                        @Label(suggestion.Kind)
+                                    </span>
+                                    <span class="fw-semibold">@suggestion.Summary</span>
+                                    @if (!string.IsNullOrWhiteSpace(suggestion.Reasoning))
+                                    {
+                                        <div class="text-muted mt-1">@suggestion.Reasoning</div>
+                                    }
+                                    @if (suggestion.Kind == MailSuggestionKind.OpenTicket
+                                         && suggestion.State == MailSuggestionState.Pending
+                                         && message.CustomerId is Guid appOwner)
+                                    {
+                                        <div class="mt-2 d-flex align-items-center gap-2">
+                                            <label class="text-muted mb-0" style="font-size: .75rem">
+                                                On application
+                                            </label>
+                                            <select class="form-select form-select-sm" style="max-width: 20rem"
+                                                    value="@ChosenApp(suggestion)"
+                                                    @onchange="e => ChooseApp(suggestion.Id, e.Value?.ToString())">
+                                                <option value="">&#8212; none of them &#8212;</option>
+                                                @foreach (Data.App app in AppsFor(appOwner))
+                                                {
+                                                    <option value="@app.Id">@app.Name</option>
+                                                }
+                                            </select>
+                                        </div>
+                                        @if (suggestion.AppId is null && AppsFor(appOwner).Count > 0)
+                                        {
+                                            <div class="text-muted mt-1" style="font-size: .75rem">
+                                                No application name was recognised in the text. Choosing one
+                                                here puts the ticket on it; leaving it as none opens the
+                                                ticket without naming an application.
+                                            </div>
+                                        }
+                                    }
+                                    @if (!string.IsNullOrWhiteSpace(suggestion.DraftText))
+                                    {
+                                        <pre class="bg-light border rounded p-2 mt-2 mb-0"
+                                             style="white-space: pre-wrap; font-size: .8rem">@suggestion.DraftText</pre>
+                                        <div class="text-muted mt-1" style="font-size: .75rem">
+                                            <i class="bi bi-info-circle me-1"></i>
+                                            A draft. Nothing is sent from here — copy it, or send it from
+                                            the ticket once you are happy with it.
+                                        </div>
+                                    }
+                                </div>
+                                @if (suggestion.State == MailSuggestionState.Pending && IsActionable(suggestion.Kind))
+                                {
+                                    <div class="d-flex gap-1 ms-3 text-nowrap">
+                                        <AsyncButton CssClass="btn-sm btn-primary"
+                                                     OnClick="() => AcceptAsync(suggestion)">
+                                            Accept
+                                        </AsyncButton>
+                                        <button class="btn btn-sm btn-outline-secondary"
+                                                @onclick="() => RejectAsync(suggestion.Id)">
+                                            No
+                                        </button>
+                                    </div>
+                                }
+                                else if (suggestion.State != MailSuggestionState.Pending)
+                                {
+                                    <div class="text-muted text-nowrap ms-3" style="font-size: .75rem">
+                                        @suggestion.State by @suggestion.DecidedBy
+                                    </div>
+                                }
+                            </div>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter] public string? ActorName { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private bool showHandled;
+    private List<InboundMailMessage> messages = [];
+    private List<Customer> customers = [];
+
+    /// <summary>The customer picked for each unplaced message, before Place is pressed.</summary>
+    private readonly Dictionary<Guid, Guid> assigning = [];
+
+    /// <summary>Which of those should also register the sender's domain.</summary>
+    private readonly HashSet<Guid> remembering = [];
+
+    /// <summary>The application picked for a suggestion, before Accept is pressed.</summary>
+    private readonly Dictionary<Guid, string> chosenApps = [];
+
+    /// <summary>Each customer's applications, for the picker.</summary>
+    private readonly Dictionary<Guid, List<Data.App>> appsByCustomer = [];
+
+    private void Remember(Guid messageId, bool on)
+    {
+        if (on) { remembering.Add(messageId); } else { remembering.Remove(messageId); }
+    }
+
+    private async Task AssignAsync(Guid messageId)
+    {
+        if (!assigning.TryGetValue(messageId, out Guid customerId) || customerId == Guid.Empty)
+        {
+            Toasts.Error("Choose which customer it is from.");
+            return;
+        }
+
+        try
+        {
+            await Mail.AssignCustomerAsync(
+                messageId, customerId, await Actor.NameAsync(), remembering.Contains(messageId));
+
+            assigning.Remove(messageId);
+            remembering.Remove(messageId);
+            Toasts.Success("Placed, and read again now that the customer is known.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not place it: {ex.Message}");
+        }
+    }
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            messages = await Mail.GetQueueAsync(TenantId, showHandled);
+
+            // Only needed to place a message nobody recognised, but loading it with the
+            // queue keeps the picker from being empty the moment somebody reaches for it.
+            using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+            customers = await db.Customers.AsNoTracking()
+                .Where(c => c.TenantId == TenantId)
+                .OrderBy(c => c.Name)
+                .ToListAsync();
+
+            // Only the customers with something in the queue, so a tenant with hundreds of
+            // applications does not load all of them to render a handful of pickers.
+            HashSet<Guid> inQueue = [.. messages.Where(m => m.CustomerId is not null)
+                                                .Select(m => m.CustomerId!.Value)];
+
+            appsByCustomer.Clear();
+
+            foreach (IGrouping<Guid, Data.App> group in (await db.Apps.AsNoTracking()
+                .Where(a => inQueue.Contains(a.CustomerId))
+                .OrderBy(a => a.Name)
+                .ToListAsync()).GroupBy(a => a.CustomerId))
+            {
+                appsByCustomer[group.Key] = [.. group];
+            }
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    /// <summary>
+    /// Which suggestions do something when accepted. A proposed priority deliberately does
+    /// not: §14.3 wants a written reason, which is given on the ticket by the person who
+    /// confirms it, not by clicking Accept on a keyword match.
+    /// </summary>
+    private static bool IsActionable(MailSuggestionKind kind) =>
+        kind is MailSuggestionKind.OpenTicket or MailSuggestionKind.AppendToTicket;
+
+    /// <summary>
+    /// The application chosen for a suggestion, as the select's value: whatever a person
+    /// picked, otherwise whatever was recognised.
+    /// </summary>
+    private string ChosenApp(MailSuggestion suggestion) =>
+        chosenApps.TryGetValue(suggestion.Id, out string? picked)
+            ? picked
+            : suggestion.AppId?.ToString() ?? "";
+
+    private void ChooseApp(Guid suggestionId, string? value) =>
+        chosenApps[suggestionId] = value ?? "";
+
+    private List<Data.App> AppsFor(Guid customerId) =>
+        appsByCustomer.TryGetValue(customerId, out List<Data.App>? found) ? found : [];
+
+    private async Task AcceptAsync(MailSuggestion suggestion)
+    {
+        // Only the kind that opens a ticket carries an application, and only then is the
+        // picker rendered — so anything else accepts with no choice attached.
+        AppChoice? chosen = suggestion.Kind == MailSuggestionKind.OpenTicket
+            ? new AppChoice(Guid.TryParse(ChosenApp(suggestion), out Guid id) ? id : null)
+            : null;
+
+        Ticket? ticket = await Mail.AcceptAsync(
+            suggestion.Id, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow, chosen);
+
+        chosenApps.Remove(suggestion.Id);
+
+        Toasts.Success(ticket is null
+            ? "Done."
+            : $"Ticket #{ticket.Number} — confirm the priority on it, with a reason (§14.3).");
+
+        await LoadAsync();
+    }
+
+    private async Task RejectAsync(Guid suggestionId)
+    {
+        await Mail.RejectAsync(suggestionId, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow);
+        await LoadAsync();
+    }
+
+    private async Task DismissAsync(Guid messageId)
+    {
+        await Mail.DismissAsync(messageId, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow);
+        await LoadAsync();
+    }
+
+    private static string Excerpt(string body) =>
+        body.Length <= 400 ? body : body[..400] + "…";
+
+    private static string Label(MailSuggestionKind kind) => kind switch
+    {
+        MailSuggestionKind.OpenTicket => "open",
+        MailSuggestionKind.AppendToTicket => "append",
+        MailSuggestionKind.ProposePriority => "priority",
+        MailSuggestionKind.DraftReply => "draft",
+        MailSuggestionKind.SuggestPause => "pause?",
+        MailSuggestionKind.FlagDevelopment => "§15?",
+        MailSuggestionKind.FlagTimebank => "hour bank",
+        MailSuggestionKind.FlagUnknownSender => "unknown",
+        MailSuggestionKind.FlagForgedSender => "not verified",
+        _ => kind.ToString(),
+    };
+
+    private static string KindClass(MailSuggestionKind kind) => kind switch
+    {
+        MailSuggestionKind.OpenTicket or MailSuggestionKind.AppendToTicket => "bg-primary",
+        MailSuggestionKind.ProposePriority => "bg-info text-dark",
+        MailSuggestionKind.FlagUnknownSender => "bg-warning text-dark",
+        // The only one in red. Everything else here is a proposal about what to do with a
+        // message; this is our own server saying the message is not from who it says.
+        MailSuggestionKind.FlagForgedSender => "bg-danger",
+        MailSuggestionKind.FlagTimebank or MailSuggestionKind.FlagDevelopment => "bg-warning text-dark",
+        _ => "bg-light text-dark border",
+    };
+
+    private static string StateClass(MailTriageState state) => state switch
+    {
+        MailTriageState.Received => "bg-primary",
+        MailTriageState.Proposed => "bg-info text-dark",
+        MailTriageState.Handled => "bg-success",
+        _ => "bg-secondary",
+    };
+}

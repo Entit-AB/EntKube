@@ -667,6 +667,55 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("AppEnvironments");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.AppKnowledgeProfile", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("BackupResponsibility")
+                        .HasColumnType("int");
+
+                    b.Property<string>("BusinessPurpose")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("DataClassification")
+                        .HasColumnType("int");
+
+                    b.Property<bool>("HandlesPatientData")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("ImpactWhenDown")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("RegulatoryScope")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("AppKnowledgeProfiles");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.AppL4Route", b =>
                 {
                     b.Property<Guid>("Id")
@@ -937,6 +986,58 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("AppRoutes");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.AppServiceDependency", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ContactRoute")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("CriticalPath")
+                        .HasColumnType("bit");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("OfficeHoursOnly")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Supplier")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("SupportHours")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("AppServiceDependencies");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.AppServicePort", b =>
                 {
                     b.Property<Guid>("Id")
@@ -998,6 +1099,106 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("AppId", "EnvironmentId");
 
                     b.ToTable("AppServicePorts");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationContract", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int?>("Criticality")
+                        .HasColumnType("int");
+
+                    b.Property<string>("DevelopedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("GuaranteeEndsAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("ManagementEndedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<decimal?>("MonthlyWorkCapHours")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("OnboardedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<decimal?>("OnboardingFee")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<int>("Origin")
+                        .HasColumnType("int");
+
+                    b.Property<Guid?>("ParentAppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("SlaStartsAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId")
+                        .IsUnique();
+
+                    b.HasIndex("ParentAppId");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("ApplicationContracts");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationServiceLevel", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("ApplicationContractId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("EffectiveFrom")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Level")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("RecordedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RecordedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("SupportWindow")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ApplicationContractId", "EffectiveFrom");
+
+                    b.ToTable("ApplicationServiceLevels");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ApplicationUser", b =>
@@ -2100,6 +2301,63 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("ConnectivityRules");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ContractContact", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Email")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Party")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Phone")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Role")
+                        .HasColumnType("int");
+
+                    b.Property<string>("TeamsHandle")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("CustomerId", "Party", "Role");
+
+                    b.ToTable("ContractContacts");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.CostLedgerCoverage", b =>
                 {
                     b.Property<Guid>("Id")
@@ -2321,6 +2579,44 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("CustomerAccesses");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.CustomerEmailDomain", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("AddedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Domain")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("nvarchar(253)");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("TenantId", "Domain")
+                        .IsUnique();
+
+                    b.ToTable("CustomerEmailDomains");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.CustomerEnvironment", b =>
                 {
                     b.Property<Guid>("CustomerId")
@@ -2415,6 +2711,47 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsUnique();
 
                     b.ToTable("CustomerGitRepoPolicies");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CustomerSupportAddress", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("AddedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("Address")
+                        .IsRequired()
+                        .HasMaxLength(320)
+                        .HasColumnType("nvarchar(320)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<bool>("ReplyFromThis")
+                        .HasColumnType("bit");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("TenantId", "Address")
+                        .IsUnique();
+
+                    b.ToTable("CustomerSupportAddresses");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Dashboard", b =>
@@ -2836,6 +3173,61 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId");
 
                     b.ToTable("EgressAgents");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.EndOfLifeNotice", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Component")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("CurrentVersion")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("EndOfLifeOn")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("NoticeGivenAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("NoticeGivenBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("ProposedUpgrade")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("UpgradeOrderedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("UpgradedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("AppId", "UpgradedAt");
+
+                    b.ToTable("EndOfLifeNotices");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>
@@ -3316,6 +3708,82 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("KeycloakRealmId");
 
                     b.ToTable("IdentityBindings");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.InboundMailMessage", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Body")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("DeliveredTo")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("FromAddress")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("FromName")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("HandledAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("HandledBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("InReplyTo")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("MessageId")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<DateTime>("ReceivedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("SenderAuthenticity")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("SentAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Subject")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("ToAddresses")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("TicketId");
+
+                    b.HasIndex("TenantId", "MessageId")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "State");
+
+                    b.ToTable("InboundMailMessages");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.IncidentNote", b =>
@@ -3953,6 +4421,85 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("KeycloakThemes");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.KnowledgeRevision", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Body")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("SavedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("SavedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("SectionId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Summary")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("SectionId", "SavedAt");
+
+                    b.ToTable("KnowledgeRevisions");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KnowledgeSection", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Body")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("int");
+
+                    b.Property<int>("ReviewIntervalDays")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("ReviewedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("ReviewedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("AppId", "Kind");
+
+                    b.ToTable("KnowledgeSections");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.KubernetesCluster", b =>
                 {
                     b.Property<Guid>("Id")
@@ -4047,11 +4594,110 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("KyvernoPolicies");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.MailSuggestion", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("DecidedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("DecidedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("DraftText")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("MessageId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int?>("Priority")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Reasoning")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("State")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Summary")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("MessageId", "Kind");
+
+                    b.ToTable("MailSuggestions");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.MailTriageRule", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Criterion")
+                        .HasMaxLength(300)
+                        .HasColumnType("nvarchar(300)");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Phrase")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<int?>("Priority")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Signal")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Signal", "Phrase")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "Signal", "SortOrder");
+
+                    b.ToTable("MailTriageRules");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.MaintenanceWindow", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("AnnouncedAt")
+                        .HasColumnType("datetime2");
 
                     b.Property<Guid?>("ClusterId")
                         .HasColumnType("uniqueidentifier");
@@ -4070,6 +4716,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<DateTime>("EndsAt")
                         .HasColumnType("datetime2");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("int");
 
                     b.Property<DateTime>("StartsAt")
                         .HasColumnType("datetime2");
@@ -4472,6 +5121,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<int?>("Covers")
+                        .HasColumnType("int");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
 
@@ -4504,6 +5156,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<int>("Affiliation")
+                        .HasColumnType("int");
+
                     b.Property<string>("AssigneeEmail")
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
@@ -4513,8 +5168,20 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
 
+                    b.Property<string>("AssigneePhone")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<string>("AssigneeTeamsHandle")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
                     b.Property<DateTime>("EndsAt")
                         .HasColumnType("datetime2");
+
+                    b.Property<string>("HandoverNotes")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
 
                     b.Property<string>("Notes")
                         .HasMaxLength(1000)
@@ -4526,11 +5193,16 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<DateTime>("StartsAt")
                         .HasColumnType("datetime2");
 
+                    b.Property<Guid?>("SubconsultantId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.HasKey("Id");
 
                     b.HasIndex("ScheduleId");
 
                     b.HasIndex("StartsAt");
+
+                    b.HasIndex("SubconsultantId");
 
                     b.ToTable("OnCallShifts");
                 });
@@ -4966,6 +5638,118 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsUnique();
 
                     b.ToTable("OutboundMtlsCredentials");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PortfolioAgreement", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("EffectiveFrom")
+                        .HasColumnType("datetime2");
+
+                    b.Property<decimal?>("HourBankHoursPerMonth")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("PricingModel")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("RecordedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RecordedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("CustomerId", "EffectiveFrom");
+
+                    b.ToTable("PortfolioAgreements");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceList", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("CreatedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Currency")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("EffectiveFrom")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("TenantId", "CustomerId", "EffectiveFrom");
+
+                    b.ToTable("PriceLists");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceListEntry", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<decimal>("Amount")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<decimal?>("Hours")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<string>("Key")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(450)");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("PriceListId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("SortOrder")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("PriceListId", "Kind", "Key")
+                        .IsUnique();
+
+                    b.ToTable("PriceListEntries");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQBackup", b =>
@@ -5984,6 +6768,156 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("StorageLinks");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.Subconsultant", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("ApprovedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Company")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("ConfidentialitySignedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid?>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("DataProcessingBoundAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Email")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Notes")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("NotifiedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("ObjectedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("ObjectionReason")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("OrganisationNumber")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Phone")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CustomerId");
+
+                    b.HasIndex("TenantId", "IsActive");
+
+                    b.ToTable("Subconsultants");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SupportMailbox", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Address")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<int>("ConsecutiveFailures")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Disposition")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Folder")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("Host")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<DateTime?>("LastMessageAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("LastPolledAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<long?>("LastSeenUid")
+                        .HasColumnType("bigint");
+
+                    b.Property<long?>("LastUidValidity")
+                        .HasColumnType("bigint");
+
+                    b.Property<string>("MoveToFolder")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<int>("PollIntervalSeconds")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Port")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("TrustedAuthenticationServer")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("UseSsl")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Username")
+                        .IsRequired()
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId")
+                        .IsUnique();
+
+                    b.ToTable("SupportMailboxes");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TelemetryAlertRule", b =>
                 {
                     b.Property<Guid>("Id")
@@ -6184,6 +7118,267 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("TenantRoles");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.Ticket", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AlertIncidentId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Assignee")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Channel")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("ClockStartsAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("ClosedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("ExcludedFromSla")
+                        .HasColumnType("bit");
+
+                    b.Property<DateTime?>("FirstResponseAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<DateTime?>("IncidentReportDeliveredAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("IsCallout")
+                        .HasColumnType("bit");
+
+                    b.Property<int>("Number")
+                        .HasColumnType("int");
+
+                    b.Property<int>("Priority")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("PriorityConfirmedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("PriorityConfirmedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("PriorityEffectiveFrom")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("PriorityReason")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int?>("ProposedPriority")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime>("ReportedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RequestedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("RequestedByEmail")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Resolution")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime?>("ResolvedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("SlaApplied")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("SlaExclusionReason")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SupportWindow")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId");
+
+                    b.HasIndex("TenantId", "Number")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "ReportedAt");
+
+                    b.HasIndex("CustomerId", "Status", "Priority");
+
+                    b.ToTable("Tickets");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketAffectedApp", b =>
+                {
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("AddedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("TicketId", "AppId");
+
+                    b.HasIndex("AppId");
+
+                    b.ToTable("TicketAffectedApps");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketEvent", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Actor")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("At")
+                        .HasColumnType("datetime2");
+
+                    b.Property<bool>("CustomerVisible")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Detail")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("int");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TicketId", "At");
+
+                    b.ToTable("TicketEvents");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketPause", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime?>("EndedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Party")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("RecordedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("RecordedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("StartedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<int>("WaitingOn")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TicketId", "StartedAt");
+
+                    b.ToTable("TicketPauses");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TimeEntry", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AuthorisationId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Description")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("EndedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int>("Kind")
+                        .HasColumnType("int");
+
+                    b.Property<string>("PerformedBy")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<DateTime>("StartedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId");
+
+                    b.HasIndex("AuthorisationId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TicketId");
+
+                    b.HasIndex("CustomerId", "StartedAt");
+
+                    b.ToTable("TimeEntries");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.VaultSecret", b =>
                 {
                     b.Property<Guid>("Id")
@@ -6273,6 +7468,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<Guid?>("StorageLinkId")
                         .HasColumnType("uniqueidentifier");
 
+                    b.Property<Guid?>("SupportMailboxId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<bool>("SyncToKubernetes")
                         .HasColumnType("bit");
 
@@ -6321,6 +7519,8 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("RegisteredPostgresDatabaseId");
 
                     b.HasIndex("StorageLinkId");
+
+                    b.HasIndex("SupportMailboxId");
 
                     b.HasIndex("VpnRemoteEndpointId");
 
@@ -6537,6 +7737,54 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsUnique();
 
                     b.ToTable("VpnTunnels");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.WorkAuthorisation", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("ApprovedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("ApprovedBy")
+                        .IsRequired()
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<decimal?>("Hours")
+                        .HasPrecision(18, 2)
+                        .HasColumnType("decimal(18,2)");
+
+                    b.Property<DateTime>("Month")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Note")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("AppId");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("TicketId");
+
+                    b.HasIndex("CustomerId", "Month");
+
+                    b.ToTable("WorkAuthorisations");
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole", b =>
@@ -6942,6 +8190,25 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Environment");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.AppKnowledgeProfile", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.AppL4Route", b =>
                 {
                     b.HasOne("EntKube.Web.Data.AppDeployment", "AppDeployment")
@@ -7039,6 +8306,25 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("ClientCaBundle");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.AppServiceDependency", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.AppServicePort", b =>
                 {
                     b.HasOne("EntKube.Web.Data.App", "App")
@@ -7056,6 +8342,43 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("App");
 
                     b.Navigation("Environment");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationContract", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.App", "ParentApp")
+                        .WithMany()
+                        .HasForeignKey("ParentAppId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("ParentApp");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationServiceLevel", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ApplicationContract", "Contract")
+                        .WithMany("ServiceLevels")
+                        .HasForeignKey("ApplicationContractId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Contract");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AuditEvent", b =>
@@ -7304,6 +8627,32 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("PeerApp");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ContractContact", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.CostLedgerCoverage", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
@@ -7365,6 +8714,25 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Customer");
 
                     b.Navigation("User");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CustomerEmailDomain", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CustomerEnvironment", b =>
@@ -7430,6 +8798,25 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Customer");
 
                     b.Navigation("Environment");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.CustomerSupportAddress", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.DatabaseBinding", b =>
@@ -7565,6 +8952,25 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasForeignKey("TenantId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.EndOfLifeNotice", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
 
                     b.Navigation("Tenant");
                 });
@@ -7779,6 +9185,31 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("AppDeployment");
 
                     b.Navigation("KeycloakRealm");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.InboundMailMessage", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+
+                    b.Navigation("Ticket");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.IncidentNote", b =>
@@ -8030,6 +9461,36 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("ComponentConfig");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.KnowledgeRevision", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KnowledgeSection", "Section")
+                        .WithMany("Revisions")
+                        .HasForeignKey("SectionId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Section");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KnowledgeSection", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.KubernetesCluster", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Environment", "Environment")
@@ -8064,6 +9525,28 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired();
 
                     b.Navigation("Environment");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.MailSuggestion", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.InboundMailMessage", "Message")
+                        .WithMany("Suggestions")
+                        .HasForeignKey("MessageId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Message");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.MailTriageRule", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
 
                     b.Navigation("Tenant");
                 });
@@ -8202,7 +9685,14 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
 
+                    b.HasOne("EntKube.Web.Data.Subconsultant", "Subconsultant")
+                        .WithMany()
+                        .HasForeignKey("SubconsultantId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
                     b.Navigation("Schedule");
+
+                    b.Navigation("Subconsultant");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OpenLdapComponentConfig", b =>
@@ -8298,6 +9788,54 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired();
 
                     b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PortfolioAgreement", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceList", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceListEntry", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.PriceList", "PriceList")
+                        .WithMany("Entries")
+                        .HasForeignKey("PriceListId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("PriceList");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQBackup", b =>
@@ -8594,6 +10132,35 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.Subconsultant", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade);
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SupportMailbox", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TenantMembership", b =>
                 {
                     b.HasOne("EntKube.Web.Data.TenantRole", "Role")
@@ -8630,6 +10197,113 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired();
 
                     b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.Ticket", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketAffectedApp", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany("AffectedApps")
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("App");
+
+                    b.Navigation("Ticket");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketEvent", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany("Events")
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Ticket");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TicketPause", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany("Pauses")
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Ticket");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.TimeEntry", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("EntKube.Web.Data.WorkAuthorisation", "Authorisation")
+                        .WithMany("Entries")
+                        .HasForeignKey("AuthorisationId")
+                        .OnDelete(DeleteBehavior.SetNull);
+
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("App");
+
+                    b.Navigation("Authorisation");
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+
+                    b.Navigation("Ticket");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.VaultSecret", b =>
@@ -8712,6 +10386,11 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasOne("EntKube.Web.Data.StorageLink", "StorageLink")
                         .WithMany()
                         .HasForeignKey("StorageLinkId");
+
+                    b.HasOne("EntKube.Web.Data.SupportMailbox", null)
+                        .WithMany()
+                        .HasForeignKey("SupportMailboxId")
+                        .OnDelete(DeleteBehavior.Cascade);
 
                     b.HasOne("EntKube.Web.Data.SecretVault", "Vault")
                         .WithMany("Secrets")
@@ -8818,6 +10497,39 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired();
 
                     b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.WorkAuthorisation", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.App", "App")
+                        .WithMany()
+                        .HasForeignKey("AppId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.HasOne("EntKube.Web.Data.Customer", "Customer")
+                        .WithMany()
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Ticket", "Ticket")
+                        .WithMany()
+                        .HasForeignKey("TicketId")
+                        .OnDelete(DeleteBehavior.Restrict);
+
+                    b.Navigation("App");
+
+                    b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+
+                    b.Navigation("Ticket");
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRoleClaim<string>", b =>
@@ -8987,6 +10699,11 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("DeploymentRoutes");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ApplicationContract", b =>
+                {
+                    b.Navigation("ServiceLevels");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
                 {
                     b.Navigation("Targets");
@@ -9079,6 +10796,11 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Memberships");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.InboundMailMessage", b =>
+                {
+                    b.Navigation("Suggestions");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.KafkaCluster", b =>
                 {
                     b.Navigation("Topics");
@@ -9099,6 +10821,11 @@ namespace EntKube.Web.Data.Migrations.SqlServer
             modelBuilder.Entity("EntKube.Web.Data.KeycloakTheme", b =>
                 {
                     b.Navigation("Realms");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.KnowledgeSection", b =>
+                {
+                    b.Navigation("Revisions");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KubernetesCluster", b =>
@@ -9147,6 +10874,11 @@ namespace EntKube.Web.Data.Migrations.SqlServer
             modelBuilder.Entity("EntKube.Web.Data.OpenStackConnection", b =>
                 {
                     b.Navigation("StorageLinks");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.PriceList", b =>
+                {
+                    b.Navigation("Entries");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQCluster", b =>
@@ -9209,6 +10941,15 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Memberships");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.Ticket", b =>
+                {
+                    b.Navigation("AffectedApps");
+
+                    b.Navigation("Events");
+
+                    b.Navigation("Pauses");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.VaultSecret", b =>
                 {
                     b.Navigation("Versions");
@@ -9224,6 +10965,11 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("LocalEndpoints");
 
                     b.Navigation("RemoteEndpoints");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.WorkAuthorisation", b =>
+                {
+                    b.Navigation("Entries");
                 });
 #pragma warning restore 612, 618
         }

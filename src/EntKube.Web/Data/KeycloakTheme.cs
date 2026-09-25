@@ -14,10 +14,10 @@ public class KeycloakTheme
 
     public Guid KeycloakComponentConfigId { get; set; }
 
-    /// <summary>Human-readable name shown in the theme selector (e.g. "Capio Blue").</summary>
+    /// <summary>Human-readable name shown in the theme selector (e.g. "Entit Blue").</summary>
     public required string Name { get; set; }
 
-    /// <summary>Keycloak-native login theme provider name (e.g. "capio", "keycloak").</summary>
+    /// <summary>Keycloak-native login theme provider name (e.g. "entit", "keycloak").</summary>
     public string? LoginTheme { get; set; }
 
     /// <summary>Keycloak-native account console theme provider name.</summary>

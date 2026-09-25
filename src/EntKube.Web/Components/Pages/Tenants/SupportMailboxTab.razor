@@ -1,0 +1,459 @@
+@using System.ComponentModel.DataAnnotations
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Mail
+@inject SupportMailboxService Mailboxes
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   Where support mail comes from. §14.3 accepts e-mail as a reporting
+   channel for P3 and P4, and in practice everything arrives there
+   first — so a mailbox that is quietly broken looks exactly like a
+   quiet week, which is why the last poll and its error are on screen.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<ConfirmDialog Visible="@confirmingDelete"
+               Message="Remove the mailbox settings and the stored password? Messages already taken in are kept — this only stops new ones arriving."
+               ConfirmText="Remove it"
+               IsBusy="busy"
+               OnConfirm="DeleteAsync"
+               OnCancel="() => confirmingDelete = false" />
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-start mb-3">
+        <div>
+            <h6 class="mb-0">Support mailbox</h6>
+            <div class="text-muted small">
+                Fetched into the triage queue, where a person decides what each message
+                becomes. Nothing here opens a ticket on its own.
+            </div>
+        </div>
+        @if (saved is not null)
+        {
+            <div class="text-nowrap">
+                <AsyncButton CssClass="btn-sm btn-outline-secondary me-2" OnClick="TestAsync">
+                    <span class="bi bi-plug me-1"></span>Test connection
+                </AsyncButton>
+                <AsyncButton CssClass="btn-sm btn-outline-primary me-2" OnClick="PollNowAsync">
+                    <span class="bi bi-arrow-repeat me-1"></span>Fetch now
+                </AsyncButton>
+                <button class="btn btn-sm btn-outline-danger" @onclick="() => confirmingDelete = true">
+                    <span class="bi bi-trash"></span>
+                </button>
+            </div>
+        }
+    </div>
+
+    @* ───────────── What the poller last saw ───────────── *@
+    @if (saved is not null)
+    {
+        <div class="alert @StatusClass() py-2 small d-flex align-items-start gap-2">
+            <span class="bi @StatusIcon() mt-1"></span>
+            <div>
+                <strong>@StatusTitle()</strong>
+                <div>
+                    @if (saved.LastPolledAt is DateTime polled)
+                    {
+                        <span>Last checked @polled.ToLocalTime().ToString("MMM d HH:mm").</span>
+                    }
+                    else
+                    {
+                        <span>Never checked.</span>
+                    }
+                    @if (saved.LastMessageAt is DateTime message)
+                    {
+                        <span class="ms-1">
+                            Last message taken in @message.ToLocalTime().ToString("MMM d HH:mm").
+                        </span>
+                    }
+                </div>
+                @if (!string.IsNullOrWhiteSpace(saved.LastError))
+                {
+                    <div class="mt-1"><code>@saved.LastError</code></div>
+                }
+                @if (saved.ConsecutiveFailures >= SupportMailboxService.FailuresBeforeBackingOff)
+                {
+                    <div class="mt-1">
+                        @saved.ConsecutiveFailures failures in a row, so fetching has stopped —
+                        repeatedly presenting a password a server is rejecting is how an account
+                        gets locked. Saving these settings again starts it.
+                    </div>
+                }
+                @if (!hasPassword)
+                {
+                    <div class="mt-1">No password is stored, so nothing can be fetched.</div>
+                }
+            </div>
+        </div>
+    }
+
+    <EditForm Model="form" OnValidSubmit="SaveAsync">
+        <DataAnnotationsValidator />
+        <div class="row g-3">
+            <div class="col-md-5">
+                <label class="form-label small text-muted">IMAP server</label>
+                <InputText class="form-control form-control-sm" @bind-Value="form.Host"
+                           placeholder="imap.example.com" />
+                <ValidationMessage For="() => form.Host" class="text-danger small" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small text-muted">Port</label>
+                <InputNumber class="form-control form-control-sm" @bind-Value="form.Port" />
+                <ValidationMessage For="() => form.Port" class="text-danger small" />
+            </div>
+            <div class="col-md-5 align-self-end">
+                <div class="form-check">
+                    <InputCheckbox class="form-check-input" id="mailbox-ssl" @bind-Value="form.UseSsl" />
+                    <label class="form-check-label small" for="mailbox-ssl">
+                        TLS on connect (port 993). Off means STARTTLS on port 143 —
+                        never an unencrypted connection.
+                    </label>
+                </div>
+            </div>
+
+            <div class="col-md-4">
+                <label class="form-label small text-muted">Username</label>
+                <InputText class="form-control form-control-sm" @bind-Value="form.Username"
+                           autocomplete="off" />
+                <ValidationMessage For="() => form.Username" class="text-danger small" />
+            </div>
+            <div class="col-md-4">
+                <label class="form-label small text-muted">
+                    Password
+                    @if (hasPassword)
+                    {
+                        <span class="badge bg-light text-dark border ms-1">stored</span>
+                    }
+                </label>
+                <InputText type="password" class="form-control form-control-sm"
+                           @bind-Value="form.Password" autocomplete="new-password"
+                           placeholder="@(hasPassword ? "unchanged" : "")" />
+                <div class="form-text small">
+                    Kept encrypted in the tenant's vault, never shown back. Leaving it
+                    empty keeps the one already stored.
+                </div>
+            </div>
+            <div class="col-md-4">
+                <label class="form-label small text-muted">Support address</label>
+                <InputText class="form-control form-control-sm" @bind-Value="form.Address"
+                           placeholder="support@example.com" />
+                <div class="form-text small">What replies should come from.</div>
+            </div>
+
+            <div class="col-md-3">
+                <label class="form-label small text-muted">Folder</label>
+                <InputText class="form-control form-control-sm" @bind-Value="form.Folder" />
+                <ValidationMessage For="() => form.Folder" class="text-danger small" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small text-muted">Check every (seconds)</label>
+                <InputNumber class="form-control form-control-sm" @bind-Value="form.PollIntervalSeconds" />
+                <ValidationMessage For="() => form.PollIntervalSeconds" class="text-danger small" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small text-muted">Once taken in</label>
+                <InputSelect class="form-select form-select-sm" @bind-Value="form.Disposition">
+                    <option value="@MailboxDisposition.MarkSeen">Mark it read</option>
+                    <option value="@MailboxDisposition.MoveToFolder">Move it to a folder</option>
+                    <option value="@MailboxDisposition.LeaveAlone">Leave the mailbox alone</option>
+                </InputSelect>
+            </div>
+            <div class="col-md-3">
+                @if (form.Disposition == MailboxDisposition.MoveToFolder)
+                {
+                    <label class="form-label small text-muted">Move to</label>
+                    <InputText class="form-control form-control-sm" @bind-Value="form.MoveToFolder"
+                               placeholder="Processed" />
+                    <ValidationMessage For="() => form.MoveToFolder" class="text-danger small" />
+                }
+            </div>
+
+            <div class="col-12">
+                <label class="form-label small text-muted">
+                    Trust the sender checks from
+                </label>
+                <InputText class="form-control form-control-sm"
+                           @bind-Value="form.TrustedAuthenticationServer"
+                           placeholder="mx.example.com" />
+                <div class="form-text small">
+                    The name your own mail server stamps on its <code>Authentication-Results</code>
+                    header — usually its hostname. It is normally the first word of that header
+                    on any message already in this mailbox.
+                    @if (string.IsNullOrWhiteSpace(form.TrustedAuthenticationServer))
+                    {
+                        <span class="text-warning-emphasis">
+                            Left empty, nothing checks who a message is from. A stranger writing
+                            as one of a customer's named contacts is placed in that customer's
+                            queue with no warning — because the From address is what places it,
+                            and anybody can write that.
+                        </span>
+                    }
+                    else
+                    {
+                        <span>
+                            Only verdicts stamped by this name are believed. A sender can add
+                            that header themselves, so one from any other server is read and
+                            discarded.
+                        </span>
+                    }
+                </div>
+            </div>
+
+            <div class="col-12">
+                <div class="form-check">
+                    <InputCheckbox class="form-check-input" id="mailbox-enabled"
+                                   @bind-Value="form.IsEnabled" />
+                    <label class="form-check-label small" for="mailbox-enabled">
+                        <strong>Fetch mail from this mailbox.</strong>
+                        Test the connection before switching this on.
+                    </label>
+                </div>
+            </div>
+        </div>
+
+        <div class="mt-3">
+            <button type="submit" class="btn btn-sm btn-primary" disabled="@busy">
+                @if (busy)
+                {
+                    <span class="spinner-border spinner-border-sm me-1"></span>
+                }
+                Save
+            </button>
+        </div>
+    </EditForm>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private bool busy;
+    private bool confirmingDelete;
+    private string? error;
+
+    private SupportMailbox? saved;
+    private bool hasPassword;
+    private MailboxForm form = new();
+
+    private sealed class MailboxForm : IValidatableObject
+    {
+        [Required(ErrorMessage = "The server is required.")]
+        [StringLength(256)]
+        public string Host { get; set; } = "";
+
+        [Range(1, 65535, ErrorMessage = "A port is between 1 and 65535.")]
+        public int Port { get; set; } = 993;
+
+        public bool UseSsl { get; set; } = true;
+
+        [Required(ErrorMessage = "The username is required.")]
+        [StringLength(256)]
+        public string Username { get; set; } = "";
+
+        /// <summary>Only ever written. An empty box means "keep what is stored".</summary>
+        public string? Password { get; set; }
+
+        [StringLength(256)]
+        public string? Address { get; set; }
+
+        [Required(ErrorMessage = "A folder is required.")]
+        [StringLength(256)]
+        public string Folder { get; set; } = "INBOX";
+
+        public bool IsEnabled { get; set; }
+
+        public int PollIntervalSeconds { get; set; } = 120;
+
+        public MailboxDisposition Disposition { get; set; } = MailboxDisposition.MarkSeen;
+
+        [StringLength(256)]
+        public string? MoveToFolder { get; set; }
+
+        [StringLength(256)]
+        public string? TrustedAuthenticationServer { get; set; }
+
+        public IEnumerable<ValidationResult> Validate(ValidationContext context)
+        {
+            int floor = (int)SupportMailPoller.MinimumInterval.TotalSeconds;
+
+            if (PollIntervalSeconds < floor)
+            {
+                yield return new ValidationResult(
+                    $"A server will start refusing connections long before this is useful — {floor} seconds is the floor.",
+                    [nameof(PollIntervalSeconds)]);
+            }
+
+            if (Disposition == MailboxDisposition.MoveToFolder && string.IsNullOrWhiteSpace(MoveToFolder))
+            {
+                yield return new ValidationResult(
+                    "Name the folder to move messages to.", [nameof(MoveToFolder)]);
+            }
+        }
+    }
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            saved = await Mailboxes.GetAsync(TenantId);
+            hasPassword = saved is not null && await Mailboxes.HasPasswordAsync(saved);
+
+            form = saved is null
+                ? new MailboxForm()
+                : new MailboxForm
+                {
+                    Host = saved.Host,
+                    Port = saved.Port,
+                    UseSsl = saved.UseSsl,
+                    Username = saved.Username,
+                    Address = saved.Address,
+                    Folder = saved.Folder,
+                    IsEnabled = saved.IsEnabled,
+                    PollIntervalSeconds = saved.PollIntervalSeconds,
+                    Disposition = saved.Disposition,
+                    MoveToFolder = saved.MoveToFolder,
+                    TrustedAuthenticationServer = saved.TrustedAuthenticationServer,
+                };
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task SaveAsync()
+    {
+        // Switching fetching on with nothing to authenticate with would only produce a
+        // failure every couple of minutes, so say so here instead.
+        if (form.IsEnabled && !hasPassword && string.IsNullOrEmpty(form.Password))
+        {
+            Toasts.Error("A password is needed before mail can be fetched.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Mailboxes.SaveAsync(
+                new SupportMailbox
+                {
+                    TenantId = TenantId,
+                    Host = form.Host.Trim(),
+                    Port = form.Port,
+                    UseSsl = form.UseSsl,
+                    Username = form.Username.Trim(),
+                    Address = string.IsNullOrWhiteSpace(form.Address) ? null : form.Address.Trim(),
+                    Folder = form.Folder.Trim(),
+                    IsEnabled = form.IsEnabled,
+                    PollIntervalSeconds = form.PollIntervalSeconds,
+                    Disposition = form.Disposition,
+                    TrustedAuthenticationServer =
+                        string.IsNullOrWhiteSpace(form.TrustedAuthenticationServer)
+                            ? null
+                            : form.TrustedAuthenticationServer.Trim(),
+                    MoveToFolder = string.IsNullOrWhiteSpace(form.MoveToFolder)
+                        ? null
+                        : form.MoveToFolder.Trim(),
+                },
+                form.Password);
+
+            form.Password = null;
+            Toasts.Success("Mailbox saved.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not save: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task TestAsync()
+    {
+        MailPollResult result = await Mailboxes.TestAsync(TenantId);
+
+        if (result.Ok)
+        {
+            Toasts.Success($"Connected. {result.Seen} message(s) in {form.Folder}.");
+        }
+        else
+        {
+            Toasts.Error(result.Error ?? "The connection failed.");
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task PollNowAsync()
+    {
+        MailPollResult result = await Mailboxes.PollAsync(TenantId);
+
+        if (result.AlreadyRunning)
+        {
+            Toasts.Info("A fetch is already running for this mailbox.");
+        }
+        else if (result.Ok)
+        {
+            Toasts.Success(result.Taken == 0
+                ? $"Nothing new — {result.Seen} message(s) looked at."
+                : $"Took in {result.Taken} message(s).");
+        }
+        else
+        {
+            Toasts.Error(result.Error ?? "The fetch failed.");
+        }
+
+        await LoadAsync();
+    }
+
+    private async Task DeleteAsync()
+    {
+        busy = true;
+
+        try
+        {
+            await Mailboxes.DeleteAsync(TenantId);
+            Toasts.Success("Mailbox removed.");
+            await LoadAsync();
+        }
+        finally
+        {
+            busy = false;
+            confirmingDelete = false;
+        }
+    }
+
+    private string StatusClass() =>
+        saved is null ? "alert-secondary"
+        : !string.IsNullOrWhiteSpace(saved.LastError) ? "alert-danger"
+        : !saved.IsEnabled || !hasPassword ? "alert-secondary"
+        : "alert-success";
+
+    private string StatusIcon() =>
+        saved is not null && !string.IsNullOrWhiteSpace(saved.LastError)
+            ? "bi-exclamation-triangle"
+            : saved?.IsEnabled == true && hasPassword ? "bi-check-circle" : "bi-pause-circle";
+
+    private string StatusTitle() =>
+        saved is null ? "Not configured"
+        : !string.IsNullOrWhiteSpace(saved.LastError) ? "The last check failed"
+        : !hasPassword ? "No password stored"
+        : !saved.IsEnabled ? "Fetching is switched off"
+        : "Fetching";
+}

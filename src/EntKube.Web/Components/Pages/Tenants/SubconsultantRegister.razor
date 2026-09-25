@@ -1,0 +1,413 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Support
+@inject OnCallService OnCall
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   The §18 register: everybody outside our own payroll who works under
+   the agreement.
+
+   §18 asks three things of us and all three are dates rather than
+   opinions — bound by confidentiality and data-processing terms
+   equal to §17, notified to the customer for approval, and a current
+   list kept available on request. The rules have been implemented
+   and tested since this subsystem was written; until now there was
+   no way to put anybody into them.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<ConfirmDialog Visible="@(pendingObjection is not null)"
+               Message="@($"Record that the customer objected to {pendingObjection?.Name}? §18 says approval may not be unreasonably withheld, so the reason matters — it is what the objection is argued against if it comes to that.")"
+               ConfirmText="Record the objection"
+               IsBusy="busy"
+               OnConfirm="RecordObjectionAsync"
+               OnCancel="() => pendingObjection = null" />
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-start mb-3">
+        <div>
+            <h6 class="mb-0">Subconsultants (§18)</h6>
+            <div class="text-muted small">
+                Anybody outside our payroll who takes on-call duty, handles an incident,
+                fixes a bug or deploys. We answer for their work as for our own, so the
+                agreement asks who they are and whether the customer has seen the list.
+            </div>
+        </div>
+        <button class="btn btn-sm btn-primary" @onclick="StartNew">
+            <span class="bi bi-person-plus me-1"></span>Add
+        </button>
+    </div>
+
+    @if (Blocked.Count > 0)
+    {
+        <div class="alert alert-warning py-2 small">
+            <span class="bi bi-shield-exclamation me-1"></span>
+            <strong>Not yet allowed into a customer's environments.</strong>
+            §18 wants confidentiality and data-processing terms in place <em>before</em> they
+            touch anything, and the customer notified for approval.
+            <ul class="mb-0 mt-1">
+                @foreach (Subconsultant person in Blocked)
+                {
+                    <li>@person.Name — @WhyBlocked(person)</li>
+                }
+            </ul>
+        </div>
+    }
+
+    @if (editing is not null)
+    {
+        <div class="border rounded p-3 mb-3">
+            <div class="row g-3">
+                <div class="col-md-4">
+                    <label class="form-label small text-muted">Name</label>
+                    <input class="form-control form-control-sm" @bind="editing.Name" />
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted">Company</label>
+                    <input class="form-control form-control-sm" @bind="editing.Company" />
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted">Organisation number</label>
+                    <input class="form-control form-control-sm" @bind="editing.OrganisationNumber" />
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted">Email</label>
+                    <input class="form-control form-control-sm" @bind="editing.Email" />
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted">
+                        Confidentiality signed
+                    </label>
+                    <input type="date" class="form-control form-control-sm"
+                           @bind="confidentiality" />
+                </div>
+                <div class="col-md-4">
+                    <label class="form-label small text-muted">
+                        Data-processing terms bound
+                    </label>
+                    <input type="date" class="form-control form-control-sm"
+                           @bind="dataProcessing" />
+                </div>
+                <div class="col-12">
+                    <label class="form-label small text-muted">Notes</label>
+                    <input class="form-control form-control-sm" @bind="editing.Notes" />
+                </div>
+                <div class="col-12">
+                    <div class="form-check">
+                        <input type="checkbox" class="form-check-input" id="sub-active"
+                               @bind="editing.IsActive" />
+                        <label class="form-check-label small" for="sub-active">
+                            Still working under the agreement
+                        </label>
+                    </div>
+                </div>
+            </div>
+            <div class="text-end mt-3">
+                <button class="btn btn-sm btn-outline-secondary me-2"
+                        @onclick="() => editing = null">Cancel</button>
+                <AsyncButton CssClass="btn-sm btn-primary" OnClick="SaveAsync">Save</AsyncButton>
+            </div>
+        </div>
+    }
+
+    @if (people.Count == 0)
+    {
+        <EmptyState Icon="bi-people"
+                    Title="Nobody registered"
+                    Message="§18 asks for a current list available on request. An empty one is an answer, as long as it is true." />
+    }
+    else
+    {
+        <div class="table-responsive">
+            <table class="table table-sm align-middle">
+                <thead class="table-light">
+                    <tr>
+                        <th>Name</th>
+                        <th>Company</th>
+                        <th>§18 approval</th>
+                        <th>§17 terms</th>
+                        <th>May work</th>
+                        <th></th>
+                    </tr>
+                </thead>
+                <tbody>
+                    @foreach (Subconsultant person in people)
+                    {
+                        SubconsultantApproval approval =
+                            OnCallService.ApprovalStatus(person, now);
+
+                        <tr class="@(person.IsActive ? "" : "text-muted")">
+                            <td class="small fw-semibold">
+                                @person.Name
+                                @if (!person.IsActive)
+                                {
+                                    <span class="badge bg-light text-dark border ms-1">past</span>
+                                }
+                            </td>
+                            <td class="small text-muted">@person.Company</td>
+                            <td class="small">
+                                <span class="badge @ApprovalClass(approval)">@Describe(approval)</span>
+                                @if (approval == SubconsultantApproval.AwaitingResponse
+                                     && OnCallService.ObjectionDeadline(person) is DateTime by)
+                                {
+                                    <div class="text-muted" style="font-size: .75rem">
+                                        approved by default on
+                                        @by.ToLocalTime().ToString("MMM d")
+                                    </div>
+                                }
+                                @if (approval == SubconsultantApproval.Objected
+                                     && !string.IsNullOrWhiteSpace(person.ObjectionReason))
+                                {
+                                    <div class="text-muted" style="font-size: .75rem">
+                                        @person.ObjectionReason
+                                    </div>
+                                }
+                            </td>
+                            <td class="small">
+                                <span class="@(person.ConfidentialitySignedAt is null ? "text-danger" : "text-muted")">
+                                    <i class="bi @(person.ConfidentialitySignedAt is null ? "bi-x-lg" : "bi-check-lg")"></i>
+                                    confidentiality
+                                </span>
+                                <div class="@(person.DataProcessingBoundAt is null ? "text-danger" : "text-muted")">
+                                    <i class="bi @(person.DataProcessingBoundAt is null ? "bi-x-lg" : "bi-check-lg")"></i>
+                                    data processing
+                                </div>
+                            </td>
+                            <td>
+                                @if (OnCallService.MayAccessCustomerEnvironments(person, now))
+                                {
+                                    <span class="badge bg-success">yes</span>
+                                }
+                                else
+                                {
+                                    <span class="badge bg-secondary">not yet</span>
+                                }
+                            </td>
+                            <td class="text-end text-nowrap">
+                                @if (person.NotifiedAt is null)
+                                {
+                                    <AsyncButton CssClass="btn-sm btn-outline-primary me-1"
+                                                 OnClick="() => NotifyAsync(person)">
+                                        Notified the customer
+                                    </AsyncButton>
+                                }
+                                else if (approval != SubconsultantApproval.Objected)
+                                {
+                                    <AsyncButton CssClass="btn-sm btn-outline-success me-1"
+                                                 OnClick="() => ApproveAsync(person)">
+                                        They approved
+                                    </AsyncButton>
+                                    <button class="btn btn-sm btn-outline-danger me-1"
+                                            @onclick="() => pendingObjection = person">
+                                        They objected
+                                    </button>
+                                }
+                                <button class="btn btn-sm btn-outline-secondary"
+                                        @onclick="() => Edit(person)">Edit</button>
+                            </td>
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        <div class="text-muted small">
+            Approval is tacit: §18 gives the customer
+            @OnCallService.SubconsultantObjectionWorkingDays working days to object, after
+            which somebody counts as approved. The deadline is counted in working days on
+            the §9 calendar, not in calendar days.
+        </div>
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private bool busy;
+    private string? error;
+
+    private List<Subconsultant> people = [];
+    private Subconsultant? editing;
+    private Subconsultant? pendingObjection;
+
+    private DateTime? confidentiality;
+    private DateTime? dataProcessing;
+
+    private DateTime now = DateTime.UtcNow;
+
+    /// <summary>
+    /// Registered, still working, and not yet allowed near a customer's environment. §18
+    /// wants the terms in place beforehand, so this is the list worth seeing first.
+    /// </summary>
+    private List<Subconsultant> Blocked =>
+        [.. people.Where(p => p.IsActive
+                              && !OnCallService.MayAccessCustomerEnvironments(p, now))];
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+        now = DateTime.UtcNow;
+
+        try
+        {
+            people = await OnCall.GetSubconsultantsAsync(TenantId);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private void StartNew()
+    {
+        editing = new Subconsultant { TenantId = TenantId, Name = "" };
+        confidentiality = null;
+        dataProcessing = null;
+    }
+
+    private void Edit(Subconsultant person)
+    {
+        editing = person;
+        confidentiality = person.ConfidentialitySignedAt?.ToLocalTime().Date;
+        dataProcessing = person.DataProcessingBoundAt?.ToLocalTime().Date;
+    }
+
+    private async Task SaveAsync()
+    {
+        if (editing is null || string.IsNullOrWhiteSpace(editing.Name))
+        {
+            Toasts.Error("A name is required.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            editing.TenantId = TenantId;
+            editing.ConfidentialitySignedAt = AsUtc(confidentiality);
+            editing.DataProcessingBoundAt = AsUtc(dataProcessing);
+
+            await OnCall.SaveSubconsultantAsync(editing);
+
+            editing = null;
+            Toasts.Success("Saved.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not save: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task NotifyAsync(Subconsultant person)
+    {
+        person.NotifiedAt = DateTime.UtcNow;
+        await OnCall.SaveSubconsultantAsync(person);
+
+        Toasts.Success(
+            $"Recorded. Unless the customer objects, {person.Name} counts as approved on "
+            + $"{OnCallService.ObjectionDeadline(person)!.Value.ToLocalTime():d MMMM}.");
+
+        await LoadAsync();
+    }
+
+    private async Task ApproveAsync(Subconsultant person)
+    {
+        person.ApprovedAt = DateTime.UtcNow;
+        person.ObjectedAt = null;
+        person.ObjectionReason = null;
+        await OnCall.SaveSubconsultantAsync(person);
+        await LoadAsync();
+    }
+
+    private async Task RecordObjectionAsync()
+    {
+        if (pendingObjection is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            pendingObjection.ObjectedAt = DateTime.UtcNow;
+            pendingObjection.ApprovedAt = null;
+            await OnCall.SaveSubconsultantAsync(pendingObjection);
+            pendingObjection = null;
+            await LoadAsync();
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    /// <summary>A local date as the instant we store, or null.</summary>
+    private static DateTime? AsUtc(DateTime? date) =>
+        date is null ? null : DateTime.SpecifyKind(date.Value.Date, DateTimeKind.Utc);
+
+    private static string Describe(SubconsultantApproval approval) => approval switch
+    {
+        SubconsultantApproval.NotNotified => "not notified",
+        SubconsultantApproval.AwaitingResponse => "awaiting the customer",
+        SubconsultantApproval.Approved => "approved",
+        SubconsultantApproval.Objected => "objected to",
+        _ => approval.ToString(),
+    };
+
+    private static string ApprovalClass(SubconsultantApproval approval) => approval switch
+    {
+        SubconsultantApproval.Approved => "bg-success",
+        SubconsultantApproval.AwaitingResponse => "bg-info text-dark",
+        SubconsultantApproval.Objected => "bg-danger",
+        _ => "bg-secondary",
+    };
+
+    /// <summary>The specific thing missing, rather than "not allowed".</summary>
+    private string WhyBlocked(Subconsultant person)
+    {
+        List<string> missing = [];
+
+        if (person.ConfidentialitySignedAt is null)
+        {
+            missing.Add("no confidentiality undertaking");
+        }
+
+        if (person.DataProcessingBoundAt is null)
+        {
+            missing.Add("not bound by §17 data-processing terms");
+        }
+
+        SubconsultantApproval approval = OnCallService.ApprovalStatus(person, now);
+
+        if (approval != SubconsultantApproval.Approved)
+        {
+            missing.Add(approval switch
+            {
+                SubconsultantApproval.NotNotified => "the customer has not been told",
+                SubconsultantApproval.AwaitingResponse =>
+                    $"the customer's {OnCallService.SubconsultantObjectionWorkingDays} working days have not run out",
+                _ => "the customer objected",
+            });
+        }
+
+        return string.Join("; ", missing);
+    }
+}

@@ -831,6 +831,88 @@ public class VaultService(
     }
 
     /// <summary>
+    /// Stores the support mailbox's IMAP password in the tenant's vault, replacing
+    /// whatever was there.
+    /// </summary>
+    public async Task<VaultSecret> SetSupportMailboxPasswordAsync(
+        Guid tenantId, Guid mailboxId, string password, CancellationToken ct = default)
+    {
+        await InitializeVaultAsync(tenantId, ct);
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+
+        VaultSecret? existing = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
+                && s.SupportMailboxId == mailboxId
+                && s.Name == SupportMailboxPasswordName, ct);
+
+        (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, password);
+
+        if (existing is not null)
+        {
+            await ArchiveVersionAsync(db, existing, ct);
+            existing.EncryptedValue = ciphertext;
+            existing.Nonce = nonce;
+            existing.UpdatedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+            return existing;
+        }
+
+        SecretVault vault = (await GetVaultAsync(tenantId, ct))!;
+
+        VaultSecret secret = new()
+        {
+            Id = Guid.NewGuid(),
+            VaultId = vault.Id,
+            Name = SupportMailboxPasswordName,
+            SecretType = VaultSecretType.Opaque,
+            EncryptedValue = ciphertext,
+            Nonce = nonce,
+            SupportMailboxId = mailboxId,
+        };
+
+        db.Set<VaultSecret>().Add(secret);
+        await db.SaveChangesAsync(ct);
+        return secret;
+    }
+
+    /// <summary>The support mailbox's IMAP password, or null when none has been set.</summary>
+    public async Task<string?> GetSupportMailboxPasswordAsync(
+        Guid tenantId, Guid mailboxId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        VaultSecret? secret = await db.Set<VaultSecret>()
+            .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
+                && s.SupportMailboxId == mailboxId
+                && s.Name == SupportMailboxPasswordName, ct);
+
+        if (secret is null)
+        {
+            return null;
+        }
+
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
+        return encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
+    }
+
+    /// <summary>Whether a password has been stored, without decrypting it.</summary>
+    public async Task<bool> HasSupportMailboxPasswordAsync(
+        Guid tenantId, Guid mailboxId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.Set<VaultSecret>().AnyAsync(s => s.Vault.TenantId == tenantId
+            && s.SupportMailboxId == mailboxId
+            && s.Name == SupportMailboxPasswordName, ct);
+    }
+
+    /// <summary>The one secret name a support mailbox owns.</summary>
+    public const string SupportMailboxPasswordName = "PASSWORD";
+
+    /// <summary>
     /// Enumerates every certificate and OAuth/OIDC client secret in the tenant's vault,
     /// decrypting each just far enough to read its expiry, and projects the non-secret
     /// metadata (scope, expiry, days remaining) used by the expiry-notification scanner

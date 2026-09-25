@@ -25,8 +25,15 @@
 </button>
 
 @code {
-    /// <summary>The work to run on click. The button stays busy until it completes.</summary>
-    [Parameter] public Func<Task>? OnClick { get; set; }
+    /// <summary>
+    /// The work to run on click. The button stays busy until it completes.
+    ///
+    /// <para><b>An EventCallback, not a Func&lt;Task&gt;.</b> A plain delegate re-renders
+    /// only this button, so a caller that reloaded its data after saving kept showing the
+    /// old data until the page was left and come back to. An EventCallback re-renders the
+    /// component that supplied it, which is the one whose state just changed.</para>
+    /// </summary>
+    [Parameter] public EventCallback OnClick { get; set; }
 
     [Parameter] public RenderFragment? ChildContent { get; set; }
 
@@ -54,13 +61,18 @@
 
     private async Task RunAsync()
     {
-        if (_running || OnClick is null)
+        if (_running || !OnClick.HasDelegate)
             return;
 
         _running = true;
+
+        // Without this the spinner only appears once the work is already done, which is
+        // the opposite of what a busy indicator is for.
+        StateHasChanged();
+
         try
         {
-            await OnClick();
+            await OnClick.InvokeAsync();
         }
         catch (Exception ex) when (ShowErrorToast)
         {

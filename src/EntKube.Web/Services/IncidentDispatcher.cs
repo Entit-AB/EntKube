@@ -13,6 +13,7 @@ public class IncidentDispatcher(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     NotificationService notifications,
     StormSuppressionService stormSuppression,
+    Tickets.AlertTicketBridge alertTickets,
     ILogger<IncidentDispatcher> logger)
 {
     public async Task DispatchAsync(
@@ -23,6 +24,11 @@ public class IncidentDispatcher(
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         DateTime now = DateTime.UtcNow;
+
+        // §14.3: the ticket is opened whether or not anyone is notified. A maintenance
+        // window suppresses the noise, not the record that the alert fired.
+        await alertTickets.OpenForIncidentsAsync(tenantId, firing, ct);
+        await alertTickets.NoteIncidentResolvedAsync(resolved, now, ct);
 
         bool inMaintenance = await db.MaintenanceWindows.AnyAsync(
             w => w.TenantId == tenantId && (w.ClusterId == null || w.ClusterId == clusterId)

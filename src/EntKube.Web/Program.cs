@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Identity;
+using Microsoft.AspNetCore.SignalR;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Authorization;
@@ -20,6 +21,12 @@ namespace EntKube.Web;
 
 public class Program
 {
+    /// <summary>
+    /// The largest single message a browser may send over a circuit. Sized for a pasted
+    /// markdown document rather than for a form field — see the hub configuration below.
+    /// </summary>
+    public const long MaximumDocumentBytes = 4L * 1024 * 1024;
+
     public static async Task Main(string[] args)
     {
         WebApplicationBuilder builder = WebApplication.CreateBuilder(args);
@@ -28,6 +35,19 @@ public class Program
         builder.Services.AddRazorComponents()
             .AddInteractiveServerComponents()
             .AddAuthenticationStateSerialization();
+
+        // Blazor Server ships a 32 KB ceiling on anything a browser sends over the circuit,
+        // which is ample for a form field and far too small for a document. Pasting an
+        // architecture guide or a runbook into a knowledge section sent the whole text over
+        // the wire, the hub refused the message, and it never reached the server — so it
+        // simply did not save, with nothing anywhere to say why.
+        //
+        // The knowledge base exists to hold exactly those documents (§19 hands them to the
+        // customer at off-boarding), so the limit has to fit one. Four megabytes of text is
+        // a very long document indeed, and still bounds what a single message from one
+        // authenticated circuit can push at us.
+        builder.Services.Configure<HubOptions>(
+            options => options.MaximumReceiveMessageSize = MaximumDocumentBytes);
 
         builder.Services.AddCascadingAuthenticationState();
         builder.Services.AddScoped<IdentityRedirectManager>();
@@ -544,6 +564,24 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.Cost.CostRateService>();
         builder.Services.AddScoped<EntKube.Web.Services.Cost.CostLedgerWriter>();
         builder.Services.AddScoped<EntKube.Web.Services.Cost.CostLedgerService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Contracts.ContractService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Tickets.TicketService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Tickets.AlertTicketBridge>();
+        builder.Services.AddScoped<EntKube.Web.Services.Time.TimeService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Knowledge.KnowledgeService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Mail.ISupportMailAnalyst,
+            EntKube.Web.Services.Mail.RuleBasedMailAnalyst>();
+        builder.Services.AddScoped<EntKube.Web.Services.Mail.MailTriageRuleService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailService>();
+        builder.Services.AddScoped<EntKube.Web.Services.CurrentActor>();
+        builder.Services.AddScoped<EntKube.Web.Services.Mail.SmtpSettingsResolver>();
+        builder.Services.AddScoped<EntKube.Web.Services.Tickets.TicketNotifier>();
+        builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailboxService>();
+
+        // Fetches support mail into the triage queue. Does nothing until a tenant has
+        // configured a mailbox and switched it on.
+        builder.Services.AddHostedService<EntKube.Web.Services.Mail.SupportMailPoller>();
+        builder.Services.AddScoped<EntKube.Web.Services.Reporting.MonthlyReportService>();
         builder.Services.AddSingleton<EntKube.Web.Services.Cost.CostScanCache>();
         builder.Services.AddHostedService<EntKube.Web.Services.Cost.CostScanService>();
         builder.Services.AddScoped<EntKube.Web.Services.Rollouts.RolloutService>();

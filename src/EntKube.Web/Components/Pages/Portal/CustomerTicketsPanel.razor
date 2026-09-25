@@ -1,0 +1,426 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@using Microsoft.EntityFrameworkCore
+@inject TicketService Tickets
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject ToastService Toasts
+@inject CurrentActor ActorService
+
+@* ═══════════════════════════════════════════════════════════════════
+   The customer's own view of §14: raise a ticket, follow it, and say
+   whether a resolution is accepted — which for a P1 or P2 is what
+   §14.4 makes resolution mean.
+
+   Only customer-visible history is shown. Internal working notes are
+   still part of the record, they are simply not ours to publish here.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    @if (selected is not null)
+    {
+        @* ───────────── One ticket ───────────── *@
+        <nav class="mb-3">
+            <button class="btn btn-sm btn-link text-decoration-none p-0" @onclick="() => selected = null">
+                <i class="bi bi-arrow-left me-1"></i>All tickets
+            </button>
+        </nav>
+
+        <div class="d-flex justify-content-between align-items-start mb-3">
+            <div>
+                <h5 class="mb-1"><span class="text-muted">#@selected.Number</span> @selected.Title</h5>
+                <div class="small text-muted">
+                    Reported @selected.ReportedAt.ToLocalTime().ToString("yyyy-MM-dd HH:mm")
+                    · support window @selected.SupportWindow
+                </div>
+            </div>
+            <div class="text-end">
+                <span class="badge @PriorityClass(selected.Priority) fs-6">@selected.Priority</span>
+                <span class="badge bg-light text-dark border ms-1">@selected.Status</span>
+            </div>
+        </div>
+
+        @if (selected.PriorityConfirmedAt is null)
+        {
+            <div class="alert alert-light border py-2 small">
+                <i class="bi bi-hourglass-split me-1"></i>
+                The priority is as proposed and has not yet been confirmed at our first assessment.
+                Until then §14.3 gives your assessment precedence for P1 and P2.
+            </div>
+        }
+        else if (!string.IsNullOrWhiteSpace(selected.PriorityReason))
+        {
+            <div class="alert alert-light border py-2 small">
+                <i class="bi bi-flag me-1"></i>
+                <strong>Priority @selected.Priority.</strong> @selected.PriorityReason
+            </div>
+        }
+
+        @if (WaitingOnYou is not null)
+        {
+            <div class="alert alert-warning py-2 small">
+                <i class="bi bi-hourglass me-1"></i>
+                <strong>Waiting on you since
+                    @WaitingOnYou.StartedAt.ToLocalTime().ToString("MMM d HH:mm").</strong>
+                @WaitingOnYou.Reason
+                <div class="mt-1">The resolution time is paused while we wait (§14.4).</div>
+            </div>
+        }
+
+        @if (selected.Status == TicketStatus.Resolved)
+        {
+            <div class="card border-success mb-3">
+                <div class="card-body">
+                    <div class="small text-muted mb-1">Proposed as resolved</div>
+                    <div class="mb-3" style="white-space: pre-wrap">@selected.Resolution</div>
+                    <div class="small text-muted mb-2">
+                        §14.4 treats a P1 or P2 as resolved when the service is restored or you accept a
+                        workaround. If this is not resolved, say so and the ticket reopens.
+                    </div>
+                    <div class="d-flex gap-2">
+                        <AsyncButton CssClass="btn-sm btn-success" OnClick="AcceptAsync">
+                            <i class="bi bi-check2 me-1"></i>Accept
+                        </AsyncButton>
+                        <button class="btn btn-sm btn-outline-danger" @onclick="() => showReopen = !showReopen">
+                            <i class="bi bi-arrow-counterclockwise me-1"></i>Not resolved
+                        </button>
+                    </div>
+                    @if (showReopen)
+                    {
+                        <div class="mt-3">
+                            <textarea class="form-control form-control-sm mb-2" rows="2" @bind="replyText"
+                                      placeholder="What is still wrong?"></textarea>
+                            <AsyncButton CssClass="btn-sm btn-outline-danger" OnClick="ReopenAsync">Reopen</AsyncButton>
+                        </div>
+                    }
+                </div>
+            </div>
+        }
+
+        @if (!string.IsNullOrWhiteSpace(selected.Description))
+        {
+            <div class="card mb-3">
+                <div class="card-body">
+                    <div class="small text-muted mb-1">Description</div>
+                    <div style="white-space: pre-wrap">@selected.Description</div>
+                </div>
+            </div>
+        }
+
+        @if (CanWrite && selected.Status is not (TicketStatus.Closed or TicketStatus.Rejected))
+        {
+            <div class="card mb-3">
+                <div class="card-body">
+                    <textarea class="form-control form-control-sm mb-2" rows="2" @bind="replyText"
+                              placeholder="Add information for the support team"></textarea>
+                    <div class="text-end">
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="ReplyAsync">Send</AsyncButton>
+                    </div>
+                </div>
+            </div>
+        }
+
+        <h6 class="mb-2">History</h6>
+        <div class="list-group">
+            @foreach (TicketEvent entry in selected.Events
+                .Where(e => e.CustomerVisible).OrderByDescending(e => e.At))
+            {
+                <div class="list-group-item py-2">
+                    <div class="d-flex justify-content-between">
+                        <div class="small">@entry.Detail</div>
+                        <div class="text-muted text-nowrap ms-3" style="font-size: .75rem">
+                            @entry.At.ToLocalTime().ToString("MMM d HH:mm")
+                        </div>
+                    </div>
+                </div>
+            }
+        </div>
+    }
+    else
+    {
+        @* ───────────── The list ───────────── *@
+        <div class="d-flex justify-content-between align-items-center mb-3">
+            <div>
+                <h6 class="mb-0">Support tickets</h6>
+                <div class="text-muted small">
+                    Response times run inside each application's support window.
+                </div>
+            </div>
+            @if (CanWrite)
+            {
+                <button class="btn btn-sm btn-primary" @onclick="() => raising = !raising">
+                    <i class="bi bi-plus-lg me-1"></i>Raise a ticket
+                </button>
+            }
+        </div>
+
+        @if (raising)
+        {
+            <div class="card border-primary mb-3">
+                <div class="card-body">
+                    <div class="row g-3">
+                        <div class="col-md-6">
+                            <label class="form-label small text-muted">Application</label>
+                            <select class="form-select form-select-sm" @bind="newAppId">
+                                <option value="">— select —</option>
+                                @foreach (Data.App app in apps)
+                                {
+                                    <option value="@app.Id">@app.Name</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-6">
+                            <label class="form-label small text-muted">How urgent is it?</label>
+                            <select class="form-select form-select-sm" @bind="newPriority">
+                                <option value="@TicketPriority.P1">P1 — unusable, or a risk to safety or data</option>
+                                <option value="@TicketPriority.P2">P2 — a key function is broken for many</option>
+                                <option value="@TicketPriority.P3">P3 — part of a function, or a workaround exists</option>
+                                <option value="@TicketPriority.P4">P4 — cosmetic, a question, a suggestion</option>
+                            </select>
+                            <div class="form-text small">
+                                We confirm or change this at our first assessment, with reasons (§14.3).
+                            </div>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small text-muted">Summary</label>
+                            <input class="form-control form-control-sm" @bind="newTitle" />
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small text-muted">What happened</label>
+                            <textarea class="form-control form-control-sm" rows="3" @bind="newDescription"></textarea>
+                        </div>
+                    </div>
+                    <div class="text-end mt-3">
+                        <button class="btn btn-sm btn-outline-secondary me-2" @onclick="() => raising = false">Cancel</button>
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="RaiseAsync">Raise</AsyncButton>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @if (tickets.Count == 0)
+        {
+            <EmptyState Icon="bi-life-preserver" Title="No tickets" Message="Nothing has been raised yet." />
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm align-middle">
+                    <thead class="table-light">
+                        <tr>
+                            <th>#</th>
+                            <th>Prio</th>
+                            <th>Ticket</th>
+                            <th>Status</th>
+                            <th>Reported</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (Ticket row in tickets)
+                        {
+                            <tr style="cursor: pointer" @onclick="() => OpenAsync(row.Id)">
+                                <td class="text-muted small">@row.Number</td>
+                                <td><span class="badge @PriorityClass(row.Priority)">@row.Priority</span></td>
+                                <td>
+                                    <div class="fw-semibold small">@row.Title</div>
+                                    @if (row.Pauses.Any(p => p.EndedAt is null && p.WaitingOn == WaitingOn.Customer))
+                                    {
+                                        <span class="badge bg-warning text-dark" style="font-size: .7rem">
+                                            waiting on you
+                                        </span>
+                                    }
+                                </td>
+                                <td><span class="badge bg-light text-dark border">@row.Status</span></td>
+                                <td class="small text-muted">
+                                    @row.ReportedAt.ToLocalTime().ToString("MMM d HH:mm")
+                                </td>
+                            </tr>
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
+
+    /// <summary>
+    /// A Viewer can read the queue; raising a ticket and answering on one are changes, so
+    /// they follow the same role gate as the portal's other write actions.
+    /// </summary>
+    [Parameter] public CustomerAccessRole AccessRole { get; set; } = CustomerAccessRole.Viewer;
+
+    [Parameter] public string? ActorName { get; set; }
+
+    private bool loading = true;
+    private string? error;
+
+    private List<Ticket> tickets = [];
+    private List<Data.App> apps = [];
+    private Ticket? selected;
+
+    private bool raising;
+    private bool showReopen;
+    private Guid? newAppId;
+    private TicketPriority newPriority = TicketPriority.P3;
+    private string newTitle = "";
+    private string newDescription = "";
+    private string replyText = "";
+
+    private bool CanWrite => AccessRole >= CustomerAccessRole.Operator;
+
+    private TicketPause? WaitingOnYou =>
+        selected?.Pauses.FirstOrDefault(p => p.EndedAt is null && p.WaitingOn == WaitingOn.Customer);
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+
+            tickets = await db.Tickets
+                .Include(t => t.Pauses)
+                .AsNoTracking()
+                .Where(t => t.CustomerId == Customer.Id)
+                .OrderBy(t => t.Status == TicketStatus.Closed || t.Status == TicketStatus.Rejected)
+                .ThenBy(t => t.Priority)
+                .ThenByDescending(t => t.ReportedAt)
+                .Take(200)
+                .ToListAsync();
+
+            apps = await db.Apps.AsNoTracking()
+                .Where(a => a.CustomerId == Customer.Id)
+                .OrderBy(a => a.Name)
+                .ToListAsync();
+
+            if (selected is not null)
+            {
+                selected = await Tickets.GetAsync(selected.Id);
+            }
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task OpenAsync(Guid ticketId)
+    {
+        Ticket? found = await Tickets.GetAsync(ticketId);
+
+        // Only ever called from a row of this customer's own list, so this cannot fire
+        // today. It is here because the next caller might not be, and the whole class of
+        // mistake is trusting an id because the only caller that exists happens to be safe.
+        selected = found?.CustomerId == Customer.Id ? found : null;
+
+        showReopen = false;
+        replyText = "";
+    }
+
+    private async Task RaiseAsync()
+    {
+        if (string.IsNullOrWhiteSpace(newTitle))
+        {
+            Toasts.Error("A summary is needed.");
+            return;
+        }
+
+        try
+        {
+            Ticket created = await Tickets.CreateAsync(
+                Customer.TenantId, Customer.Id, newAppId,
+                newTitle, newDescription, TicketChannel.Portal, newPriority,
+                DateTime.UtcNow, ActorName);
+
+            raising = false;
+            newTitle = "";
+            newDescription = "";
+            newAppId = null;
+
+            Toasts.Success($"Ticket #{created.Number} raised.");
+            await LoadAsync();
+            await OpenAsync(created.Id);
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not raise the ticket: {ex.Message}");
+        }
+    }
+
+    private async Task ReplyAsync()
+    {
+        if (selected is null || string.IsNullOrWhiteSpace(replyText))
+        {
+            return;
+        }
+
+        await Tickets.AddEventAsync(
+            selected.Id, TicketEventKind.Note, replyText, await ActorService.NameOrAsync(Customer.Name), DateTime.UtcNow);
+
+        // An answer from the customer is what §14.4 was waiting for, so the clock resumes.
+        if (WaitingOnYou is not null)
+        {
+            await Tickets.EndPauseAsync(selected.Id, await ActorService.NameOrAsync(Customer.Name), DateTime.UtcNow);
+        }
+
+        replyText = "";
+        await LoadAsync();
+    }
+
+    private async Task AcceptAsync()
+    {
+        if (selected is null)
+        {
+            return;
+        }
+
+        await Tickets.AddEventAsync(
+            selected.Id, TicketEventKind.Note,
+            "The customer accepts this as resolved (§14.4).",
+            await ActorService.NameOrAsync(Customer.Name), DateTime.UtcNow);
+
+        await Tickets.CloseAsync(selected.Id, await ActorService.NameOrAsync(Customer.Name), DateTime.UtcNow);
+
+        Toasts.Success("Thank you — the ticket is closed.");
+        await LoadAsync();
+    }
+
+    private async Task ReopenAsync()
+    {
+        if (selected is null || string.IsNullOrWhiteSpace(replyText))
+        {
+            Toasts.Error("Tell us what is still wrong.");
+            return;
+        }
+
+        await Tickets.ReopenAsync(
+            selected.Id, replyText, await ActorService.NameOrAsync(Customer.Name), DateTime.UtcNow);
+
+        showReopen = false;
+        replyText = "";
+        Toasts.Success("Reopened.");
+        await LoadAsync();
+    }
+
+    private static string PriorityClass(TicketPriority priority) => priority switch
+    {
+        TicketPriority.P1 => "bg-danger",
+        TicketPriority.P2 => "bg-warning text-dark",
+        TicketPriority.P3 => "bg-info text-dark",
+        _ => "bg-secondary",
+    };
+}

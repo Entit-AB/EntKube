@@ -1,0 +1,1531 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Contracts
+@inject ContractService Contracts
+@inject ToastService Toasts
+@inject CurrentActor Actor
+
+@* ═══════════════════════════════════════════════════════════════════
+   Annex B and C for a customer's portfolio, plus the people the
+   agreement requires by name.
+
+   Two panes, the same shape as the knowledge panel. Four unrelated
+   things stacked in one column meant scrolling past a fee breakdown to
+   reach a phone number.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<ConfirmDialog Visible="@(pendingDeleteContactId is not null)"
+               Message="Remove this contact?"
+               ConfirmText="Remove"
+               IsBusy="busy"
+               OnConfirm="DeleteContactAsync"
+               OnCancel="() => pendingDeleteContactId = null" />
+
+<ConfirmDialog Visible="@(pendingDeleteAgreement is not null)"
+               Message="@($"Delete the Annex B effective {pendingDeleteAgreement?.EffectiveFrom:yyyy-MM-dd}? Months that resolved their pricing model from it fall back to whichever agreement preceded it. To end an arrangement, record a new one with a later date instead.")"
+               ConfirmText="Delete it"
+               IsBusy="busy"
+               OnConfirm="DeleteAgreementAsync"
+               OnCancel="() => pendingDeleteAgreement = null" />
+
+<ConfirmDialog Visible="@(pendingDeleteList is not null)"
+               Message="@($"Delete the price list effective {pendingDeleteList?.EffectiveFrom:yyyy-MM-dd} and all {pendingDeleteList?.Entries.Count} amounts in it? Every month priced from it — including ones already reported — reprices from whichever list preceded it.")"
+               ConfirmText="Delete it"
+               IsBusy="busy"
+               OnConfirm="DeleteListAsync"
+               OnCancel="() => pendingDeleteList = null" />
+
+<ConfirmDialog Visible="@(pendingDeleteAddress is not null)"
+               Message="@($"Stop routing {pendingDeleteAddress?.Address}? Mail sent to it will be placed by who sent it instead, and may not be placed at all. Replies will come from the tenant's own support address.")"
+               ConfirmText="Stop routing it"
+               IsBusy="busy"
+               OnConfirm="DeleteSupportAddressAsync"
+               OnCancel="() => pendingDeleteAddress = null" />
+
+<ConfirmDialog Visible="@(pendingDeleteDomain is not null)"
+               Message="@($"Stop recognising {pendingDeleteDomain?.Domain}? Mail from anyone there who is not named as a contact will arrive unplaced from now on. Messages already taken in keep the customer they were given.")"
+               ConfirmText="Stop recognising it"
+               IsBusy="busy"
+               OnConfirm="DeleteDomainAsync"
+               OnCancel="() => pendingDeleteDomain = null" />
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="pane">
+        @* ───────────── Navigator ───────────── *@
+        <div class="pane-nav">
+            <div class="pane-nav-scroll">
+                <button type="button" class="pane-item @(view == View.Overview ? "selected" : "")"
+                        @onclick="() => Show(View.Overview)">
+                    <span class="ico bi bi-receipt"></span>
+                    <span class="pane-item-body">
+                        <span class="pane-item-title">
+                            Monthly fee
+                            @if (fee.Unpriced.Count > 0)
+                            {
+                                <span class="pane-dot critical"
+                                      title="@fee.Unpriced.Count not being charged for"></span>
+                            }
+                        </span>
+                        <span class="pane-item-sub">@Money(fee.Total) per month</span>
+                    </span>
+                </button>
+
+                <div class="pane-group">What was agreed</div>
+
+                <button type="button" class="pane-item @(view == View.AnnexB ? "selected" : "")"
+                        @onclick="() => Show(View.AnnexB)">
+                    <span class="ico bi bi-file-earmark-ruled"></span>
+                    <span class="pane-item-body">
+                        <span class="pane-item-title">
+                            Annex B
+                            @if (InForceAgreement is null)
+                            {
+                                <span class="pane-dot critical" title="No pricing model recorded"></span>
+                            }
+                        </span>
+                        <span class="pane-item-sub">@AgreementSummary()</span>
+                    </span>
+                    <span class="pane-count">@agreements.Count</span>
+                </button>
+
+                <button type="button" class="pane-item @(view == View.AnnexC ? "selected" : "")"
+                        @onclick="() => Show(View.AnnexC)">
+                    <span class="ico bi bi-tags"></span>
+                    <span class="pane-item-body">
+                        <span class="pane-item-title">
+                            Annex C
+                            @if (InForceList is null)
+                            {
+                                <span class="pane-dot critical" title="No price list in force"></span>
+                            }
+                        </span>
+                        <span class="pane-item-sub">@PriceSummary()</span>
+                    </span>
+                    <span class="pane-count">@priceLists.Count</span>
+                </button>
+
+                <div class="pane-group">Who to reach</div>
+
+                <button type="button" class="pane-item @(view == View.Contacts ? "selected" : "")"
+                        @onclick="() => Show(View.Contacts)">
+                    <span class="ico bi bi-person-lines-fill"></span>
+                    <span class="pane-item-body">
+                        <span class="pane-item-title">
+                            Contacts
+                            @if (MissingRequiredContacts.Count > 0)
+                            {
+                                <span class="pane-dot"
+                                      title="@string.Join(", ", MissingRequiredContacts)"></span>
+                            }
+                        </span>
+                        <span class="pane-item-sub">@ContactSummary()</span>
+                    </span>
+                    <span class="pane-count">@(contacts.Count + domains.Count + addresses.Count)</span>
+                </button>
+            </div>
+        </div>
+
+        @* ───────────── Content ───────────── *@
+        <div class="pane-main">
+            @if (view == View.Overview)
+            {
+                <div class="pane-head">
+                    <div>
+                        <div class="fw-semibold">Base fee</div>
+                        <div class="text-muted small">
+                            Charged every month under §10, whether or not any work is done.
+                        </div>
+                    </div>
+                    <div class="d-flex align-items-center gap-2">
+                        <label class="form-label small text-muted mb-0">As of</label>
+                        <input type="date" class="form-control form-control-sm" style="width: 9.5rem"
+                               @bind="asOf" @bind:after="LoadAsync" />
+                    </div>
+                </div>
+                <div class="pane-body">
+                    <div class="row g-3 mb-3">
+                        <div class="col-sm-4">
+                            <div class="border rounded text-center p-3">
+                                <div class="fs-4 fw-bold text-primary">@Money(fee.WindowFee)</div>
+                                <div class="small text-muted">
+                                    Window fee @(fee.Window is null ? "" : $"({fee.Window})")
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-sm-4">
+                            <div class="border rounded text-center p-3">
+                                <div class="fs-4 fw-bold text-primary">@Money(fee.KnowledgeFees)</div>
+                                <div class="small text-muted">
+                                    Knowledge fees (@fee.Applications.Count apps)
+                                </div>
+                            </div>
+                        </div>
+                        <div class="col-sm-4">
+                            <div class="border rounded text-center p-3 bg-light">
+                                <div class="fs-4 fw-bold">@Money(fee.Total)</div>
+                                <div class="small text-muted">Total per month, excl. VAT</div>
+                            </div>
+                        </div>
+                    </div>
+
+                    @if (fee.Unpriced.Count > 0)
+                    {
+                        <div class="alert alert-warning py-2 small">
+                            <span class="bi bi-exclamation-triangle me-1"></span>
+                            <strong>Not being charged for.</strong> Classify these, or add the amount
+                            to the price list.
+                            <ul class="mb-0 mt-1">
+                                @foreach (string gap in fee.Unpriced)
+                                {
+                                    <li>@gap</li>
+                                }
+                            </ul>
+                        </div>
+                    }
+
+                    @if (fee.Applications.Count == 0)
+                    {
+                        <EmptyState Icon="bi-receipt"
+                                    Title="Nothing to charge"
+                                    Message="No application is under management on this date." />
+                    }
+                    else
+                    {
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-0">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Application</th>
+                                        <th>Level</th>
+                                        <th>Window</th>
+                                        <th class="text-end">Knowledge fee</th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (ApplicationFee row in fee.Applications)
+                                    {
+                                        <tr>
+                                            <td class="fw-semibold small">@row.AppName</td>
+                                            <td class="small">
+                                                @row.Level
+                                                @if (row.PriceKey == ContractPricing.ReducedInstanceKey)
+                                                {
+                                                    <span class="badge bg-light text-dark border ms-1"
+                                                          title="Reduced rate from the 21st instance (§10.2.1)">reduced</span>
+                                                }
+                                            </td>
+                                            <td class="small">@row.Window</td>
+                                            <td class="text-end">@Money(row.KnowledgeFee)</td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                </div>
+            }
+            else if (view == View.AnnexB)
+            {
+                <div class="pane-head">
+                    <div>
+                        <div class="fw-semibold">Annex B — portfolio choices</div>
+                        <div class="text-muted small">
+                            §2 allows a change at a calendar-quarter boundary, and no sooner than
+                            three months after the last one.
+                        </div>
+                    </div>
+                    <button class="btn btn-sm btn-primary" @onclick="() => addingAgreement = !addingAgreement">
+                        <span class="bi bi-plus-lg me-1"></span>Record a change
+                    </button>
+                </div>
+                <div class="pane-body">
+                    @if (addingAgreement)
+                    {
+                        <div class="border rounded p-3 mb-3">
+                            <div class="row g-3">
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted">Pricing model</label>
+                                    <select class="form-select form-select-sm" @bind="newPricingModel">
+                                        <option value="@PricingModel.HourBank">Model A — hour bank</option>
+                                        <option value="@PricingModel.TimeAndMaterials">
+                                            Model B — time and materials
+                                        </option>
+                                    </select>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted">Hour bank (hours / month)</label>
+                                    <input type="number" step="1" class="form-control form-control-sm"
+                                           @bind="newHourBank"
+                                           disabled="@(newPricingModel != PricingModel.HourBank)" />
+                                    <div class="form-text small">§11.1: unused hours expire at month end.</div>
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted">Effective from</label>
+                                    <input type="date" class="form-control form-control-sm"
+                                           @bind="newAgreementFrom" />
+                                </div>
+                                <div class="col-12">
+                                    <label class="form-label small text-muted">Notes</label>
+                                    <input class="form-control form-control-sm" @bind="newAgreementNotes" />
+                                </div>
+                            </div>
+                            <div class="text-end mt-3">
+                                <button class="btn btn-sm btn-outline-secondary me-2"
+                                        @onclick="() => addingAgreement = false">Cancel</button>
+                                <AsyncButton CssClass="btn-sm btn-primary"
+                                             OnClick="RecordAgreementAsync">Record</AsyncButton>
+                            </div>
+                        </div>
+                    }
+
+                    @if (agreements.Count == 0)
+                    {
+                        <EmptyState Icon="bi-file-earmark-ruled"
+                                    Title="No Annex B recorded"
+                                    Message="Until a pricing model is recorded, work cannot be billed against this portfolio." />
+                    }
+                    else
+                    {
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Effective from</th>
+                                        <th>Pricing model</th>
+                                        <th>Hour bank</th>
+                                        <th>Notes</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (PortfolioAgreement agreement in agreements)
+                                    {
+                                        bool inForce = ReferenceEquals(agreement, InForceAgreement);
+                                        <tr class="@RowClass(inForce, agreement.EffectiveFrom)">
+                                            <td class="fw-semibold">
+                                                @agreement.EffectiveFrom.ToLocalTime().ToString("yyyy-MM-dd")
+                                                @if (inForce)
+                                                {
+                                                    <span class="badge bg-primary ms-2">In force</span>
+                                                }
+                                                else if (agreement.EffectiveFrom > DateTime.UtcNow)
+                                                {
+                                                    <span class="badge bg-light text-dark border ms-2">Future</span>
+                                                }
+                                            </td>
+                                            <td>
+                                                @(agreement.PricingModel == PricingModel.HourBank
+                                                    ? "Model A — hour bank"
+                                                    : "Model B — time and materials")
+                                            </td>
+                                            <td>
+                                                @(agreement.HourBankHoursPerMonth is null
+                                                    ? "—"
+                                                    : $"{agreement.HourBankHoursPerMonth:0.##} h")
+                                            </td>
+                                            <td class="small text-muted">@agreement.Notes</td>
+                                            <td class="text-end">
+                                                <button class="btn btn-sm btn-outline-danger"
+                                                        aria-label="@($"Delete the Annex B effective {agreement.EffectiveFrom:yyyy-MM-dd}")"
+                                                        @onclick="() => pendingDeleteAgreement = agreement">
+                                                    <span class="bi bi-trash"></span>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                </div>
+            }
+            else if (view == View.AnnexC)
+            {
+                <div class="pane-head">
+                    <div>
+                        <div class="fw-semibold">Annex C — price annex</div>
+                        <div class="text-muted small">
+                            Versioned. §19 indexes prices every January, and an earlier month keeps
+                            pricing at the list that was in force then.
+                        </div>
+                    </div>
+                    <div class="text-nowrap">
+                        @if (priceLists.Count == 0)
+                        {
+                            <AsyncButton CssClass="btn-sm btn-primary" OnClick="SeedStandardListAsync">
+                                <span class="bi bi-plus-lg me-1"></span>Start from the standard list
+                            </AsyncButton>
+                        }
+                        else
+                        {
+                            <button class="btn btn-sm btn-outline-primary" @onclick="() => indexing = !indexing">
+                                <span class="bi bi-graph-up-arrow me-1"></span>Index for a new year
+                            </button>
+                        }
+                    </div>
+                </div>
+                <div class="pane-body">
+                    @if (indexing)
+                    {
+                        <div class="border rounded p-3 mb-3">
+                            <div class="row g-2 align-items-end">
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted">Effective from</label>
+                                    <input type="date" class="form-control form-control-sm" @bind="indexFrom" />
+                                </div>
+                                <div class="col-md-4">
+                                    <label class="form-label small text-muted">Increase (%)</label>
+                                    <input type="number" step="0.01" class="form-control form-control-sm"
+                                           @bind="indexPercent" />
+                                    <div class="form-text small">
+                                        §19 applies SCB's labour cost index for salaried employees, with
+                                        a floor of @ContractService.MinimumIndexationPercent%.
+                                    </div>
+                                </div>
+                                <div class="col-md-4 text-end">
+                                    <button class="btn btn-sm btn-outline-secondary me-2"
+                                            @onclick="() => indexing = false">Cancel</button>
+                                    <AsyncButton CssClass="btn-sm btn-primary"
+                                                 OnClick="IndexPricesAsync">Create list</AsyncButton>
+                                </div>
+                            </div>
+                        </div>
+                    }
+
+                    @if (priceLists.Count == 0)
+                    {
+                        <EmptyState Icon="bi-tags"
+                                    Title="No price list"
+                                    Message="Without one, nothing in the portfolio can be priced." />
+                    }
+                    else
+                    {
+                        <div class="table-responsive mb-3">
+                            <table class="table table-sm align-middle">
+                                <thead class="table-light">
+                                    <tr>
+                                        <th>Effective from</th>
+                                        <th>Lines</th>
+                                        <th>S1 / S4 window fee</th>
+                                        <th>Ordinary hour</th>
+                                        <th>Notes</th>
+                                        <th></th>
+                                    </tr>
+                                </thead>
+                                <tbody>
+                                    @foreach (PriceList list in priceLists)
+                                    {
+                                        bool inForce = ReferenceEquals(list, InForceList);
+                                        <tr class="@RowClass(inForce, list.EffectiveFrom)">
+                                            <td class="fw-semibold">
+                                                @list.EffectiveFrom.ToLocalTime().ToString("yyyy-MM-dd")
+                                                @if (inForce)
+                                                {
+                                                    <span class="badge bg-primary ms-2">In force</span>
+                                                }
+                                            </td>
+                                            <td class="small text-muted">@list.Entries.Count</td>
+                                            <td class="small">
+                                                @Money(ContractService.Lookup(list, PriceKind.WindowFee, nameof(SupportWindow.S1)) ?? 0m)
+                                                /
+                                                @Money(ContractService.Lookup(list, PriceKind.WindowFee, nameof(SupportWindow.S4)) ?? 0m)
+                                            </td>
+                                            <td class="small">
+                                                @Money(ContractService.Lookup(list, PriceKind.HourlyRate, nameof(SupportTimeCategory.Ordinary)) ?? 0m)
+                                            </td>
+                                            <td class="small text-muted">@list.Notes</td>
+                                            <td class="text-end text-nowrap">
+                                                <button class="btn btn-sm btn-outline-secondary me-1"
+                                                        @onclick="() => OpenEditor(list)">
+                                                    @(editingList?.Id == list.Id ? "Close" : "Amounts")
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-danger"
+                                                        aria-label="@($"Delete the price list effective {list.EffectiveFrom:yyyy-MM-dd}")"
+                                                        @onclick="() => pendingDeleteList = list">
+                                                    <span class="bi bi-trash"></span>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+
+                    @if (editingList is not null)
+                    {
+                        <div class="card border-primary">
+                            <div class="card-header bg-white py-2 d-flex justify-content-between align-items-center">
+                                <div>
+                                    <strong class="small">
+                                        Amounts — effective
+                                        @editingList.EffectiveFrom.ToLocalTime().ToString("yyyy-MM-dd")
+                                    </strong>
+                                    <span class="text-muted small ms-2">@editingList.Currency, excl. VAT</span>
+                                </div>
+                                <div class="text-nowrap">
+                                    @if (staged.Count > 0)
+                                    {
+                                        <span class="text-muted small me-2">@staged.Count unsaved</span>
+                                        <AsyncButton CssClass="btn-sm btn-primary me-2"
+                                                     OnClick="SaveAmountsAsync">Save amounts</AsyncButton>
+                                    }
+                                    <button class="btn btn-sm btn-outline-secondary"
+                                            @onclick="() => editingList = null">Close</button>
+                                </div>
+                            </div>
+                            <div class="card-body">
+                                <div class="alert alert-warning py-2 small">
+                                    <i class="bi bi-exclamation-triangle me-1"></i>
+                                    Editing an amount reprices <strong>every month that used this
+                                    list</strong>, including ones already reported — §28 gives the
+                                    customer thirty days to dispute a report, and a figure that moves
+                                    underneath one is how that starts. Use this to enter what was
+                                    signed or to fix a typo. To change prices going forward, add a
+                                    list with a later effective date.
+                                </div>
+
+                                <div class="row g-2 align-items-end mb-3">
+                                    <div class="col-md-3">
+                                        <label class="form-label small text-muted">Effective from</label>
+                                        <input type="date" class="form-control form-control-sm"
+                                               @bind="headerEffectiveFrom" />
+                                    </div>
+                                    <div class="col-md-7">
+                                        <label class="form-label small text-muted">Notes</label>
+                                        <input class="form-control form-control-sm" @bind="headerNotes" />
+                                    </div>
+                                    <div class="col-md-2 text-end">
+                                        <AsyncButton CssClass="btn-sm btn-outline-primary"
+                                                     OnClick="SaveHeaderAsync">Save</AsyncButton>
+                                    </div>
+                                </div>
+
+                                @foreach (PriceKind kind in Enum.GetValues<PriceKind>())
+                                {
+                                    List<PriceListEntry> group = [.. editingList.Entries
+                                        .Where(e => e.Kind == kind).OrderBy(e => e.SortOrder)];
+
+                                    <h6 class="small text-muted mt-3 mb-2">@KindName(kind)</h6>
+
+                                    @if (group.Count == 0)
+                                    {
+                                        <div class="text-muted small mb-2">Nothing priced.</div>
+                                    }
+                                    else
+                                    {
+                                        <div class="table-responsive mb-2">
+                                            <table class="table table-sm align-middle mb-0">
+                                                <tbody>
+                                                    @foreach (PriceListEntry entry in group)
+                                                    {
+                                                        <tr>
+                                                            <td class="small" style="width: 40%">
+                                                                @KeyLabel(entry)
+                                                            </td>
+                                                            <td style="width: 30%">
+                                                                <div class="input-group input-group-sm">
+                                                                    <input type="number" step="1" class="form-control"
+                                                                           value="@entry.Amount"
+                                                                           @onchange="e => StageAmount(entry, e.Value?.ToString())" />
+                                                                    <span class="input-group-text">kr</span>
+                                                                </div>
+                                                            </td>
+                                                            <td style="width: 20%">
+                                                                @if (entry.Kind == PriceKind.HourBankTier)
+                                                                {
+                                                                    <div class="input-group input-group-sm">
+                                                                        <input type="number" step="1" class="form-control"
+                                                                               value="@entry.Hours"
+                                                                               @onchange="e => StageHours(entry, e.Value?.ToString())" />
+                                                                        <span class="input-group-text">h</span>
+                                                                    </div>
+                                                                }
+                                                            </td>
+                                                            <td class="text-end">
+                                                                <button class="btn btn-sm btn-outline-danger"
+                                                                        aria-label="@($"Remove the price for {KeyLabel(entry)}")"
+                                                                        @onclick="() => RemoveEntryAsync(entry)">
+                                                                    <span class="bi bi-trash"></span>
+                                                                </button>
+                                                            </td>
+                                                        </tr>
+                                                    }
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    }
+                                }
+
+                                <div class="row g-2 align-items-end mt-3 pt-3 border-top">
+                                    <div class="col-md-3">
+                                        <label class="form-label small text-muted">Add a line</label>
+                                        <select class="form-select form-select-sm" @bind="newEntryKind">
+                                            @foreach (PriceKind kind in Enum.GetValues<PriceKind>())
+                                            {
+                                                <option value="@kind">@KindName(kind)</option>
+                                            }
+                                        </select>
+                                    </div>
+                                    <div class="col-md-4">
+                                        <label class="form-label small text-muted">For</label>
+                                        <input class="form-control form-control-sm" @bind="newEntryKey"
+                                               placeholder="@KeyHint(newEntryKind)" />
+                                    </div>
+                                    <div class="col-md-2">
+                                        <label class="form-label small text-muted">Amount</label>
+                                        <input type="number" step="1" class="form-control form-control-sm"
+                                               @bind="newEntryAmount" />
+                                    </div>
+                                    @if (newEntryKind == PriceKind.HourBankTier)
+                                    {
+                                        <div class="col-md-1">
+                                            <label class="form-label small text-muted">Hours</label>
+                                            <input type="number" step="1" class="form-control form-control-sm"
+                                                   @bind="newEntryHours" />
+                                        </div>
+                                    }
+                                    <div class="col-md-2 text-end">
+                                        <AsyncButton CssClass="btn-sm btn-outline-primary"
+                                                     OnClick="AddEntryAsync">Add</AsyncButton>
+                                    </div>
+                                </div>
+                            </div>
+                        </div>
+                    }
+                </div>
+            }
+            else if (view == View.Contacts)
+            {
+                <div class="pane-head">
+                    <div>
+                        <div class="fw-semibold">Contacts and escalation</div>
+                        <div class="text-muted small">
+                            §23 wants a contact with a mandate plus a deputy; §14.5 wants levels 2
+                            and 3 named on both sides.
+                        </div>
+                    </div>
+                    <button class="btn btn-sm btn-primary" @onclick="() => addingContact = !addingContact">
+                        <span class="bi bi-person-plus me-1"></span>Add contact
+                    </button>
+                </div>
+                <div class="pane-body">
+                    @if (MissingRequiredContacts.Count > 0)
+                    {
+                        <div class="alert alert-warning py-2 small">
+                            <i class="bi bi-person-exclamation me-1"></i>
+                            Nobody is named as: <strong>@string.Join(", ", MissingRequiredContacts)</strong>.
+                            §14.1 notifies a designated contact on every incident, and §14.5's
+                            escalation has nowhere to go without one.
+                        </div>
+                    }
+
+                    @if (addingContact)
+                    {
+                        <div class="border rounded p-3 mb-3">
+                            <div class="row g-3">
+                                <div class="col-md-3">
+                                    <label class="form-label small text-muted">Side</label>
+                                    <select class="form-select form-select-sm" @bind="newContact.Party">
+                                        <option value="@ContractParty.Customer">Customer</option>
+                                        <option value="@ContractParty.Supplier">Us</option>
+                                    </select>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small text-muted">Role</label>
+                                    <select class="form-select form-select-sm" @bind="newContact.Role">
+                                        @foreach (ContractContactRole role in Enum.GetValues<ContractContactRole>())
+                                        {
+                                            <option value="@role">@RoleName(role)</option>
+                                        }
+                                    </select>
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small text-muted">Name</label>
+                                    <input class="form-control form-control-sm" @bind="newContact.Name" />
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small text-muted">Email</label>
+                                    <input class="form-control form-control-sm" @bind="newContact.Email" />
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small text-muted">Phone</label>
+                                    <input class="form-control form-control-sm" @bind="newContact.Phone" />
+                                </div>
+                                <div class="col-md-3">
+                                    <label class="form-label small text-muted">Teams</label>
+                                    <input class="form-control form-control-sm" @bind="newContact.TeamsHandle" />
+                                </div>
+                                <div class="col-md-6 text-end align-self-end">
+                                    <button class="btn btn-sm btn-outline-secondary me-2"
+                                            @onclick="() => addingContact = false">Cancel</button>
+                                    <AsyncButton CssClass="btn-sm btn-primary"
+                                                 OnClick="SaveContactAsync">Add</AsyncButton>
+                                </div>
+                            </div>
+                        </div>
+                    }
+
+                    @if (contacts.Count == 0)
+                    {
+                        <EmptyState Icon="bi-person-lines-fill"
+                                    Title="No contacts recorded"
+                                    Message="§14.1 requires notifying a named person on every incident." />
+                    }
+                    else
+                    {
+                        @foreach (ContractParty party in (ContractParty[])[ContractParty.Customer, ContractParty.Supplier])
+                        {
+                            List<ContractContact> side = [.. contacts.Where(c => c.Party == party)];
+
+                            <h6 class="small text-muted mt-2 mb-2">
+                                @(party == ContractParty.Customer ? "The customer" : "Us")
+                            </h6>
+
+                            @if (side.Count == 0)
+                            {
+                                <div class="text-muted small mb-3">Nobody named.</div>
+                            }
+                            else
+                            {
+                                <div class="table-responsive mb-3">
+                                    <table class="table table-sm align-middle mb-0">
+                                        <tbody>
+                                            @foreach (ContractContact contact in side)
+                                            {
+                                                <tr>
+                                                    <td class="small text-muted" style="width: 30%">
+                                                        @RoleName(contact.Role)
+                                                    </td>
+                                                    <td class="small fw-semibold">@contact.Name</td>
+                                                    <td class="small text-muted">
+                                                        @if (!string.IsNullOrWhiteSpace(contact.Email))
+                                                        {
+                                                            <a href="mailto:@contact.Email">@contact.Email</a>
+                                                        }
+                                                        @if (!string.IsNullOrWhiteSpace(contact.Phone))
+                                                        {
+                                                            <span class="ms-2">
+                                                                <a href="tel:@contact.Phone">@contact.Phone</a>
+                                                            </span>
+                                                        }
+                                                        @if (!string.IsNullOrWhiteSpace(contact.TeamsHandle))
+                                                        {
+                                                            <span class="ms-2">
+                                                                <i class="bi bi-microsoft-teams me-1"></i>@contact.TeamsHandle
+                                                            </span>
+                                                        }
+                                                    </td>
+                                                    <td class="text-end">
+                                                        <button class="btn btn-sm btn-outline-danger"
+                                                                aria-label="@($"Remove {contact.Name}")"
+                                                                @onclick="() => pendingDeleteContactId = contact.Id">
+                                                            <span class="bi bi-trash"></span>
+                                                        </button>
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                </div>
+                            }
+                        }
+                    }
+
+                    @* ───────────── Their own support address ───────────── *@
+                    <h6 class="small text-muted mt-4 mb-2">Support address</h6>
+                    <div class="text-muted small mb-2">
+                        An address of this customer's own. Anything sent to it is placed with
+                        them whoever wrote it — which is the case a domain cannot cover, like a
+                        consultant reporting a fault on their behalf. Their replies come from it
+                        too, so the thread stays on it.
+                        <strong>It has to be an alias that delivers into the mailbox above</strong>;
+                        nothing here opens a second connection.
+                    </div>
+
+                    <div class="row g-2 align-items-end mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Address</label>
+                            <input class="form-control form-control-sm" @bind="newAddress"
+                                   placeholder="customer-support@entit.se" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Notes</label>
+                            <input class="form-control form-control-sm" @bind="newAddressNotes" />
+                        </div>
+                        <div class="col-md-2 align-self-center">
+                            <div class="form-check">
+                                <input type="checkbox" class="form-check-input" id="reply-from"
+                                       @bind="newAddressReplyFrom" />
+                                <label class="form-check-label small" for="reply-from">
+                                    Reply from it
+                                </label>
+                            </div>
+                        </div>
+                        <div class="col-md-2 text-end">
+                            <AsyncButton CssClass="btn-sm btn-outline-primary"
+                                         OnClick="AddSupportAddressAsync">Add</AsyncButton>
+                        </div>
+                    </div>
+
+                    @if (addresses.Count == 0)
+                    {
+                        <div class="text-muted small">
+                            None. Mail for this customer is recognised by who sent it — the
+                            contacts above, and the domains below.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-0">
+                                <tbody>
+                                    @foreach (CustomerSupportAddress address in addresses)
+                                    {
+                                        <tr>
+                                            <td class="small fw-semibold" style="width: 35%">
+                                                @address.Address
+                                                @if (address.ReplyFromThis)
+                                                {
+                                                    <span class="badge bg-light text-dark border ms-1"
+                                                          title="Replies to this customer come from here">
+                                                        replies from
+                                                    </span>
+                                                }
+                                            </td>
+                                            <td class="small text-muted">@address.Notes</td>
+                                            <td class="small text-muted" style="width: 20%">
+                                                @address.AddedBy
+                                            </td>
+                                            <td class="text-end" style="width: 10%">
+                                                <button class="btn btn-sm btn-outline-danger"
+                                                        aria-label="@($"Stop routing {address.Address}")"
+                                                        @onclick="() => pendingDeleteAddress = address">
+                                                    <span class="bi bi-trash"></span>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+
+                    @* ───────────── Mail domains ───────────── *@
+                    <h6 class="small text-muted mt-4 mb-2">Mail domains</h6>
+                    <div class="text-muted small mb-2">
+                        Support mail from these domains is placed with this customer, which is
+                        what lets it be read for an application name. Somebody named above as a
+                        contact wins over any domain. Subdomains count:
+                        <code>entit.example</code> also covers <code>it.entit.example</code>.
+                    </div>
+
+                    <div class="row g-2 align-items-end mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Domain</label>
+                            <input class="form-control form-control-sm" @bind="newDomain"
+                                   placeholder="entit.example" />
+                        </div>
+                        <div class="col-md-5">
+                            <label class="form-label small text-muted">Notes</label>
+                            <input class="form-control form-control-sm" @bind="newDomainNotes"
+                                   placeholder="Who confirmed it" />
+                        </div>
+                        <div class="col-md-3 text-end">
+                            <AsyncButton CssClass="btn-sm btn-outline-primary"
+                                         OnClick="AddDomainAsync">Register</AsyncButton>
+                        </div>
+                    </div>
+
+                    @if (domains.Count == 0)
+                    {
+                        <div class="text-muted small">
+                            None registered. Only people named as contacts above are recognised,
+                            so everybody else's mail arrives in the inbox unplaced.
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="table-responsive">
+                            <table class="table table-sm align-middle mb-0">
+                                <tbody>
+                                    @foreach (CustomerEmailDomain domain in domains)
+                                    {
+                                        <tr>
+                                            <td class="small fw-semibold" style="width: 30%">@domain.Domain</td>
+                                            <td class="small text-muted">@domain.Notes</td>
+                                            <td class="small text-muted" style="width: 20%">@domain.AddedBy</td>
+                                            <td class="text-end" style="width: 10%">
+                                                <button class="btn btn-sm btn-outline-danger"
+                                                        aria-label="@($"Stop recognising {domain.Domain}")"
+                                                        @onclick="() => pendingDeleteDomain = domain">
+                                                    <span class="bi bi-trash"></span>
+                                                </button>
+                                            </td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        </div>
+                    }
+                </div>
+            }
+        </div>
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
+
+    private enum View { Overview, AnnexB, AnnexC, Contacts }
+
+    private bool loading = true;
+    private bool busy;
+    private string? error;
+
+    private View view = View.Overview;
+    private DateTime asOf = DateTime.UtcNow.Date;
+
+    private BaseFeeBreakdown fee;
+    private List<PortfolioAgreement> agreements = [];
+    private List<ContractContact> contacts = [];
+    private List<PriceList> priceLists = [];
+
+    private bool addingAgreement;
+    private PricingModel newPricingModel = PricingModel.HourBank;
+    private decimal? newHourBank = 20m;
+    private DateTime? newAgreementFrom = DateTime.UtcNow.Date;
+    private string? newAgreementNotes;
+
+    private bool addingContact;
+    private ContractContact newContact = NewContact();
+    private Guid? pendingDeleteContactId;
+
+    private List<CustomerEmailDomain> domains = [];
+    private List<CustomerSupportAddress> addresses = [];
+    private string? newAddress;
+    private string? newAddressNotes;
+    private bool newAddressReplyFrom = true;
+    private CustomerSupportAddress? pendingDeleteAddress;
+    private string? newDomain;
+    private string? newDomainNotes;
+    private CustomerEmailDomain? pendingDeleteDomain;
+
+    private PortfolioAgreement? pendingDeleteAgreement;
+    private PriceList? pendingDeleteList;
+
+    private bool indexing;
+    private DateTime? indexFrom = new DateTime(DateTime.UtcNow.Year + 1, 1, 1);
+    private decimal indexPercent = ContractService.MinimumIndexationPercent;
+
+    private PriceList? editingList;
+    private DateTime? headerEffectiveFrom;
+    private string? headerNotes;
+
+    /// <summary>
+    /// Amounts typed but not yet saved, keyed by entry. Held rather than written on every
+    /// keystroke, because each save reprices whatever used this list.
+    /// </summary>
+    private readonly Dictionary<Guid, (decimal Amount, decimal? Hours)> staged = [];
+
+    private PriceKind newEntryKind = PriceKind.KnowledgeFee;
+    private string newEntryKey = "";
+    private decimal newEntryAmount;
+    private decimal? newEntryHours;
+
+    private PortfolioAgreement? InForceAgreement =>
+        agreements.Where(a => a.EffectiveFrom <= DateTime.UtcNow)
+                  .OrderByDescending(a => a.EffectiveFrom)
+                  .FirstOrDefault();
+
+    private PriceList? InForceList =>
+        priceLists.Where(p => p.EffectiveFrom <= DateTime.UtcNow)
+                  .OrderByDescending(p => p.EffectiveFrom)
+                  .FirstOrDefault();
+
+    /// <summary>
+    /// The roles the agreement names that nobody fills. §23 wants a technical contact and a
+    /// deputy; §14.5 wants an escalation chain on both sides.
+    /// </summary>
+    private List<string> MissingRequiredContacts
+    {
+        get
+        {
+            List<string> missing = [];
+
+            void Require(ContractParty party, ContractContactRole role)
+            {
+                if (!contacts.Any(c => c.IsActive && c.Party == party && c.Role == role))
+                {
+                    missing.Add($"{RoleName(role)} ({(party == ContractParty.Customer ? "customer" : "us")})");
+                }
+            }
+
+            Require(ContractParty.Customer, ContractContactRole.TechnicalContact);
+            Require(ContractParty.Customer, ContractContactRole.Deputy);
+            Require(ContractParty.Supplier, ContractContactRole.EscalationLevel2);
+            Require(ContractParty.Supplier, ContractContactRole.EscalationLevel3);
+
+            return missing;
+        }
+    }
+
+    protected override async Task OnParametersSetAsync() => await LoadAsync();
+
+    private void Show(View next)
+    {
+        view = next;
+        editingList = null;
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            DateTime at = DateTime.SpecifyKind(asOf.Date, DateTimeKind.Utc);
+
+            fee = await Contracts.CalculateBaseFeeAsync(Customer.Id, at);
+            agreements = await Contracts.ListPortfolioAgreementsAsync(Customer.Id);
+            contacts = await Contracts.ListContactsAsync(Customer.Id);
+            domains = await Contracts.ListEmailDomainsAsync(Customer.Id);
+            addresses = await Contracts.ListSupportAddressesAsync(Customer.Id);
+
+            // A customer's own lists if any have been negotiated, otherwise the tenant's.
+            priceLists = await Contracts.ListPriceListsAsync(Customer.TenantId, Customer.Id);
+
+            if (priceLists.Count == 0)
+            {
+                priceLists = await Contracts.ListPriceListsAsync(Customer.TenantId, null);
+            }
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task RecordAgreementAsync()
+    {
+        if (newAgreementFrom is null)
+        {
+            Toasts.Error("An effective date is required.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Contracts.RecordPortfolioAgreementAsync(new PortfolioAgreement
+            {
+                TenantId = Customer.TenantId,
+                CustomerId = Customer.Id,
+                EffectiveFrom = DateTime.SpecifyKind(newAgreementFrom.Value.Date, DateTimeKind.Utc),
+                PricingModel = newPricingModel,
+                HourBankHoursPerMonth = newPricingModel == PricingModel.HourBank ? newHourBank : null,
+                Notes = newAgreementNotes,
+            });
+
+            addingAgreement = false;
+            newAgreementNotes = null;
+            Toasts.Success("Annex B recorded.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not record: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DeleteAgreementAsync()
+    {
+        if (pendingDeleteAgreement is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Contracts.DeletePortfolioAgreementAsync(pendingDeleteAgreement.Id);
+            pendingDeleteAgreement = null;
+            await LoadAsync();
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task SaveContactAsync()
+    {
+        if (string.IsNullOrWhiteSpace(newContact.Name))
+        {
+            Toasts.Error("A name is required.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            newContact.TenantId = Customer.TenantId;
+            newContact.CustomerId = Customer.Id;
+            await Contracts.SaveContactAsync(newContact);
+
+            addingContact = false;
+            newContact = NewContact();
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not save: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task AddSupportAddressAsync()
+    {
+        if (string.IsNullOrWhiteSpace(newAddress))
+        {
+            Toasts.Error("An address is required.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            (CustomerSupportAddress? added, string? refused) =
+                await Contracts.AddSupportAddressAsync(
+                    Customer.TenantId, Customer.Id, newAddress, newAddressReplyFrom,
+                    newAddressNotes, await Actor.NameAsync());
+
+            if (refused is not null)
+            {
+                Toasts.Error(refused);
+                return;
+            }
+
+            newAddress = null;
+            newAddressNotes = null;
+            Toasts.Success($"Mail to {added!.Address} is now placed with {Customer.Name}.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not add: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DeleteSupportAddressAsync()
+    {
+        if (pendingDeleteAddress is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Contracts.DeleteSupportAddressAsync(pendingDeleteAddress.Id);
+            pendingDeleteAddress = null;
+            await LoadAsync();
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task AddDomainAsync()
+    {
+        if (string.IsNullOrWhiteSpace(newDomain))
+        {
+            Toasts.Error("A domain is required.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            (CustomerEmailDomain? added, string? refused) = await Contracts.AddEmailDomainAsync(
+                Customer.TenantId, Customer.Id, newDomain, newDomainNotes, await Actor.NameAsync());
+
+            if (refused is not null)
+            {
+                Toasts.Error(refused);
+                return;
+            }
+
+            newDomain = null;
+            newDomainNotes = null;
+            Toasts.Success($"Mail from {added!.Domain} is now placed with {Customer.Name}.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not register: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DeleteDomainAsync()
+    {
+        if (pendingDeleteDomain is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Contracts.DeleteEmailDomainAsync(pendingDeleteDomain.Id);
+            pendingDeleteDomain = null;
+            await LoadAsync();
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DeleteContactAsync()
+    {
+        if (pendingDeleteContactId is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            await Contracts.DeleteContactAsync(pendingDeleteContactId.Value);
+            pendingDeleteContactId = null;
+            await LoadAsync();
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task SeedStandardListAsync()
+    {
+        busy = true;
+
+        try
+        {
+            await Contracts.AddPriceListAsync(StandardPriceList.Create(
+                Customer.TenantId, DateTime.SpecifyKind(asOf.Date, DateTimeKind.Utc)));
+
+            Toasts.Success("Standard price list created. Adjust the amounts to what was signed.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not create: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task IndexPricesAsync()
+    {
+        if (indexFrom is null)
+        {
+            Toasts.Error("An effective date is required.");
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            PriceList? created = await Contracts.IndexPriceListAsync(
+                Customer.TenantId,
+                priceLists.FirstOrDefault()?.CustomerId,
+                DateTime.SpecifyKind(indexFrom.Value.Date, DateTimeKind.Utc),
+                indexPercent,
+                null);
+
+            if (created is null)
+            {
+                Toasts.Error("No price list in force to index from.");
+                return;
+            }
+
+            indexing = false;
+            Toasts.Success($"Indexed price list created, effective {created.EffectiveFrom:yyyy-MM-dd}.");
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not index: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task DeleteListAsync()
+    {
+        if (pendingDeleteList is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            if (editingList?.Id == pendingDeleteList.Id)
+            {
+                editingList = null;
+            }
+
+            await Contracts.DeletePriceListAsync(pendingDeleteList.Id);
+            pendingDeleteList = null;
+            await LoadAsync();
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private void OpenEditor(PriceList list)
+    {
+        if (editingList?.Id == list.Id)
+        {
+            editingList = null;
+            return;
+        }
+
+        editingList = list;
+        headerEffectiveFrom = list.EffectiveFrom.ToLocalTime().Date;
+        headerNotes = list.Notes;
+        staged.Clear();
+    }
+
+    private void StageAmount(PriceListEntry entry, string? value)
+    {
+        if (decimal.TryParse(value, out decimal amount))
+        {
+            staged[entry.Id] = (amount, staged.TryGetValue(entry.Id, out var s) ? s.Hours : entry.Hours);
+        }
+    }
+
+    private void StageHours(PriceListEntry entry, string? value)
+    {
+        decimal? hours = decimal.TryParse(value, out decimal parsed) ? parsed : null;
+        staged[entry.Id] = (staged.TryGetValue(entry.Id, out var s) ? s.Amount : entry.Amount, hours);
+    }
+
+    private async Task SaveAmountsAsync()
+    {
+        if (editingList is null)
+        {
+            return;
+        }
+
+        busy = true;
+
+        try
+        {
+            foreach ((Guid entryId, (decimal amount, decimal? hours)) in staged)
+            {
+                PriceListEntry? entry = editingList.Entries.FirstOrDefault(e => e.Id == entryId);
+
+                if (entry is not null)
+                {
+                    await Contracts.SavePriceListEntryAsync(
+                        editingList.Id, entry.Kind, entry.Key, amount, hours);
+                }
+            }
+
+            int saved = staged.Count;
+            staged.Clear();
+            Toasts.Success($"{saved} amount{(saved == 1 ? "" : "s")} saved.");
+            await ReloadEditorAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not save: {ex.Message}");
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    private async Task SaveHeaderAsync()
+    {
+        if (editingList is null || headerEffectiveFrom is null)
+        {
+            Toasts.Error("An effective date is required.");
+            return;
+        }
+
+        await Contracts.UpdatePriceListAsync(
+            editingList.Id,
+            DateTime.SpecifyKind(headerEffectiveFrom.Value.Date, DateTimeKind.Utc),
+            headerNotes);
+
+        Toasts.Success("Saved.");
+        await ReloadEditorAsync();
+    }
+
+    private async Task AddEntryAsync()
+    {
+        if (editingList is null || string.IsNullOrWhiteSpace(newEntryKey))
+        {
+            Toasts.Error("Say what the amount is for.");
+            return;
+        }
+
+        try
+        {
+            await Contracts.SavePriceListEntryAsync(
+                editingList.Id, newEntryKind, newEntryKey.Trim(), newEntryAmount,
+                newEntryKind == PriceKind.HourBankTier ? newEntryHours : null);
+
+            newEntryKey = "";
+            newEntryAmount = 0m;
+            newEntryHours = null;
+            await ReloadEditorAsync();
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not add: {ex.Message}");
+        }
+    }
+
+    private async Task RemoveEntryAsync(PriceListEntry entry)
+    {
+        await Contracts.DeletePriceListEntryAsync(entry.Id);
+        staged.Remove(entry.Id);
+        await ReloadEditorAsync();
+    }
+
+    private async Task ReloadEditorAsync()
+    {
+        Guid? open = editingList?.Id;
+        await LoadAsync();
+        editingList = open is Guid id ? priceLists.FirstOrDefault(p => p.Id == id) : null;
+    }
+
+    private static ContractContact NewContact() => new()
+    {
+        Name = "",
+        Party = ContractParty.Customer,
+        Role = ContractContactRole.TechnicalContact,
+    };
+
+    private static string RowClass(bool inForce, DateTime effectiveFrom) =>
+        inForce ? "table-primary" : effectiveFrom > DateTime.UtcNow ? "text-muted" : "";
+
+    private static string Money(decimal amount) => $"{amount:N0} kr";
+
+    private string AgreementSummary()
+    {
+        if (InForceAgreement is null)
+        {
+            return "nothing recorded";
+        }
+
+        return InForceAgreement.PricingModel == PricingModel.HourBank
+            ? $"Model A — {InForceAgreement.HourBankHoursPerMonth:0.##} h/month"
+            : "Model B — time and materials";
+    }
+
+    private string PriceSummary() =>
+        InForceList is null
+            ? "none in force"
+            : $"in force since {InForceList.EffectiveFrom.ToLocalTime():MMM yyyy}";
+
+    private string ContactSummary()
+    {
+        string roles = contacts.Count == 0
+            ? "nobody named"
+            : MissingRequiredContacts.Count == 0
+                ? "all roles filled"
+                : $"{MissingRequiredContacts.Count} role{(MissingRequiredContacts.Count == 1 ? "" : "s")} empty";
+
+        return domains.Count == 0
+            ? $"{roles} · no mail domains"
+            : $"{roles} · {domains.Count} mail domain{(domains.Count == 1 ? "" : "s")}";
+    }
+
+    private static string RoleName(ContractContactRole role) => role switch
+    {
+        ContractContactRole.TechnicalContact => "Technical contact (§23)",
+        ContractContactRole.Deputy => "Deputy (§23)",
+        ContractContactRole.ApplicationOwner => "Application owner (level 2)",
+        ContractContactRole.EscalationLevel2 => "Escalation level 2",
+        ContractContactRole.EscalationLevel3 => "Escalation level 3",
+        ContractContactRole.Billing => "Billing",
+        _ => role.ToString(),
+    };
+
+    private static string KindName(PriceKind kind) => kind switch
+    {
+        PriceKind.WindowFee => "Window fee, per support window",
+        PriceKind.KnowledgeFee => "Knowledge fee, per service level",
+        PriceKind.HourBankTier => "Hour bank tiers",
+        PriceKind.HourlyRate => "Hourly rates, per time category",
+        PriceKind.OneOffFee => "One-off fees",
+        _ => kind.ToString(),
+    };
+
+    private static string KeyHint(PriceKind kind) => kind switch
+    {
+        PriceKind.WindowFee => "S1, S2, S3 or S4",
+        PriceKind.KnowledgeFee => "Simple, Standard, Complex, Instance, InstanceReduced",
+        PriceKind.HourBankTier => "the number of hours, e.g. 20",
+        PriceKind.HourlyRate => "Ordinary, EveningMorning, WeekendOrRedDay, Night, Callout, Development",
+        PriceKind.OneOffFee => "OnboardingStandard, NewInstance",
+        _ => "",
+    };
+
+    /// <summary>The key as a person reads it — the stored key is an enum name.</summary>
+    private static string KeyLabel(PriceListEntry entry) => entry.Kind switch
+    {
+        PriceKind.HourBankTier => $"{entry.Key} hours per month",
+        PriceKind.KnowledgeFee when entry.Key == ContractPricing.ReducedInstanceKey =>
+            "Instance, from the 21st",
+        _ => entry.Key,
+    };
+}
