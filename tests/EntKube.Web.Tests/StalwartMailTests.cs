@@ -853,10 +853,48 @@ public class StalwartMailTests
         string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
 
         JsonElement tag = Operation(plan, "SpamTag")!.Value.GetProperty("value")
-            .EnumerateObject().Select(p => p.Value).Single();
+            .EnumerateObject().Select(p => p.Value)
+            .Single(v => v.GetProperty("tag").GetString() == "SPAM_FLAG");
         tag.GetProperty("@type").GetString().Should().Be("Score");
-        tag.GetProperty("tag").GetString().Should().Be("SPAM_FLAG");
         tag.GetProperty("score").GetDouble().Should().Be(0.0);
+    }
+
+    [Fact]
+    public void TheConnectionAddressIsNotScoredBecauseItIsNotTheSenders()
+    {
+        // Measured on a real delivered message. Its X-Spam-Result, unfolded, summed to exactly the
+        // 6.00 that filed it to Junk against a scoreSpam of 5:
+        //
+        //   VIOLATED_DIRECT_SPF  +3.50   the peer is in nobody's SPF record, because it is ours
+        //   RDNS_NONE            +2.00   a private address has no PTR, and never will
+        //   MIME_BAD, MIME_MA_MISSING_HTML, MID_RHS_MATCH_FROM   +3.00
+        //   MIME_BASE64_TEXT, RCVD_COUNT_ZERO                   +0.20
+        //   SIGNED_PGP, DMARC_POLICY_ALLOW, DKIM_ALLOW           -2.70
+        //
+        // DKIM_ALLOW and DMARC_POLICY_ALLOW are the point: the message was provably authentic —
+        // signature verified, DMARC aligned — and junked anyway on an address that was never the
+        // sender's, because the load balancer had rewritten it. Zeroing those two leaves 0.50.
+        StalwartComponentConfig config = Config();
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+        Dictionary<string, double> scores = Operation(plan, "SpamTag")!.Value
+            .GetProperty("value").EnumerateObject()
+            .Select(p => p.Value)
+            .ToDictionary(v => v.GetProperty("tag").GetString()!, v => v.GetProperty("score").GetDouble());
+
+        scores.Should().ContainKey("VIOLATED_DIRECT_SPF").WhoseValue.Should().Be(0.0);
+        scores.Should().ContainKey("RDNS_NONE").WhoseValue.Should().Be(0.0);
+
+        // Not conditional on rspamd: these are about the network path, not the filter in it.
+        scores.Keys.Should().NotContain("SPAM_FLAG");
+
+        // And what still works is left alone. DKIM and DMARC sign and align the message, so they
+        // survive a rewritten peer address; overriding them would throw away the only authentication
+        // this deployment still has.
+        foreach (string keep in new[] { "DKIM_ALLOW", "DMARC_POLICY_ALLOW", "SIGNED_PGP", "MIME_BAD" })
+        {
+            scores.Keys.Should().NotContain(keep);
+        }
     }
 
     [Fact]
@@ -883,12 +921,19 @@ public class StalwartMailTests
                 .Should().BeTrue($"the built-in filter files into Junk (rspamd: {rspamd})");
         }
 
-        // And the tag override is scoped: with no upstream filter the rule is doing real work, and
-        // zeroing it would hand spammers back the evasion it exists to catch.
+        // And the SPAM_FLAG override is scoped: with no upstream filter the rule is doing real work,
+        // and zeroing it would hand spammers back the evasion it exists to catch. The connection tags
+        // stay zeroed either way — they are about the network path, not about rspamd.
         StalwartComponentConfig noRspamd = Config(c => c.RspamdEnabled = false);
-        Operation(
-            StalwartPlanBuilder.BuildApplyPlan(noRspamd, [Domain(noRspamd.Id, "example.com")], []),
-            "SpamTag").Should().BeNull();
+        List<string> tags = Operation(
+                StalwartPlanBuilder.BuildApplyPlan(noRspamd, [Domain(noRspamd.Id, "example.com")], []),
+                "SpamTag")!.Value
+            .GetProperty("value").EnumerateObject()
+            .Select(p => p.Value.GetProperty("tag").GetString()!)
+            .ToList();
+
+        tags.Should().NotContain("SPAM_FLAG");
+        tags.Should().Contain("VIOLATED_DIRECT_SPF").And.Contain("RDNS_NONE");
     }
 
     [Fact]
