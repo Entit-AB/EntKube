@@ -532,10 +532,33 @@ public static class StalwartPlanBuilder
 
         // ── Spam filtering ──
         //
+        // Exactly one filter decides. Stalwart ships its own, enabled by default, with its own Bayes
+        // classifier and a scoreSpam threshold of 5 — so installing rspamd beside it does not replace
+        // it, it adds a second opinion, and the two then read each other's headers.
+        //
+        // What that looked like: every message filed to Junk, and rspamd innocent. rspamd scored a
+        // legitimate PGP-signed message 3.00 against its own threshold of 15 and returned "no
+        // action"; Stalwart's filter had already scored the same message 6.00, stamped
+        // X-Spam-Status: Yes and X-Spam-Result, and filed it. rspamd then saw that header and fired
+        // SPAM_FLAG (+5.00) on the rescan — the filters inflating each other. Days were spent on
+        // rspamd's Redis and DNS, all of it real and none of it the cause, because the filter making
+        // the decision was never rspamd.
+        //
+        // So the built-in filter is switched off exactly when rspamd is the filter, and left on when
+        // it is not. Written unconditionally rather than only when disabling, so that turning rspamd
+        // off hands the job back instead of leaving a server with no filter at all.
+        bool rspamdIsTheFilter =
+            config.RspamdEnabled && !string.IsNullOrWhiteSpace(config.RspamdHost);
+
+        lines.Add(Update("SpamSettings", new()
+        {
+            ["enable"] = !rspamdIsTheFilter,
+        }));
+
         // reconcile with an empty value map is how "no milter" is expressed: turning rspamd off has
         // to remove the hook, or every message keeps being handed to a filter that is no longer there.
         Dictionary<string, object?> milters = [];
-        if (config.RspamdEnabled && !string.IsNullOrWhiteSpace(config.RspamdHost))
+        if (rspamdIsTheFilter)
         {
             milters["rspamd"] = new Dictionary<string, object?>
             {
