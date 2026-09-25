@@ -78,6 +78,7 @@ public static class StalwartManifestBuilder
         y.Add("---");
 
         // ── config.json ──
+        int configStart = y.Count;
         y.Add("apiVersion: v1");
         y.Add("kind: ConfigMap");
         y.Add("metadata:");
@@ -95,7 +96,13 @@ public static class StalwartManifestBuilder
         }
         y.Add("---");
 
-        AppendStatefulSet(y, config, releaseName, ns, recoveryMode, ha);
+        // Same reason as the mail stack's other workloads: a new ConfigMap is not a change to the
+        // pod template, so without this the datastore can be repointed and the running nodes would
+        // never notice. Applying configuration restarts them anyway; installing from the Components
+        // tab does not, and that is the path where it would silently do nothing.
+        string configHash = MailManifest.ConfigHash(y, configStart);
+
+        AppendStatefulSet(y, config, releaseName, ns, recoveryMode, ha, configHash);
         AppendHeadlessService(y, releaseName, ns);
         AppendInternalService(y, config, releaseName, ns);
 
@@ -121,7 +128,7 @@ public static class StalwartManifestBuilder
 
     private static void AppendStatefulSet(
         List<string> y, StalwartComponentConfig config, string releaseName, string ns, bool recoveryMode,
-        StalwartPlanBuilder.StalwartHaBackend? ha)
+        StalwartPlanBuilder.StalwartHaBackend? ha, string configHash)
     {
         y.Add("apiVersion: apps/v1");
         y.Add("kind: StatefulSet");
@@ -146,6 +153,8 @@ public static class StalwartManifestBuilder
         y.Add("    metadata:");
         y.Add("      labels:");
         y.Add($"        app: {releaseName}");
+        y.Add("      annotations:");
+        y.Add($"        entkube.io/config-hash: {configHash}");
         y.Add("    spec:");
         y.Add("      securityContext:");
         y.Add($"        fsGroup: {RunAsUser}");
