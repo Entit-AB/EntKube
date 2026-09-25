@@ -1614,6 +1614,48 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void AConfigChangeRollsThePodsThatReadIt()
+    {
+        // The failure this prevents has no symptom. Kubernetes rolls a Deployment when its pod
+        // template changes, and writing a new ConfigMap does not touch the pod template — so the
+        // apply succeeds, the ConfigMap holds the new value, and rspamd keeps talking to whatever it
+        // read at startup. Every artefact an operator inspects says the change landed. Stamping the
+        // config's digest on the pod template is what turns "applied" into "in effect".
+        static string HashOf(string manifest) =>
+            Scalar(
+                Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "Deployment").RootNode,
+                "spec", "template", "metadata", "annotations", "entkube.io/config-hash")!;
+
+        string before = HashOf(RspamdManifestBuilder.Build(new RspamdSettings(null), "rspamd", "mail"));
+
+        // Same input, same bytes: applying an unchanged configuration must restart nothing.
+        HashOf(RspamdManifestBuilder.Build(new RspamdSettings(null), "rspamd", "mail"))
+            .Should().Be(before);
+
+        // A changed controller password is a changed worker-controller.inc, which the running
+        // process only reads at startup.
+        HashOf(RspamdManifestBuilder.Build(new RspamdSettings("ui-pass"), "rspamd", "mail"))
+            .Should().NotBe(before);
+    }
+
+    [Fact]
+    public void TheMailServerAlsoRollsWhenItsDatastoreIsRepointed()
+    {
+        // config.json names the datastore. Repointing it without a restart leaves every node reading
+        // the old one — and the Components tab's install path, unlike "Apply configuration", does not
+        // restart anything by itself.
+        static string HashOf(string manifest) =>
+            Scalar(
+                Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "StatefulSet").RootNode,
+                "spec", "template", "metadata", "annotations", "entkube.io/config-hash")!;
+
+        string single = HashOf(StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart"));
+        string ha = HashOf(StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart", ha: Ha()));
+
+        ha.Should().NotBe(single);
+    }
+
+    [Fact]
     public void RspamdShipsItsOwnRedisAndPointsTheClassifierAtIt()
     {
         // The picker offered the cluster's managed Redis, which is sharded, and rspamd cannot speak

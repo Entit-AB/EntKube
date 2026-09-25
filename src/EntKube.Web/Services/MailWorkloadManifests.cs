@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+
 namespace EntKube.Web.Services;
 
 /// <summary>
@@ -31,6 +34,36 @@ public sealed record RspamdSettings(
         !string.IsNullOrWhiteSpace(SsoIssuerUrl)
         && !string.IsNullOrWhiteSpace(SsoClientId)
         && !string.IsNullOrWhiteSpace(WebUiHostname);
+}
+
+/// <summary>Rendering concerns shared by every workload in the mail stack.</summary>
+internal static class MailManifest
+{
+    /// <summary>
+    /// A digest of the ConfigMap just rendered into <paramref name="y"/>, from
+    /// <paramref name="from"/> to the end, stamped onto the pod template as an annotation.
+    ///
+    /// <para>Without it, changing configuration changes nothing. Kubernetes rolls a Deployment when
+    /// its pod template changes, and a new ConfigMap does not touch the pod template — so the apply
+    /// succeeds, the ConfigMap holds the new value, and the pods keep running on what they read at
+    /// startup. Every one of these workloads reads its config once and never looks again, so the
+    /// operator is left with a change that has been applied and has had no effect: the most
+    /// expensive kind of nothing to debug, because every artefact you inspect says it worked.</para>
+    ///
+    /// <para>Concretely: it is what makes an apply move a live rspamd off a Redis it cannot talk to,
+    /// with nobody restarting a pod by hand.</para>
+    ///
+    /// <para>Truncated to 16 hex characters. This is a change detector, not a security boundary —
+    /// what it has to do is differ when the content differs, and be identical when it does not, so
+    /// that applying an unchanged configuration restarts nothing.</para>
+    /// </summary>
+    internal static string ConfigHash(List<string> y, int from)
+    {
+        byte[] digest = SHA256.HashData(
+            Encoding.UTF8.GetBytes(string.Join("\n", y.Skip(from))));
+        return Convert.ToHexString(digest)[..16].ToLowerInvariant();
+    }
+
 }
 
 /// <summary>
@@ -119,6 +152,7 @@ public static class RspamdManifestBuilder
         // The image keeps upstream defaults in /usr/share/rspamd/config and reads local overrides
         // from /etc/rspamd/local.d, so replacing that directory wholesale is the supported way to
         // configure it — everything not named here keeps the upstream default.
+        int configStart = y.Count;
         y.Add("apiVersion: v1");
         y.Add("kind: ConfigMap");
         y.Add("metadata:");
@@ -186,6 +220,7 @@ public static class RspamdManifestBuilder
         ]);
 
         y.Add("---");
+        string configHash = MailManifest.ConfigHash(y, configStart);
 
         // ── State volume ──
         y.Add("apiVersion: v1");
@@ -228,6 +263,8 @@ public static class RspamdManifestBuilder
         y.Add("    metadata:");
         y.Add("      labels:");
         y.Add($"        app: {releaseName}");
+        y.Add("      annotations:");
+        y.Add($"        entkube.io/config-hash: {configHash}");
         y.Add("    spec:");
         y.Add("      securityContext:");
         y.Add($"        fsGroup: {RunAsGroup}");
@@ -633,6 +670,7 @@ public static class WebmailManifestBuilder
             ]);
         }
 
+        int configStart = y.Count;
         y.Add("apiVersion: v1");
         y.Add("kind: ConfigMap");
         y.Add("metadata:");
@@ -648,6 +686,7 @@ public static class WebmailManifestBuilder
             y.Add("    " + line);
         }
         y.Add("---");
+        string configHash = MailManifest.ConfigHash(y, configStart);
 
         AppendPvc(y, $"{releaseName}-data", ns, settings.StorageSize, settings.StorageClass);
 
@@ -670,6 +709,8 @@ public static class WebmailManifestBuilder
         y.Add("    metadata:");
         y.Add("      labels:");
         y.Add($"        app: {releaseName}");
+        y.Add("      annotations:");
+        y.Add($"        entkube.io/config-hash: {configHash}");
         y.Add("    spec:");
         y.Add("      containers:");
         y.Add("        - name: roundcube");
@@ -753,6 +794,7 @@ public static class WebmailManifestBuilder
         // the seed cannot simply be mounted over it. An init container drops the file in on first
         // start and then leaves it alone, so an administrator's later edits in the admin panel are
         // not overwritten on every restart.
+        int configStart = y.Count;
         y.Add("apiVersion: v1");
         y.Add("kind: ConfigMap");
         y.Add("metadata:");
@@ -767,6 +809,7 @@ public static class WebmailManifestBuilder
             y.Add("    " + line);
         }
         y.Add("---");
+        string configHash = MailManifest.ConfigHash(y, configStart);
 
         AppendPvc(y, $"{releaseName}-data", ns, settings.StorageSize, settings.StorageClass);
 
@@ -789,6 +832,8 @@ public static class WebmailManifestBuilder
         y.Add("    metadata:");
         y.Add("      labels:");
         y.Add($"        app: {releaseName}");
+        y.Add("      annotations:");
+        y.Add($"        entkube.io/config-hash: {configHash}");
         y.Add("    spec:");
         y.Add("      initContainers:");
         y.Add("        - name: seed-domain");
