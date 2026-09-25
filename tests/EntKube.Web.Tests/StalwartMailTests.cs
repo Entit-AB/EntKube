@@ -822,6 +822,33 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void ExactlyOneSpamFilterDecides()
+    {
+        // Stalwart's own filter is on by default with a scoreSpam threshold of 5, so installing
+        // rspamd beside it adds a second opinion rather than replacing it — and the two read each
+        // other's headers. A legitimate PGP-signed message scored 3.00/15.00 "no action" by rspamd
+        // had already been scored 6.00 and filed to Junk by the built-in filter, whose
+        // X-Spam-Status: Yes then made rspamd fire SPAM_FLAG (+5.00) on a rescan.
+        StalwartComponentConfig withRspamd = Config(c =>
+        {
+            c.RspamdEnabled = true;
+            c.RspamdHost = "rspamd.rspamd.svc.cluster.local";
+        });
+        JsonElement off = Operation(
+            StalwartPlanBuilder.BuildApplyPlan(withRspamd, [Domain(withRspamd.Id, "example.com")], []),
+            "SpamSettings")!.Value;
+        off.GetProperty("value").GetProperty("enable").GetBoolean().Should().BeFalse();
+
+        // And handed back when rspamd is not there, rather than leaving a server with no filter at
+        // all — which is why this is written on every apply and not only when disabling.
+        StalwartComponentConfig noRspamd = Config(c => c.RspamdEnabled = false);
+        JsonElement on = Operation(
+            StalwartPlanBuilder.BuildApplyPlan(noRspamd, [Domain(noRspamd.Id, "example.com")], []),
+            "SpamSettings")!.Value;
+        on.GetProperty("value").GetProperty("enable").GetBoolean().Should().BeTrue();
+    }
+
+    [Fact]
     public void TheGatewayAddressesAreAllowListedSoTheyCanNeverBeBanned()
     {
         // is_ip_blocked() is "blocked AND NOT allowed": an AllowedIp entry is a hard guarantee that
