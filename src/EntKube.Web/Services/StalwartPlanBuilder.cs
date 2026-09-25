@@ -113,6 +113,27 @@ public static class StalwartPlanBuilder
             : $"redis://default:{Uri.EscapeDataString(password)}@{endpoint}";
 
     /// <summary>
+    /// Every address range a connection can reach this server from inside the cluster, as CIDR.
+    ///
+    /// <para>Ranges rather than addresses because nothing here is stable: pods are rescheduled and
+    /// the autoscaler adds nodes. Deliberately broad — it covers the private space of RFC 1918, the
+    /// carrier-grade NAT block that several CNIs allocate pod addresses from (Kubernetes clusters are
+    /// commonly on 100.64.0.0/10, which a list of "the private ranges" would miss), loopback, and
+    /// IPv6 unique-local. None of these can be a real remote client, so exempting them costs nothing
+    /// that was protecting anything.</para>
+    /// </summary>
+    public static readonly string[] InternalRanges =
+    [
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "fc00::/7",
+        "::1/128",
+    ];
+
+    /// <summary>
     /// The single cluster role EntKube gives every node: run every task and every listener. Real
     /// deployments split roles (maintenance tasks on one node), but an all-equal cluster is the
     /// documented starting point and the one whose behaviour is unsurprising.
@@ -429,23 +450,49 @@ public static class StalwartPlanBuilder
             ["authBanPeriod"] = 3_600_000,
         }));
 
-        // is_ip_blocked() is "blocked AND NOT allowed", so an AllowedIp entry for the gateway is
-        // a hard guarantee that it cannot be banned even when a request arrives without a usable
-        // forwarding header and falls back to the TCP peer. Belt to useXForwarded's braces.
-        if (trustedProxyAddresses is { Count: > 0 })
+        // is_ip_blocked() is "blocked AND NOT allowed", so an AllowedIp entry is a hard guarantee
+        // that an address cannot be banned even when a connection arrives with no usable forwarding
+        // header and falls back to the TCP peer.
+        //
+        // Every internal range, not merely the gateway pods that could be enumerated. Two reasons,
+        // and the second is the one that cost a delivery outage.
+        //
+        // The enumerable half does not stay enumerated: pods move between nodes, and a cluster that
+        // autoscales invents node addresses that did not exist when the plan was written. An
+        // allow-list built by listing what was running is correct only until the next scale event.
+        //
+        // And where the load balancer cannot preserve the client address — an OpenStack Octavia
+        // amphora proxies and SNATs, whatever externalTrafficPolicy says — every sender on the
+        // internet arrives as one internal address. Auto-ban then counts the whole world's failures
+        // against a single peer and blocks it, which is not one sender banned but all mail refused
+        // at TCP accept, before the filter, with nothing in the inbox and nothing in the spam folder.
+        // That happened.
+        //
+        // The cost is stated rather than hidden: on such a deployment this leaves auto-ban with
+        // nothing it can act on for inbound mail. That protection was never real there — the only
+        // address it could ever have banned was the operator's own load balancer — so what this
+        // removes is a hazard, not a defence. SPF and DMARC are equally meaningless against a
+        // SNAT'd peer, and no allow-list can fix that; DKIM still works, because it signs the
+        // message rather than trusting the connection.
+        Dictionary<string, object?> allowed = [];
+        int allowIndex = 0;
+        foreach (string range in InternalRanges)
         {
-            Dictionary<string, object?> allowed = [];
-            int i = 0;
-            foreach (string address in trustedProxyAddresses.Distinct(StringComparer.Ordinal))
+            allowed[$"internal-{allowIndex++}"] = new Dictionary<string, object?>
             {
-                allowed[$"proxy-{i++}"] = new Dictionary<string, object?>
-                {
-                    ["address"] = address,
-                    ["reason"] = "EntKube ingress gateway — banning this address bans every user",
-                };
-            }
-            lines.Add(Op("upsert", "AllowedIp", MatchOn("address"), allowed));
+                ["address"] = range,
+                ["reason"] = "Inside the cluster — mail and web traffic reach this server through it",
+            };
         }
+        foreach (string address in (trustedProxyAddresses ?? []).Distinct(StringComparer.Ordinal))
+        {
+            allowed[$"proxy-{allowIndex++}"] = new Dictionary<string, object?>
+            {
+                ["address"] = address,
+                ["reason"] = "EntKube ingress gateway — banning this address bans every user",
+            };
+        }
+        lines.Add(Op("upsert", "AllowedIp", MatchOn("address"), allowed));
 
         // reconcile with an empty value set removes every object in scope — the same idiom the
         // milter uses to express "none". Deliberately gated: applying must never quietly lift a

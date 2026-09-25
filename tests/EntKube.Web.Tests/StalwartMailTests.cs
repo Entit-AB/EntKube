@@ -837,16 +837,35 @@ public class StalwartMailTests
         List<string> addresses = allowed.GetProperty("value").EnumerateObject()
             .Select(p => p.Value.GetProperty("address").GetString()!)
             .ToList();
-        addresses.Should().BeEquivalentTo(["10.42.0.17", "10.42.1.9"]); // de-duplicated
+        addresses.Should().Contain("10.42.0.17").And.Contain("10.42.1.9");
+        addresses.Count(a => a == "10.42.0.17").Should().Be(1); // de-duplicated
     }
 
     [Fact]
-    public void NoAllowListIsWrittenWhenNoGatewayAddressesWereResolved()
+    public void EveryInternalRangeIsAllowListed()
     {
+        // Enumerating what was running is correct until the next scale event: pods move and the
+        // autoscaler invents node addresses that did not exist when the plan was written.
+        //
+        // And where the load balancer cannot preserve the client address — an Octavia amphora
+        // proxies and SNATs whatever externalTrafficPolicy says — every sender on the internet
+        // arrives as one internal address. Auto-ban counted the world's failures against that single
+        // peer, blocked it, and refused all mail at TCP accept: nothing in the inbox, nothing in the
+        // spam folder, and "Blocked IP address ... remoteIp = 10.240.3.59" as the only trace.
         StalwartComponentConfig config = Config();
         string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
 
-        Operation(plan, "AllowedIp").Should().BeNull();
+        List<string> addresses = Operation(plan, "AllowedIp")!.Value
+            .GetProperty("value").EnumerateObject()
+            .Select(p => p.Value.GetProperty("address").GetString()!)
+            .ToList();
+
+        // Written even with no gateway address resolved — the ranges do not depend on discovery.
+        addresses.Should().Contain(StalwartPlanBuilder.InternalRanges);
+
+        // 100.64.0.0/10 is the one a list of "the private ranges" misses, and it is where several
+        // CNIs allocate pod addresses: this cluster's pods are on 100.96.x.
+        addresses.Should().Contain("100.64.0.0/10");
     }
 
     [Fact]
