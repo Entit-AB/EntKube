@@ -3239,23 +3239,6 @@ public static class ComponentCatalog
                 },
                 new ComponentFormField
                 {
-                    Key = "ha-coordinator-redis", Label = "Coordinator (Redis)",
-                    YamlPath = "stalwart:ha-coordinator-redis", Type = FormFieldType.RedisSelector,
-                    Placeholder = "redis.redis.svc.cluster.local:6379",
-                    DependsOnKey = "ha-enabled", DependsOnValue = "true",
-                    HelpText = "How the nodes stay in step, and where rate limits and caches live. The same Redis rspamd uses is fine; picking one EntKube manages fills its password in below and is configured as a Redis Cluster, which is what those are. An endpoint typed by hand is treated as a single server — if it is in fact a sharded cluster, the server will start, authenticate a login and then fail every lookup behind it with a MOVED redirection."
-                },
-                new ComponentFormField
-                {
-                    // Keyed "redis-password" because that is the sibling the Redis picker fills in when
-                    // the chosen endpoint is one EntKube manages.
-                    Key = "redis-password", Label = "Coordinator Redis Password",
-                    YamlPath = "stalwart:redis-password", Type = FormFieldType.Password,
-                    DependsOnKey = "ha-enabled", DependsOnValue = "true",
-                    HelpText = "Leave blank for a Redis with no authentication. A Redis Cluster reads this from the pod's environment, so it stays out of the applied configuration; a single server has nowhere to put it but the connection URL, where it is visible — so a network-isolated coordinator with no password is the better shape for that case."
-                },
-                new ComponentFormField
-                {
                     Key = "storage-size", Label = "Storage Size",
                     YamlPath = "stalwart:storage-size", Type = FormFieldType.Text,
                     DefaultValue = "20Gi",
@@ -3293,21 +3276,6 @@ public static class ComponentCatalog
             DefaultReleaseName = "rspamd",
             FormFields =
             [
-                new ComponentFormField
-                {
-                    Key = "redis-servers", Label = "Redis",
-                    YamlPath = "rspamd:redis-servers", Type = FormFieldType.RedisSelector,
-                    Placeholder = "redis.redis.svc.cluster.local:6379",
-                    StoreAsSecret = true, SecretName = "RSPAMD_REDIS_SERVERS",
-                    HelpText = "The Redis this filter keeps its learned state in — the Bayes classifier, greylisting, rate limits and reputation. Picked from what is actually running on this cluster; choosing one EntKube manages fills in its password too."
-                },
-                new ComponentFormField
-                {
-                    Key = "redis-password", Label = "Redis Password",
-                    YamlPath = "rspamd:redis-password", Type = FormFieldType.Password,
-                    StoreAsSecret = true, SecretName = "RSPAMD_REDIS_PASSWORD",
-                    HelpText = "Leave blank for a Redis with no authentication."
-                },
                 new ComponentFormField
                 {
                     Key = "controller-password", Label = "Web UI Password",

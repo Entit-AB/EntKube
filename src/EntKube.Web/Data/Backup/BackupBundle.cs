@@ -2,6 +2,8 @@ namespace EntKube.Web.Data.Backup;
 
 public class BackupBundle
 {
+    // Version 8 added the inbound ticket bridge: the customers' own ticketing systems and
+    // what each of our tickets mirrors there.
     // Version 7 added the envelope recipients kept beside the claimed ones.
     // Version 6 added each customer's own support addresses.
     // Version 5 added the customer mail-domain register.
@@ -25,7 +27,7 @@ public class BackupBundle
     /// literal here and a second literal in the import's guard, which is how a bundle
     /// this very code wrote came to be rejected by it.</para>
     /// </summary>
-    public const int CurrentVersion = 7;
+    public const int CurrentVersion = 8;
 
     public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -204,6 +206,15 @@ public class BackupBundle
     public List<MailTriageRule> MailTriageRules { get; set; } = [];
     public List<InboundMailMessage> InboundMailMessages { get; set; } = [];
     public List<MailSuggestion> MailSuggestions { get; set; } = [];
+
+    // The customers' own ticketing systems. The connection's shared secret rides along as
+    // its hash, which is all there ever was — a restored connection therefore keeps working
+    // without anybody having to reissue credentials into somebody else's estate.
+    public List<TicketBridgeConnection> TicketBridgeConnections { get; set; } = [];
+    // What each ticket mirrors in the customer's system. Losing it would not lose a ticket,
+    // but every future delivery about one would open a second — the link is the only thing
+    // that recognises a resend.
+    public List<ExternalTicketLink> ExternalTicketLinks { get; set; } = [];
 
     // Platform configuration that nothing live recreates. Added when a coverage test was
     // written and found them missing; see BackupCoverageTests for what is still not here.

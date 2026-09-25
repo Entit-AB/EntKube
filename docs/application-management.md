@@ -564,6 +564,84 @@ incidents.
   response clock paused is a question the agreement does not answer, and guessing
   would be guessing in our own favour.
 
+## The inbound ticket bridge
+
+A customer who runs their own service desk — Jira, ServiceNow, Ivanti — can have it raise
+tickets here directly, instead of a person re-typing them or mailing us.
+
+**Inbound only, and one direction on purpose.** Their system posts to us; nothing of ours
+reaches into theirs. That means no credentials into somebody's production ITSM, which is a
+better answer to §17 than careful credential handling would be, and it is why the outbound
+half — mirroring our tickets into *our* Jira — is not here. That direction would make
+Atlassian a new subprocessor over data that includes patient records, needing a DPA under
+§17 and the customer's approval under §18. Same as the language model: the seam is a
+contract question before it is a technical one.
+
+### The boundary, which is the whole design
+
+§14.6 makes our timestamps the record between the parties, and §28 makes the monthly report
+binding unless disputed within thirty days. A ticket whose clocks were driven from somebody
+else's database could not survive that — a dispute would become an argument about whose row
+was right, argued from a copy. So a delivery may **open** a ticket and **add** to its
+history, and may do nothing else:
+
+- **It cannot confirm a priority.** What arrives is a proposal (§14.3), exactly as a
+  customer's is in the portal.
+- **It cannot pause a clock.** A pause stops the resolution clock, which lowers measured
+  breach time and with it our own §14.6 penalties. An integration that quietly reduced our
+  liability is one no customer should be asked to believe, so a remote system going "on
+  hold" is a note and nothing moves.
+- **It cannot resolve or close.** §14.4 makes resolution ours to record and the customer's
+  to accept. Their closing their own copy is not that act, and the ticket here says so.
+
+All three are the same restriction: the bridge is a channel, not a second owner of the
+record.
+
+### The seam
+
+[`IInboundTicketAdapter`](../src/EntKube.Web/Services/Tickets/Bridge/InboundTicketReport.cs)
+renames fields and decides nothing — no priority mapping, no clock, no status. Every vendor
+reduces to one `InboundTicketReport`, so the rules that matter are applied once in
+[`TicketBridgeService`](../src/EntKube.Web/Services/Tickets/Bridge/TicketBridgeService.cs)
+rather than four times in four vocabularies, where the fourth would get it subtly wrong.
+Adding Ivanti is a class and a registration.
+
+The real payloads are awkward in ways worth knowing: Jira Cloud sends the description as an
+Atlassian document and Data Center sends a string, both of which are read; ServiceNow has no
+fixed webhook shape at all, so the incident is found wherever the template somebody started
+from put it, and its reference fields arrive as either a string or `{value, display_value}`.
+
+**Priorities are configured, never guessed.** Jira's are whatever a project admin last typed;
+ServiceNow's 1–5 comes from impact × urgency and its 3 is not §14.2's P3. A value nobody
+mapped proposes *nothing* — §14.3's first assessment decides it — because falling back to P3
+would look like the customer had proposed one, quietly settling a question nobody was asked
+on a record §28 makes binding.
+
+### Identity, and what stops a leaked secret spreading
+
+The connection says which customer it belongs to, so a delivery cannot name one. A secret
+that leaked reaches that customer's tickets and no further.
+
+The secret itself is **hashed, not vaulted**: every other credential in EntKube is encrypted
+because something must read it back and present it, and this one is only ever compared.
+Keeping it reversible would be an ability we have no use for and a working credential to
+lose. It is shown once when issued, and reissuing stops the old one at once — which is the
+point, since reissuing is what you do after a leak. Salted SHA-256 rather than a slow KDF:
+it is 32 random bytes we generated, so there is nothing to guess, and a deliberately slow
+hash on the path every delivery takes would be a free denial of service.
+
+`ExternalTicketLink` records what each ticket mirrors, and its unique index is what actually
+stops a resend becoming a second ticket — a service desk resends on every field change. A
+per-connection gate closes the window where two simultaneous deliveries would both find no
+link; across two instances the index is the only guard, which is the honest limit.
+
+### What is not here
+
+No polling: a customer who would rather be polled than push needs credentials into their
+instance, and that belongs behind the same seam when somebody asks for it. **Nothing has run
+against a real Jira or ServiceNow** — the payload shapes are from their documentation, and
+the first real delivery is what will find out.
+
 ## Tests
 
 310 test methods across sixteen files (more cases than that, since several are

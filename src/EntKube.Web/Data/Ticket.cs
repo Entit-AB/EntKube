@@ -35,6 +35,17 @@ public enum TicketChannel
     /// the time somebody noticed it.
     /// </summary>
     Monitoring = 3,
+
+    /// <summary>
+    /// Raised in the customer's own ticketing system and delivered to us by it.
+    ///
+    /// <para>§14.3 recognises the portal, e-mail and conversation; this is a customer's
+    /// service desk reaching us mechanically instead of a person writing. Recorded as its
+    /// own channel because the reporting time is theirs, not ours — and because "where did
+    /// this come from" is the first question asked when a ticket's terms are argued
+    /// about.</para>
+    /// </summary>
+    Integration = 4,
 }
 
 /// <summary>Where a ticket stands.</summary>

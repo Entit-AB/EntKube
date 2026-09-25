@@ -469,17 +469,6 @@ public class StalwartService(
         {
             cfg.BlobStorageLinkId = GuidOrNull(form, "ha-blob-store");
         }
-        if (form.ContainsKey("ha-coordinator-redis"))
-        {
-            // The picker's value is one "host:port" string, because that is what a Redis endpoint
-            // is everywhere else in the catalog; the config keeps the two apart.
-            (string? redisHost, int? redisPort) = SplitEndpoint(Text(form, "ha-coordinator-redis"));
-            cfg.CoordinatorRedisHost = redisHost;
-            if (redisPort is int port)
-            {
-                cfg.CoordinatorRedisPort = port;
-            }
-        }
     }
 
     /// <summary>Splits a <c>host:port</c> endpoint. A bare host keeps the stored port.</summary>
@@ -571,9 +560,6 @@ public class StalwartService(
         ["ha-replicas"] = config.Replicas.ToString(),
         ["ha-database"] = config.CnpgDatabaseId?.ToString() ?? "",
         ["ha-blob-store"] = config.BlobStorageLinkId?.ToString() ?? "",
-        ["ha-coordinator-redis"] = string.IsNullOrWhiteSpace(config.CoordinatorRedisHost)
-            ? ""
-            : $"{config.CoordinatorRedisHost}:{config.CoordinatorRedisPort}",
     };
 
     /// <summary>
@@ -581,7 +567,7 @@ public class StalwartService(
     /// the round-trip test can tell "deliberately withheld" from "forgotten".
     /// </summary>
     public static readonly string[] SecretFormKeys =
-        ["admin-password", "ldap-bind-password", "tls-cert", "tls-key", "redis-password"];
+        ["admin-password", "ldap-bind-password", "tls-cert", "tls-key"];
 
     /// <summary>
     /// Form keys that are inputs only: they are consumed while saving to derive something else and
@@ -632,10 +618,12 @@ public class StalwartService(
         Guid tenantId, Guid clusterComponentId, StalwartComponentConfig config, string releaseName, string ns,
         CancellationToken ct = default)
     {
+        // The coordinator is no longer part of what makes an HA configuration complete: it ships
+        // with the deployment, so there is nothing an operator can leave out. Only the two backends
+        // that genuinely hold state — the shared database and the shared blob store — can be missing.
         if (!config.HighAvailability
             || config.CnpgDatabaseId is not Guid dbId
-            || config.BlobStorageLinkId is not Guid linkId
-            || string.IsNullOrWhiteSpace(config.CoordinatorRedisHost))
+            || config.BlobStorageLinkId is not Guid linkId)
         {
             return null;
         }
@@ -681,50 +669,23 @@ public class StalwartService(
                 k8sSecretName: credentialsSecret, k8sNamespace: ns);
         }
 
-        // Which Redis this is decides the whole store shape. A sharded Redis Cluster answers a key
-        // it does not own with a MOVED redirection, which the standalone client does not follow — so
-        // addressing one as a single server gives a server that starts, authenticates a login, and
-        // then fails every lookup behind it. Every Redis EntKube manages is a cluster (the operator
-        // it uses only builds those), which is exactly what a picker fills in.
+        // The coordinator is the mail server's own, deployed beside it by the manifest — not an
+        // address an operator supplies. Nothing is resolved, nothing is credentialed, and nothing
+        // can be pointed at the wrong Service, because there is no question being asked. See
+        // StalwartManifestBuilder.AppendCoordinator for why it stopped being a choice.
         //
-        // An endpoint EntKube does not manage is treated as a single server, because that is all it
-        // can honestly say: the resolve is database-only by design, and guessing from a live probe
-        // on the install path would make the answer depend on whether Redis happened to be up.
-        string endpoint = $"{config.CoordinatorRedisHost!.Trim()}:{config.CoordinatorRedisPort}";
-        RedisEndpointOption? managedRedis =
-            await redisService.ResolveManagedEndpointAsync(kubernetesClusterId, endpoint, ct);
-        bool redisIsCluster = managedRedis?.ClusterMode == true;
-
-        string? redisPassword = await Secret(tenantId, clusterComponentId, "STALWART_COORDINATOR_REDIS_PASSWORD", ct);
-
-        string redisUrl;
-        if (redisIsCluster)
-        {
-            // The cluster store reads its password from the environment, so the URL stays clean and
-            // the credential never lands in the applied plan.
-            redisUrl = $"redis://{endpoint}";
-            if (!string.IsNullOrWhiteSpace(redisPassword))
-            {
-                await vaultService.SetComponentSecretAsync(
-                    tenantId, clusterComponentId, StalwartPlanBuilder.RedisPasswordEnv, redisPassword, ct,
-                    k8sSecretName: credentialsSecret, k8sNamespace: ns);
-            }
-        }
-        else
-        {
-            // The standalone store carries no secret field, so a password rides in the URL.
-            string redisAuth = string.IsNullOrWhiteSpace(redisPassword)
-                ? ""
-                : $":{Uri.EscapeDataString(redisPassword)}@";
-            redisUrl = $"redis://{redisAuth}{endpoint}";
-        }
+        // Standalone, therefore: one node has no shards, so the client is never redirected away
+        // from a key it does not own, and the RedisCluster store shape (whose authentication could
+        // not be made to work on 0.16.21 in any spelling its schema allows) is not used at all.
+        string endpoint = StalwartManifestBuilder.CoordinatorEndpoint(releaseName, ns);
+        string redisUrl = StalwartPlanBuilder.BuildRedisUrl(endpoint, password: null);
 
         return new StalwartPlanBuilder.StalwartHaBackend(
             DbHost: dbHost, DbPort: 5432, DbName: cnpg.Name, DbUser: cnpg.Owner,
             S3Endpoint: link.Endpoint ?? "", S3Region: link.Region ?? "us-east-1", S3Bucket: link.BucketName ?? "",
             S3AccessKey: accessKey,
             RedisUrl: redisUrl,
-            RedisIsCluster: redisIsCluster,
+            RedisIsCluster: false,
             Replicas: Math.Max(2, config.Replicas));
     }
 
@@ -1265,14 +1226,6 @@ public class StalwartService(
                     "Pick an S3 storage link in this component's settings on the cluster's Components tab. "
                     + "Message bodies must live where every node can reach them; a local volume would "
                     + "strand them on one node."));
-            }
-            if (string.IsNullOrWhiteSpace(config.CoordinatorRedisHost))
-            {
-                issues.Add(new(true,
-                    "High availability is on but no coordinator is configured.",
-                    "Pick a coordinator Redis in this component's settings on the cluster's Components tab. "
-                    + "The nodes share state and stay in step through it; without one they cannot form a "
-                    + "cluster."));
             }
             if (config.Replicas < 2)
             {
@@ -2495,9 +2448,6 @@ public class StalwartService(
             clientSecretName: RspamdManifestBuilder.SsoClientSecretName, ct);
 
         RspamdSettings settings = new(
-            RedisServers: await SecretOr(tenantId, clusterComponentId, "RSPAMD_REDIS_SERVERS",
-                $"redis.redis.svc.cluster.local:6379", ct),
-            RedisPassword: await Secret(tenantId, clusterComponentId, "RSPAMD_REDIS_PASSWORD", ct),
             ControllerPassword: await Secret(tenantId, clusterComponentId, "RSPAMD_CONTROLLER_PASSWORD", ct),
             StorageSize: await SecretOr(tenantId, clusterComponentId, "RSPAMD_STORAGE_SIZE", "2Gi", ct),
             StorageClass: await Secret(tenantId, clusterComponentId, "RSPAMD_STORAGE_CLASS", ct),

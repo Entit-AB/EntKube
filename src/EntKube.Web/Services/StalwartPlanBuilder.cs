@@ -50,12 +50,88 @@ public static class StalwartPlanBuilder
     public const string S3SecretKeyEnv = "STALWART_S3_SECRET_KEY";
 
     /// <summary>
-    /// Environment variable carrying the coordinator Redis password — but only for a Redis Cluster.
-    /// The two store shapes differ here: <c>RedisClusterStore.authSecret</c> is a
-    /// <c>SecretKeyOptional</c> and can name an env var, while the standalone <c>RedisStore</c> has
-    /// no secret field at all and must carry its password inside the URL.
+    /// Environment variable carrying the coordinator Redis password. <c>RedisClusterStore.authSecret</c>
+    /// is a <c>SecretKeyOptional</c> that can name it, and the plan still sets that — but it is not
+    /// what makes the connection work, so it is no longer the only place the password appears. See
+    /// <see cref="BuildRedisUrl"/>.
     /// </summary>
     public const string RedisPasswordEnv = "STALWART_REDIS_PASSWORD";
+
+    /// <summary>
+    /// The Redis user the coordinator authenticates as, named explicitly because the alternative is
+    /// not "no user" but the empty one.
+    ///
+    /// <para>Every Stalwart store that authenticates carries a username beside its secret — the
+    /// PostgreSQL datastore has <c>authUsername</c> and <c>authSecret</c>, the S3 blob store
+    /// <c>accessKey</c> and <c>secretKey</c>. The Redis cluster store was given only the secret, so
+    /// it sent the password with an empty username, and Redis rejects that with <c>WRONGPASS
+    /// invalid username-password pair</c> — which Stalwart reports as <c>Password authentication
+    /// failed</c>, word for word what it says when there is no password at all.</para>
+    ///
+    /// <para>Measured on the live cluster with the one correct password: <c>-a pw</c> PONG,
+    /// <c>--user '' --pass pw</c> WRONGPASS, <c>--user default --pass pw</c> PONG. <c>default</c> is
+    /// the user <c>requirepass</c> configures, so naming it is what the working invocation does.</para>
+    /// </summary>
+    public const string RedisUsername = "default";
+
+    /// <summary>
+    /// The coordinator URL, carrying the password inline when there is one.
+    ///
+    /// <para>Inline for BOTH store shapes, which is not what the schema suggests. The standalone
+    /// <c>RedisStore</c> has no secret field at all, so it never had a choice. The cluster store does
+    /// have <c>authSecret</c>, and pointing it at an environment variable looked like the better
+    /// shape — the credential stays in the pod's environment and never lands in the applied plan.
+    /// It does not work: the client authenticates its seed connection from the URL alone, so a URL
+    /// with no credentials sends no password however correct the env var is, and the cluster fails
+    /// with <c>Failed to create initial connections … Password authentication failed</c>. Proven on a
+    /// live cluster, where the plan named the right store, the pod held the right password in the
+    /// right variable, <c>redis-cli</c> authenticated with that very value — and the server still
+    /// could not lock a task.</para>
+    ///
+    /// <para>So the password goes in the URL and <c>authSecret</c> is set as well: harmless where it
+    /// is honoured, load-bearing where it is not. The cost is real and deliberate — the applied plan
+    /// now contains the credential, and that plan is stored on-cluster as the
+    /// <c>&lt;release&gt;-apply-plan</c> Secret. A coordinator reachable only inside the cluster is
+    /// the shape that makes this acceptable.</para>
+    ///
+    /// <para>The username is spelled out as <c>default</c>, and that word is the entire fix. The
+    /// obvious spelling — <c>redis://:password@host</c> — names an EMPTY username, not an absent
+    /// one, and Redis answers that with <c>WRONGPASS invalid username-password pair</c>: the same
+    /// rejection as a wrong password, and indistinguishable from it in Stalwart's log. Measured
+    /// against the live cluster, one password and three spellings: <c>-a pw</c> gave PONG,
+    /// <c>--user '' --pass pw</c> gave WRONGPASS, <c>--user default --pass pw</c> gave PONG. Both
+    /// failing shapes — no credentials at all, and an empty username — surface identically as
+    /// <c>Password authentication failed</c>, which is why this cost three attempts to find.</para>
+    ///
+    /// <para>Naming a user at all requires the two-argument <c>AUTH</c> of Redis 6 (2020), which
+    /// every Redis the operator builds is well past. A pre-6 server reached as an unmanaged endpoint
+    /// would reject it — the one case this deliberately does not serve.</para>
+    /// </summary>
+    public static string BuildRedisUrl(string endpoint, string? password) =>
+        string.IsNullOrWhiteSpace(password)
+            ? $"redis://{endpoint}"
+            : $"redis://default:{Uri.EscapeDataString(password)}@{endpoint}";
+
+    /// <summary>
+    /// Every address range a connection can reach this server from inside the cluster, as CIDR.
+    ///
+    /// <para>Ranges rather than addresses because nothing here is stable: pods are rescheduled and
+    /// the autoscaler adds nodes. Deliberately broad — it covers the private space of RFC 1918, the
+    /// carrier-grade NAT block that several CNIs allocate pod addresses from (Kubernetes clusters are
+    /// commonly on 100.64.0.0/10, which a list of "the private ranges" would miss), loopback, and
+    /// IPv6 unique-local. None of these can be a real remote client, so exempting them costs nothing
+    /// that was protecting anything.</para>
+    /// </summary>
+    public static readonly string[] InternalRanges =
+    [
+        "10.0.0.0/8",
+        "172.16.0.0/12",
+        "192.168.0.0/16",
+        "100.64.0.0/10",
+        "127.0.0.0/8",
+        "fc00::/7",
+        "::1/128",
+    ];
 
     /// <summary>
     /// The single cluster role EntKube gives every node: run every task and every listener. Real
@@ -79,11 +155,12 @@ public static class StalwartPlanBuilder
     /// <param name="S3Bucket">Bucket holding message bodies and attachments.</param>
     /// <param name="S3AccessKey">S3 access key (public half; the secret half is an env var).</param>
     /// <param name="RedisUrl">
-    /// Coordinator / in-memory Redis URL, e.g. <c>redis://redis.redis.svc:6379</c>. Stalwart's
-    /// standalone-Redis store has no separate secret field — unlike the datastore and blob store —
-    /// so a password, when there is one, is carried inline in this URL
-    /// (<c>redis://:password@host:port</c>). That means it is visible in the applied plan; a
-    /// network-isolated Redis with no password is the cleaner choice for an in-cluster coordinator.
+    /// Coordinator / in-memory Redis URL, e.g. <c>redis://redis.redis.svc:6379</c>. A password, when
+    /// there is one, is carried inline (<c>redis://:password@host:port</c>) for BOTH store shapes —
+    /// the standalone one has no secret field to put it in, and the cluster one has a secret field
+    /// that does not govern the connection. Built by <see cref="BuildRedisUrl"/>, whose remarks say
+    /// why. It is therefore visible in the applied plan, which is what makes an in-cluster-only
+    /// coordinator the assumed shape.
     /// </param>
     /// <param name="Replicas">Node count.</param>
     public sealed record StalwartHaBackend(
@@ -267,6 +344,10 @@ public static class StalwartPlanBuilder
                 {
                     ["@type"] = "RedisCluster",
                     ["urls"] = Set([ha.RedisUrl]),
+                    // Beside the secret, never without it: a secret with no username is sent as a
+                    // username of "", which Redis refuses exactly as it refuses a wrong password.
+                    // See RedisUsername.
+                    ["authUsername"] = RedisUsername,
                     ["authSecret"] = new Dictionary<string, object?>
                     {
                         ["@type"] = "EnvironmentVariable",
@@ -369,23 +450,49 @@ public static class StalwartPlanBuilder
             ["authBanPeriod"] = 3_600_000,
         }));
 
-        // is_ip_blocked() is "blocked AND NOT allowed", so an AllowedIp entry for the gateway is
-        // a hard guarantee that it cannot be banned even when a request arrives without a usable
-        // forwarding header and falls back to the TCP peer. Belt to useXForwarded's braces.
-        if (trustedProxyAddresses is { Count: > 0 })
+        // is_ip_blocked() is "blocked AND NOT allowed", so an AllowedIp entry is a hard guarantee
+        // that an address cannot be banned even when a connection arrives with no usable forwarding
+        // header and falls back to the TCP peer.
+        //
+        // Every internal range, not merely the gateway pods that could be enumerated. Two reasons,
+        // and the second is the one that cost a delivery outage.
+        //
+        // The enumerable half does not stay enumerated: pods move between nodes, and a cluster that
+        // autoscales invents node addresses that did not exist when the plan was written. An
+        // allow-list built by listing what was running is correct only until the next scale event.
+        //
+        // And where the load balancer cannot preserve the client address — an OpenStack Octavia
+        // amphora proxies and SNATs, whatever externalTrafficPolicy says — every sender on the
+        // internet arrives as one internal address. Auto-ban then counts the whole world's failures
+        // against a single peer and blocks it, which is not one sender banned but all mail refused
+        // at TCP accept, before the filter, with nothing in the inbox and nothing in the spam folder.
+        // That happened.
+        //
+        // The cost is stated rather than hidden: on such a deployment this leaves auto-ban with
+        // nothing it can act on for inbound mail. That protection was never real there — the only
+        // address it could ever have banned was the operator's own load balancer — so what this
+        // removes is a hazard, not a defence. SPF and DMARC are equally meaningless against a
+        // SNAT'd peer, and no allow-list can fix that; DKIM still works, because it signs the
+        // message rather than trusting the connection.
+        Dictionary<string, object?> allowed = [];
+        int allowIndex = 0;
+        foreach (string range in InternalRanges)
         {
-            Dictionary<string, object?> allowed = [];
-            int i = 0;
-            foreach (string address in trustedProxyAddresses.Distinct(StringComparer.Ordinal))
+            allowed[$"internal-{allowIndex++}"] = new Dictionary<string, object?>
             {
-                allowed[$"proxy-{i++}"] = new Dictionary<string, object?>
-                {
-                    ["address"] = address,
-                    ["reason"] = "EntKube ingress gateway — banning this address bans every user",
-                };
-            }
-            lines.Add(Op("upsert", "AllowedIp", MatchOn("address"), allowed));
+                ["address"] = range,
+                ["reason"] = "Inside the cluster — mail and web traffic reach this server through it",
+            };
         }
+        foreach (string address in (trustedProxyAddresses ?? []).Distinct(StringComparer.Ordinal))
+        {
+            allowed[$"proxy-{allowIndex++}"] = new Dictionary<string, object?>
+            {
+                ["address"] = address,
+                ["reason"] = "EntKube ingress gateway — banning this address bans every user",
+            };
+        }
+        lines.Add(Op("upsert", "AllowedIp", MatchOn("address"), allowed));
 
         // reconcile with an empty value set removes every object in scope — the same idiom the
         // milter uses to express "none". Deliberately gated: applying must never quietly lift a
@@ -425,10 +532,62 @@ public static class StalwartPlanBuilder
 
         // ── Spam filtering ──
         //
+        // Exactly one filter decides. Stalwart ships its own, enabled by default, with its own Bayes
+        // classifier and a scoreSpam threshold of 5 — so installing rspamd beside it does not replace
+        // it, it adds a second opinion, and the two then read each other's headers.
+        //
+        // What that looked like: every message filed to Junk, and rspamd innocent. rspamd scored a
+        // legitimate PGP-signed message 3.00 against its own threshold of 15 and returned "no
+        // action"; Stalwart's filter had already scored the same message 6.00, stamped
+        // X-Spam-Status: Yes and X-Spam-Result, and filed it. rspamd then saw that header and fired
+        // SPAM_FLAG (+5.00) on the rescan — the filters inflating each other. Days were spent on
+        // rspamd's Redis and DNS, all of it real and none of it the cause, because the filter making
+        // the decision was never rspamd.
+        //
+        // The mechanism is narrower than "two filters disagree", and knowing which way round it goes
+        // decides the fix. SPAM_FLAG is STALWART's tag, and it scores +5 when the message already
+        // carries an X-Spam header — a real anti-evasion rule, because spammers do forge
+        // "X-Spam-Flag: No". rspamd's milter adds X-Spam-Status at DATA, before the built-in filter
+        // runs. So rspamd's own header was triggering Stalwart's verdict: 1.00 became 6.00, crossed
+        // scoreSpam of 5, and the message was filed to Junk.
+        //
+        // Which means the built-in filter is the half to keep, not the half to switch off. It is
+        // what files into Junk, and nothing else can: a SieveSystemScript runs at SMTP stages and
+        // cannot use fileinto, so only a per-account script could file — and writing one onto every
+        // mailbox, including accounts EntKube did not create, is not a mechanism worth having.
+        // Disabling it leaves rspamd adding headers that nothing acts on and spam in the inbox.
+        //
+        // So: enabled, always, and written explicitly rather than left at its default so that a
+        // server an earlier version of this plan switched off is repaired by the next apply.
+        bool rspamdIsTheFilter =
+            config.RspamdEnabled && !string.IsNullOrWhiteSpace(config.RspamdHost);
+
+        lines.Add(Update("SpamSettings", new()
+        {
+            ["enable"] = true,
+        }));
+
+        // And the tag that reacted to rspamd's header is neutralised while rspamd is in the path.
+        // Upstream's own advice for this arrangement, and the reason it is scoped to when rspamd is
+        // enabled: without an upstream filter the rule is doing real work, and zeroing it then would
+        // hand spammers back the evasion it exists to catch.
+        if (rspamdIsTheFilter)
+        {
+            lines.Add(Op("upsert", "SpamTag", MatchOn("tag"), new()
+            {
+                ["spam-flag"] = new Dictionary<string, object?>
+                {
+                    ["@type"] = "Score",
+                    ["tag"] = "SPAM_FLAG",
+                    ["score"] = 0.0,
+                },
+            }));
+        }
+
         // reconcile with an empty value map is how "no milter" is expressed: turning rspamd off has
         // to remove the hook, or every message keeps being handed to a filter that is no longer there.
         Dictionary<string, object?> milters = [];
-        if (config.RspamdEnabled && !string.IsNullOrWhiteSpace(config.RspamdHost))
+        if (rspamdIsTheFilter)
         {
             milters["rspamd"] = new Dictionary<string, object?>
             {

@@ -471,6 +471,10 @@ else
         // connection and the phrases that triage it.
         new("Mail", "bi-envelope",
         [ new("support-inbox", "Support inbox", "bi-envelope"), new("support-mailbox", "Mailbox connection", "bi-envelope-at"), new("mail-triage", "Mail triage phrases", "bi-funnel") ]),
+        // A customer's own service desk reaching us directly. A channel, like the mailbox,
+        // which is why it sits beside it rather than under Manage.
+        new("Ticket bridge", "bi-arrow-left-right",
+        [ new("ticket-bridge", "Customer systems", "bi-plug") ]),
         // The agreement's own promises about how all of the above went.
         new("Service levels", "bi-check2-square",
         [ new("sla", "SLA", "bi-check2-square") ]),
@@ -939,6 +943,7 @@ else
             case "support-inbox": builder.OpenComponent<SupportInbox>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-mailbox": builder.OpenComponent<SupportMailboxTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "mail-triage": builder.OpenComponent<MailTriageRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "ticket-bridge": builder.OpenComponent<TicketBridgeTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "incidents":
                 builder.OpenComponent<IncidentManagement>(0);
                 builder.AddComponentParameter(1, "TenantId", tid);

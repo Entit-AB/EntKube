@@ -78,6 +78,7 @@ public static class StalwartManifestBuilder
         y.Add("---");
 
         // ── config.json ──
+        int configStart = y.Count;
         y.Add("apiVersion: v1");
         y.Add("kind: ConfigMap");
         y.Add("metadata:");
@@ -95,9 +96,20 @@ public static class StalwartManifestBuilder
         }
         y.Add("---");
 
-        AppendStatefulSet(y, config, releaseName, ns, recoveryMode, ha);
+        // Same reason as the mail stack's other workloads: a new ConfigMap is not a change to the
+        // pod template, so without this the datastore can be repointed and the running nodes would
+        // never notice. Applying configuration restarts them anyway; installing from the Components
+        // tab does not, and that is the path where it would silently do nothing.
+        string configHash = MailManifest.ConfigHash(y, configStart);
+
+        AppendStatefulSet(y, config, releaseName, ns, recoveryMode, ha, configHash);
         AppendHeadlessService(y, releaseName, ns);
         AppendInternalService(y, config, releaseName, ns);
+
+        if (ha is not null)
+        {
+            AppendCoordinator(y, releaseName, ns);
+        }
 
         if (config.ExposeMode == StalwartMailExposeMode.LoadBalancer)
         {
@@ -116,7 +128,7 @@ public static class StalwartManifestBuilder
 
     private static void AppendStatefulSet(
         List<string> y, StalwartComponentConfig config, string releaseName, string ns, bool recoveryMode,
-        StalwartPlanBuilder.StalwartHaBackend? ha)
+        StalwartPlanBuilder.StalwartHaBackend? ha, string configHash)
     {
         y.Add("apiVersion: apps/v1");
         y.Add("kind: StatefulSet");
@@ -141,6 +153,8 @@ public static class StalwartManifestBuilder
         y.Add("    metadata:");
         y.Add("      labels:");
         y.Add($"        app: {releaseName}");
+        y.Add("      annotations:");
+        y.Add($"        entkube.io/config-hash: {configHash}");
         y.Add("    spec:");
         y.Add("      securityContext:");
         y.Add($"        fsGroup: {RunAsUser}");
@@ -328,6 +342,171 @@ public static class StalwartManifestBuilder
             y.Add("          requests:");
             y.Add($"            storage: {config.StorageSize}");
         }
+        y.Add("---");
+    }
+
+    /// <summary>The coordinator's own name, in the mail server's namespace.</summary>
+    public static string CoordinatorName(string releaseName) => $"{releaseName}-coordinator";
+
+    /// <summary>In-cluster address of the bundled coordinator.</summary>
+    public static string CoordinatorEndpoint(string releaseName, string ns) =>
+        $"{CoordinatorName(releaseName)}.{ns}.svc.cluster.local:{CoordinatorPort}";
+
+    /// <summary>Redis image for the bundled coordinator. Pinned; a coordinator is not a place for surprises.</summary>
+    public const string CoordinatorImage = "redis:7.4-alpine";
+
+    private const int CoordinatorPort = 6379;
+
+    /// <summary>
+    /// The <c>redis</c> user inside <see cref="CoordinatorImage"/>. Named explicitly because
+    /// <c>runAsNonRoot</c> without a uid is a pod that fails admission rather than a pod that runs
+    /// safely — the image sets no numeric USER of its own.
+    /// </summary>
+    private const int CoordinatorUid = 999;
+
+    /// <summary>The <c>redis</c> group. 1000 on Alpine, unlike Debian's 999 — verified, not assumed.</summary>
+    private const int CoordinatorGid = 1000;
+
+    /// <summary>
+    /// The Redis an HA deployment coordinates through, deployed as part of the mail server rather
+    /// than chosen by an operator.
+    ///
+    /// <para>It used to be a picker. That asked the operator to answer three questions they had no
+    /// way to get right: which of several near-identical Services belonging to one Redis to point
+    /// at, what its password was, and whether it was sharded — because a sharded Redis needs a
+    /// different store shape and a standalone client is redirected away from keys it does not own.
+    /// Getting any of them wrong produced the same unhelpful sentence, and the one combination
+    /// EntKube's own managed Redis produced — a cluster with a password — could not be made to
+    /// authenticate at all on Stalwart 0.16.21, in any of the four spellings its schema allows.</para>
+    ///
+    /// <para>So the coordinator is plumbing now, like the headless Service: one node, no password,
+    /// no shards, nothing to choose. What it holds is entirely ephemeral — pub/sub between nodes,
+    /// task locks, rate limits — while durable state is the shared PostgreSQL and S3. That is what
+    /// makes a single replica the right shape rather than a corner cut: losing it costs a blip and
+    /// some re-run tasks, not mail. Persistence is switched off for the same reason; writing it to
+    /// disk would only give the restart something stale to recover.</para>
+    ///
+    /// <para>Having no password is deliberate and is paid for by <see cref="AppendCoordinatorNetworkPolicy"/>:
+    /// nothing but the mail server's own pods may open a connection to it. A credential that every
+    /// node must be told, that an operator must copy, and that four separate code paths must agree
+    /// on was the thing that kept breaking — network isolation makes the same guarantee with
+    /// nothing to keep in sync.</para>
+    /// </summary>
+    private static void AppendCoordinator(List<string> y, string releaseName, string ns)
+    {
+        string name = CoordinatorName(releaseName);
+
+        y.Add("apiVersion: apps/v1");
+        y.Add("kind: Deployment");
+        y.Add("metadata:");
+        y.Add($"  name: {name}");
+        y.Add($"  namespace: {ns}");
+        y.Add("  labels:");
+        y.Add($"    app: {name}");
+        y.Add("    app.kubernetes.io/managed-by: entkube");
+        y.Add("spec:");
+        y.Add("  replicas: 1");
+        // Never two at once: a second coordinator is a second, silently divergent view of who holds
+        // which lock. Recreate means a restart is a gap rather than a split brain.
+        y.Add("  strategy:");
+        y.Add("    type: Recreate");
+        y.Add("  selector:");
+        y.Add("    matchLabels:");
+        y.Add($"      app: {name}");
+        y.Add("  template:");
+        y.Add("    metadata:");
+        y.Add("      labels:");
+        y.Add($"        app: {name}");
+        y.Add("    spec:");
+        y.Add("      containers:");
+        y.Add("        - name: redis");
+        y.Add($"          image: {CoordinatorImage}");
+        // --save "" and --appendonly no: no RDB snapshot, no AOF. Nothing here outlives a restart
+        // by design, and a coordinator that pauses to fork for a dump is a coordinator that stalls
+        // every node waiting on a lock.
+        y.Add("          args: [\"--save\", \"\", \"--appendonly\", \"no\"]");
+        y.Add("          ports:");
+        y.Add($"            - name: redis");
+        y.Add($"              containerPort: {CoordinatorPort}");
+        y.Add("          readinessProbe:");
+        y.Add("            exec:");
+        y.Add("              command: [\"redis-cli\", \"ping\"]");
+        y.Add("            periodSeconds: 5");
+        y.Add("          livenessProbe:");
+        y.Add("            exec:");
+        y.Add("              command: [\"redis-cli\", \"ping\"]");
+        y.Add("            periodSeconds: 30");
+        y.Add("          resources:");
+        y.Add("            requests:");
+        y.Add("              cpu: 25m");
+        y.Add("              memory: 64Mi");
+        y.Add("            limits:");
+        y.Add("              memory: 256Mi");
+        y.Add("          securityContext:");
+        y.Add("            allowPrivilegeEscalation: false");
+        // runAsNonRoot is a promise the kubelet checks and cannot verify on its own: the Redis
+        // image declares no numeric USER (it starts as root and drops privileges in its own
+        // entrypoint), so the flag alone fails admission with "container has runAsNonRoot and image
+        // will run as root" and the pod never starts. The uid has to be named here. 999/1000 is the
+        // redis user in the official image — confirmed against redis:7.4-alpine rather than assumed,
+        // because the two variants disagree: Debian's redis is 999:999, Alpine's is 999:1000.
+        y.Add("            runAsNonRoot: true");
+        y.Add($"            runAsUser: {CoordinatorUid}");
+        y.Add($"            runAsGroup: {CoordinatorGid}");
+        y.Add("            capabilities:");
+        y.Add("              drop: [ALL]");
+        y.Add("---");
+
+        y.Add("apiVersion: v1");
+        y.Add("kind: Service");
+        y.Add("metadata:");
+        y.Add($"  name: {name}");
+        y.Add($"  namespace: {ns}");
+        y.Add("  labels:");
+        y.Add($"    app: {name}");
+        y.Add("    app.kubernetes.io/managed-by: entkube");
+        y.Add("spec:");
+        y.Add("  type: ClusterIP");
+        y.Add("  selector:");
+        y.Add($"    app: {name}");
+        y.Add("  ports:");
+        y.Add("    - name: redis");
+        y.Add($"      port: {CoordinatorPort}");
+        y.Add($"      targetPort: {CoordinatorPort}");
+        y.Add("---");
+
+        AppendCoordinatorNetworkPolicy(y, releaseName, ns);
+    }
+
+    /// <summary>
+    /// The isolation that stands in for the password: only the mail server's pods may reach the
+    /// coordinator. Without this the "no credential" decision would be an open Redis rather than a
+    /// private one, so the two belong together and are written together.
+    /// </summary>
+    private static void AppendCoordinatorNetworkPolicy(List<string> y, string releaseName, string ns)
+    {
+        string name = CoordinatorName(releaseName);
+
+        y.Add("apiVersion: networking.k8s.io/v1");
+        y.Add("kind: NetworkPolicy");
+        y.Add("metadata:");
+        y.Add($"  name: {name}");
+        y.Add($"  namespace: {ns}");
+        y.Add("  labels:");
+        y.Add("    app.kubernetes.io/managed-by: entkube");
+        y.Add("spec:");
+        y.Add("  podSelector:");
+        y.Add("    matchLabels:");
+        y.Add($"      app: {name}");
+        y.Add("  policyTypes: [Ingress]");
+        y.Add("  ingress:");
+        y.Add("    - from:");
+        y.Add("        - podSelector:");
+        y.Add("            matchLabels:");
+        y.Add($"              app: {releaseName}");
+        y.Add("      ports:");
+        y.Add("        - protocol: TCP");
+        y.Add($"          port: {CoordinatorPort}");
         y.Add("---");
     }
 

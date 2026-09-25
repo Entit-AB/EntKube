@@ -822,6 +822,76 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void RspamdsOwnHeaderDoesNotTriggerStalwartsSpamFlag()
+    {
+        // The mechanism, and it runs the opposite way to the obvious reading. SPAM_FLAG is
+        // STALWART's tag and scores +5 on a message that already carries an X-Spam header — sound,
+        // because spammers forge "X-Spam-Flag: No". rspamd's milter added X-Spam-Status at DATA,
+        // before the built-in filter ran, so rspamd's own header was producing Stalwart's verdict:
+        // a legitimate PGP-signed message went from 1.00 to 6.00, crossed scoreSpam of 5, and was
+        // filed to Junk. rspamd meanwhile scored it 3.00/15.00 and returned "no action".
+        //
+        // Two guards, because they fail differently: the header is not written at all, and the tag
+        // is neutralised in case Stalwart reacts to one of the headers that remain.
+        string rspamdConfig = Scalar(
+            Parse(RspamdManifestBuilder.Build(new RspamdSettings(null), "rspamd", "mail"))
+                .First(d => Scalar(d.RootNode, "kind") == "ConfigMap")
+                .RootNode,
+            "data", "milter_headers.conf")!;
+
+        rspamdConfig.Should().NotContain("x-spam-status");
+
+        // The diagnostic value stays: these carry rspamd's score and its DKIM/SPF results.
+        rspamdConfig.Should().Contain("x-spamd-bar").And.Contain("x-spam-level");
+        rspamdConfig.Should().Contain("authentication-results");
+
+        StalwartComponentConfig config = Config(c =>
+        {
+            c.RspamdEnabled = true;
+            c.RspamdHost = "rspamd.mail.svc.cluster.local";
+        });
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+        JsonElement tag = Operation(plan, "SpamTag")!.Value.GetProperty("value")
+            .EnumerateObject().Select(p => p.Value).Single();
+        tag.GetProperty("@type").GetString().Should().Be("Score");
+        tag.GetProperty("tag").GetString().Should().Be("SPAM_FLAG");
+        tag.GetProperty("score").GetDouble().Should().Be(0.0);
+    }
+
+    [Fact]
+    public void StalwartsOwnFilterStaysOnBecauseNothingElseCanFileIntoJunk()
+    {
+        // It is the half to keep. A SieveSystemScript runs at SMTP stages and cannot use fileinto,
+        // so only a per-account script could file a message — and writing one onto every mailbox,
+        // including accounts EntKube never created, is not a mechanism worth having. Switching the
+        // built-in filter off leaves rspamd adding headers nothing acts on, and spam in the inbox.
+        //
+        // Written explicitly rather than left at its default so that a server an earlier version of
+        // this plan switched off is repaired by the next apply.
+        foreach (bool rspamd in new[] { true, false })
+        {
+            StalwartComponentConfig config = Config(c =>
+            {
+                c.RspamdEnabled = rspamd;
+                c.RspamdHost = rspamd ? "rspamd.mail.svc.cluster.local" : null;
+            });
+            string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+            Operation(plan, "SpamSettings")!.Value
+                .GetProperty("value").GetProperty("enable").GetBoolean()
+                .Should().BeTrue($"the built-in filter files into Junk (rspamd: {rspamd})");
+        }
+
+        // And the tag override is scoped: with no upstream filter the rule is doing real work, and
+        // zeroing it would hand spammers back the evasion it exists to catch.
+        StalwartComponentConfig noRspamd = Config(c => c.RspamdEnabled = false);
+        Operation(
+            StalwartPlanBuilder.BuildApplyPlan(noRspamd, [Domain(noRspamd.Id, "example.com")], []),
+            "SpamTag").Should().BeNull();
+    }
+
+    [Fact]
     public void TheGatewayAddressesAreAllowListedSoTheyCanNeverBeBanned()
     {
         // is_ip_blocked() is "blocked AND NOT allowed": an AllowedIp entry is a hard guarantee that
@@ -837,16 +907,35 @@ public class StalwartMailTests
         List<string> addresses = allowed.GetProperty("value").EnumerateObject()
             .Select(p => p.Value.GetProperty("address").GetString()!)
             .ToList();
-        addresses.Should().BeEquivalentTo(["10.42.0.17", "10.42.1.9"]); // de-duplicated
+        addresses.Should().Contain("10.42.0.17").And.Contain("10.42.1.9");
+        addresses.Count(a => a == "10.42.0.17").Should().Be(1); // de-duplicated
     }
 
     [Fact]
-    public void NoAllowListIsWrittenWhenNoGatewayAddressesWereResolved()
+    public void EveryInternalRangeIsAllowListed()
     {
+        // Enumerating what was running is correct until the next scale event: pods move and the
+        // autoscaler invents node addresses that did not exist when the plan was written.
+        //
+        // And where the load balancer cannot preserve the client address — an Octavia amphora
+        // proxies and SNATs whatever externalTrafficPolicy says — every sender on the internet
+        // arrives as one internal address. Auto-ban counted the world's failures against that single
+        // peer, blocked it, and refused all mail at TCP accept: nothing in the inbox, nothing in the
+        // spam folder, and "Blocked IP address ... remoteIp = 10.240.3.59" as the only trace.
         StalwartComponentConfig config = Config();
         string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
 
-        Operation(plan, "AllowedIp").Should().BeNull();
+        List<string> addresses = Operation(plan, "AllowedIp")!.Value
+            .GetProperty("value").EnumerateObject()
+            .Select(p => p.Value.GetProperty("address").GetString()!)
+            .ToList();
+
+        // Written even with no gateway address resolved — the ranges do not depend on discovery.
+        addresses.Should().Contain(StalwartPlanBuilder.InternalRanges);
+
+        // 100.64.0.0/10 is the one a list of "the private ranges" misses, and it is where several
+        // CNIs allocate pod addresses: this cluster's pods are on 100.96.x.
+        addresses.Should().Contain("100.64.0.0/10");
     }
 
     [Fact]
@@ -1268,17 +1357,122 @@ public class StalwartMailTests
             urls.ValueKind.Should().Be(JsonValueKind.Object);
             urls.GetProperty("redis://redis-leader.redis.svc.cluster.local:6379").GetBoolean().Should().BeTrue();
 
-            // Only the cluster store has a secret field, so this is the one shape where the password
-            // can stay out of the applied plan.
+            // Only the cluster store has a secret field, and the plan still sets it — but it is not
+            // what opens the connection, so it is set beside an inline credential rather than
+            // instead of one. See TheClusterCoordinatorUrlCarriesThePasswordInline.
             v.GetProperty("authSecret").GetProperty("@type").GetString().Should().Be("EnvironmentVariable");
             v.GetProperty("authSecret").GetProperty("variableName").GetString()
                 .Should().Be(StalwartPlanBuilder.RedisPasswordEnv);
             v.TryGetProperty("url", out _).Should().BeFalse();
+
+            // The username has to travel with the secret. Sent alone, the secret goes out under an
+            // empty username and Redis answers WRONGPASS — reported as "Password authentication
+            // failed", the same words as no credentials at all, which is why this cost four rounds.
+            v.GetProperty("authUsername").GetString().Should().Be(StalwartPlanBuilder.RedisUsername);
         }
 
         // …and the pod has to be given it.
         string manifest = StalwartManifestBuilder.Build(config, "stalwart", "stalwart", ha: ha);
         manifest.Should().Contain(StalwartPlanBuilder.RedisPasswordEnv);
+    }
+
+    [Fact]
+    public void AnHaDeploymentShipsItsOwnCoordinatorBehindANetworkPolicy()
+    {
+        // The coordinator stopped being a choice because every way of choosing it was wrong: the
+        // picker listed several near-identical Services belonging to one Redis, only one of which
+        // resolved as managed; the password had to be re-keyed by hand; and the managed shape —
+        // a sharded cluster with a password — could not be authenticated by Stalwart 0.16.21 in any
+        // spelling its schema allows. One node, no password, nothing to choose.
+        List<YamlDocument> docs = Parse(
+            StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart", ha: Ha()));
+
+        YamlDocument deployment = docs.First(d => Scalar(d.RootNode, "kind") == "Deployment");
+        Scalar(deployment.RootNode, "metadata", "name").Should().Be("stalwart-coordinator");
+
+        // Exactly one, always, and never two at once: a second coordinator is a second view of who
+        // holds which lock, so the rollout replaces rather than overlaps.
+        Scalar(deployment.RootNode, "spec", "replicas").Should().Be("1");
+        Scalar(deployment.RootNode, "spec", "strategy", "type").Should().Be("Recreate");
+
+        YamlDocument service = docs.First(d =>
+            Scalar(d.RootNode, "kind") == "Service"
+            && Scalar(d.RootNode, "metadata", "name") == "stalwart-coordinator");
+        Scalar(service.RootNode, "spec", "type").Should().Be("ClusterIP");
+
+        // runAsNonRoot without a uid does not harden the pod, it stops it existing: the Redis image
+        // declares no numeric USER, so the kubelet refuses it with "container has runAsNonRoot and
+        // image will run as root" and nothing ever starts. The flag and the uid are one decision.
+        YamlNode container = ((YamlSequenceNode)At(
+            deployment.RootNode, "spec", "template", "spec", "containers")!).Children.Single();
+        Scalar(container, "securityContext", "runAsNonRoot").Should().Be("true");
+        Scalar(container, "securityContext", "runAsUser").Should().Be("999");
+        Scalar(container, "securityContext", "runAsGroup").Should().Be("1000");
+
+        // Having no password is only safe because nothing else may reach it. The two decisions are
+        // one decision, so a manifest that drops the policy must fail here.
+        YamlDocument policy = docs.First(d => Scalar(d.RootNode, "kind") == "NetworkPolicy");
+        Scalar(policy.RootNode, "spec", "podSelector", "matchLabels", "app")
+            .Should().Be("stalwart-coordinator");
+        YamlNode rule = ((YamlSequenceNode)At(policy.RootNode, "spec", "ingress")!).Children.Single();
+        YamlNode source = ((YamlSequenceNode)At(rule, "from")!).Children.Single();
+        Scalar(source, "podSelector", "matchLabels", "app").Should().Be("stalwart");
+    }
+
+    [Fact]
+    public void WithoutHighAvailabilityThereIsNoCoordinatorToShip()
+    {
+        // A single node coordinates with nobody. Shipping a Redis beside it would be a pod, a
+        // Service and a NetworkPolicy that exist to serve no reader.
+        string manifest = StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart");
+
+        manifest.Should().NotContain("stalwart-coordinator");
+        manifest.Should().NotContain("kind: NetworkPolicy");
+    }
+
+    [Fact]
+    public void TheClusterCoordinatorUrlCarriesThePasswordInline()
+    {
+        // The whole point of authSecret was to keep the credential out of the plan, and it does not
+        // work: the client authenticates its seed connection from the URL, so a URL with no
+        // credentials sends no password however correct the environment variable is. A live cluster
+        // had the right store, the right variable and the right value in it, redis-cli authenticated
+        // with that same value, and every task still failed with "Failed to create initial
+        // connections … Password authentication failed". So the URL carries it too.
+        StalwartPlanBuilder.BuildRedisUrl("redis-leader.cache.svc.cluster.local:6379", "s3cr3t")
+            .Should().Be("redis://default:s3cr3t@redis-leader.cache.svc.cluster.local:6379");
+    }
+
+    [Fact]
+    public void TheCoordinatorUrlNamesTheDefaultUserRatherThanAnEmptyOne()
+    {
+        // "redis://:pw@host" names an EMPTY user, not an absent one, and Redis rejects that with
+        // WRONGPASS — reported by Stalwart as "Password authentication failed", exactly like a wrong
+        // password and exactly like no credentials at all. Measured against the live cluster with
+        // one correct password: `-a pw` PONG, `--user '' --pass pw` WRONGPASS, `--user default
+        // --pass pw` PONG. This is the assertion that keeps the colon from losing its username.
+        string url = StalwartPlanBuilder.BuildRedisUrl("redis:6379", "s3cr3t");
+
+        url.Should().StartWith("redis://default:");
+        url.Should().NotStartWith("redis://:");
+    }
+
+    [Fact]
+    public void ACoordinatorPasswordWithUrlPunctuationSurvivesTheUrl()
+    {
+        // A generated password contains whatever the generator emits, and an unescaped '@' or ':'
+        // would re-point the URL at a different host entirely rather than merely failing to parse.
+        StalwartPlanBuilder.BuildRedisUrl("redis:6379", "p@ss:w/rd?#")
+            .Should().Be("redis://default:p%40ss%3Aw%2Frd%3F%23@redis:6379");
+    }
+
+    [Fact]
+    public void ACoordinatorWithNoPasswordGetsABareUrl()
+    {
+        // An empty credential must not produce "redis://:@host", which is a password of zero length
+        // rather than no password at all.
+        StalwartPlanBuilder.BuildRedisUrl("redis:6379", null).Should().Be("redis://redis:6379");
+        StalwartPlanBuilder.BuildRedisUrl("redis:6379", "   ").Should().Be("redis://redis:6379");
     }
 
     [Fact]
@@ -1496,27 +1690,108 @@ public class StalwartMailTests
     public void RspamdOmitsOptionalPasswordLinesEntirelyWhenUnset()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", RedisPassword: null, ControllerPassword: null),
+            new RspamdSettings(ControllerPassword: null),
             "rspamd", "rspamd");
 
         YamlDocument configMap = Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "ConfigMap");
         string redis = Scalar(configMap.RootNode, "data", "redis.conf")!;
 
-        redis.Should().Contain("servers = \"redis:6379\";");
+        redis.Should().Contain("servers = \"rspamd-redis.rspamd.svc.cluster.local:6379\";");
         // An empty password line is not the same as no password line — it is an attempt to
         // authenticate with the empty string, which a Redis with auth off will refuse.
         redis.Should().NotContain("password");
     }
 
     [Fact]
-    public void RspamdWritesRedisAndControllerCredentialsWhenTheyAreSet()
+    public void AConfigChangeRollsThePodsThatReadIt()
+    {
+        // The failure this prevents has no symptom. Kubernetes rolls a Deployment when its pod
+        // template changes, and writing a new ConfigMap does not touch the pod template — so the
+        // apply succeeds, the ConfigMap holds the new value, and rspamd keeps talking to whatever it
+        // read at startup. Every artefact an operator inspects says the change landed. Stamping the
+        // config's digest on the pod template is what turns "applied" into "in effect".
+        static string HashOf(string manifest) =>
+            Scalar(
+                Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "Deployment").RootNode,
+                "spec", "template", "metadata", "annotations", "entkube.io/config-hash")!;
+
+        string before = HashOf(RspamdManifestBuilder.Build(new RspamdSettings(null), "rspamd", "mail"));
+
+        // Same input, same bytes: applying an unchanged configuration must restart nothing.
+        HashOf(RspamdManifestBuilder.Build(new RspamdSettings(null), "rspamd", "mail"))
+            .Should().Be(before);
+
+        // A changed controller password is a changed worker-controller.inc, which the running
+        // process only reads at startup.
+        HashOf(RspamdManifestBuilder.Build(new RspamdSettings("ui-pass"), "rspamd", "mail"))
+            .Should().NotBe(before);
+    }
+
+    [Fact]
+    public void TheMailServerAlsoRollsWhenItsDatastoreIsRepointed()
+    {
+        // config.json names the datastore. Repointing it without a restart leaves every node reading
+        // the old one — and the Components tab's install path, unlike "Apply configuration", does not
+        // restart anything by itself.
+        static string HashOf(string manifest) =>
+            Scalar(
+                Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "StatefulSet").RootNode,
+                "spec", "template", "metadata", "annotations", "entkube.io/config-hash")!;
+
+        string single = HashOf(StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart"));
+        string ha = HashOf(StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart", ha: Ha()));
+
+        ha.Should().NotBe(single);
+    }
+
+    [Fact]
+    public void RspamdShipsItsOwnRedisAndPointsTheClassifierAtIt()
+    {
+        // The picker offered the cluster's managed Redis, which is sharded, and rspamd cannot speak
+        // to a sharded Redis. What that produced was not a connection error but a filter with
+        // nothing learned behind it — CROSSSLOT from the Bayes classifier, MOVED from the neural
+        // module, greylisting and ratelimits failing on the same backend — while mail quietly
+        // landed in the spam folder. So rspamd brings its own, and nobody chooses.
+        List<YamlDocument> docs = Parse(
+            RspamdManifestBuilder.Build(new RspamdSettings(null), "rspamd", "mail"));
+
+        YamlDocument configMap = docs.First(d => Scalar(d.RootNode, "kind") == "ConfigMap");
+        Scalar(configMap.RootNode, "data", "redis.conf")!
+            .Should().Contain("servers = \"rspamd-redis.mail.svc.cluster.local:6379\";");
+
+        YamlDocument redis = docs.First(d =>
+            Scalar(d.RootNode, "kind") == "Deployment"
+            && Scalar(d.RootNode, "metadata", "name") == "rspamd-redis");
+
+        // runAsNonRoot without a uid is a pod that fails admission, not a hardened one.
+        YamlNode container = ((YamlSequenceNode)At(
+            redis.RootNode, "spec", "template", "spec", "containers")!).Children.Single();
+        Scalar(container, "securityContext", "runAsUser").Should().Be("999");
+        Scalar(container, "securityContext", "runAsGroup").Should().Be("1000");
+
+        // Unlike the mail server's coordinator this one persists: Bayes training is what an operator
+        // spends weeks building, and it must survive the pod.
+        docs.Should().Contain(d =>
+            Scalar(d.RootNode, "kind") == "PersistentVolumeClaim"
+            && Scalar(d.RootNode, "metadata", "name") == "rspamd-redis-data");
+        Scalar(redis.RootNode, "spec", "strategy", "type").Should().Be("Recreate");
+
+        // No password, so nothing else may reach it.
+        YamlDocument policy = docs.First(d =>
+            Scalar(d.RootNode, "kind") == "NetworkPolicy"
+            && Scalar(d.RootNode, "metadata", "name") == "rspamd-redis");
+        YamlNode rule = ((YamlSequenceNode)At(policy.RootNode, "spec", "ingress")!).Children.Single();
+        YamlNode source = ((YamlSequenceNode)At(rule, "from")!).Children.Single();
+        Scalar(source, "podSelector", "matchLabels", "app").Should().Be("rspamd");
+    }
+
+    [Fact]
+    public void RspamdWritesTheControllerCredentialWhenItIsSet()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", "s3cr3t", "ui-pass"), "rspamd", "rspamd");
+            new RspamdSettings("ui-pass"), "rspamd", "rspamd");
 
         YamlDocument configMap = Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "ConfigMap");
-
-        Scalar(configMap.RootNode, "data", "redis.conf")!.Should().Contain("password = \"s3cr3t\";");
 
         string controller = Scalar(configMap.RootNode, "data", "worker-controller.inc")!;
         controller.Should().Contain("password = \"ui-pass\";");
@@ -1527,7 +1802,7 @@ public class StalwartMailTests
     public void RspamdWithoutSingleSignOnHasNoProxyAndNoLoopbackTrust()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", null, "ui-pass"), "rspamd", "rspamd");
+            new RspamdSettings("ui-pass"), "rspamd", "rspamd");
 
         manifest.Should().NotContain("oauth2-proxy");
 
@@ -1555,7 +1830,7 @@ public class StalwartMailTests
     {
         string manifest = RspamdManifestBuilder.Build(
             new RspamdSettings(
-                "redis:6379", null, "ui-pass",
+                "ui-pass",
                 SsoIssuerUrl: "https://sso.example.com/realms/mail/",
                 SsoClientId: "rspamd",
                 SsoEmailDomain: "example.com",
@@ -1588,7 +1863,7 @@ public class StalwartMailTests
     {
         string manifest = RspamdManifestBuilder.Build(
             new RspamdSettings(
-                "redis:6379", null, null,
+                null,
                 SsoIssuerUrl: "https://sso.example.com/realms/mail",
                 SsoClientId: "rspamd",
                 WebUiHostname: "rspamd.example.com"),
@@ -1607,7 +1882,7 @@ public class StalwartMailTests
     public void RspamdKeepsItsLearnedStateInRedisRatherThanThePod()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", null, null), "rspamd", "rspamd");
+            new RspamdSettings(null), "rspamd", "rspamd");
 
         YamlDocument configMap = Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "ConfigMap");
         Scalar(configMap.RootNode, "data", "classifier-bayes.conf")!
@@ -1618,7 +1893,7 @@ public class StalwartMailTests
     public void RspamdExposesTheMilterPortStalwartConnectsTo()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", null, null), "rspamd", "rspamd");
+            new RspamdSettings(null), "rspamd", "rspamd");
 
         YamlDocument service = Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "Service");
         List<string?> ports = ((YamlSequenceNode)At(service.RootNode, "spec", "ports")!)
@@ -1634,7 +1909,7 @@ public class StalwartMailTests
     public void RspamdRollsByRecreatingBecauseItsVolumeIsReadWriteOnce()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", null, null), "rspamd", "rspamd");
+            new RspamdSettings(null), "rspamd", "rspamd");
 
         YamlDocument deployment = Parse(manifest).First(d => Scalar(d.RootNode, "kind") == "Deployment");
         Scalar(deployment.RootNode, "spec", "strategy", "type").Should().Be("Recreate");
@@ -1873,15 +2148,12 @@ public class StalwartMailTests
             ["ha-replicas"] = "3",
             ["ha-database"] = database.ToString(),
             ["ha-blob-store"] = bucket.ToString(),
-            ["ha-coordinator-redis"] = "redis.redis.svc.cluster.local:6380",
         });
 
         config.HighAvailability.Should().BeTrue();
         config.Replicas.Should().Be(3);
         config.CnpgDatabaseId.Should().Be(database);
         config.BlobStorageLinkId.Should().Be(bucket);
-        config.CoordinatorRedisHost.Should().Be("redis.redis.svc.cluster.local");
-        config.CoordinatorRedisPort.Should().Be(6380);
 
         // A picker put back to "choose one…" is an instruction, not silence: leaving the old id in
         // place would keep the component attached to a database the operator has just detached.
@@ -1890,13 +2162,11 @@ public class StalwartMailTests
             ["ha-enabled"] = "false",
             ["ha-database"] = "",
             ["ha-blob-store"] = "",
-            ["ha-coordinator-redis"] = "",
         });
 
         config.HighAvailability.Should().BeFalse();
         config.CnpgDatabaseId.Should().BeNull();
         config.BlobStorageLinkId.Should().BeNull();
-        config.CoordinatorRedisHost.Should().BeNull();
     }
 
     [Fact]
@@ -1913,8 +2183,6 @@ public class StalwartMailTests
             c.Replicas = 3;
             c.CnpgDatabaseId = database;
             c.BlobStorageLinkId = bucket;
-            c.CoordinatorRedisHost = "redis.redis.svc.cluster.local";
-            c.CoordinatorRedisPort = 6380;
         });
 
         Dictionary<string, string> form = StalwartService.BuildFormValues(config);
@@ -1923,15 +2191,17 @@ public class StalwartMailTests
         form["ha-replicas"].Should().Be("3");
         form["ha-database"].Should().Be(database.ToString());
         form["ha-blob-store"].Should().Be(bucket.ToString());
-        form["ha-coordinator-redis"].Should().Be("redis.redis.svc.cluster.local:6380");
+
+        // The coordinator is deliberately absent: it ships with the deployment, so there is no
+        // form field to read back and nothing an operator could have entered.
+        form.Should().NotContainKey("ha-coordinator-redis");
 
         // And what comes back out reproduces the configuration it came from.
         StalwartComponentConfig reopened = Config();
         StalwartService.ApplyFormValues(reopened, form);
         reopened.Should().BeEquivalentTo(config, o => o
             .Including(c => c.HighAvailability).Including(c => c.Replicas)
-            .Including(c => c.CnpgDatabaseId).Including(c => c.BlobStorageLinkId)
-            .Including(c => c.CoordinatorRedisHost).Including(c => c.CoordinatorRedisPort));
+            .Including(c => c.CnpgDatabaseId).Including(c => c.BlobStorageLinkId));
     }
 
     [Fact]
@@ -2071,7 +2341,7 @@ public class StalwartMailTests
     public void ARenderedManifestIsOne()
     {
         string manifest = RspamdManifestBuilder.Build(
-            new RspamdSettings("redis:6379", null, null), "rspamd", "rspamd");
+            new RspamdSettings(null), "rspamd", "rspamd");
 
         ComponentLifecycleService.ContainsKubernetesObjects(manifest).Should().BeTrue();
     }
