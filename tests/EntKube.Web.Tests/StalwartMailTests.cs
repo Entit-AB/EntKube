@@ -822,30 +822,73 @@ public class StalwartMailTests
     }
 
     [Fact]
-    public void ExactlyOneSpamFilterDecides()
+    public void RspamdsOwnHeaderDoesNotTriggerStalwartsSpamFlag()
     {
-        // Stalwart's own filter is on by default with a scoreSpam threshold of 5, so installing
-        // rspamd beside it adds a second opinion rather than replacing it — and the two read each
-        // other's headers. A legitimate PGP-signed message scored 3.00/15.00 "no action" by rspamd
-        // had already been scored 6.00 and filed to Junk by the built-in filter, whose
-        // X-Spam-Status: Yes then made rspamd fire SPAM_FLAG (+5.00) on a rescan.
-        StalwartComponentConfig withRspamd = Config(c =>
+        // The mechanism, and it runs the opposite way to the obvious reading. SPAM_FLAG is
+        // STALWART's tag and scores +5 on a message that already carries an X-Spam header — sound,
+        // because spammers forge "X-Spam-Flag: No". rspamd's milter added X-Spam-Status at DATA,
+        // before the built-in filter ran, so rspamd's own header was producing Stalwart's verdict:
+        // a legitimate PGP-signed message went from 1.00 to 6.00, crossed scoreSpam of 5, and was
+        // filed to Junk. rspamd meanwhile scored it 3.00/15.00 and returned "no action".
+        //
+        // Two guards, because they fail differently: the header is not written at all, and the tag
+        // is neutralised in case Stalwart reacts to one of the headers that remain.
+        string rspamdConfig = Scalar(
+            Parse(RspamdManifestBuilder.Build(new RspamdSettings(null), "rspamd", "mail"))
+                .First(d => Scalar(d.RootNode, "kind") == "ConfigMap")
+                .RootNode,
+            "data", "milter_headers.conf")!;
+
+        rspamdConfig.Should().NotContain("x-spam-status");
+
+        // The diagnostic value stays: these carry rspamd's score and its DKIM/SPF results.
+        rspamdConfig.Should().Contain("x-spamd-bar").And.Contain("x-spam-level");
+        rspamdConfig.Should().Contain("authentication-results");
+
+        StalwartComponentConfig config = Config(c =>
         {
             c.RspamdEnabled = true;
-            c.RspamdHost = "rspamd.rspamd.svc.cluster.local";
+            c.RspamdHost = "rspamd.mail.svc.cluster.local";
         });
-        JsonElement off = Operation(
-            StalwartPlanBuilder.BuildApplyPlan(withRspamd, [Domain(withRspamd.Id, "example.com")], []),
-            "SpamSettings")!.Value;
-        off.GetProperty("value").GetProperty("enable").GetBoolean().Should().BeFalse();
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
 
-        // And handed back when rspamd is not there, rather than leaving a server with no filter at
-        // all — which is why this is written on every apply and not only when disabling.
+        JsonElement tag = Operation(plan, "SpamTag")!.Value.GetProperty("value")
+            .EnumerateObject().Select(p => p.Value).Single();
+        tag.GetProperty("@type").GetString().Should().Be("Score");
+        tag.GetProperty("tag").GetString().Should().Be("SPAM_FLAG");
+        tag.GetProperty("score").GetDouble().Should().Be(0.0);
+    }
+
+    [Fact]
+    public void StalwartsOwnFilterStaysOnBecauseNothingElseCanFileIntoJunk()
+    {
+        // It is the half to keep. A SieveSystemScript runs at SMTP stages and cannot use fileinto,
+        // so only a per-account script could file a message — and writing one onto every mailbox,
+        // including accounts EntKube never created, is not a mechanism worth having. Switching the
+        // built-in filter off leaves rspamd adding headers nothing acts on, and spam in the inbox.
+        //
+        // Written explicitly rather than left at its default so that a server an earlier version of
+        // this plan switched off is repaired by the next apply.
+        foreach (bool rspamd in new[] { true, false })
+        {
+            StalwartComponentConfig config = Config(c =>
+            {
+                c.RspamdEnabled = rspamd;
+                c.RspamdHost = rspamd ? "rspamd.mail.svc.cluster.local" : null;
+            });
+            string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+            Operation(plan, "SpamSettings")!.Value
+                .GetProperty("value").GetProperty("enable").GetBoolean()
+                .Should().BeTrue($"the built-in filter files into Junk (rspamd: {rspamd})");
+        }
+
+        // And the tag override is scoped: with no upstream filter the rule is doing real work, and
+        // zeroing it would hand spammers back the evasion it exists to catch.
         StalwartComponentConfig noRspamd = Config(c => c.RspamdEnabled = false);
-        JsonElement on = Operation(
+        Operation(
             StalwartPlanBuilder.BuildApplyPlan(noRspamd, [Domain(noRspamd.Id, "example.com")], []),
-            "SpamSettings")!.Value;
-        on.GetProperty("value").GetProperty("enable").GetBoolean().Should().BeTrue();
+            "SpamTag").Should().BeNull();
     }
 
     [Fact]

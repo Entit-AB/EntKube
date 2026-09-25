@@ -544,16 +544,45 @@ public static class StalwartPlanBuilder
         // rspamd's Redis and DNS, all of it real and none of it the cause, because the filter making
         // the decision was never rspamd.
         //
-        // So the built-in filter is switched off exactly when rspamd is the filter, and left on when
-        // it is not. Written unconditionally rather than only when disabling, so that turning rspamd
-        // off hands the job back instead of leaving a server with no filter at all.
+        // The mechanism is narrower than "two filters disagree", and knowing which way round it goes
+        // decides the fix. SPAM_FLAG is STALWART's tag, and it scores +5 when the message already
+        // carries an X-Spam header — a real anti-evasion rule, because spammers do forge
+        // "X-Spam-Flag: No". rspamd's milter adds X-Spam-Status at DATA, before the built-in filter
+        // runs. So rspamd's own header was triggering Stalwart's verdict: 1.00 became 6.00, crossed
+        // scoreSpam of 5, and the message was filed to Junk.
+        //
+        // Which means the built-in filter is the half to keep, not the half to switch off. It is
+        // what files into Junk, and nothing else can: a SieveSystemScript runs at SMTP stages and
+        // cannot use fileinto, so only a per-account script could file — and writing one onto every
+        // mailbox, including accounts EntKube did not create, is not a mechanism worth having.
+        // Disabling it leaves rspamd adding headers that nothing acts on and spam in the inbox.
+        //
+        // So: enabled, always, and written explicitly rather than left at its default so that a
+        // server an earlier version of this plan switched off is repaired by the next apply.
         bool rspamdIsTheFilter =
             config.RspamdEnabled && !string.IsNullOrWhiteSpace(config.RspamdHost);
 
         lines.Add(Update("SpamSettings", new()
         {
-            ["enable"] = !rspamdIsTheFilter,
+            ["enable"] = true,
         }));
+
+        // And the tag that reacted to rspamd's header is neutralised while rspamd is in the path.
+        // Upstream's own advice for this arrangement, and the reason it is scoped to when rspamd is
+        // enabled: without an upstream filter the rule is doing real work, and zeroing it then would
+        // hand spammers back the evasion it exists to catch.
+        if (rspamdIsTheFilter)
+        {
+            lines.Add(Op("upsert", "SpamTag", MatchOn("tag"), new()
+            {
+                ["spam-flag"] = new Dictionary<string, object?>
+                {
+                    ["@type"] = "Score",
+                    ["tag"] = "SPAM_FLAG",
+                    ["score"] = 0.0,
+                },
+            }));
+        }
 
         // reconcile with an empty value map is how "no milter" is expressed: turning rspamd off has
         // to remove the hook, or every message keeps being handed to a filter that is no longer there.
