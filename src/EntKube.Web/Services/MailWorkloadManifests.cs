@@ -214,9 +214,20 @@ public static class RspamdManifestBuilder
 
         AddFile(y, "milter_headers.conf",
         [
-            // Stalwart reads the verdict from these headers, so they have to be added at the
-            // milter stage rather than left to the recipient's client to infer.
-            "use = [\"x-spamd-bar\", \"x-spam-level\", \"x-spam-status\", \"authentication-results\"];",
+            // Deliberately without x-spam-status, which used to be here.
+            //
+            // Stalwart does not read its verdict from these headers — the milter protocol carries
+            // the action, and Stalwart runs its own spam filter besides. What an X-Spam-Status
+            // header written here actually did was trigger that filter's SPAM_FLAG tag, which scores
+            // +5 for a message that arrives already flagged (spammers forge "X-Spam-Flag: No", so
+            // the rule is sound). A legitimate message scoring 1.00 became 6.00, crossed a threshold
+            // of 5, and was filed to Junk — by the other filter, on the strength of this line.
+            //
+            // The remaining three carry the same information without the collision: X-Spamd-Bar and
+            // X-Spam-Level show rspamd's score, and Authentication-Results its DKIM and SPF results.
+            // The X-Spam-Status a client sees is then the one written by the filter that actually
+            // decided where the message went.
+            "use = [\"x-spamd-bar\", \"x-spam-level\", \"authentication-results\"];",
         ]);
 
         y.Add("---");
