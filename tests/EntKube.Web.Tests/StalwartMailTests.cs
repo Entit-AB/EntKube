@@ -1604,6 +1604,40 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void BothBundledRedisInstancesEvictRatherThanBeingKilled()
+    {
+        // Redis cannot see its cgroup. With no maxmemory it grows to the container limit and the kernel
+        // kills it — and this repo has already paid for that shape of bug in other components. A
+        // coordinator that dies takes every node's locks and pub/sub with it; rspamd's classifier just
+        // stops learning, silently.
+        //
+        // The policies differ on purpose, and that is the interesting part. The coordinator holds only
+        // locks, rate limits and cached state, all recomputable, so allkeys-lru loses nothing. rspamd's
+        // holds Bayes training, where rspamd expires its own tokens — so volatile-lru degrades the
+        // classifier by dropping the coldest expiring token, while allkeys-lru could discard reputation
+        // state that has no expiry and cannot be recomputed.
+        string coordinator = Parse(
+                StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart", ha: Ha()))
+            .First(d => Scalar(d.RootNode, "metadata", "name") == "stalwart-coordinator")
+            .RootNode.ToString();
+
+        coordinator.Should().Contain("--maxmemory").And.Contain("allkeys-lru");
+
+        string rspamdRedis = Parse(
+                RspamdManifestBuilder.Build(new RspamdSettings(null), "rspamd", "mail"))
+            .First(d => Scalar(d.RootNode, "kind") == "Deployment"
+                        && Scalar(d.RootNode, "metadata", "name") == "rspamd-redis")
+            .RootNode.ToString();
+
+        rspamdRedis.Should().Contain("--maxmemory").And.Contain("volatile-lru");
+
+        // And the ceiling has to sit below the limit, or it is decoration: Redis needs headroom above
+        // its dataset for buffers and fragmentation.
+        coordinator.Should().Contain("192mb").And.Contain("256Mi");
+        rspamdRedis.Should().Contain("384mb").And.Contain("512Mi");
+    }
+
+    [Fact]
     public void WithoutHighAvailabilityThereIsNoCoordinatorToShip()
     {
         // A single node coordinates with nobody. Shipping a Redis beside it would be a pod, a

@@ -472,7 +472,18 @@ public static class RspamdManifestBuilder
         y.Add("      containers:");
         y.Add("        - name: redis");
         y.Add($"          image: {RedisImage}");
-        y.Add("          args: [\"--appendonly\", \"yes\", \"--dir\", \"/data\"]");
+        // A ceiling and a policy, for the same reason as the mail coordinator: Redis cannot see its
+        // cgroup, so without maxmemory it grows until the kernel kills it, and rspamd's classifier
+        // then silently stops learning.
+        //
+        // volatile-lru rather than allkeys-lru, which is the whole difference between the two stores.
+        // This one holds Bayes training, and rspamd gives its tokens an expiry — so evicting the
+        // coldest expiring token degrades the classifier a little, while allkeys-lru could throw away
+        // ratelimit and reputation state that has no expiry and is not recomputable. Writes fail
+        // rather than data vanishing if it ever fills with non-expiring keys, which is the louder and
+        // therefore better failure.
+        y.Add("          args: [\"--appendonly\", \"yes\", \"--dir\", \"/data\", "
+              + "\"--maxmemory\", \"384mb\", \"--maxmemory-policy\", \"volatile-lru\"]");
         y.Add("          ports:");
         y.Add("            - name: redis");
         y.Add($"              containerPort: {RedisPort}");
