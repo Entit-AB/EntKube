@@ -535,9 +535,21 @@
         }
         else if (result.Ok)
         {
-            Toasts.Success(result.Taken == 0
-                ? $"Nothing new — {result.Seen} message(s) looked at."
-                : $"Took in {result.Taken} message(s).");
+            // A rescue is not good news, it is a filter misclassifying a customer — so it is said out
+            // loud rather than folded into the total, where nobody would notice it.
+            if (result.FromJunk > 0)
+            {
+                Toasts.Warning(
+                    $"Took in {result.Taken} message(s) — {result.FromJunk} of them from Junk, from a "
+                    + "registered customer domain. The spam filter is classifying a customer's mail as "
+                    + "spam; nothing was lost, but it is worth looking at why.");
+            }
+            else
+            {
+                Toasts.Success(result.Taken == 0
+                    ? $"Nothing new — {result.Seen} message(s) looked at."
+                    : $"Took in {result.Taken} message(s).");
+            }
         }
         else
         {

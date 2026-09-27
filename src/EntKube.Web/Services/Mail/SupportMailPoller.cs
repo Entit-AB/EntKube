@@ -96,8 +96,9 @@ public class SupportMailPoller(
             if (result is { Ok: true, Taken: > 0 })
             {
                 logger.LogInformation(
-                    "Took in {Taken} support message(s) for tenant {Tenant}.",
-                    result.Taken, tenantId);
+                    "Took in {Taken} support message(s) for tenant {Tenant}, {FromJunk} of them "
+                    + "rescued from Junk.",
+                    result.Taken, tenantId, result.FromJunk);
             }
         }
     }
