@@ -899,6 +899,38 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void TheProxyAnnotationIsNeverWrittenTwice()
+    {
+        // An operator who sets the same key keeps their value, and there is only ever one of it.
+        // Writing ours beside theirs would put two copies of one key in a YAML mapping, which is not
+        // "the later one wins" — that is undefined. A strict parser refuses the whole document and a
+        // lenient one silently picks one, so the manifest would either fail to apply or apply
+        // something nobody chose.
+        StalwartComponentConfig config = Config(c =>
+        {
+            c.ProxyProtocol = true;
+            c.ProxyTrustedNetworks = "10.240.3.0/24";
+            c.ExposeMode = StalwartMailExposeMode.LoadBalancer;
+            c.LoadBalancerAnnotations =
+                $"{StalwartManifestBuilder.OctaviaProxyProtocolAnnotation}: false";
+        });
+
+        YamlDocument mail = Parse(StalwartManifestBuilder.Build(config, "stalwart", "stalwart"))
+            .First(d => Scalar(d.RootNode, "metadata", "name") == "stalwart-mail");
+
+        YamlMappingNode annotations =
+            (YamlMappingNode)At(mail.RootNode, "metadata", "annotations")!;
+
+        annotations.Children.Keys
+            .Count(k => ((YamlScalarNode)k).Value == StalwartManifestBuilder.OctaviaProxyProtocolAnnotation)
+            .Should().Be(1);
+
+        // And theirs is the one that survives.
+        Scalar(annotations, StalwartManifestBuilder.OctaviaProxyProtocolAnnotation)
+            .Should().Be("false");
+    }
+
+    [Fact]
     public void WithoutTrustedNetworksProxyProtocolIsNotConfiguredAtAll()
     {
         // The list is what enables the protocol, so an empty one must leave both halves off. Enabling
@@ -1569,6 +1601,40 @@ public class StalwartMailTests
         YamlNode rule = ((YamlSequenceNode)At(policy.RootNode, "spec", "ingress")!).Children.Single();
         YamlNode source = ((YamlSequenceNode)At(rule, "from")!).Children.Single();
         Scalar(source, "podSelector", "matchLabels", "app").Should().Be("stalwart");
+    }
+
+    [Fact]
+    public void BothBundledRedisInstancesEvictRatherThanBeingKilled()
+    {
+        // Redis cannot see its cgroup. With no maxmemory it grows to the container limit and the kernel
+        // kills it — and this repo has already paid for that shape of bug in other components. A
+        // coordinator that dies takes every node's locks and pub/sub with it; rspamd's classifier just
+        // stops learning, silently.
+        //
+        // The policies differ on purpose, and that is the interesting part. The coordinator holds only
+        // locks, rate limits and cached state, all recomputable, so allkeys-lru loses nothing. rspamd's
+        // holds Bayes training, where rspamd expires its own tokens — so volatile-lru degrades the
+        // classifier by dropping the coldest expiring token, while allkeys-lru could discard reputation
+        // state that has no expiry and cannot be recomputed.
+        string coordinator = Parse(
+                StalwartManifestBuilder.Build(Config(), "stalwart", "stalwart", ha: Ha()))
+            .First(d => Scalar(d.RootNode, "metadata", "name") == "stalwart-coordinator")
+            .RootNode.ToString();
+
+        coordinator.Should().Contain("--maxmemory").And.Contain("allkeys-lru");
+
+        string rspamdRedis = Parse(
+                RspamdManifestBuilder.Build(new RspamdSettings(null), "rspamd", "mail"))
+            .First(d => Scalar(d.RootNode, "kind") == "Deployment"
+                        && Scalar(d.RootNode, "metadata", "name") == "rspamd-redis")
+            .RootNode.ToString();
+
+        rspamdRedis.Should().Contain("--maxmemory").And.Contain("volatile-lru");
+
+        // And the ceiling has to sit below the limit, or it is decoration: Redis needs headroom above
+        // its dataset for buffers and fragmentation.
+        coordinator.Should().Contain("192mb").And.Contain("256Mi");
+        rspamdRedis.Should().Contain("384mb").And.Contain("512Mi");
     }
 
     [Fact]

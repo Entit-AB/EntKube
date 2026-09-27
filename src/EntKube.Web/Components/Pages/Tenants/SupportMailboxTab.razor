@@ -535,9 +535,32 @@
         }
         else if (result.Ok)
         {
-            Toasts.Success(result.Taken == 0
-                ? $"Nothing new — {result.Seen} message(s) looked at."
-                : $"Took in {result.Taken} message(s).");
+            // The sweep was wanted and had nowhere to look, so the protection an operator believes is
+            // in force is not. Said before the counts, because it is about every future message rather
+            // than this fetch.
+            if (result.JunkUnavailable)
+            {
+                Toasts.Warning(
+                    "This mail server offers no Junk folder that can be found by its special-use "
+                    + "attribute, so customer mail filed as spam cannot be rescued — a support request "
+                    + "classified as spam would not be read. Everything else was fetched normally.");
+            }
+
+            // A rescue is not good news, it is a filter misclassifying a customer — so it is said out
+            // loud rather than folded into the total, where nobody would notice it.
+            if (result.FromJunk > 0)
+            {
+                Toasts.Warning(
+                    $"Took in {result.Taken} message(s) — {result.FromJunk} of them from Junk, from a "
+                    + "registered customer domain. The spam filter is classifying a customer's mail as "
+                    + "spam; nothing was lost, but it is worth looking at why.");
+            }
+            else
+            {
+                Toasts.Success(result.Taken == 0
+                    ? $"Nothing new — {result.Seen} message(s) looked at."
+                    : $"Took in {result.Taken} message(s).");
+            }
         }
         else
         {
