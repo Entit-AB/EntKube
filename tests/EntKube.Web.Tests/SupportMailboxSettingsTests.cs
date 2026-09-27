@@ -119,6 +119,69 @@ public class SupportMailboxSettingsTests : IDisposable
         saved.Address.Should().Be("helpdesk@example.com");
     }
 
+    /// <summary>
+    /// What an operator is told when a mailbox points at something that has gone, or at a server that
+    /// cannot serve it.
+    ///
+    /// <para>These all resolve before any connection is attempted, which is the point: the message
+    /// names what to fix rather than arriving as a timeout, a null reference, or a mailbox that simply
+    /// stays empty. Every one of them is reachable in normal use — a component uninstalled, a mailbox
+    /// removed on the Mail tab, IMAP switched off, a server changed to OIDC after the mailbox was
+    /// configured.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("component", "no longer exists")]
+    [InlineData("account", "has been removed")]
+    [InlineData("imap-off", "IMAP is switched off")]
+    [InlineData("no-service-account", "no service account has been created")]
+    public async Task A_mailbox_that_cannot_be_resolved_says_why(string broken, string expected)
+    {
+        (Guid componentId, Guid accountId) =
+            await GivenAStalwartMailboxAsync("support", "example.com");
+
+        StalwartComponentConfig config = await db.StalwartComponentConfigs
+            .FirstAsync(c => c.ClusterComponentId == componentId);
+
+        switch (broken)
+        {
+            case "component":
+                db.ClusterComponents.Remove(await db.ClusterComponents.FirstAsync(c => c.Id == componentId));
+                break;
+
+            case "account":
+                db.StalwartMailAccounts.Remove(
+                    await db.StalwartMailAccounts.FirstAsync(a => a.Id == accountId));
+                break;
+
+            case "imap-off":
+                config.ImapEnabled = false;
+                break;
+
+            case "no-service-account":
+                // The server was changed to OIDC after the mailbox was set up, so the token it now
+                // needs has nothing to mint it. Saying "save it again" is the actual fix.
+                config.AuthMode = StalwartAuthMode.Oidc;
+                break;
+        }
+
+        await db.SaveChangesAsync();
+
+        await mailboxes.SaveAsync(new SupportMailbox
+        {
+            TenantId = tenantId,
+            StalwartComponentId = componentId,
+            StalwartAccountId = accountId,
+            Host = "",
+            Username = "",
+            Address = "support@example.com",
+        }, password: null);
+
+        MailPollResult result = await mailboxes.TestAsync(tenantId);
+
+        result.Ok.Should().BeFalse();
+        result.Error.Should().Contain(expected);
+    }
+
     private static readonly HashSet<string> NotConfiguration =
     [
         nameof(SupportMailbox.Id),
