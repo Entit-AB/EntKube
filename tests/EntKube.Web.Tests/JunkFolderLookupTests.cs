@@ -40,7 +40,7 @@ public class JunkFolderLookupTests
         IMailFolder junk = client.GetFolder(SpecialFolder.Junk);
 
         junk.Should().NotBeNull();
-        junk.Name.Should().Be("Junk Mail");
+        junk!.Name.Should().Be("Junk Mail");
     }
 
     [Fact]
