@@ -1380,9 +1380,38 @@ public class StalwartService(
             case StalwartAuthMode.Oidc:
                 if (string.IsNullOrWhiteSpace(config.OidcIssuerUrl))
                 {
+                    // Two different situations, and telling an operator to type a URL is the right
+                    // answer to only one of them. With a realm chosen, a missing issuer means the
+                    // resolution against Keycloak failed — and typing the URL by hand then works
+                    // around a transient failure by hardcoding round it, which is what choosing a
+                    // realm exists to avoid.
+                    issues.Add(config.OidcKeycloakRealmId is null
+                        ? new(true,
+                            "Authentication is OIDC but no identity provider is set.",
+                            "Choose a Keycloak realm on the Configuration tab and the issuer is "
+                            + "derived from it, or enter an issuer URL for a provider EntKube does "
+                            + "not run.")
+                        : new(true,
+                            "A Keycloak realm is chosen but its issuer could not be resolved.",
+                            "EntKube could not reach that realm's Keycloak to read its address. "
+                            + "Check the Identity component is installed and its admin URL is "
+                            + "right, then save the mail server again — rather than entering the "
+                            + "issuer by hand, which would leave the realm and the URL able to "
+                            + "drift apart."));
+                }
+                else if (config.OidcKeycloakRealmId is not null
+                         && string.IsNullOrWhiteSpace(config.OidcRequireAudience))
+                {
+                    // The silent half of the same failure. The issuer resolved, so this looks
+                    // configured — but creating the client carrying the audience is what did not
+                    // happen, and without it the server falls back to requiring an audience of
+                    // "stalwart" that no token from this realm will carry. Every login is then
+                    // refused by a server that reports itself healthy.
                     issues.Add(new(true,
-                        "Authentication is OIDC but no realm URL is set.",
-                        "Set the Keycloak realm URL on the Configuration tab."));
+                        "The Keycloak client that stamps this server's audience was not created.",
+                        "Save the mail server again to create it. Until then the server requires an "
+                        + "audience no token from that realm carries, so every sign-in is refused — "
+                        + "Keycloak does not add a resource server to a token's audience on its own."));
                 }
                 if (!await db.StalwartMailAccounts.AnyAsync(a => a.ConfigId == config.Id, ct))
                 {
