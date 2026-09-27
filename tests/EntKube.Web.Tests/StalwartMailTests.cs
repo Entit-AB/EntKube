@@ -860,6 +860,44 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void ProxyProtocolCanBeChosenAtInstallTimeBecauseLaterIsTooLate()
+    {
+        // It has to be on the install form and not only the Mail tab. This install creates the load
+        // balancer, and OpenStack cannot change a pool's protocol afterwards — so the annotation is
+        // either in the manifest the first time the Service is applied or it never takes effect.
+        //
+        // Originally it existed only on the Mail tab, which cannot be reached until the component is
+        // installed. A fresh install therefore had it off, created the balancer without it, and by the
+        // time the box could be ticked the pool existed and would not change: not a setting that was
+        // easy to miss, a setting that was unreachable.
+        StalwartComponentConfig config = Config();
+
+        StalwartService.ApplyFormValues(config, new Dictionary<string, string>
+        {
+            ["proxy-protocol"] = "true",
+            ["proxy-trusted-networks"] = "10.240.3.0/24, 10.240.4.7",
+        });
+
+        config.ProxyProtocol.Should().BeTrue();
+        StalwartPlanBuilder.ProxyTrustedNetworks(config)
+            .Should().BeEquivalentTo(["10.240.3.0/24", "10.240.4.7"]);
+
+        // And it reads back, or reopening the Components tab would show the catalog default and saving
+        // would turn it off again — over a live configuration, with no way to turn it back on short of
+        // recreating the balancer.
+        Dictionary<string, string> form = StalwartService.BuildFormValues(config);
+
+        form["proxy-protocol"].Should().Be("true");
+        form["proxy-trusted-networks"].Should().Be("10.240.3.0/24, 10.240.4.7");
+
+        StalwartComponentConfig reopened = Config();
+        StalwartService.ApplyFormValues(reopened, form);
+
+        reopened.ProxyProtocol.Should().BeTrue();
+        StalwartPlanBuilder.ProxyTrustedNetworks(reopened).Should().HaveCount(2);
+    }
+
+    [Fact]
     public void ProxyProtocolTurnsOnBothHalvesAndRestoresTheConnectionChecks()
     {
         // Both halves are one decision: a balancer sending PROXY headers to a server that does not
@@ -2335,10 +2373,24 @@ public class StalwartMailTests
         readBack.Keys.Should().NotIntersectWith(StalwartService.SecretFormKeys);
 
         // Both exemption lists must name fields that actually exist, or a renamed field would leave
-        // a stale exemption behind that quietly excuses the next real omission.
+        // a stale exemption behind that quietly excuses the next real omission. Emptiness is allowed
+        // and asserted around rather than through: an exemption list with nothing on it is the
+        // healthiest state it can be in, and FluentAssertions refuses containment against an empty
+        // expectation — so asserting it directly would make removing the last exemption fail the
+        // guard that exists to police them.
         List<string> keys = entry.FormFields.Select(f => f.Key).ToList();
-        keys.Should().Contain(StalwartService.SecretFormKeys);
-        keys.Should().Contain(StalwartService.DerivedFormKeys);
+
+        foreach (string[] exemptions in new[]
+        {
+            StalwartService.SecretFormKeys,
+            StalwartService.DerivedFormKeys,
+        })
+        {
+            if (exemptions.Length > 0)
+            {
+                keys.Should().Contain(exemptions);
+            }
+        }
     }
 
     [Fact]
@@ -2385,6 +2437,30 @@ public class StalwartMailTests
         config.HighAvailability.Should().BeFalse();
         config.CnpgDatabaseId.Should().BeNull();
         config.BlobStorageLinkId.Should().BeNull();
+    }
+
+    [Fact]
+    public void OneIdentitySourceAtATimeAndTheIssuerFollowsIt()
+    {
+        // The two are alternatives, not layers: a stored app registration describes a provider EntKube
+        // does not run, a realm is one it does, and the plan needs one answer rather than two. So
+        // choosing either must clear the other — a config carrying both would resolve differently
+        // depending on which resolver ran last.
+        StalwartComponentConfig config = Config(c =>
+        {
+            c.AuthMode = StalwartAuthMode.Oidc;
+            c.OidcAppRegistrationSecretId = Guid.NewGuid();
+            c.OidcKeycloakRealmId = Guid.NewGuid();
+        });
+
+        // The read-back is what the Components tab reopens on, and an OIDC server whose realm was
+        // dropped there would silently revert to a typed issuer.
+        Dictionary<string, string> form = StalwartService.BuildFormValues(config);
+
+        StalwartComponentConfig reopened = Config();
+        StalwartService.ApplyFormValues(reopened, form);
+
+        reopened.AuthMode.Should().Be(StalwartAuthMode.Oidc);
     }
 
     [Fact]

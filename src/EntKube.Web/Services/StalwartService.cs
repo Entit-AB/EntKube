@@ -162,6 +162,7 @@ public class StalwartService(
             // values are stored rather than recomputed so the UI shows exactly what will be applied.
             await ResolveOpenLdapLinkAsync(db, existing, ct);
             await ResolveOidcRegistrationAsync(db, existing, ct);
+            await ResolveKeycloakRealmAsync(db, existing, ct);
 
             existing.UpdatedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(ct);
@@ -282,6 +283,70 @@ public class StalwartService(
     /// gone. Stalwart validates tokens rather than acting as an OAuth client, so only the issuer and
     /// claims matter here — not the client secret (that is the webmail's concern).
     /// </summary>
+    /// <summary>
+    /// Fills the OIDC settings in from a Keycloak realm EntKube manages, and makes Keycloak ready for
+    /// them, so that choosing the realm is the whole of the configuration.
+    ///
+    /// <para>Three things follow from the choice and none of them should be typed. The issuer is the
+    /// realm's own address, and a mistyped one fails every login with nothing naming the character that
+    /// was wrong. The audience is what the mail server checks a token's <c>aud</c> against, so it has
+    /// to match a client that actually stamps it — which means a client has to exist, which EntKube can
+    /// create because it holds the realm's admin credentials. And the username claim and scopes are the
+    /// directory's own defaults, which are right unless somebody has a reason.</para>
+    ///
+    /// <para>Never throws into the save. A realm that cannot be reached is worth reporting, but not at
+    /// the cost of losing everything else an operator has just entered — so the issuer is still written
+    /// from what is known, and the part that needed Keycloak is what is missing.</para>
+    /// </summary>
+    private async Task ResolveKeycloakRealmAsync(
+        ApplicationDbContext db, StalwartComponentConfig config, CancellationToken ct)
+    {
+        if (config.AuthMode != StalwartAuthMode.Oidc
+            || config.OidcKeycloakRealmId is not Guid realmId)
+        {
+            return;
+        }
+
+        // The two are alternatives, not layers: a stored app registration describes a provider EntKube
+        // does not run, and a realm is one it does. Choosing a realm clears the other so the plan has
+        // one answer rather than two.
+        config.OidcAppRegistrationSecretId = null;
+
+        KeycloakRealm? realm = await db.KeycloakRealms
+            .FirstOrDefaultAsync(r => r.Id == realmId && r.TenantId == config.TenantId, ct);
+
+        if (realm is null)
+        {
+            return;
+        }
+
+        if (await ResolveRealmIssuerAsync(config.TenantId, realmId, ct) is string issuer)
+        {
+            config.OidcIssuerUrl = issuer;
+        }
+
+        // The audience is the client, so it is named after the server it lets in rather than being a
+        // word somebody has to keep consistent in two places.
+        string clientId = $"stalwart-{config.Hostname.Trim().ToLowerInvariant()}";
+
+        try
+        {
+            await keycloakService.EnsureAudienceClientAsync(
+                config.TenantId, realmId, clientId,
+                $"EntKube mail server {config.Hostname.Trim()}", ct);
+
+            config.OidcRequireAudience = clientId;
+        }
+        catch (Exception ex)
+        {
+            // Reported, not thrown: the rest of the configuration is worth keeping, and a preflight
+            // says what is missing before an apply can act on it.
+            logger.LogWarning(ex,
+                "Could not prepare Keycloak realm {Realm} for the mail server {Hostname}. The issuer "
+                + "was set; the audience client was not created.", realm.RealmName, config.Hostname);
+        }
+    }
+
     private async Task ResolveOidcRegistrationAsync(
         ApplicationDbContext db, StalwartComponentConfig config, CancellationToken ct)
     {
@@ -343,21 +408,19 @@ public class StalwartService(
         form.TryGetValue("tls-key", out string? key);
         form.TryGetValue("redis-password", out string? redisPassword);
 
-        // Picking a realm on this cluster's Keycloak fills the issuer URL in. Stalwart validates tokens
-        // rather than issuing them, so unlike the webmail and the rspamd UI it needs no client of its own —
-        // the realm's address is the whole of what it needs, and typing that by hand is the step that
-        // silently mismatches the client's issuer and rejects every token.
-        Dictionary<string, string> resolved = new(form, StringComparer.Ordinal);
-        if (form.TryGetValue("oidc-realm", out string? realmValue)
-            && Guid.TryParse(realmValue, out Guid realmId)
-            && await ResolveRealmIssuerAsync(tenantId, realmId, ct) is string issuerFromRealm)
-        {
-            resolved["oidc-issuer"] = issuerFromRealm;
-        }
-
+        // The realm is stored rather than reduced to an issuer here, and ResolveKeycloakRealmAsync
+        // derives the rest on save — one path for both the install form and the Mail tab.
+        //
+        // It used to be resolved in passing: the issuer was written and the realm id thrown away, on
+        // the belief that Stalwart "needs no client of its own" because it validates tokens rather
+        // than issuing them. That is half true and the missing half matters. Its directory defaults
+        // requireAudience to "stalwart", so a token must carry that audience, and Keycloak does not
+        // put a resource server in aud on its own — which means a client with an audience mapper has
+        // to exist. Discarding the realm left nothing able to create one, and left the Mail tab
+        // showing "enter the issuer by hand" for a server whose realm had been chosen at install.
         await ConfigureAsync(
             tenantId, clusterComponentId,
-            cfg => ApplyFormValues(cfg, resolved),
+            cfg => ApplyFormValues(cfg, form),
             string.IsNullOrWhiteSpace(adminPassword) ? null : adminPassword,
             string.IsNullOrWhiteSpace(bindPassword) ? null : bindPassword,
             string.IsNullOrWhiteSpace(cert) ? null : cert,
@@ -465,6 +528,18 @@ public class StalwartService(
         {
             cfg.CnpgDatabaseId = GuidOrNull(form, "ha-database");
         }
+        if (form.ContainsKey("oidc-realm"))
+        {
+            cfg.OidcKeycloakRealmId = GuidOrNull(form, "oidc-realm");
+        }
+        if (form.TryGetValue("proxy-protocol", out string? proxyProtocol))
+        {
+            cfg.ProxyProtocol = proxyProtocol.Equals("true", StringComparison.OrdinalIgnoreCase);
+        }
+        if (form.ContainsKey("proxy-trusted-networks"))
+        {
+            cfg.ProxyTrustedNetworks = Text(form, "proxy-trusted-networks");
+        }
         if (form.ContainsKey("ha-blob-store"))
         {
             cfg.BlobStorageLinkId = GuidOrNull(form, "ha-blob-store");
@@ -560,6 +635,9 @@ public class StalwartService(
         ["ha-replicas"] = config.Replicas.ToString(),
         ["ha-database"] = config.CnpgDatabaseId?.ToString() ?? "",
         ["ha-blob-store"] = config.BlobStorageLinkId?.ToString() ?? "",
+        ["oidc-realm"] = config.OidcKeycloakRealmId?.ToString() ?? "",
+        ["proxy-protocol"] = config.ProxyProtocol ? "true" : "false",
+        ["proxy-trusted-networks"] = config.ProxyTrustedNetworks ?? "",
     };
 
     /// <summary>
@@ -570,16 +648,19 @@ public class StalwartService(
         ["admin-password", "ldap-bind-password", "tls-cert", "tls-key"];
 
     /// <summary>
-    /// Form keys that are inputs only: they are consumed while saving to derive something else and
-    /// are never stored, so there is nothing to read back. <c>oidc-realm</c> is the picker that
-    /// fills in <c>oidc-issuer</c> — the issuer is what the server actually validates against, and
-    /// it is what gets persisted. Reopening the form therefore shows the issuer filled in and the
-    /// realm unselected, which is the honest picture rather than a lost value.
+    /// Form keys that are inputs only: consumed while saving to derive something else and never
+    /// stored, so there is nothing to read back.
     ///
-    /// <para>Kept separate from <see cref="SecretFormKeys"/> because the reasons differ: a secret
-    /// must never be echoed back, whereas this simply has nothing to echo.</para>
+    /// <para>Empty now. <c>oidc-realm</c> was the only one, on the grounds that the issuer it filled
+    /// in was what actually got persisted — so the form reopened with the issuer set and the realm
+    /// unselected. That was a loss dressed up as honesty: the realm is what an operator chose, it is
+    /// what identifies the Keycloak client the audience mapper lives on, and throwing it away left
+    /// nothing able to create that client. It is stored now and reads back.</para>
+    ///
+    /// <para>Kept as a concept because the reason differs from <see cref="SecretFormKeys"/>: a secret
+    /// must never be echoed back, whereas this would be a key with nothing to echo.</para>
     /// </summary>
-    public static readonly string[] DerivedFormKeys = ["oidc-realm"];
+    public static readonly string[] DerivedFormKeys = [];
 
     private static string? Text(IReadOnlyDictionary<string, string> form, string key) =>
         form.TryGetValue(key, out string? v) && !string.IsNullOrWhiteSpace(v) ? v.Trim() : null;
@@ -1299,9 +1380,38 @@ public class StalwartService(
             case StalwartAuthMode.Oidc:
                 if (string.IsNullOrWhiteSpace(config.OidcIssuerUrl))
                 {
+                    // Two different situations, and telling an operator to type a URL is the right
+                    // answer to only one of them. With a realm chosen, a missing issuer means the
+                    // resolution against Keycloak failed — and typing the URL by hand then works
+                    // around a transient failure by hardcoding round it, which is what choosing a
+                    // realm exists to avoid.
+                    issues.Add(config.OidcKeycloakRealmId is null
+                        ? new(true,
+                            "Authentication is OIDC but no identity provider is set.",
+                            "Choose a Keycloak realm on the Configuration tab and the issuer is "
+                            + "derived from it, or enter an issuer URL for a provider EntKube does "
+                            + "not run.")
+                        : new(true,
+                            "A Keycloak realm is chosen but its issuer could not be resolved.",
+                            "EntKube could not reach that realm's Keycloak to read its address. "
+                            + "Check the Identity component is installed and its admin URL is "
+                            + "right, then save the mail server again — rather than entering the "
+                            + "issuer by hand, which would leave the realm and the URL able to "
+                            + "drift apart."));
+                }
+                else if (config.OidcKeycloakRealmId is not null
+                         && string.IsNullOrWhiteSpace(config.OidcRequireAudience))
+                {
+                    // The silent half of the same failure. The issuer resolved, so this looks
+                    // configured — but creating the client carrying the audience is what did not
+                    // happen, and without it the server falls back to requiring an audience of
+                    // "stalwart" that no token from this realm will carry. Every login is then
+                    // refused by a server that reports itself healthy.
                     issues.Add(new(true,
-                        "Authentication is OIDC but no realm URL is set.",
-                        "Set the Keycloak realm URL on the Configuration tab."));
+                        "The Keycloak client that stamps this server's audience was not created.",
+                        "Save the mail server again to create it. Until then the server requires an "
+                        + "audience no token from that realm carries, so every sign-in is refused — "
+                        + "Keycloak does not add a resource server to a token's audience on its own."));
                 }
                 if (!await db.StalwartMailAccounts.AnyAsync(a => a.ConfigId == config.Id, ct))
                 {

@@ -6567,6 +6567,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(400)
                         .HasColumnType("character varying(400)");
 
+                    b.Property<Guid?>("OidcKeycloakRealmId")
+                        .HasColumnType("uuid");
+
                     b.Property<string>("OidcRequireAudience")
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)");

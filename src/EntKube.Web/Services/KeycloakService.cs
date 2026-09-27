@@ -1276,6 +1276,79 @@ public class KeycloakService(
         return (clientId, secret, $"{adminUrl}/realms/{realm.RealmName}/protocol/openid-connect/token");
     }
 
+    /// <summary>
+    /// A client whose tokens carry an audience a mail server will accept.
+    ///
+    /// <para>Needed because omitting the audience is not the same as not checking it: Stalwart's OIDC
+    /// directory defaults <c>requireAudience</c> to <c>stalwart</c>, so a token that does not say so is
+    /// rejected however valid it is. Keycloak does not put a resource server in <c>aud</c> on its own —
+    /// the client id goes in <c>azp</c> — so a mapper has to add it, and that mapper has to live on a
+    /// client somebody created. Which is the work an operator would otherwise do by hand in Keycloak
+    /// after reading a document explaining why.</para>
+    ///
+    /// <para>Idempotent: it runs on every save of a mail server that may not have changed.</para>
+    /// </summary>
+    public async Task EnsureAudienceClientAsync(
+        Guid tenantId, Guid realmId, string clientId, string? displayName = null,
+        CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+
+        string realmBase =
+            $"{realm.ComponentConfig.AdminUrl!.TrimEnd('/')}/admin/realms/{realm.RealmName}";
+
+        HttpClient http = CreateHttpClient();
+
+        var definition = new
+        {
+            clientId,
+            name = displayName ?? clientId,
+            description =
+                "Created by EntKube so tokens for this mail server carry an audience its directory "
+                + "will accept. The mail server validates tokens; it does not sign in through this.",
+            enabled = true,
+            publicClient = true,
+            standardFlowEnabled = true,
+            directAccessGrantsEnabled = true,
+            protocolMappers = new object[]
+            {
+                new
+                {
+                    name = "entkube-audience",
+                    protocol = "openid-connect",
+                    protocolMapper = "oidc-audience-mapper",
+                    config = new Dictionary<string, string>
+                    {
+                        ["included.client.audience"] = clientId,
+                        ["access.token.claim"] = "true",
+                    },
+                },
+            },
+        };
+
+        string json = JsonSerializer.Serialize(definition);
+        string? uuid = await FindClientUuidAsync(http, realmBase, token, clientId, ct);
+
+        HttpResponseMessage resp = uuid is null
+            ? await http.SendAsync(new HttpRequestMessage(HttpMethod.Post, $"{realmBase}/clients")
+            {
+                Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+                Content = new StringContent(json, Encoding.UTF8, "application/json"),
+            }, ct)
+            : await http.SendAsync(new HttpRequestMessage(HttpMethod.Put, $"{realmBase}/clients/{uuid}")
+            {
+                Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+                Content = new StringContent(json, Encoding.UTF8, "application/json"),
+            }, ct);
+
+        if (!resp.IsSuccessStatusCode)
+        {
+            string body = await resp.Content.ReadAsStringAsync(ct);
+            throw new InvalidOperationException(
+                $"Keycloak refused the audience client '{clientId}': {(int)resp.StatusCode} {body}");
+        }
+    }
+
     /// <summary>The internal uuid Keycloak addresses a client by, found from the id we chose.</summary>
     private static async Task<string?> FindClientUuidAsync(
         HttpClient http, string realmBase, string token, string clientId, CancellationToken ct)
