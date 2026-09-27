@@ -578,6 +578,8 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.Mail.SmtpSettingsResolver>();
         builder.Services.AddScoped<EntKube.Web.Services.Tickets.TicketNotifier>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailboxService>();
+        // Singleton: its token cache is the point, and a scoped one would mint a token per request.
+        builder.Services.AddSingleton<EntKube.Web.Services.Mail.MailboxTokenProvider>();
 
         // The inbound ticket bridge. One adapter per system, registered as the interface —
         // so adding Ivanti is a class and a line here, which is the whole point of the seam.

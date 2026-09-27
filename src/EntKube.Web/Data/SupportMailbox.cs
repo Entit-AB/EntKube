@@ -44,6 +44,49 @@ public class SupportMailbox
     /// <summary>One mailbox per tenant, enforced by a unique index.</summary>
     public Guid TenantId { get; set; }
 
+    /// <summary>
+    /// The Stalwart component this mailbox lives on, when it is one EntKube deployed.
+    ///
+    /// <para>Set, the connection stops being typed in: the host is the server's own in-cluster
+    /// Service, the port and TLS follow the protocols it was configured with, the username is the
+    /// chosen account's address, and the credential is a token minted for a service account created
+    /// alongside it. Left null, this is an outside mailbox and <see cref="Host"/>,
+    /// <see cref="Port"/>, <see cref="UseSsl"/> and <see cref="Username"/> are what they always
+    /// were — the fields stay, because a customer's own IMAP server is still a valid thing to
+    /// poll.</para>
+    ///
+    /// <para>A reference rather than copied settings, so that a server renamed, re-addressed or
+    /// switched from implicit TLS to STARTTLS does not leave a mailbox pointing at what used to be
+    /// true. The values are derived on every connection, not stored.</para>
+    /// </summary>
+    public Guid? StalwartComponentId { get; set; }
+
+    /// <summary>
+    /// The mailbox on that server, as a <see cref="StalwartMailAccount"/>. The account's local part
+    /// and its domain are the login; EntKube created the account, so there is nothing to look up.
+    /// </summary>
+    public Guid? StalwartAccountId { get; set; }
+
+    /// <summary>
+    /// The Keycloak client EntKube created to authenticate as this mailbox, and where to mint from.
+    ///
+    /// <para>Only used when the mail server's own directory is OIDC, which is the case that makes a
+    /// password impossible: upstream's rule is that a directory serves every protocol and both
+    /// credential types, and an OIDC one validates only bearer tokens. So no password stored
+    /// anywhere would be checked, and the poller authenticates with a token minted by client
+    /// credentials instead. The secret lives in the vault, never here.</para>
+    /// </summary>
+    public string? OAuthClientId { get; set; }
+
+    public string? OAuthTokenEndpoint { get; set; }
+
+    /// <summary>
+    /// Scopes to ask for, matching what the mail server's directory requires — its default is
+    /// <c>openid email</c>. Requested explicitly because a client-credentials token carries only
+    /// what its client grants, and the directory rejects a token missing what it asked for.
+    /// </summary>
+    public string? OAuthScopes { get; set; }
+
     public required string Host { get; set; }
 
     public int Port { get; set; } = 993;

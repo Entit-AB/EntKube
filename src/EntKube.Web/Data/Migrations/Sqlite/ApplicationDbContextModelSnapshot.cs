@@ -6942,11 +6942,29 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(256)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("OAuthClientId")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OAuthScopes")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("OAuthTokenEndpoint")
+                        .HasMaxLength(512)
+                        .HasColumnType("TEXT");
+
                     b.Property<int>("PollIntervalSeconds")
                         .HasColumnType("INTEGER");
 
                     b.Property<int>("Port")
                         .HasColumnType("INTEGER");
+
+                    b.Property<Guid?>("StalwartAccountId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("StalwartComponentId")
+                        .HasColumnType("TEXT");
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("TEXT");

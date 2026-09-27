@@ -45,6 +45,8 @@ public class SupportMailboxService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vault,
     SupportMailService mail,
+    MailboxTokenProvider tokens,
+    KeycloakService keycloak,
     ILogger<SupportMailboxService> logger)
 {
     /// <summary>
@@ -118,8 +120,12 @@ public class SupportMailboxService(
             // would skip every message below it.
             bool movedMailbox = existing.Host != settings.Host
                 || existing.Username != settings.Username
-                || existing.Folder != settings.Folder;
+                || existing.Folder != settings.Folder
+                || existing.StalwartComponentId != settings.StalwartComponentId
+                || existing.StalwartAccountId != settings.StalwartAccountId;
 
+            existing.StalwartComponentId = settings.StalwartComponentId;
+            existing.StalwartAccountId = settings.StalwartAccountId;
             existing.Host = settings.Host;
             existing.Port = settings.Port;
             existing.UseSsl = settings.UseSsl;
@@ -153,7 +159,193 @@ public class SupportMailboxService(
                 existing.TenantId, existing.Id, password, ct);
         }
 
+        await EnsureCredentialAsync(db, existing, ct);
+
         return existing;
+    }
+
+    /// <summary>
+    /// Makes sure this mailbox has a credential its mail server will actually accept, creating one if
+    /// it does not — so that choosing a server and an account is the whole of the configuration.
+    ///
+    /// <para>Which credential is not a choice, it is a consequence. A directory serves every protocol
+    /// and both credential types, and an OIDC one validates only bearer tokens — so on a server whose
+    /// directory is Keycloak, no password stored anywhere would be checked, and the poller has to
+    /// present a token. A token needs an identity to be minted for, and there is no human here, so it
+    /// is a service account: a confidential Keycloak client whose own mapper hardcodes the mailbox
+    /// address into the claim the directory reads.</para>
+    ///
+    /// <para>Idempotent and quiet. It runs on every save, including saves that changed nothing, and it
+    /// never throws into the caller: a mailbox that could not be given a credential is still worth
+    /// saving, and the failure belongs on the mailbox where its other errors are reported rather than
+    /// as an exception over a form the operator has just filled in.</para>
+    /// </summary>
+    private async Task EnsureCredentialAsync(
+        ApplicationDbContext db, SupportMailbox mailbox, CancellationToken ct)
+    {
+        if (mailbox.StalwartComponentId is not Guid componentId
+            || mailbox.StalwartAccountId is not Guid accountId)
+        {
+            return;
+        }
+
+        try
+        {
+            StalwartComponentConfig? config = await db.StalwartComponentConfigs
+                .FirstOrDefaultAsync(c => c.ClusterComponentId == componentId, ct);
+
+            if (config is null || config.AuthMode != StalwartAuthMode.Oidc)
+            {
+                // Passwords are checkable here, so there is nothing to mint.
+                return;
+            }
+
+            // The Stalwart config keeps the issuer URL rather than a realm id — the realm selector
+            // resolves to one at configure time — so the realm is found back out of it. The last path
+            // segment of ".../realms/<name>" is the realm, which is how the issuer is built.
+            string issuer = (config.OidcIssuerUrl ?? "").Trim().TrimEnd('/');
+            string realmName = issuer.Contains("/realms/", StringComparison.OrdinalIgnoreCase)
+                ? issuer[(issuer.LastIndexOf('/') + 1)..]
+                : "";
+
+            KeycloakRealm? realm = realmName.Length == 0
+                ? null
+                : await db.KeycloakRealms.FirstOrDefaultAsync(
+                    r => r.TenantId == mailbox.TenantId && r.RealmName == realmName, ct);
+
+            if (realm is null)
+            {
+                mailbox.LastError =
+                    $"That mail server authenticates against OIDC at {issuer}, but no Keycloak realm "
+                    + "EntKube manages matches it — so no service account can be created for this "
+                    + "mailbox. Pick a realm on the mail server's component settings rather than "
+                    + "typing an issuer URL.";
+                await db.SaveChangesAsync(ct);
+                return;
+            }
+
+            Guid realmId = realm.Id;
+
+            StalwartMailAccount? account = await db.StalwartMailAccounts
+                .FirstOrDefaultAsync(a => a.Id == accountId, ct);
+            StalwartMailDomain? domain = account is null
+                ? null
+                : await db.StalwartMailDomains.FirstOrDefaultAsync(d => d.Id == account.DomainId, ct);
+
+            if (account is null || domain is null)
+            {
+                return;
+            }
+
+            string username =
+                $"{account.LocalPart.Trim().ToLowerInvariant()}@{domain.Name.Trim().ToLowerInvariant()}";
+
+            // One client per mailbox, named after what it is for rather than randomly, so somebody
+            // looking at the realm's client list can tell what created it and why.
+            string clientId = $"entkube-support-mailbox-{mailbox.Id:N}"[..Math.Min(36, 30 + 6)];
+
+            (string id, string secret, string tokenEndpoint) =
+                await keycloak.EnsureServiceAccountClientAsync(
+                    mailbox.TenantId, realmId, clientId, username,
+                    // The directory validates aud, and its default is "stalwart" — so the audience the
+                    // mapper adds has to be whatever that server actually requires, not a guess.
+                    string.IsNullOrWhiteSpace(config.OidcRequireAudience)
+                        ? "stalwart"
+                        : config.OidcRequireAudience!.Trim(),
+                    ct);
+
+            await vault.SetSupportMailboxOAuthSecretAsync(mailbox.TenantId, mailbox.Id, secret, ct);
+
+            mailbox.OAuthClientId = id;
+            mailbox.OAuthTokenEndpoint = tokenEndpoint;
+            // The scopes the directory requires, so the token carries what it will be checked for.
+            mailbox.OAuthScopes = config.OidcRequireScopes;
+
+            // A new client means a new secret, so a token minted from the old one is no longer good.
+            MailboxTokenProvider.Forget(mailbox.Id);
+
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex,
+                "Could not create the Keycloak service account for the support mailbox of tenant "
+                + "{Tenant}.", mailbox.TenantId);
+
+            mailbox.LastError = $"Could not create the service account: {ex.Message}";
+            await db.SaveChangesAsync(ct);
+        }
+    }
+
+    /// <summary>A Stalwart server the tenant could read a support mailbox from.</summary>
+    public sealed record StalwartMailServerOption(Guid ComponentId, string Label, bool UsesOidc);
+
+    /// <summary>A mailbox on one of those servers.</summary>
+    public sealed record StalwartMailboxOption(Guid AccountId, string Address);
+
+    /// <summary>
+    /// The mail servers this tenant has, for choosing one instead of typing a hostname.
+    ///
+    /// <para>Only servers that are installed and have IMAP on: a mailbox cannot be read from a
+    /// component that was added and never deployed, and offering one would produce a connection
+    /// error rather than a mailbox.</para>
+    /// </summary>
+    public async Task<List<StalwartMailServerOption>> GetStalwartServersAsync(
+        Guid tenantId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        var rows = await db.StalwartComponentConfigs
+            .Where(c => c.TenantId == tenantId && c.ImapEnabled)
+            .Join(
+                db.ClusterComponents.Include(k => k.Cluster)
+                    .Where(k => k.Status == ComponentStatus.Installed),
+                c => c.ClusterComponentId,
+                k => k.Id,
+                (c, k) => new { Config = c, Component = k })
+            .ToListAsync(ct);
+
+        return [.. rows
+            .Select(r => new StalwartMailServerOption(
+                r.Component.Id,
+                // The hostname is what an operator recognises; the cluster disambiguates two servers
+                // that serve the same domain from different clusters.
+                $"{r.Config.Hostname} ({r.Component.Cluster?.Name ?? r.Component.Name})",
+                r.Config.AuthMode == StalwartAuthMode.Oidc))
+            .OrderBy(o => o.Label, StringComparer.OrdinalIgnoreCase)];
+    }
+
+    /// <summary>
+    /// The mailboxes on one of those servers, as addresses.
+    ///
+    /// <para>These are the accounts EntKube authored, which is why no lookup against the server is
+    /// needed — and also why one that has been added but not yet applied appears here before it
+    /// exists. That is the right way round: the alternative is an operator unable to select the
+    /// mailbox they just created.</para>
+    /// </summary>
+    public async Task<List<StalwartMailboxOption>> GetStalwartMailboxesAsync(
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        StalwartComponentConfig? config = await db.StalwartComponentConfigs
+            .FirstOrDefaultAsync(c => c.ClusterComponentId == componentId && c.TenantId == tenantId, ct);
+
+        if (config is null)
+        {
+            return [];
+        }
+
+        var rows = await db.StalwartMailAccounts
+            .Where(a => a.ConfigId == config.Id)
+            .Join(db.StalwartMailDomains, a => a.DomainId, d => d.Id, (a, d) => new { a, d })
+            .ToListAsync(ct);
+
+        return [.. rows
+            .Select(r => new StalwartMailboxOption(
+                r.a.Id,
+                $"{r.a.LocalPart.Trim().ToLowerInvariant()}@{r.d.Name.Trim().ToLowerInvariant()}"))
+            .OrderBy(o => o.Address, StringComparer.OrdinalIgnoreCase)];
     }
 
     public async Task DeleteAsync(Guid tenantId, CancellationToken ct = default)
@@ -187,17 +379,13 @@ public class SupportMailboxService(
             return new MailPollResult(false, "No mailbox is configured.");
         }
 
-        string? password = await vault.GetSupportMailboxPasswordAsync(tenantId, mailbox.Id, ct);
-
-        if (password is null)
-        {
-            return new MailPollResult(false, "No password has been stored for this mailbox.");
-        }
-
         try
         {
+            using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+            (MailboxConnection where, string credential) = await ResolveAsync(db, mailbox, ct);
+
             using ImapClient client = new();
-            await ConnectAsync(client, mailbox, password, ct);
+            await ConnectAsync(client, where, credential, ct);
 
             IMailFolder folder = await client.GetFolderAsync(mailbox.Folder, ct);
             await folder.OpenAsync(FolderAccess.ReadOnly, ct);
@@ -259,13 +447,6 @@ public class SupportMailboxService(
 
         try
         {
-            string? password = await vault.GetSupportMailboxPasswordAsync(tenantId, mailbox.Id, ct);
-
-            if (password is null)
-            {
-                throw new InvalidOperationException("No password has been stored for this mailbox.");
-            }
-
             // The register of customer domains, so a message the filter junked can be told from
             // the spam beside it. Read here rather than in the fetch: one query per poll, not one
             // per message.
@@ -276,8 +457,10 @@ public class SupportMailboxService(
                     .ToListAsync(ct),
                 StringComparer.OrdinalIgnoreCase);
 
+            (MailboxConnection where, string credential) = await ResolveAsync(db, mailbox, ct);
+
             (int taken, int seen, int fromJunk) =
-                await FetchAsync(mailbox, password, customerDomains, ct);
+                await FetchAsync(mailbox, where, credential, customerDomains, ct);
 
             mailbox.LastPolledAt = DateTime.UtcNow;
             mailbox.LastError = null;
@@ -296,6 +479,15 @@ public class SupportMailboxService(
         {
             string explained = Explain(ex);
 
+            // A token can stop working before it expires — the client disabled, its secret rotated,
+            // the mailbox renamed — and a cached one would then be presented on every poll until it
+            // aged out on its own. Dropping it means the next poll asks for a fresh one, so a fixed
+            // Keycloak recovers without waiting.
+            if (ex is AuthenticationException)
+            {
+                MailboxTokenProvider.Forget(mailbox.Id);
+            }
+
             mailbox.LastPolledAt = DateTime.UtcNow;
             mailbox.LastError = explained;
             mailbox.ConsecutiveFailures++;
@@ -312,11 +504,11 @@ public class SupportMailboxService(
 
     /// <summary>The fetch itself, separated from the bookkeeping around it.</summary>
     private async Task<(int Taken, int Seen, int FromJunk)> FetchAsync(
-        SupportMailbox mailbox, string password, IReadOnlySet<string> customerDomains,
-        CancellationToken ct)
+        SupportMailbox mailbox, MailboxConnection where, string credential,
+        IReadOnlySet<string> customerDomains, CancellationToken ct)
     {
         using ImapClient client = new();
-        await ConnectAsync(client, mailbox, password, ct);
+        await ConnectAsync(client, where, credential, ct);
 
         IMailFolder folder = await client.GetFolderAsync(mailbox.Folder, ct);
 
@@ -526,12 +718,102 @@ public class SupportMailboxService(
         }
     }
 
+    /// <summary>
+    /// Where this mailbox is, and what to authenticate with.
+    ///
+    /// <para>Two shapes. A mailbox pointed at a Stalwart server EntKube manages derives everything
+    /// from the component and the chosen account, and its credential is a token minted for the
+    /// service account created beside it — nothing about the connection is typed in or stored, so a
+    /// server renamed or re-addressed is followed rather than remembered wrongly. A mailbox somebody
+    /// entered by hand is exactly what they entered, with the password from the vault.</para>
+    /// </summary>
+    private async Task<(MailboxConnection Where, string Credential)> ResolveAsync(
+        ApplicationDbContext db, SupportMailbox mailbox, CancellationToken ct)
+    {
+        if (mailbox.StalwartComponentId is not Guid componentId
+            || mailbox.StalwartAccountId is not Guid accountId)
+        {
+            string? password = await vault.GetSupportMailboxPasswordAsync(
+                mailbox.TenantId, mailbox.Id, ct);
+
+            return password is null
+                ? throw new InvalidOperationException(
+                    "No password has been stored for this mailbox.")
+                : (MailboxConnectionResolver.FromStoredSettings(mailbox), password);
+        }
+
+        ClusterComponent component = await db.ClusterComponents
+            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            ?? throw new InvalidOperationException(
+                "The mail server this mailbox is on no longer exists. Choose another on the "
+                + "Support mailbox tab.");
+
+        StalwartComponentConfig config = await db.StalwartComponentConfigs
+            .FirstOrDefaultAsync(c => c.ClusterComponentId == componentId, ct)
+            ?? throw new InvalidOperationException(
+                "The mail server this mailbox is on is no longer configured.");
+
+        StalwartMailAccount account = await db.StalwartMailAccounts
+            .FirstOrDefaultAsync(a => a.Id == accountId, ct)
+            ?? throw new InvalidOperationException(
+                "The mail account this mailbox uses has been removed. Choose another on the "
+                + "Support mailbox tab.");
+
+        StalwartMailDomain domain = await db.StalwartMailDomains
+            .FirstOrDefaultAsync(d => d.Id == account.DomainId, ct)
+            ?? throw new InvalidOperationException(
+                "The domain of the mail account this mailbox uses has been removed.");
+
+        MailboxConnection where =
+            MailboxConnectionResolver.Resolve(config, component, account, domain)
+            ?? throw new InvalidOperationException(
+                "IMAP is switched off on that mail server, so there is nothing to read. Turn it on "
+                + "in the Mail tab's protocols and apply the configuration.");
+
+        if (!where.UseOAuth)
+        {
+            // The server validates passwords, so the account's own credential is what to send.
+            string? password = await vault.GetSupportMailboxPasswordAsync(
+                mailbox.TenantId, mailbox.Id, ct);
+
+            return password is null
+                ? throw new InvalidOperationException(
+                    "No password has been stored for this mailbox.")
+                : (where, password);
+        }
+
+        if (string.IsNullOrWhiteSpace(mailbox.OAuthClientId)
+            || string.IsNullOrWhiteSpace(mailbox.OAuthTokenEndpoint))
+        {
+            throw new InvalidOperationException(
+                "That mail server authenticates against OIDC, which accepts only bearer tokens, and "
+                + "no service account has been created for this mailbox yet. Save it again on the "
+                + "Support mailbox tab.");
+        }
+
+        string? clientSecret = await vault.GetSupportMailboxOAuthSecretAsync(
+            mailbox.TenantId, mailbox.Id, ct);
+
+        if (clientSecret is null)
+        {
+            throw new InvalidOperationException(
+                $"No secret is stored for the service account '{mailbox.OAuthClientId}'. Save the "
+                + "mailbox again to create it.");
+        }
+
+        string token = await tokens.GetAsync(
+            mailbox.Id, mailbox.OAuthTokenEndpoint!, mailbox.OAuthClientId!, clientSecret,
+            mailbox.OAuthScopes ?? "", ct);
+
+        return (where, token);
+    }
+
     private static async Task ConnectAsync(
-        ImapClient client, SupportMailbox mailbox, string password, CancellationToken ct)
+        ImapClient client, MailboxConnection where, string credential, CancellationToken ct)
     {
         // Implicit TLS on 993, STARTTLS where the server offers it on 143. Never plain:
-        // these are patient-facing support messages and a service account's password.
-        SecureSocketOptions tls = mailbox.UseSsl
+        // these are patient-facing support messages and a service account's credential.
+        SecureSocketOptions tls = where.UseSsl
             ? SecureSocketOptions.SslOnConnect
             : SecureSocketOptions.StartTls;
 
@@ -539,8 +821,33 @@ public class SupportMailboxService(
         // rather than whatever MailKit's default happens to be.
         client.Timeout = (int)ConnectionTimeout.TotalMilliseconds;
 
-        await client.ConnectAsync(mailbox.Host, mailbox.Port, tls, ct);
-        await client.AuthenticateAsync(mailbox.Username, password, ct);
+        if (!where.ValidateCertificateName)
+        {
+            // Only the name check, and only for a server EntKube deployed and reaches by its
+            // in-cluster Service. The certificate is for the hostname its users arrive on, so the
+            // name cannot match — and insisting on a match is the wrong check rather than a
+            // protection: the connection does not leave the cluster, and the server presenting the
+            // certificate is the one EntKube issued it to. Everything else about the chain is still
+            // verified, and a mailbox somebody typed in gets the full check.
+            client.ServerCertificateValidationCallback = (_, _, _, errors) =>
+                errors is System.Net.Security.SslPolicyErrors.None
+                    or System.Net.Security.SslPolicyErrors.RemoteCertificateNameMismatch;
+        }
+
+        await client.ConnectAsync(where.Host, where.Port, tls, ct);
+
+        if (where.UseOAuth)
+        {
+            // The mail server's directory is OIDC, which validates bearer tokens and nothing else, so
+            // the credential is a token and the mechanism has to say so — sending it as a password
+            // would be refused by a server that never checks passwords.
+            await client.AuthenticateAsync(
+                new SaslMechanismOAuthBearer(where.Username, credential), ct);
+        }
+        else
+        {
+            await client.AuthenticateAsync(where.Username, credential, ct);
+        }
     }
 
     /// <summary>

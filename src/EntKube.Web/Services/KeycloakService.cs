@@ -1128,6 +1128,181 @@ public class KeycloakService(
         resp.EnsureSuccessStatusCode();
     }
 
+    /// <summary>
+    /// A confidential client that authenticates as itself, for a service that has no human to log in.
+    ///
+    /// <para>This is what makes a mail poller possible on a mail server whose directory is OIDC.
+    /// Upstream is unambiguous that nothing else can work there: "one directory is resolved per
+    /// domain and it serves every protocol and both credential types", and "only an OIDC-type
+    /// directory can validate bearer tokens, and only LDAP or SQL can validate passwords". So no
+    /// account password and no app password is checkable, whatever is stored on the account — a
+    /// bearer token is the only credential the server will accept, and a service account is how a
+    /// background process gets one without a person.</para>
+    ///
+    /// <para>Two protocol mappers do the work that makes the token usable as a mailbox login:</para>
+    ///
+    /// <list type="bullet">
+    /// <item><description><c>preferred_username</c> is hardcoded to the mailbox address. Without it a
+    /// client-credentials token carries <c>service-account-&lt;id&gt;</c>, and the mail server resolves
+    /// the login from whatever claim its directory names — <c>preferred_username</c> by default — so
+    /// the mailbox would have to be named after a Keycloak client. Overriding it per client keeps the
+    /// claim the directory reads for every human user untouched.</description></item>
+    /// <item><description>an audience, because the directory validates <c>aud</c> and a
+    /// client-credentials token would otherwise carry only the client's own id.</description></item>
+    /// </list>
+    ///
+    /// <para>Idempotent: called again it updates the client it already made rather than failing or
+    /// making a second one, because it runs on every save of a mailbox that may not have changed.</para>
+    /// </summary>
+    /// <returns>The client id and its secret, for the caller to store in the vault.</returns>
+    public async Task<(string ClientId, string ClientSecret, string TokenEndpoint)>
+        EnsureServiceAccountClientAsync(
+            Guid tenantId, Guid realmId, string clientId, string username, string audience,
+            CancellationToken ct = default)
+    {
+        (KeycloakRealm realm, string token) = await LoadRealmAndTokenAsync(tenantId, realmId, ct);
+
+        string adminUrl = realm.ComponentConfig.AdminUrl!.TrimEnd('/');
+        string realmBase = $"{adminUrl}/admin/realms/{realm.RealmName}";
+
+        HttpClient http = CreateHttpClient();
+
+        // Only the flows a service account needs. Standard flow off because there is no browser and
+        // no redirect URI to register; direct access grants off because no password is involved.
+        var definition = new
+        {
+            clientId,
+            name = $"EntKube service account for {username}",
+            description =
+                "Created by EntKube so a background service can authenticate to a mail server whose "
+                + "directory is OIDC. Tokens are minted by client credentials; there is no user.",
+            enabled = true,
+            publicClient = false,
+            serviceAccountsEnabled = true,
+            standardFlowEnabled = false,
+            implicitFlowEnabled = false,
+            directAccessGrantsEnabled = false,
+            protocolMappers = new object[]
+            {
+                new
+                {
+                    name = "entkube-preferred-username",
+                    protocol = "openid-connect",
+                    protocolMapper = "oidc-hardcoded-claim-mapper",
+                    config = new Dictionary<string, string>
+                    {
+                        ["claim.name"] = "preferred_username",
+                        ["claim.value"] = username,
+                        ["jsonType.label"] = "String",
+                        ["access.token.claim"] = "true",
+                        ["id.token.claim"] = "true",
+                        ["userinfo.token.claim"] = "true",
+                    },
+                },
+                new
+                {
+                    name = "entkube-audience",
+                    protocol = "openid-connect",
+                    protocolMapper = "oidc-audience-mapper",
+                    config = new Dictionary<string, string>
+                    {
+                        ["included.custom.audience"] = audience,
+                        ["access.token.claim"] = "true",
+                    },
+                },
+            },
+        };
+
+        string json = JsonSerializer.Serialize(definition);
+
+        // Find it first: this runs on every save, and a second POST of an existing clientId is a 409.
+        string? uuid = await FindClientUuidAsync(http, realmBase, token, clientId, ct);
+
+        if (uuid is null)
+        {
+            HttpResponseMessage created = await http.SendAsync(new HttpRequestMessage(
+                HttpMethod.Post, $"{realmBase}/clients")
+            {
+                Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+                Content = new StringContent(json, Encoding.UTF8, "application/json"),
+            }, ct);
+
+            if (!created.IsSuccessStatusCode)
+            {
+                string body = await created.Content.ReadAsStringAsync(ct);
+                throw new InvalidOperationException(
+                    $"Keycloak refused to create the service account client '{clientId}': "
+                    + $"{(int)created.StatusCode} {body}");
+            }
+
+            uuid = await FindClientUuidAsync(http, realmBase, token, clientId, ct)
+                ?? throw new InvalidOperationException(
+                    $"Keycloak accepted the client '{clientId}' but does not list it.");
+        }
+        else
+        {
+            // The mailbox address can change, and the hardcoded username mapper has to follow it.
+            HttpResponseMessage updated = await http.SendAsync(new HttpRequestMessage(
+                HttpMethod.Put, $"{realmBase}/clients/{uuid}")
+            {
+                Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+                Content = new StringContent(json, Encoding.UTF8, "application/json"),
+            }, ct);
+
+            updated.EnsureSuccessStatusCode();
+        }
+
+        HttpResponseMessage secretResp = await http.SendAsync(new HttpRequestMessage(
+            HttpMethod.Get, $"{realmBase}/clients/{uuid}/client-secret")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+        }, ct);
+
+        secretResp.EnsureSuccessStatusCode();
+
+        using JsonDocument secretDoc = JsonDocument.Parse(await secretResp.Content.ReadAsStringAsync(ct));
+
+        string secret = secretDoc.RootElement.TryGetProperty("value", out JsonElement v)
+            ? v.GetString() ?? ""
+            : "";
+
+        if (secret.Length == 0)
+        {
+            throw new InvalidOperationException(
+                $"Keycloak returned no secret for the client '{clientId}'. A public client cannot "
+                + "mint tokens by client credentials.");
+        }
+
+        return (clientId, secret, $"{adminUrl}/realms/{realm.RealmName}/protocol/openid-connect/token");
+    }
+
+    /// <summary>The internal uuid Keycloak addresses a client by, found from the id we chose.</summary>
+    private static async Task<string?> FindClientUuidAsync(
+        HttpClient http, string realmBase, string token, string clientId, CancellationToken ct)
+    {
+        HttpResponseMessage resp = await http.SendAsync(new HttpRequestMessage(
+            HttpMethod.Get, $"{realmBase}/clients?clientId={Uri.EscapeDataString(clientId)}")
+        {
+            Headers = { Authorization = new AuthenticationHeaderValue("Bearer", token) },
+        }, ct);
+
+        resp.EnsureSuccessStatusCode();
+
+        using JsonDocument doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync(ct));
+
+        foreach (JsonElement client in doc.RootElement.EnumerateArray())
+        {
+            if (client.TryGetProperty("clientId", out JsonElement id)
+                && id.GetString() == clientId
+                && client.TryGetProperty("id", out JsonElement uuid))
+            {
+                return uuid.GetString();
+            }
+        }
+
+        return null;
+    }
+
     public async Task DeleteIdpAsync(
         Guid tenantId, Guid realmId, string alias, CancellationToken ct = default)
     {

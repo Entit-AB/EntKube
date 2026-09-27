@@ -880,6 +880,9 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
 
             entity.Property(m => m.Host).HasMaxLength(256);
             entity.Property(m => m.Username).HasMaxLength(256);
+            entity.Property(m => m.OAuthClientId).HasMaxLength(256);
+            entity.Property(m => m.OAuthTokenEndpoint).HasMaxLength(512);
+            entity.Property(m => m.OAuthScopes).HasMaxLength(256);
             entity.Property(m => m.Address).HasMaxLength(256);
             entity.Property(m => m.Folder).HasMaxLength(256);
             entity.Property(m => m.MoveToFolder).HasMaxLength(256);
