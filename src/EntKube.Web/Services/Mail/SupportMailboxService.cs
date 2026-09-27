@@ -24,9 +24,15 @@ namespace EntKube.Web.Services.Mail;
 /// counted silently: a non-zero number here means the spam filter is misclassifying a customer's
 /// mail, which is worth someone's attention even though no message was lost.
 /// </param>
+/// <param name="JunkUnavailable">
+/// Customer domains are registered, so the Junk sweep was wanted, and the server offered no Junk
+/// folder to sweep. Reported because the protection is then not in force while an operator has every
+/// reason to believe it is: a mail server that does not advertise the folder's SPECIAL-USE attribute
+/// cannot be found by one, and a customer's request filed as spam is simply never read.
+/// </param>
 public readonly record struct MailPollResult(
     bool Ok, string? Error, int Taken = 0, int Seen = 0, bool AlreadyRunning = false,
-    int FromJunk = 0);
+    int FromJunk = 0, bool JunkUnavailable = false);
 
 /// <summary>
 /// The tenant's support mailbox: its settings, and the fetch that fills the triage queue.
@@ -507,7 +513,7 @@ public class SupportMailboxService(
 
             (MailboxConnection where, string credential) = await ResolveAsync(db, mailbox, ct);
 
-            (int taken, int seen, int fromJunk) =
+            (int taken, int seen, int fromJunk, bool junkUnavailable) =
                 await FetchAsync(mailbox, where, credential, customerDomains, ct);
 
             mailbox.LastPolledAt = DateTime.UtcNow;
@@ -521,7 +527,8 @@ public class SupportMailboxService(
 
             await db.SaveChangesAsync(ct);
 
-            return new MailPollResult(true, null, taken, seen, FromJunk: fromJunk);
+            return new MailPollResult(
+                true, null, taken, seen, FromJunk: fromJunk, JunkUnavailable: junkUnavailable);
         }
         catch (Exception ex)
         {
@@ -551,7 +558,7 @@ public class SupportMailboxService(
     }
 
     /// <summary>The fetch itself, separated from the bookkeeping around it.</summary>
-    private async Task<(int Taken, int Seen, int FromJunk)> FetchAsync(
+    private async Task<(int Taken, int Seen, int FromJunk, bool JunkUnavailable)> FetchAsync(
         SupportMailbox mailbox, MailboxConnection where, string credential,
         IReadOnlySet<string> customerDomains, CancellationToken ct)
     {
@@ -611,11 +618,12 @@ public class SupportMailboxService(
 
         await folder.CloseAsync(false, ct);
 
-        int fromJunk = await SweepJunkAsync(client, mailbox, customerDomains, ct);
+        (int fromJunk, bool junkUnavailable) =
+            await SweepJunkAsync(client, mailbox, customerDomains, ct);
 
         await client.DisconnectAsync(true, ct);
 
-        return (taken + fromJunk, ids.Count, fromJunk);
+        return (taken + fromJunk, ids.Count, fromJunk, junkUnavailable);
     }
 
     /// <summary>
@@ -653,13 +661,15 @@ public class SupportMailboxService(
     /// so an operator looking at the folder sees what it has been doing, and the copy EntKube took is
     /// recognised by its message id if the folder is read again.</para>
     /// </summary>
-    private async Task<int> SweepJunkAsync(
+    private async Task<(int Rescued, bool Unavailable)> SweepJunkAsync(
         ImapClient client, SupportMailbox mailbox, IReadOnlySet<string> customerDomains,
         CancellationToken ct)
     {
         if (customerDomains.Count == 0)
         {
-            return 0;
+            // Nothing registered, so nothing was expected of the sweep and its absence is not a
+            // finding — unlike a sweep that was wanted and had nowhere to look.
+            return (0, false);
         }
 
         IMailFolder? junk;
@@ -674,12 +684,21 @@ public class SupportMailboxService(
             logger.LogDebug(ex,
                 "No Junk folder for the support mailbox of tenant {Tenant}; nothing to sweep.",
                 mailbox.TenantId);
-            return 0;
+            return (0, true);
         }
 
         if (junk is null)
         {
-            return 0;
+            // The realistic shape of this, and it used to return silently. MailKit answers a
+            // special-use lookup with null rather than an exception when the server does not advertise
+            // the attribute — measured, not assumed, and it returns null even when a folder plainly
+            // named "Junk" exists, because a name is not an attribute. So the sweep has nowhere to
+            // look, protects nothing, and the operator has no reason to suspect it.
+            //
+            // Reported through the result rather than logged every poll: a warning every two minutes
+            // is noise that gets filtered, which is how the rest of this stack's real problems stayed
+            // hidden behind a wall of repeated lines.
+            return (0, true);
         }
 
         int rescued = 0;
@@ -732,7 +751,8 @@ public class SupportMailboxService(
                 + "folder was read normally.", mailbox.TenantId);
         }
 
-        return rescued;
+        // Found the folder and read it, whatever happened to individual messages.
+        return (rescued, false);
     }
 
     /// <summary>What happens to a message in the mailbox once it has been taken in.</summary>

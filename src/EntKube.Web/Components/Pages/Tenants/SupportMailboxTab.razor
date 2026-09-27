@@ -535,6 +535,17 @@
         }
         else if (result.Ok)
         {
+            // The sweep was wanted and had nowhere to look, so the protection an operator believes is
+            // in force is not. Said before the counts, because it is about every future message rather
+            // than this fetch.
+            if (result.JunkUnavailable)
+            {
+                Toasts.Warning(
+                    "This mail server offers no Junk folder that can be found by its special-use "
+                    + "attribute, so customer mail filed as spam cannot be rescued — a support request "
+                    + "classified as spam would not be read. Everything else was fetched normally.");
+            }
+
             // A rescue is not good news, it is a filter misclassifying a customer — so it is said out
             // loud rather than folded into the total, where nobody would notice it.
             if (result.FromJunk > 0)
