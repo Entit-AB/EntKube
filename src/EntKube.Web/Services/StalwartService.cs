@@ -408,21 +408,19 @@ public class StalwartService(
         form.TryGetValue("tls-key", out string? key);
         form.TryGetValue("redis-password", out string? redisPassword);
 
-        // Picking a realm on this cluster's Keycloak fills the issuer URL in. Stalwart validates tokens
-        // rather than issuing them, so unlike the webmail and the rspamd UI it needs no client of its own —
-        // the realm's address is the whole of what it needs, and typing that by hand is the step that
-        // silently mismatches the client's issuer and rejects every token.
-        Dictionary<string, string> resolved = new(form, StringComparer.Ordinal);
-        if (form.TryGetValue("oidc-realm", out string? realmValue)
-            && Guid.TryParse(realmValue, out Guid realmId)
-            && await ResolveRealmIssuerAsync(tenantId, realmId, ct) is string issuerFromRealm)
-        {
-            resolved["oidc-issuer"] = issuerFromRealm;
-        }
-
+        // The realm is stored rather than reduced to an issuer here, and ResolveKeycloakRealmAsync
+        // derives the rest on save — one path for both the install form and the Mail tab.
+        //
+        // It used to be resolved in passing: the issuer was written and the realm id thrown away, on
+        // the belief that Stalwart "needs no client of its own" because it validates tokens rather
+        // than issuing them. That is half true and the missing half matters. Its directory defaults
+        // requireAudience to "stalwart", so a token must carry that audience, and Keycloak does not
+        // put a resource server in aud on its own — which means a client with an audience mapper has
+        // to exist. Discarding the realm left nothing able to create one, and left the Mail tab
+        // showing "enter the issuer by hand" for a server whose realm had been chosen at install.
         await ConfigureAsync(
             tenantId, clusterComponentId,
-            cfg => ApplyFormValues(cfg, resolved),
+            cfg => ApplyFormValues(cfg, form),
             string.IsNullOrWhiteSpace(adminPassword) ? null : adminPassword,
             string.IsNullOrWhiteSpace(bindPassword) ? null : bindPassword,
             string.IsNullOrWhiteSpace(cert) ? null : cert,
@@ -530,6 +528,10 @@ public class StalwartService(
         {
             cfg.CnpgDatabaseId = GuidOrNull(form, "ha-database");
         }
+        if (form.ContainsKey("oidc-realm"))
+        {
+            cfg.OidcKeycloakRealmId = GuidOrNull(form, "oidc-realm");
+        }
         if (form.TryGetValue("proxy-protocol", out string? proxyProtocol))
         {
             cfg.ProxyProtocol = proxyProtocol.Equals("true", StringComparison.OrdinalIgnoreCase);
@@ -633,6 +635,7 @@ public class StalwartService(
         ["ha-replicas"] = config.Replicas.ToString(),
         ["ha-database"] = config.CnpgDatabaseId?.ToString() ?? "",
         ["ha-blob-store"] = config.BlobStorageLinkId?.ToString() ?? "",
+        ["oidc-realm"] = config.OidcKeycloakRealmId?.ToString() ?? "",
         ["proxy-protocol"] = config.ProxyProtocol ? "true" : "false",
         ["proxy-trusted-networks"] = config.ProxyTrustedNetworks ?? "",
     };
@@ -645,16 +648,19 @@ public class StalwartService(
         ["admin-password", "ldap-bind-password", "tls-cert", "tls-key"];
 
     /// <summary>
-    /// Form keys that are inputs only: they are consumed while saving to derive something else and
-    /// are never stored, so there is nothing to read back. <c>oidc-realm</c> is the picker that
-    /// fills in <c>oidc-issuer</c> — the issuer is what the server actually validates against, and
-    /// it is what gets persisted. Reopening the form therefore shows the issuer filled in and the
-    /// realm unselected, which is the honest picture rather than a lost value.
+    /// Form keys that are inputs only: consumed while saving to derive something else and never
+    /// stored, so there is nothing to read back.
     ///
-    /// <para>Kept separate from <see cref="SecretFormKeys"/> because the reasons differ: a secret
-    /// must never be echoed back, whereas this simply has nothing to echo.</para>
+    /// <para>Empty now. <c>oidc-realm</c> was the only one, on the grounds that the issuer it filled
+    /// in was what actually got persisted — so the form reopened with the issuer set and the realm
+    /// unselected. That was a loss dressed up as honesty: the realm is what an operator chose, it is
+    /// what identifies the Keycloak client the audience mapper lives on, and throwing it away left
+    /// nothing able to create that client. It is stored now and reads back.</para>
+    ///
+    /// <para>Kept as a concept because the reason differs from <see cref="SecretFormKeys"/>: a secret
+    /// must never be echoed back, whereas this would be a key with nothing to echo.</para>
     /// </summary>
-    public static readonly string[] DerivedFormKeys = ["oidc-realm"];
+    public static readonly string[] DerivedFormKeys = [];
 
     private static string? Text(IReadOnlyDictionary<string, string> form, string key) =>
         form.TryGetValue(key, out string? v) && !string.IsNullOrWhiteSpace(v) ? v.Trim() : null;

@@ -2307,10 +2307,24 @@ public class StalwartMailTests
         readBack.Keys.Should().NotIntersectWith(StalwartService.SecretFormKeys);
 
         // Both exemption lists must name fields that actually exist, or a renamed field would leave
-        // a stale exemption behind that quietly excuses the next real omission.
+        // a stale exemption behind that quietly excuses the next real omission. Emptiness is allowed
+        // and asserted around rather than through: an exemption list with nothing on it is the
+        // healthiest state it can be in, and FluentAssertions refuses containment against an empty
+        // expectation — so asserting it directly would make removing the last exemption fail the
+        // guard that exists to police them.
         List<string> keys = entry.FormFields.Select(f => f.Key).ToList();
-        keys.Should().Contain(StalwartService.SecretFormKeys);
-        keys.Should().Contain(StalwartService.DerivedFormKeys);
+
+        foreach (string[] exemptions in new[]
+        {
+            StalwartService.SecretFormKeys,
+            StalwartService.DerivedFormKeys,
+        })
+        {
+            if (exemptions.Length > 0)
+            {
+                keys.Should().Contain(exemptions);
+            }
+        }
     }
 
     [Fact]
