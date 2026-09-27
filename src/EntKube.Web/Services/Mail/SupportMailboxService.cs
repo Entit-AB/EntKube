@@ -159,9 +159,50 @@ public class SupportMailboxService(
                 existing.TenantId, existing.Id, password, ct);
         }
 
+        await EnsureReplyAddressAsync(db, existing, ct);
         await EnsureCredentialAsync(db, existing, ct);
 
         return existing;
+    }
+
+    /// <summary>
+    /// Fills in the address replies come from, when a mailbox was chosen rather than typed.
+    ///
+    /// <para>Without this, picking a server and a mailbox leaves the reply address blank, and
+    /// TicketNotifier falls back to the From in appsettings — so acknowledgements to customers go out
+    /// from whatever that happens to be, addressed from somewhere nobody reads. It is the worst shape
+    /// of wrong: the mailbox says it is configured, mail is fetched correctly, and only the replies
+    /// are addressed from the wrong place.</para>
+    ///
+    /// <para>Only when blank. An operator who set an address meant it — replying from an alias rather
+    /// than the mailbox the mail arrived in is a legitimate thing to want, and overwriting it on every
+    /// save would make that impossible to express.</para>
+    /// </summary>
+    private async Task EnsureReplyAddressAsync(
+        ApplicationDbContext db, SupportMailbox mailbox, CancellationToken ct)
+    {
+        if (!string.IsNullOrWhiteSpace(mailbox.Address)
+            || mailbox.StalwartAccountId is not Guid accountId)
+        {
+            return;
+        }
+
+        StalwartMailAccount? account = await db.StalwartMailAccounts
+            .FirstOrDefaultAsync(a => a.Id == accountId, ct);
+
+        StalwartMailDomain? domain = account is null
+            ? null
+            : await db.StalwartMailDomains.FirstOrDefaultAsync(d => d.Id == account.DomainId, ct);
+
+        if (account is null || domain is null)
+        {
+            return;
+        }
+
+        mailbox.Address =
+            $"{account.LocalPart.Trim().ToLowerInvariant()}@{domain.Name.Trim().ToLowerInvariant()}";
+
+        await db.SaveChangesAsync(ct);
     }
 
     /// <summary>
@@ -241,8 +282,9 @@ public class SupportMailboxService(
                 $"{account.LocalPart.Trim().ToLowerInvariant()}@{domain.Name.Trim().ToLowerInvariant()}";
 
             // One client per mailbox, named after what it is for rather than randomly, so somebody
-            // looking at the realm's client list can tell what created it and why.
-            string clientId = $"entkube-support-mailbox-{mailbox.Id:N}"[..Math.Min(36, 30 + 6)];
+            // looking at the realm's client list can tell what created it and why. Half the mailbox id
+            // is plenty to keep it unique and keeps the whole thing short enough to read in a list.
+            string clientId = $"entkube-support-mailbox-{mailbox.Id:N}"[..IdentifierLength];
 
             (string id, string secret, string tokenEndpoint) =
                 await keycloak.EnsureServiceAccountClientAsync(
@@ -276,6 +318,12 @@ public class SupportMailboxService(
             await db.SaveChangesAsync(ct);
         }
     }
+
+    /// <summary>
+    /// How much of "entkube-support-mailbox-&lt;id&gt;" the Keycloak client is named with: the whole
+    /// prefix and the first 12 hex digits of the mailbox id.
+    /// </summary>
+    private const int IdentifierLength = 36;
 
     /// <summary>A Stalwart server the tenant could read a support mailbox from.</summary>
     public sealed record StalwartMailServerOption(Guid ComponentId, string Label, bool UsesOidc);

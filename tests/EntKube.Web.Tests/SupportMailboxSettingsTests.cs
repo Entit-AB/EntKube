@@ -26,6 +26,99 @@ public class SupportMailboxSettingsTests : IDisposable
     /// entity is configuration, and so must survive a save — including whatever is added
     /// next, which is the whole point of listing the exceptions rather than the rule.
     /// </summary>
+    /// <summary>
+    /// The chain a mailbox on a managed server needs: a cluster, the component, its config, a domain
+    /// and the account. Written out because the foreign keys are real — an account cannot exist
+    /// without the config it belongs to, which cannot exist without the component it configures.
+    /// </summary>
+    private async Task<(Guid ComponentId, Guid AccountId)> GivenAStalwartMailboxAsync(
+        string localPart, string domainName)
+    {
+        Guid clusterId = Guid.NewGuid();
+        Guid componentId = Guid.NewGuid();
+        Guid environmentId = Guid.NewGuid();
+
+        db.Environments.Add(new EntKube.Web.Data.Environment
+        {
+            Id = environmentId, TenantId = tenantId, Name = "prod",
+        });
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = clusterId, TenantId = tenantId, EnvironmentId = environmentId, Name = "prod-1",
+            ApiServerUrl = "https://k8s.example.com",
+        });
+        db.ClusterComponents.Add(new ClusterComponent
+        {
+            Id = componentId, ClusterId = clusterId, Name = "stalwart",
+            ComponentType = "Manifest", ReleaseName = "mail", Namespace = "messaging",
+        });
+
+        StalwartComponentConfig config = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenantId, ClusterComponentId = componentId,
+            Hostname = "mail.example.com",
+        };
+        StalwartMailDomain domain = new()
+        {
+            Id = Guid.NewGuid(), ConfigId = config.Id, Name = domainName, IsPrimary = true,
+        };
+        StalwartMailAccount account = new()
+        {
+            Id = Guid.NewGuid(), ConfigId = config.Id, DomainId = domain.Id, LocalPart = localPart,
+        };
+
+        db.StalwartComponentConfigs.Add(config);
+        db.StalwartMailDomains.Add(domain);
+        db.StalwartMailAccounts.Add(account);
+        await db.SaveChangesAsync();
+
+        return (componentId, account.Id);
+    }
+
+    [Fact]
+    public async Task A_chosen_mailbox_supplies_the_address_replies_come_from()
+    {
+        // Left blank, TicketNotifier falls back to the From in appsettings — so acknowledgements go to
+        // customers from whatever that happens to be. Fetching works, the mailbox reports healthy, and
+        // only the replies are addressed from somewhere nobody reads.
+        (Guid componentId, Guid accountId) =
+            await GivenAStalwartMailboxAsync("Support", "Example.COM");
+
+        SupportMailbox saved = await mailboxes.SaveAsync(new SupportMailbox
+        {
+            TenantId = tenantId,
+            StalwartComponentId = componentId,
+            StalwartAccountId = accountId,
+            Host = "",
+            Username = "",
+            Address = null,
+        }, password: null);
+
+        // Lower-cased and joined, however the account and domain were capitalised.
+        saved.Address.Should().Be("support@example.com");
+    }
+
+    [Fact]
+    public async Task An_address_somebody_set_is_left_alone()
+    {
+        // Replying from an alias rather than the mailbox the mail arrived in is a legitimate thing to
+        // want, and filling this in on every save would make it impossible to express.
+        (Guid componentId, Guid accountId) =
+            await GivenAStalwartMailboxAsync("support", "example.com");
+
+        SupportMailbox saved = await mailboxes.SaveAsync(new SupportMailbox
+        {
+            TenantId = tenantId,
+            StalwartComponentId = componentId,
+            StalwartAccountId = accountId,
+            Host = "",
+            Username = "",
+            Address = "helpdesk@example.com",
+        }, password: null);
+
+        saved.Address.Should().Be("helpdesk@example.com");
+    }
+
     private static readonly HashSet<string> NotConfiguration =
     [
         nameof(SupportMailbox.Id),
