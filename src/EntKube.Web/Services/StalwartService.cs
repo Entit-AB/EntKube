@@ -1736,6 +1736,7 @@ public class StalwartService(
         List<StalwartMailDomain> domains;
         List<StalwartMailAccount> accounts;
         List<ClusterComponent> clusterComponents;
+        List<string> trustedSenderDomains;
         string releaseName;
         string ns;
         string kubeconfig;
@@ -1787,6 +1788,14 @@ public class StalwartService(
             clusterComponents = await db.ClusterComponents
                 .Where(c => c.ClusterId == component.ClusterId)
                 .ToListAsync(ct);
+
+            // The customers' own domains, exempted from block-list checks. The same register the
+            // support mailbox uses to decide whose mail to rescue from Junk.
+            trustedSenderDomains = await db.CustomerEmailDomains
+                .Where(d => d.TenantId == tenantId)
+                .Select(d => d.Domain)
+                .Distinct()
+                .ToListAsync(ct);
         }
 
         // Refuse to converge onto a configuration that cannot work. Applying restarts the server
@@ -1815,7 +1824,8 @@ public class StalwartService(
             await BuildHaBackendAsync(tenantId, clusterComponentId, config, releaseName, ns, ct);
 
         string plan = StalwartPlanBuilder.BuildApplyPlan(
-            config, domains, accounts, adminPassword, proxyAddresses, clearBlockedIps, verboseLogging, ha);
+            config, domains, accounts, adminPassword, proxyAddresses, clearBlockedIps, verboseLogging, ha,
+            trustedSenderDomains);
         List<string> output = [];
 
         output.Add(proxyAddresses.Count > 0

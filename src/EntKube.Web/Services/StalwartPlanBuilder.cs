@@ -174,6 +174,14 @@ public static class StalwartPlanBuilder
     /// </summary>
     public const int HttpPort = 8080;
 
+    /// <summary>A <c>SpamTag</c> override that stops a tag contributing to the score.</summary>
+    private static Dictionary<string, object?> ZeroScore(string tag) => new()
+    {
+        ["@type"] = "Score",
+        ["tag"] = tag,
+        ["score"] = 0.0,
+    };
+
     private static readonly JsonSerializerOptions Compact = new() { WriteIndented = false };
     private static readonly JsonSerializerOptions Indented = new() { WriteIndented = true };
 
@@ -240,7 +248,8 @@ public static class StalwartPlanBuilder
         IReadOnlyList<string>? trustedProxyAddresses = null,
         bool clearBlockedIps = false,
         bool verboseLogging = false,
-        StalwartHaBackend? ha = null)
+        StalwartHaBackend? ha = null,
+        IReadOnlyList<string>? trustedSenderDomains = null)
     {
         List<string> lines = [];
 
@@ -567,21 +576,81 @@ public static class StalwartPlanBuilder
             ["enable"] = true,
         }));
 
-        // And the tag that reacted to rspamd's header is neutralised while rspamd is in the path.
-        // Upstream's own advice for this arrangement, and the reason it is scoped to when rspamd is
-        // enabled: without an upstream filter the rule is doing real work, and zeroing it then would
-        // hand spammers back the evasion it exists to catch.
+        // ── Tags that cannot mean what they say here ──
+        //
+        // Two of the filter's rules score the CONNECTION rather than the message, and the connection
+        // is not the sender's. EntKube fronts the mail listeners with a Kubernetes LoadBalancer
+        // Service, and whether that preserves the client address is the cloud provider's choice, not
+        // ours: an OpenStack Octavia load balancer is an HAProxy amphora that proxies and SNATs
+        // whatever externalTrafficPolicy says. Every sender on the internet then arrives as one
+        // private address.
+        //
+        // Scored against that address:
+        //
+        //   VIOLATED_DIRECT_SPF  +3.50  the peer is in nobody's SPF record, because it is ours
+        //   RDNS_NONE            +2.00  a private address has no PTR, and never will
+        //
+        // 5.50 against a scoreSpam of 5, on every message, for ever. A real one measured: a
+        // PGP-signed message whose DKIM verified and whose DMARC passed — DKIM_ALLOW and
+        // DMARC_POLICY_ALLOW both fired — scored 6.00 and was filed to Junk. Provably authentic mail,
+        // rejected on an address that was never the sender's.
+        //
+        // So they are not scored. What still works is scored, and it is the half that matters:
+        // DKIM and DMARC sign and align the MESSAGE, so they survive a rewritten peer address
+        // entirely, and the content and Bayes tags never depended on it.
+        //
+        // Unconditional, not an operator setting, because the operator has no way to know either:
+        // the answer depends on a load balancer implementation Kubernetes does not expose. If a
+        // deployment ever gains the real client address — PROXY protocol between the balancer and the
+        // listener is the only way, and Stalwart would have to accept it — these two come back, and
+        // this comment is where to start.
+        Dictionary<string, object?> tagScores = new()
+        {
+            ["violated-direct-spf"] = ZeroScore("VIOLATED_DIRECT_SPF"),
+            ["rdns-none"] = ZeroScore("RDNS_NONE"),
+        };
+
+        // And the tag that reacts to an upstream filter's header, while there is one. Scoped to that,
+        // because without rspamd the rule is doing real work — spammers forge "X-Spam-Flag: No" — and
+        // zeroing it then would hand back the evasion it exists to catch.
         if (rspamdIsTheFilter)
         {
-            lines.Add(Op("upsert", "SpamTag", MatchOn("tag"), new()
+            tagScores["spam-flag"] = ZeroScore("SPAM_FLAG");
+        }
+
+        lines.Add(Op("upsert", "SpamTag", MatchOn("tag"), tagScores));
+
+        // ── Customer domains, as far as the filter can be told to trust them ──
+        //
+        // Deliberately modest, because the mechanism is. Listing a domain here exempts it from DNS
+        // block-list checks and nothing else — it would not have stopped the SPF and reverse-DNS
+        // score that junked a real customer's support request, and Stalwart has no allow-list that
+        // would: that is an open feature request upstream. So this reduces one class of false
+        // positive and is not a guarantee, and the guarantee lives where it can actually be made —
+        // SupportMailboxService.SweepJunkAsync takes a customer's mail in even from Junk.
+        //
+        // upsert rather than reconcile: reconcile removes every object in scope, and the scope here
+        // would have to be every MemoryLookupKey — including the blocked-domains and spam-trap lists
+        // an operator maintains by hand. A domain removed from the register therefore stays trusted
+        // until someone deletes it in Stalwart, which is the safe direction to be wrong in.
+        if (trustedSenderDomains is { Count: > 0 })
+        {
+            Dictionary<string, object?> trusted = [];
+            int trustedIndex = 0;
+
+            foreach (string domain in trustedSenderDomains
+                         .Select(d => d.Trim().ToLowerInvariant())
+                         .Where(d => d.Length > 0)
+                         .Distinct(StringComparer.Ordinal))
             {
-                ["spam-flag"] = new Dictionary<string, object?>
+                trusted[$"trusted-{trustedIndex++}"] = new Dictionary<string, object?>
                 {
-                    ["@type"] = "Score",
-                    ["tag"] = "SPAM_FLAG",
-                    ["score"] = 0.0,
-                },
-            }));
+                    ["namespace"] = "trusted-domains",
+                    ["key"] = domain,
+                };
+            }
+
+            lines.Add(Op("upsert", "MemoryLookupKey", MatchOn("namespace", "key"), trusted));
         }
 
         // reconcile with an empty value map is how "no milter" is expressed: turning rspamd off has
