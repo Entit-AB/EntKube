@@ -3193,6 +3193,33 @@ public static class ComponentCatalog
                 },
                 new ComponentFormField
                 {
+                    // On the INSTALL form, not only the Mail tab, and that is the whole point of it
+                    // being here. The load balancer is created by this install, and OpenStack cannot
+                    // change a pool's protocol afterwards — so the annotation has to be in the manifest
+                    // the first time the Service is applied or it never takes effect at all.
+                    //
+                    // It was originally only on the Mail tab, which is unreachable until the component
+                    // is installed. A fresh install therefore had this off by default, created the
+                    // balancer without it, and by the time the box could be ticked the pool existed and
+                    // would not change. The setting was not merely easy to miss, it was unreachable.
+                    Key = "proxy-protocol", Label = "LoadBalancer sends PROXY protocol",
+                    YamlPath = "stalwart:proxy-protocol", Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    DependsOnKey = "expose-mode", DependsOnValue = "LoadBalancer",
+                    HelpText = "Turn this on now if the balancer will be configured to send the PROXY protocol header — it cannot be added later without recreating the load balancer, because OpenStack cannot change a pool's protocol. Without it the sending server's address is replaced by the balancer's, which makes SPF fail for every sender, leaves reverse DNS unresolvable, and lets one banned address refuse all mail. Those checks are suppressed while it is off and restored when it is on."
+                },
+                new ComponentFormField
+                {
+                    Key = "proxy-trusted-networks", Label = "Accept PROXY header from",
+                    // Text, not a textarea: the catalog has no multi-line type, and the parser already
+                    // splits on commas as well as newlines, so one line serves.
+                    YamlPath = "stalwart:proxy-trusted-networks", Type = FormFieldType.Text,
+                    Placeholder = "10.240.3.0/24, 10.240.4.0/24",
+                    DependsOnKey = "proxy-protocol", DependsOnValue = "true",
+                    HelpText = "Addresses or CIDRs, comma separated — the balancer's own subnet, never every private range: anything listed here can claim to be any sender. Leave it blank and the protocol is not configured on either side, because this list is what enables it."
+                },
+                new ComponentFormField
+                {
                     Key = "rspamd-enabled", Label = "Scan mail with rspamd",
                     YamlPath = "stalwart:rspamd-enabled", Type = FormFieldType.Toggle,
                     DefaultValue = "false",

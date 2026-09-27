@@ -860,6 +860,44 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void ProxyProtocolCanBeChosenAtInstallTimeBecauseLaterIsTooLate()
+    {
+        // It has to be on the install form and not only the Mail tab. This install creates the load
+        // balancer, and OpenStack cannot change a pool's protocol afterwards — so the annotation is
+        // either in the manifest the first time the Service is applied or it never takes effect.
+        //
+        // Originally it existed only on the Mail tab, which cannot be reached until the component is
+        // installed. A fresh install therefore had it off, created the balancer without it, and by the
+        // time the box could be ticked the pool existed and would not change: not a setting that was
+        // easy to miss, a setting that was unreachable.
+        StalwartComponentConfig config = Config();
+
+        StalwartService.ApplyFormValues(config, new Dictionary<string, string>
+        {
+            ["proxy-protocol"] = "true",
+            ["proxy-trusted-networks"] = "10.240.3.0/24, 10.240.4.7",
+        });
+
+        config.ProxyProtocol.Should().BeTrue();
+        StalwartPlanBuilder.ProxyTrustedNetworks(config)
+            .Should().BeEquivalentTo(["10.240.3.0/24", "10.240.4.7"]);
+
+        // And it reads back, or reopening the Components tab would show the catalog default and saving
+        // would turn it off again — over a live configuration, with no way to turn it back on short of
+        // recreating the balancer.
+        Dictionary<string, string> form = StalwartService.BuildFormValues(config);
+
+        form["proxy-protocol"].Should().Be("true");
+        form["proxy-trusted-networks"].Should().Be("10.240.3.0/24, 10.240.4.7");
+
+        StalwartComponentConfig reopened = Config();
+        StalwartService.ApplyFormValues(reopened, form);
+
+        reopened.ProxyProtocol.Should().BeTrue();
+        StalwartPlanBuilder.ProxyTrustedNetworks(reopened).Should().HaveCount(2);
+    }
+
+    [Fact]
     public void ProxyProtocolTurnsOnBothHalvesAndRestoresTheConnectionChecks()
     {
         // Both halves are one decision: a balancer sending PROXY headers to a server that does not

@@ -530,6 +530,14 @@ public class StalwartService(
         {
             cfg.CnpgDatabaseId = GuidOrNull(form, "ha-database");
         }
+        if (form.TryGetValue("proxy-protocol", out string? proxyProtocol))
+        {
+            cfg.ProxyProtocol = proxyProtocol.Equals("true", StringComparison.OrdinalIgnoreCase);
+        }
+        if (form.ContainsKey("proxy-trusted-networks"))
+        {
+            cfg.ProxyTrustedNetworks = Text(form, "proxy-trusted-networks");
+        }
         if (form.ContainsKey("ha-blob-store"))
         {
             cfg.BlobStorageLinkId = GuidOrNull(form, "ha-blob-store");
@@ -625,6 +633,8 @@ public class StalwartService(
         ["ha-replicas"] = config.Replicas.ToString(),
         ["ha-database"] = config.CnpgDatabaseId?.ToString() ?? "",
         ["ha-blob-store"] = config.BlobStorageLinkId?.ToString() ?? "",
+        ["proxy-protocol"] = config.ProxyProtocol ? "true" : "false",
+        ["proxy-trusted-networks"] = config.ProxyTrustedNetworks ?? "",
     };
 
     /// <summary>
