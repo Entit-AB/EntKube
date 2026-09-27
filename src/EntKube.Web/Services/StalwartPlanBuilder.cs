@@ -174,6 +174,42 @@ public static class StalwartPlanBuilder
     /// </summary>
     public const int HttpPort = 8080;
 
+    /// <summary>
+    /// The addresses a PROXY header is honoured from, one per line in the operator's field.
+    /// </summary>
+    public static List<string> ProxyTrustedNetworks(StalwartComponentConfig config) =>
+        !config.ProxyProtocol
+            ? []
+            : (config.ProxyTrustedNetworks ?? "")
+                .Split(['\n', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(n => !n.StartsWith('#'))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+    /// <summary>
+    /// Hands a tag back to the rule set's own score, undoing a previous override.
+    ///
+    /// <para>Removing the override object would be the obvious way and is the wrong one: the plan
+    /// upserts these, so an object simply left out stays exactly as it was on a server that already
+    /// has it. Restoring a suppressed tag has to be something written, not something omitted.</para>
+    /// </summary>
+    private static Dictionary<string, object?> DefaultScore(string tag) => new()
+    {
+        ["@type"] = "Score",
+        ["tag"] = tag,
+        ["score"] = DefaultTagScores[tag],
+    };
+
+    /// <summary>
+    /// What the rule set scores the tags this plan is willing to override, so one can be put back.
+    /// Taken from the values observed on a live 0.16 server rather than guessed.
+    /// </summary>
+    private static readonly Dictionary<string, double> DefaultTagScores = new()
+    {
+        ["VIOLATED_DIRECT_SPF"] = 3.50,
+        ["RDNS_NONE"] = 2.00,
+    };
+
     /// <summary>A <c>SpamTag</c> override that stops a tag contributing to the score.</summary>
     private static Dictionary<string, object?> ZeroScore(string tag) => new()
     {
@@ -444,6 +480,17 @@ public static class StalwartPlanBuilder
         {
             system["defaultCertificateId"] = "#cert";
         }
+
+        // Where a PROXY header is accepted from. Declaring the set is what enables the protocol, so an
+        // empty list means it is off: a trusted address may send the header or not and is processed
+        // either way, which is what lets webmail and the apply Job keep connecting to the same
+        // listeners without one, while an untrusted address that sends one is refused.
+        List<string> proxyNetworks = ProxyTrustedNetworks(config);
+        if (proxyNetworks.Count > 0)
+        {
+            system["proxyTrustedNetworks"] = Set(proxyNetworks);
+        }
+
         lines.Add(Update("SystemSettings", system));
 
         // ── Listeners ──
@@ -604,11 +651,22 @@ public static class StalwartPlanBuilder
         // deployment ever gains the real client address — PROXY protocol between the balancer and the
         // listener is the only way, and Stalwart would have to accept it — these two come back, and
         // this comment is where to start.
-        Dictionary<string, object?> tagScores = new()
+        Dictionary<string, object?> tagScores = [];
+
+        if (proxyNetworks.Count == 0)
         {
-            ["violated-direct-spf"] = ZeroScore("VIOLATED_DIRECT_SPF"),
-            ["rdns-none"] = ZeroScore("RDNS_NONE"),
-        };
+            tagScores["violated-direct-spf"] = ZeroScore("VIOLATED_DIRECT_SPF");
+            tagScores["rdns-none"] = ZeroScore("RDNS_NONE");
+        }
+        else
+        {
+            // The PROXY header carries the sender's own address, so both tags are measuring the
+            // sender again and are restored to whatever the rule set scores them. Written back
+            // explicitly rather than left out: a deployment that had them suppressed must be repaired
+            // by the apply that turns the protocol on, not silently keep ignoring SPF for ever.
+            tagScores["violated-direct-spf"] = DefaultScore("VIOLATED_DIRECT_SPF");
+            tagScores["rdns-none"] = DefaultScore("RDNS_NONE");
+        }
 
         // And the tag that reacts to an upstream filter's header, while there is one. Scoped to that,
         // because without rspamd the rule is doing real work — spammers forge "X-Spam-Flag: No" — and

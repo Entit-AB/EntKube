@@ -6586,6 +6586,13 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<bool>("Pop3Enabled")
                         .HasColumnType("boolean");
 
+                    b.Property<bool>("ProxyProtocol")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("ProxyTrustedNetworks")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
                     b.Property<int>("Replicas")
                         .HasColumnType("integer");
 

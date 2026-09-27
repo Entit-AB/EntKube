@@ -241,6 +241,45 @@ public class StalwartComponentConfig
     /// </summary>
     public string? LoadBalancerAnnotations { get; set; }
 
+    /// <summary>
+    /// The load balancer speaks the PROXY protocol, so the sending server's real address survives it.
+    ///
+    /// <para>Off by default, and it must stay off unless the balancer is actually configured to send
+    /// the header — the two halves are one decision. EntKube writes the OpenStack annotation itself
+    /// when this is on, so the switch does both sides at once rather than leaving an operator to
+    /// match an annotation to a trusted network by hand.</para>
+    ///
+    /// <para>What it repairs is most of what goes wrong without it. A Kubernetes LoadBalancer Service
+    /// does not guarantee the client address: an OpenStack Octavia balancer is an HAProxy amphora that
+    /// proxies and SNATs whatever <c>externalTrafficPolicy</c> says, so every sender on the internet
+    /// arrives as one private address. SPF then fails for everyone, reverse DNS never resolves,
+    /// auto-ban counts the whole world's failures against a single peer, and rspamd files inbound
+    /// internet mail as <c>LOCAL_OUTBOUND</c> and stops checking it. With the real address back, all
+    /// four start meaning what they say — which is why turning this on also restores the SPF and
+    /// reverse-DNS spam scoring that is otherwise suppressed.</para>
+    ///
+    /// <para>One operational catch, which is why this is a deliberate setting and not a default:
+    /// Octavia cannot change a pool's protocol, so the cloud controller ignores the annotation on a
+    /// load balancer that already exists. Turning this on means uninstalling and reinstalling the
+    /// component so the Service — and the balancer behind it — is created again.</para>
+    /// </summary>
+    public bool ProxyProtocol { get; set; }
+
+    /// <summary>
+    /// Addresses the PROXY header is accepted from, one CIDR or address per line.
+    ///
+    /// <para>Narrow on purpose. A client inside a trusted range can assert <em>any</em> client
+    /// address, which would defeat SPF and auto-ban far more thoroughly than losing them did — so
+    /// this wants the balancer's own subnet, never "every private range". The address to use is the
+    /// one the server already reports: a blocked-IP or a <c>RDNS_NONE</c> finding names the peer the
+    /// balancer connects from.</para>
+    ///
+    /// <para>Left blank, PROXY protocol is not configured at all however <see cref="ProxyProtocol"/>
+    /// is set, because a trusted-networks list is what enables it — and an empty one would publish a
+    /// balancer sending headers to a server that rejects every connection carrying one.</para>
+    /// </summary>
+    public string? ProxyTrustedNetworks { get; set; }
+
     // ── Protocols ─────────────────────────────────────────────────────────────
 
     public bool SmtpEnabled { get; set; } = true;

@@ -1851,6 +1851,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(c => c.ExposeMode).HasConversion<string>().HasMaxLength(20);
             entity.Property(c => c.LoadBalancerIp).HasMaxLength(100);
             entity.Property(c => c.LoadBalancerAnnotations).HasMaxLength(2000);
+            entity.Property(c => c.ProxyTrustedNetworks).HasMaxLength(2000);
             entity.Property(c => c.RspamdHost).HasMaxLength(253);
             entity.Property(c => c.CoordinatorRedisHost).HasMaxLength(253);
 

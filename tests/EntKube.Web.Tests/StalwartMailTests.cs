@@ -860,6 +860,77 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void ProxyProtocolTurnsOnBothHalvesAndRestoresTheConnectionChecks()
+    {
+        // Both halves are one decision: a balancer sending PROXY headers to a server that does not
+        // trust them refuses every connection, and a server trusting a balancer that sends none never
+        // learns the client address. So one switch does the annotation and the trusted-networks list.
+        StalwartComponentConfig config = Config(c =>
+        {
+            c.ProxyProtocol = true;
+            c.ProxyTrustedNetworks = "10.240.3.0/24\n# a comment\n10.240.4.7";
+            c.ExposeMode = StalwartMailExposeMode.LoadBalancer;
+        });
+
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+        JsonElement networks = Operation(plan, "SystemSettings")!.Value
+            .GetProperty("value").GetProperty("proxyTrustedNetworks");
+
+        // A Set, so {member: true} — comments dropped, blanks dropped.
+        networks.EnumerateObject().Select(p => p.Name)
+            .Should().BeEquivalentTo(["10.240.3.0/24", "10.240.4.7"]);
+
+        // With the sender's own address back, both tags measure the sender again — and are written
+        // back to the rule set's scores rather than left out, because the plan upserts them: an
+        // object simply omitted stays suppressed for ever on a server that already has it.
+        Dictionary<string, double> scores = Operation(plan, "SpamTag")!.Value
+            .GetProperty("value").EnumerateObject().Select(p => p.Value)
+            .ToDictionary(v => v.GetProperty("tag").GetString()!, v => v.GetProperty("score").GetDouble());
+
+        scores["VIOLATED_DIRECT_SPF"].Should().Be(3.50);
+        scores["RDNS_NONE"].Should().Be(2.00);
+
+        // And the balancer is told to send them.
+        Parse(StalwartManifestBuilder.Build(config, "stalwart", "stalwart"))
+            .First(d => Scalar(d.RootNode, "metadata", "name") == "stalwart-mail")
+            .RootNode.ToString()
+            .Should().Contain(StalwartManifestBuilder.OctaviaProxyProtocolAnnotation);
+    }
+
+    [Fact]
+    public void WithoutTrustedNetworksProxyProtocolIsNotConfiguredAtAll()
+    {
+        // The list is what enables the protocol, so an empty one must leave both halves off. Enabling
+        // the annotation alone would publish a balancer sending headers to a server that rejects every
+        // connection carrying one — worse than not trying.
+        foreach (StalwartComponentConfig config in new[]
+        {
+            Config(c => c.ProxyProtocol = false),
+            Config(c => { c.ProxyProtocol = true; c.ProxyTrustedNetworks = "  \n # only a comment"; }),
+        })
+        {
+            string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+            Operation(plan, "SystemSettings")!.Value.GetProperty("value")
+                .TryGetProperty("proxyTrustedNetworks", out _).Should().BeFalse();
+
+            // And the connection tags stay suppressed, because the connection is still not the sender's.
+            Dictionary<string, double> scores = Operation(plan, "SpamTag")!.Value
+                .GetProperty("value").EnumerateObject().Select(p => p.Value)
+                .ToDictionary(v => v.GetProperty("tag").GetString()!, v => v.GetProperty("score").GetDouble());
+
+            scores["VIOLATED_DIRECT_SPF"].Should().Be(0.0);
+            scores["RDNS_NONE"].Should().Be(0.0);
+
+            Parse(StalwartManifestBuilder.Build(config, "stalwart", "stalwart"))
+                .First(d => Scalar(d.RootNode, "metadata", "name") == "stalwart-mail")
+                .RootNode.ToString()
+                .Should().NotContain(StalwartManifestBuilder.OctaviaProxyProtocolAnnotation);
+        }
+    }
+
+    [Fact]
     public void CustomerDomainsAreTrustedAsFarAsTheFilterAllows()
     {
         // Modest on purpose, because the mechanism is: listing a domain here exempts it from DNS

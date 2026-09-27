@@ -6589,6 +6589,13 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<bool>("Pop3Enabled")
                         .HasColumnType("bit");
 
+                    b.Property<bool>("ProxyProtocol")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("ProxyTrustedNetworks")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
                     b.Property<int>("Replicas")
                         .HasColumnType("int");
 

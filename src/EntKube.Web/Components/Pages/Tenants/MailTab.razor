@@ -237,6 +237,42 @@
                                               placeholder="one key: value per line"></textarea>
                                     <div class="form-text">Provider-specific settings — a floating IP, an address pool, an internal-LB flag.</div>
                                 </div>
+                                <div class="form-check form-switch mb-2">
+                                    <input class="form-check-input" type="checkbox" id="proxyproto" @bind="cfg.ProxyProtocol" />
+                                    <label class="form-check-label small" for="proxyproto">
+                                        The load balancer sends the PROXY protocol header
+                                    </label>
+                                    <div class="form-text">
+                                        Turn this on only if the balancer is actually configured to send it — EntKube
+                                        sets the OpenStack annotation for you, so this switch does both sides.
+                                        Without it the sending server's address is replaced by the balancer's, which
+                                        makes SPF fail for every sender, leaves reverse DNS unresolvable, and lets one
+                                        banned address refuse all mail. Those checks are suppressed while it is off, and
+                                        restored when it is on.
+                                    </div>
+                                </div>
+                                @if (cfg.ProxyProtocol)
+                                {
+                                    <div class="mb-2">
+                                        <label class="form-label small">Accept the header from</label>
+                                        <textarea class="form-control form-control-sm font-monospace" rows="2"
+                                                  @bind="cfg.ProxyTrustedNetworks"
+                                                  placeholder="10.240.3.0/24"></textarea>
+                                        <div class="form-text">
+                                            One address or CIDR per line — the balancer's own subnet, never every
+                                            private range: anything listed here can claim to be any sender. Leave it
+                                            blank and nothing is configured, because the list is what enables the
+                                            protocol.
+                                        </div>
+                                    </div>
+                                    <div class="alert alert-warning py-2 small">
+                                        <i class="bi bi-exclamation-triangle-fill me-1"></i>
+                                        OpenStack cannot change a load balancer's protocol after it exists, so this
+                                        takes effect only when the Service is created again — <strong>uninstall and
+                                        reinstall the component</strong>. Set <em>Requested address</em> above first if
+                                        the MX record has to keep pointing at the same address.
+                                    </div>
+                                }
                             }
                             <div class="d-flex gap-3 flex-wrap mt-3">
                                 <div class="form-check form-switch">
@@ -991,6 +1027,10 @@
             target.ExposeMode = edited.ExposeMode;
             target.LoadBalancerIp = string.IsNullOrWhiteSpace(edited.LoadBalancerIp) ? null : edited.LoadBalancerIp.Trim();
             target.LoadBalancerAnnotations = edited.LoadBalancerAnnotations;
+            target.ProxyProtocol = edited.ProxyProtocol;
+            target.ProxyTrustedNetworks = string.IsNullOrWhiteSpace(edited.ProxyTrustedNetworks)
+                ? null
+                : edited.ProxyTrustedNetworks;
             target.SmtpEnabled = edited.SmtpEnabled;
             target.SubmissionEnabled = edited.SubmissionEnabled;
             target.ImapEnabled = edited.ImapEnabled;
