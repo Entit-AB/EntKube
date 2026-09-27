@@ -39,6 +39,14 @@ public class SupportMailboxSettingsTests : IDisposable
         nameof(SupportMailbox.CreatedAt),
         nameof(SupportMailbox.UpdatedAt),
         nameof(SupportMailbox.Tenant),
+
+        // Not settings: EntKube writes these itself when a mailbox names a Stalwart server whose
+        // directory is OIDC, by creating the service account that mints its tokens. There is nothing
+        // for an operator to type, and copying them from a submitted form would let one be pointed at
+        // a client they do not own.
+        nameof(SupportMailbox.OAuthClientId),
+        nameof(SupportMailbox.OAuthTokenEndpoint),
+        nameof(SupportMailbox.OAuthScopes),
     ];
 
     private readonly SqliteConnection connection;
@@ -57,10 +65,10 @@ public class SupportMailboxSettingsTests : IDisposable
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
         db.SaveChanges();
 
-        // The vault and the ingest pipeline are only reached by a password and a poll,
-        // neither of which happens here.
+        // The vault, the ingest pipeline, the token provider and Keycloak are only reached by a
+        // poll or by saving a mailbox that names a Stalwart server, none of which happens here.
         mailboxes = new SupportMailboxService(
-            new TestDbContextFactory(connection), null!, null!,
+            new TestDbContextFactory(connection), null!, null!, null!, null!,
             NullLogger<SupportMailboxService>.Instance);
     }
 
@@ -131,6 +139,15 @@ public class SupportMailboxSettingsTests : IDisposable
         if (type == typeof(int))
         {
             return 3607;
+        }
+
+        if (type == typeof(Guid))
+        {
+            // A reference to a mail server or an account. Any value will do — what is being checked is
+            // that the save copies it, which is the mistake this test exists for: a new field added to
+            // the form and to the entity, and left out of the assignments in between, looks saved and
+            // is not.
+            return Guid.Parse("00000000-0000-0000-0000-0000000000ff");
         }
 
         if (type.IsEnum)

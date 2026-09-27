@@ -880,6 +880,9 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
 
             entity.Property(m => m.Host).HasMaxLength(256);
             entity.Property(m => m.Username).HasMaxLength(256);
+            entity.Property(m => m.OAuthClientId).HasMaxLength(256);
+            entity.Property(m => m.OAuthTokenEndpoint).HasMaxLength(512);
+            entity.Property(m => m.OAuthScopes).HasMaxLength(256);
             entity.Property(m => m.Address).HasMaxLength(256);
             entity.Property(m => m.Folder).HasMaxLength(256);
             entity.Property(m => m.MoveToFolder).HasMaxLength(256);
@@ -1851,6 +1854,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(c => c.ExposeMode).HasConversion<string>().HasMaxLength(20);
             entity.Property(c => c.LoadBalancerIp).HasMaxLength(100);
             entity.Property(c => c.LoadBalancerAnnotations).HasMaxLength(2000);
+            entity.Property(c => c.ProxyTrustedNetworks).HasMaxLength(2000);
             entity.Property(c => c.RspamdHost).HasMaxLength(253);
             entity.Property(c => c.CoordinatorRedisHost).HasMaxLength(253);
 

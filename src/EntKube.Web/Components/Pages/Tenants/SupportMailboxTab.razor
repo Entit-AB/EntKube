@@ -92,6 +92,67 @@
     <EditForm Model="form" OnValidSubmit="SaveAsync">
         <DataAnnotationsValidator />
         <div class="row g-3">
+            <div class="col-12">
+                <label class="form-label small text-muted">Mail server</label>
+                <select class="form-select form-select-sm" value="@form.StalwartComponentId?.ToString()"
+                        @onchange="OnServerChanged">
+                    <option value="">Another server — enter the connection below</option>
+                    @foreach (SupportMailboxService.StalwartMailServerOption server in stalwartServers)
+                    {
+                        <option value="@server.ComponentId">@server.Label</option>
+                    }
+                </select>
+                <div class="form-text small">
+                    Choosing a mail server EntKube manages settles the rest: the address, the port,
+                    TLS, the login and the credential are taken from the server itself, so a server
+                    later renamed or moved is followed rather than remembered wrongly.
+                </div>
+            </div>
+
+            @if (form.StalwartComponentId is not null)
+            {
+                <div class="col-md-6">
+                    <label class="form-label small text-muted">Mailbox</label>
+                    <select class="form-select form-select-sm" value="@form.StalwartAccountId?.ToString()"
+                            @onchange="OnAccountChanged">
+                        <option value="">-- choose a mailbox --</option>
+                        @foreach (SupportMailboxService.StalwartMailboxOption account in stalwartAccounts)
+                        {
+                            <option value="@account.AccountId">@account.Address</option>
+                        }
+                    </select>
+                    @if (stalwartAccounts.Count == 0)
+                    {
+                        <div class="form-text small text-warning">
+                            That server has no mailboxes yet. Add one on its Mail tab, apply the
+                            configuration, and it will appear here.
+                        </div>
+                    }
+                </div>
+                <div class="col-md-6 align-self-end">
+                    <div class="small text-muted">
+                        @if (selectedServerUsesOidc)
+                        {
+                            <span>
+                                <i class="bi bi-shield-lock me-1"></i>
+                                That server authenticates against OIDC, which accepts only bearer
+                                tokens — so saving creates a Keycloak service account for this mailbox
+                                and mints tokens with it. There is no password to enter or keep.
+                            </span>
+                        }
+                        else
+                        {
+                            <span>
+                                <i class="bi bi-key me-1"></i>
+                                That server validates passwords, so the mailbox's own password is used.
+                            </span>
+                        }
+                    </div>
+                </div>
+            }
+
+            @if (form.StalwartComponentId is null)
+            {
             <div class="col-md-5">
                 <label class="form-label small text-muted">IMAP server</label>
                 <InputText class="form-control form-control-sm" @bind-Value="form.Host"
@@ -119,6 +180,7 @@
                            autocomplete="off" />
                 <ValidationMessage For="() => form.Username" class="text-danger small" />
             </div>
+            }
             <div class="col-md-4">
                 <label class="form-label small text-muted">
                     Password
@@ -240,7 +302,14 @@
 
     private sealed class MailboxForm : IValidatableObject
     {
-        [Required(ErrorMessage = "The server is required.")]
+        /// <summary>
+        /// The Stalwart server chosen, if any. Set, the connection fields below are neither shown nor
+        /// required — they are derived from the server on every connection instead of copied here.
+        /// </summary>
+        public Guid? StalwartComponentId { get; set; }
+
+        public Guid? StalwartAccountId { get; set; }
+
         [StringLength(256)]
         public string Host { get; set; } = "";
 
@@ -249,7 +318,6 @@
 
         public bool UseSsl { get; set; } = true;
 
-        [Required(ErrorMessage = "The username is required.")]
         [StringLength(256)]
         public string Username { get; set; } = "";
 
@@ -291,8 +359,52 @@
                 yield return new ValidationResult(
                     "Name the folder to move messages to.", [nameof(MoveToFolder)]);
             }
+
+            // One shape or the other, and which one decides what is required. A chosen server derives
+            // the host and login, so asking for them would be asking for something that is ignored;
+            // an outside mailbox has nothing to derive them from, so they are the whole of it.
+            if (StalwartComponentId is null)
+            {
+                if (string.IsNullOrWhiteSpace(Host))
+                {
+                    yield return new ValidationResult(
+                        "The server is required, or choose a mail server above.", [nameof(Host)]);
+                }
+
+                if (string.IsNullOrWhiteSpace(Username))
+                {
+                    yield return new ValidationResult(
+                        "The username is required, or choose a mail server above.", [nameof(Username)]);
+                }
+            }
+            else if (StalwartAccountId is null)
+            {
+                yield return new ValidationResult(
+                    "Choose which mailbox on that server to read.", [nameof(StalwartAccountId)]);
+            }
         }
     }
+
+    private List<SupportMailboxService.StalwartMailServerOption> stalwartServers = [];
+    private List<SupportMailboxService.StalwartMailboxOption> stalwartAccounts = [];
+
+    private bool selectedServerUsesOidc =>
+        form.StalwartComponentId is Guid id
+        && stalwartServers.FirstOrDefault(s => s.ComponentId == id)?.UsesOidc == true;
+
+    private async Task OnServerChanged(ChangeEventArgs e)
+    {
+        form.StalwartComponentId = Guid.TryParse(e.Value?.ToString(), out Guid id) ? id : null;
+
+        // The old mailbox belonged to the old server, so it cannot carry over.
+        form.StalwartAccountId = null;
+        stalwartAccounts = form.StalwartComponentId is Guid chosen
+            ? await Mailboxes.GetStalwartMailboxesAsync(TenantId, chosen)
+            : [];
+    }
+
+    private void OnAccountChanged(ChangeEventArgs e) =>
+        form.StalwartAccountId = Guid.TryParse(e.Value?.ToString(), out Guid id) ? id : null;
 
     protected override async Task OnParametersSetAsync() => await LoadAsync();
 
@@ -306,10 +418,17 @@
             saved = await Mailboxes.GetAsync(TenantId);
             hasPassword = saved is not null && await Mailboxes.HasPasswordAsync(saved);
 
+            stalwartServers = await Mailboxes.GetStalwartServersAsync(TenantId);
+            stalwartAccounts = saved?.StalwartComponentId is Guid chosen
+                ? await Mailboxes.GetStalwartMailboxesAsync(TenantId, chosen)
+                : [];
+
             form = saved is null
                 ? new MailboxForm()
                 : new MailboxForm
                 {
+                    StalwartComponentId = saved.StalwartComponentId,
+                    StalwartAccountId = saved.StalwartAccountId,
                     Host = saved.Host,
                     Port = saved.Port,
                     UseSsl = saved.UseSsl,
@@ -337,7 +456,11 @@
     {
         // Switching fetching on with nothing to authenticate with would only produce a
         // failure every couple of minutes, so say so here instead.
-        if (form.IsEnabled && !hasPassword && string.IsNullOrEmpty(form.Password))
+        // Only when there is a password to need. A mailbox on a server EntKube manages gets its
+        // credential from the server's own auth mode — a token where the directory is OIDC, the
+        // account's password otherwise — so demanding one here would block the case this exists for.
+        if (form.IsEnabled && form.StalwartComponentId is null
+            && !hasPassword && string.IsNullOrEmpty(form.Password))
         {
             Toasts.Error("A password is needed before mail can be fetched.");
             return;
@@ -351,6 +474,8 @@
                 new SupportMailbox
                 {
                     TenantId = TenantId,
+                    StalwartComponentId = form.StalwartComponentId,
+                    StalwartAccountId = form.StalwartAccountId,
                     Host = form.Host.Trim(),
                     Port = form.Port,
                     UseSsl = form.UseSsl,

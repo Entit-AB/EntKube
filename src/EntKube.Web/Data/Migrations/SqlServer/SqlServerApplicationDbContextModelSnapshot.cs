@@ -6589,6 +6589,13 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<bool>("Pop3Enabled")
                         .HasColumnType("bit");
 
+                    b.Property<bool>("ProxyProtocol")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("ProxyTrustedNetworks")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
                     b.Property<int>("Replicas")
                         .HasColumnType("int");
 
@@ -6943,11 +6950,29 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(256)
                         .HasColumnType("nvarchar(256)");
 
+                    b.Property<string>("OAuthClientId")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("OAuthScopes")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("OAuthTokenEndpoint")
+                        .HasMaxLength(512)
+                        .HasColumnType("nvarchar(512)");
+
                     b.Property<int>("PollIntervalSeconds")
                         .HasColumnType("int");
 
                     b.Property<int>("Port")
                         .HasColumnType("int");
+
+                    b.Property<Guid?>("StalwartAccountId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("StalwartComponentId")
+                        .HasColumnType("uniqueidentifier");
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uniqueidentifier");

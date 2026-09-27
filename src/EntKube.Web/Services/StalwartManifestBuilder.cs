@@ -568,6 +568,19 @@ public static class StalwartManifestBuilder
         y.Add("    app.kubernetes.io/managed-by: entkube");
 
         List<(string Key, string Value)> annotations = ParseAnnotations(config.LoadBalancerAnnotations);
+
+        // The balancer's half of the PROXY protocol, set here rather than left to the operator's
+        // annotation box. Both halves are one decision — a balancer sending headers to a server that
+        // does not trust them refuses every connection, and a server trusting a balancer that sends
+        // none simply never learns the client address — so they are turned on by the same switch.
+        //
+        // Gated on the trusted-networks list rather than the toggle alone, so the two cannot disagree:
+        // the plan enables the protocol by declaring that list, and this enables it on the balancer.
+        if (StalwartPlanBuilder.ProxyTrustedNetworks(config).Count > 0)
+        {
+            annotations.Insert(0, (OctaviaProxyProtocolAnnotation, "true"));
+        }
+
         if (annotations.Count > 0)
         {
             y.Add("  annotations:");
@@ -602,6 +615,19 @@ public static class StalwartManifestBuilder
         }
         y.Add("---");
     }
+
+    /// <summary>
+    /// The OpenStack cloud controller's switch for the PROXY protocol on a TCP pool.
+    ///
+    /// <para>Inserted before the operator's own annotations so a hand-written copy of the same key
+    /// wins, which is the direction to be wrong in: somebody overriding this deliberately knows
+    /// something about their balancer that EntKube does not.</para>
+    ///
+    /// <para>The catch worth knowing about it: Octavia cannot change a pool's protocol, so the
+    /// controller ignores this on a load balancer that already exists. It takes effect when the
+    /// Service is created, which means uninstalling and reinstalling the component.</para>
+    /// </summary>
+    public const string OctaviaProxyProtocolAnnotation = "loadbalancer.openstack.org/proxy-protocol";
 
     /// <summary>Parses the operator's <c>key: value</c> lines into LoadBalancer annotations.</summary>
     public static List<(string Key, string Value)> ParseAnnotations(string? text)

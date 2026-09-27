@@ -834,8 +834,12 @@ public class VaultService(
     /// Stores the support mailbox's IMAP password in the tenant's vault, replacing
     /// whatever was there.
     /// </summary>
-    public async Task<VaultSecret> SetSupportMailboxPasswordAsync(
-        Guid tenantId, Guid mailboxId, string password, CancellationToken ct = default)
+    public Task<VaultSecret> SetSupportMailboxPasswordAsync(
+        Guid tenantId, Guid mailboxId, string password, CancellationToken ct = default) =>
+        SetSupportMailboxSecretAsync(tenantId, mailboxId, SupportMailboxPasswordName, password, ct);
+
+    private async Task<VaultSecret> SetSupportMailboxSecretAsync(
+        Guid tenantId, Guid mailboxId, string name, string password, CancellationToken ct)
     {
         await InitializeVaultAsync(tenantId, ct);
 
@@ -846,7 +850,7 @@ public class VaultService(
         VaultSecret? existing = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
                 && s.SupportMailboxId == mailboxId
-                && s.Name == SupportMailboxPasswordName, ct);
+                && s.Name == name, ct);
 
         (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, password);
 
@@ -866,7 +870,7 @@ public class VaultService(
         {
             Id = Guid.NewGuid(),
             VaultId = vault.Id,
-            Name = SupportMailboxPasswordName,
+            Name = name,
             SecretType = VaultSecretType.Opaque,
             EncryptedValue = ciphertext,
             Nonce = nonce,
@@ -879,15 +883,32 @@ public class VaultService(
     }
 
     /// <summary>The support mailbox's IMAP password, or null when none has been set.</summary>
-    public async Task<string?> GetSupportMailboxPasswordAsync(
-        Guid tenantId, Guid mailboxId, CancellationToken ct = default)
+    /// <summary>
+    /// Stores the OIDC service account's secret for this mailbox. Same store as its password, a
+    /// different name: a mailbox has one or the other depending on what its server can validate,
+    /// and keeping both named makes which one is in use readable rather than inferred.
+    /// </summary>
+    public Task<VaultSecret> SetSupportMailboxOAuthSecretAsync(
+        Guid tenantId, Guid mailboxId, string secret, CancellationToken ct = default) =>
+        SetSupportMailboxSecretAsync(tenantId, mailboxId, SupportMailboxOAuthSecretName, secret, ct);
+
+    public Task<string?> GetSupportMailboxOAuthSecretAsync(
+        Guid tenantId, Guid mailboxId, CancellationToken ct = default) =>
+        GetSupportMailboxSecretAsync(tenantId, mailboxId, SupportMailboxOAuthSecretName, ct);
+
+    public Task<string?> GetSupportMailboxPasswordAsync(
+        Guid tenantId, Guid mailboxId, CancellationToken ct = default) =>
+        GetSupportMailboxSecretAsync(tenantId, mailboxId, SupportMailboxPasswordName, ct);
+
+    private async Task<string?> GetSupportMailboxSecretAsync(
+        Guid tenantId, Guid mailboxId, string name, CancellationToken ct)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
                 && s.SupportMailboxId == mailboxId
-                && s.Name == SupportMailboxPasswordName, ct);
+                && s.Name == name, ct);
 
         if (secret is null)
         {
@@ -911,6 +932,12 @@ public class VaultService(
 
     /// <summary>The one secret name a support mailbox owns.</summary>
     public const string SupportMailboxPasswordName = "PASSWORD";
+
+    /// <summary>
+    /// The secret of the service account client this mailbox authenticates as, where the mail server's
+    /// directory is OIDC and a password would not be checked by anything.
+    /// </summary>
+    public const string SupportMailboxOAuthSecretName = "OAUTH_CLIENT_SECRET";
 
     /// <summary>
     /// Enumerates every certificate and OAuth/OIDC client secret in the tenant's vault,
