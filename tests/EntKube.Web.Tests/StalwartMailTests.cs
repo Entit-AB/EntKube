@@ -2322,6 +2322,30 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void OneIdentitySourceAtATimeAndTheIssuerFollowsIt()
+    {
+        // The two are alternatives, not layers: a stored app registration describes a provider EntKube
+        // does not run, a realm is one it does, and the plan needs one answer rather than two. So
+        // choosing either must clear the other — a config carrying both would resolve differently
+        // depending on which resolver ran last.
+        StalwartComponentConfig config = Config(c =>
+        {
+            c.AuthMode = StalwartAuthMode.Oidc;
+            c.OidcAppRegistrationSecretId = Guid.NewGuid();
+            c.OidcKeycloakRealmId = Guid.NewGuid();
+        });
+
+        // The read-back is what the Components tab reopens on, and an OIDC server whose realm was
+        // dropped there would silently revert to a typed issuer.
+        Dictionary<string, string> form = StalwartService.BuildFormValues(config);
+
+        StalwartComponentConfig reopened = Config();
+        StalwartService.ApplyFormValues(reopened, form);
+
+        reopened.AuthMode.Should().Be(StalwartAuthMode.Oidc);
+    }
+
+    [Fact]
     public void TheHaBackendsReadBackIntoTheFormTheyWereEnteredIn()
     {
         // Every one of these is a "stalwart:" pseudo-path, so the stored YAML holds nothing to

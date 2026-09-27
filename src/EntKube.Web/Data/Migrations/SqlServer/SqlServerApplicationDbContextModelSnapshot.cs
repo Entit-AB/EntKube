@@ -6570,6 +6570,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(400)
                         .HasColumnType("nvarchar(400)");
 
+                    b.Property<Guid?>("OidcKeycloakRealmId")
+                        .HasColumnType("uniqueidentifier");
+
                     b.Property<string>("OidcRequireAudience")
                         .HasMaxLength(200)
                         .HasColumnType("nvarchar(200)");

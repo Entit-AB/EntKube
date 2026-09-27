@@ -1,6 +1,7 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject StalwartService Mail
+@inject KeycloakService Keycloak
 @inject ComponentInstallOrchestrator InstallOrchestrator
 @inject ToastService Toasts
 
@@ -395,25 +396,46 @@
                             {
                                 <div class="mb-2">
                                     <label class="form-label small">Identity provider</label>
-                                    <select class="form-select form-select-sm" value="@(cfg.OidcAppRegistrationSecretId?.ToString() ?? "")"
-                                            @onchange="e => cfg.OidcAppRegistrationSecretId = Guid.TryParse(e.Value?.ToString(), out var g) ? g : null">
+                                    <select class="form-select form-select-sm" value="@IdentityProviderValue(cfg)"
+                                            @onchange="e => OnIdentityProviderChanged(cfg, e)">
                                         <option value="">Enter the issuer by hand</option>
-                                        @foreach (var reg in oidcRegistrations)
+                                        @if (keycloakRealms.Count > 0)
                                         {
-                                            <option value="@reg.SecretId">@reg.Name (@OAuthClientHelper.DisplayName(reg.Provider))</option>
+                                            <optgroup label="Keycloak realms on this tenant">
+                                                @foreach (KeycloakRealm realm in keycloakRealms)
+                                                {
+                                                    <option value="realm:@realm.Id">@realm.RealmName</option>
+                                                }
+                                            </optgroup>
+                                        }
+                                        @if (oidcRegistrations.Count > 0)
+                                        {
+                                            <optgroup label="Stored app registrations">
+                                                @foreach (var reg in oidcRegistrations)
+                                                {
+                                                    <option value="reg:@reg.SecretId">@reg.Name (@OAuthClientHelper.DisplayName(reg.Provider))</option>
+                                                }
+                                            </optgroup>
                                         }
                                     </select>
                                     <div class="form-text">
-                                        Pick a stored app registration (e.g. Microsoft Entra) and the issuer, username claim,
-                                        audience and scopes are derived from it on save — including the provider-specific rules
-                                        (Entra requires the audience to be the client id, and the profile scope for the username).
+                                        Pick a Keycloak realm EntKube manages and nothing below needs entering: the issuer is
+                                        the realm's own address, and saving creates the client whose tokens carry the audience
+                                        this server checks — EntKube holds that realm's admin credentials, so there is no
+                                        reason to ask you to copy a URL out of Keycloak and register a client by hand.
+                                        A stored app registration (Microsoft Entra, Google) does the same for a provider
+                                        EntKube does not run, applying that provider's own rules.
                                     </div>
                                 </div>
                                 <div class="mb-2">
                                     <label class="form-label small">Issuer URL</label>
                                     <input class="form-control form-control-sm" @bind="cfg.OidcIssuerUrl"
-                                           disabled="@(cfg.OidcAppRegistrationSecretId is not null)"
+                                           disabled="@(cfg.OidcAppRegistrationSecretId is not null || cfg.OidcKeycloakRealmId is not null)"
                                            placeholder="https://login.example.com/auth/realms/mail" />
+                                    @if (cfg.OidcKeycloakRealmId is not null)
+                                    {
+                                        <div class="form-text">Derived from the realm on save.</div>
+                                    }
                                 </div>
                                 <div class="row g-2 mb-2">
                                     <div class="col">
@@ -886,6 +908,40 @@
     private bool clearBlockedIps;
     private bool verboseLogging;
     private List<StalwartService.OidcRegistration> oidcRegistrations = [];
+    private List<KeycloakRealm> keycloakRealms = [];
+
+    /// <summary>
+    /// The one select carries two kinds of thing, so the value is prefixed rather than being a bare id:
+    /// a realm id and a secret id are both Guids and would otherwise be indistinguishable.
+    /// </summary>
+    private static string IdentityProviderValue(StalwartComponentConfig cfg) =>
+        cfg.OidcKeycloakRealmId is Guid realm ? $"realm:{realm}"
+        : cfg.OidcAppRegistrationSecretId is Guid reg ? $"reg:{reg}"
+        : "";
+
+    /// <summary>
+    /// Exactly one source, because two would leave the plan with two answers. Choosing either clears
+    /// the other; choosing neither leaves the issuer to be typed, which is still valid for a provider
+    /// EntKube neither runs nor has a registration for.
+    /// </summary>
+    private static void OnIdentityProviderChanged(StalwartComponentConfig cfg, ChangeEventArgs e)
+    {
+        string value = e.Value?.ToString() ?? "";
+
+        cfg.OidcKeycloakRealmId = null;
+        cfg.OidcAppRegistrationSecretId = null;
+
+        if (value.StartsWith("realm:", StringComparison.Ordinal)
+            && Guid.TryParse(value[6..], out Guid realmId))
+        {
+            cfg.OidcKeycloakRealmId = realmId;
+        }
+        else if (value.StartsWith("reg:", StringComparison.Ordinal)
+                 && Guid.TryParse(value[4..], out Guid secretId))
+        {
+            cfg.OidcAppRegistrationSecretId = secretId;
+        }
+    }
 
     private string? adminPassword;
     private string? ldapBindPassword;
@@ -936,6 +992,7 @@
         applyOutput = null;
         directories = await Mail.GetLinkableDirectoriesAsync(TenantId, instance.Component.Id);
         oidcRegistrations = await Mail.GetOidcRegistrationsAsync(TenantId);
+        keycloakRealms = await Keycloak.GetAllRealmsForTenantAsync(TenantId);
 
         preflight = instance.Config is null
             ? []
@@ -1013,6 +1070,7 @@
             target.LdapMemberOfFilter = edited.LdapMemberOfFilter;
             target.LdapUseTls = edited.LdapUseTls;
             target.OidcAppRegistrationSecretId = edited.AuthMode == StalwartAuthMode.Oidc ? edited.OidcAppRegistrationSecretId : null;
+            target.OidcKeycloakRealmId = edited.AuthMode == StalwartAuthMode.Oidc ? edited.OidcKeycloakRealmId : null;
             target.OidcIssuerUrl = edited.OidcIssuerUrl;
             target.OidcClaimUsername = edited.OidcClaimUsername;
             target.OidcUsernameDomain = edited.OidcUsernameDomain;

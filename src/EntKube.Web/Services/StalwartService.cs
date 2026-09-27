@@ -162,6 +162,7 @@ public class StalwartService(
             // values are stored rather than recomputed so the UI shows exactly what will be applied.
             await ResolveOpenLdapLinkAsync(db, existing, ct);
             await ResolveOidcRegistrationAsync(db, existing, ct);
+            await ResolveKeycloakRealmAsync(db, existing, ct);
 
             existing.UpdatedAt = DateTime.UtcNow;
             await db.SaveChangesAsync(ct);
@@ -282,6 +283,70 @@ public class StalwartService(
     /// gone. Stalwart validates tokens rather than acting as an OAuth client, so only the issuer and
     /// claims matter here — not the client secret (that is the webmail's concern).
     /// </summary>
+    /// <summary>
+    /// Fills the OIDC settings in from a Keycloak realm EntKube manages, and makes Keycloak ready for
+    /// them, so that choosing the realm is the whole of the configuration.
+    ///
+    /// <para>Three things follow from the choice and none of them should be typed. The issuer is the
+    /// realm's own address, and a mistyped one fails every login with nothing naming the character that
+    /// was wrong. The audience is what the mail server checks a token's <c>aud</c> against, so it has
+    /// to match a client that actually stamps it — which means a client has to exist, which EntKube can
+    /// create because it holds the realm's admin credentials. And the username claim and scopes are the
+    /// directory's own defaults, which are right unless somebody has a reason.</para>
+    ///
+    /// <para>Never throws into the save. A realm that cannot be reached is worth reporting, but not at
+    /// the cost of losing everything else an operator has just entered — so the issuer is still written
+    /// from what is known, and the part that needed Keycloak is what is missing.</para>
+    /// </summary>
+    private async Task ResolveKeycloakRealmAsync(
+        ApplicationDbContext db, StalwartComponentConfig config, CancellationToken ct)
+    {
+        if (config.AuthMode != StalwartAuthMode.Oidc
+            || config.OidcKeycloakRealmId is not Guid realmId)
+        {
+            return;
+        }
+
+        // The two are alternatives, not layers: a stored app registration describes a provider EntKube
+        // does not run, and a realm is one it does. Choosing a realm clears the other so the plan has
+        // one answer rather than two.
+        config.OidcAppRegistrationSecretId = null;
+
+        KeycloakRealm? realm = await db.KeycloakRealms
+            .FirstOrDefaultAsync(r => r.Id == realmId && r.TenantId == config.TenantId, ct);
+
+        if (realm is null)
+        {
+            return;
+        }
+
+        if (await ResolveRealmIssuerAsync(config.TenantId, realmId, ct) is string issuer)
+        {
+            config.OidcIssuerUrl = issuer;
+        }
+
+        // The audience is the client, so it is named after the server it lets in rather than being a
+        // word somebody has to keep consistent in two places.
+        string clientId = $"stalwart-{config.Hostname.Trim().ToLowerInvariant()}";
+
+        try
+        {
+            await keycloakService.EnsureAudienceClientAsync(
+                config.TenantId, realmId, clientId,
+                $"EntKube mail server {config.Hostname.Trim()}", ct);
+
+            config.OidcRequireAudience = clientId;
+        }
+        catch (Exception ex)
+        {
+            // Reported, not thrown: the rest of the configuration is worth keeping, and a preflight
+            // says what is missing before an apply can act on it.
+            logger.LogWarning(ex,
+                "Could not prepare Keycloak realm {Realm} for the mail server {Hostname}. The issuer "
+                + "was set; the audience client was not created.", realm.RealmName, config.Hostname);
+        }
+    }
+
     private async Task ResolveOidcRegistrationAsync(
         ApplicationDbContext db, StalwartComponentConfig config, CancellationToken ct)
     {

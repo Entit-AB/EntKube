@@ -1855,6 +1855,9 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(c => c.LoadBalancerIp).HasMaxLength(100);
             entity.Property(c => c.LoadBalancerAnnotations).HasMaxLength(2000);
             entity.Property(c => c.ProxyTrustedNetworks).HasMaxLength(2000);
+            // No foreign key: a realm deleted in Keycloak should leave the mail server's stored issuer
+            // working rather than cascade a delete into a running configuration. Resolution simply
+            // finds nothing and the preflight says so.
             entity.Property(c => c.RspamdHost).HasMaxLength(253);
             entity.Property(c => c.CoordinatorRedisHost).HasMaxLength(253);
 

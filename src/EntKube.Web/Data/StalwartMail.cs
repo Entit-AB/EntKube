@@ -207,6 +207,22 @@ public class StalwartComponentConfig
     /// </summary>
     public Guid? OidcAppRegistrationSecretId { get; set; }
 
+    /// <summary>
+    /// A Keycloak realm EntKube manages, chosen instead of typing an issuer URL.
+    ///
+    /// <para>The issuer, the audience and the client the mail server validates against are all derived
+    /// from it on save, and the Keycloak side is created rather than described: EntKube holds that
+    /// realm's admin credentials, so asking an operator to copy an issuer URL out of Keycloak and
+    /// paste it here — and then to go back and register a client by hand — is asking them to do work
+    /// EntKube is better placed to do and more likely to get wrong. A mistyped issuer fails every
+    /// login with nothing naming the character that was wrong.</para>
+    ///
+    /// <para>Mutually exclusive with <see cref="OidcAppRegistrationSecretId"/>, which is the same idea
+    /// for a provider EntKube does not run — Entra, Google — where the registration exists already and
+    /// only its details can be stored.</para>
+    /// </summary>
+    public Guid? OidcKeycloakRealmId { get; set; }
+
     // ── TLS ───────────────────────────────────────────────────────────────────
 
     public StalwartTlsMode TlsMode { get; set; } = StalwartTlsMode.ClusterIssuer;
