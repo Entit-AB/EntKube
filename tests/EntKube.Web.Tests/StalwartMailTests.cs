@@ -860,6 +860,42 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void CustomerDomainsAreTrustedAsFarAsTheFilterAllows()
+    {
+        // Modest on purpose, because the mechanism is: listing a domain here exempts it from DNS
+        // block-list checks and nothing else. It would not have stopped the SPF and reverse-DNS score
+        // that junked a real customer's support request, and Stalwart has no allow-list that would.
+        // The guarantee lives in SupportMailboxService.SweepJunkAsync instead.
+        StalwartComponentConfig config = Config();
+        string plan = StalwartPlanBuilder.BuildApplyPlan(
+            config, [Domain(config.Id, "example.com")], [],
+            trustedSenderDomains: ["Customer.Example", "customer.example", " other.example "]);
+
+        JsonElement op = Operation(plan, "MemoryLookupKey")!.Value;
+
+        // Keyed on namespace AND key: a domain is one entry in one list, and matching on the
+        // namespace alone would have each new domain overwrite the last.
+        op.GetProperty("matchOn").EnumerateArray().Select(e => e.GetString())
+            .Should().BeEquivalentTo(["namespace", "key"]);
+
+        List<JsonElement> entries = op.GetProperty("value").EnumerateObject()
+            .Select(p => p.Value).ToList();
+
+        entries.Should().OnlyContain(e => e.GetProperty("namespace").GetString() == "trusted-domains");
+        entries.Select(e => e.GetProperty("key").GetString())
+            .Should().BeEquivalentTo(["customer.example", "other.example"]); // trimmed, lowered, deduped
+    }
+
+    [Fact]
+    public void WithNoCustomerDomainsNoListIsWritten()
+    {
+        StalwartComponentConfig config = Config();
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+        Operation(plan, "MemoryLookupKey").Should().BeNull();
+    }
+
+    [Fact]
     public void TheConnectionAddressIsNotScoredBecauseItIsNotTheSenders()
     {
         // Measured on a real delivered message. Its X-Spam-Result, unfolded, summed to exactly the

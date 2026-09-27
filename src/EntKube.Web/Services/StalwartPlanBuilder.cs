@@ -248,7 +248,8 @@ public static class StalwartPlanBuilder
         IReadOnlyList<string>? trustedProxyAddresses = null,
         bool clearBlockedIps = false,
         bool verboseLogging = false,
-        StalwartHaBackend? ha = null)
+        StalwartHaBackend? ha = null,
+        IReadOnlyList<string>? trustedSenderDomains = null)
     {
         List<string> lines = [];
 
@@ -618,6 +619,39 @@ public static class StalwartPlanBuilder
         }
 
         lines.Add(Op("upsert", "SpamTag", MatchOn("tag"), tagScores));
+
+        // ── Customer domains, as far as the filter can be told to trust them ──
+        //
+        // Deliberately modest, because the mechanism is. Listing a domain here exempts it from DNS
+        // block-list checks and nothing else — it would not have stopped the SPF and reverse-DNS
+        // score that junked a real customer's support request, and Stalwart has no allow-list that
+        // would: that is an open feature request upstream. So this reduces one class of false
+        // positive and is not a guarantee, and the guarantee lives where it can actually be made —
+        // SupportMailboxService.SweepJunkAsync takes a customer's mail in even from Junk.
+        //
+        // upsert rather than reconcile: reconcile removes every object in scope, and the scope here
+        // would have to be every MemoryLookupKey — including the blocked-domains and spam-trap lists
+        // an operator maintains by hand. A domain removed from the register therefore stays trusted
+        // until someone deletes it in Stalwart, which is the safe direction to be wrong in.
+        if (trustedSenderDomains is { Count: > 0 })
+        {
+            Dictionary<string, object?> trusted = [];
+            int trustedIndex = 0;
+
+            foreach (string domain in trustedSenderDomains
+                         .Select(d => d.Trim().ToLowerInvariant())
+                         .Where(d => d.Length > 0)
+                         .Distinct(StringComparer.Ordinal))
+            {
+                trusted[$"trusted-{trustedIndex++}"] = new Dictionary<string, object?>
+                {
+                    ["namespace"] = "trusted-domains",
+                    ["key"] = domain,
+                };
+            }
+
+            lines.Add(Op("upsert", "MemoryLookupKey", MatchOn("namespace", "key"), trusted));
+        }
 
         // reconcile with an empty value map is how "no milter" is expressed: turning rspamd off has
         // to remove the hook, or every message keeps being handed to a filter that is no longer there.

@@ -19,8 +19,14 @@ namespace EntKube.Web.Services.Mail;
 /// failure, and not "nothing new" either — saying the latter would tell somebody who
 /// pressed the button that their mailbox was empty when it was merely busy.
 /// </param>
+/// <param name="FromJunk">
+/// How many of <paramref name="Taken"/> were rescued from the Junk folder. Reported rather than
+/// counted silently: a non-zero number here means the spam filter is misclassifying a customer's
+/// mail, which is worth someone's attention even though no message was lost.
+/// </param>
 public readonly record struct MailPollResult(
-    bool Ok, string? Error, int Taken = 0, int Seen = 0, bool AlreadyRunning = false);
+    bool Ok, string? Error, int Taken = 0, int Seen = 0, bool AlreadyRunning = false,
+    int FromJunk = 0);
 
 /// <summary>
 /// The tenant's support mailbox: its settings, and the fetch that fills the triage queue.
@@ -260,7 +266,18 @@ public class SupportMailboxService(
                 throw new InvalidOperationException("No password has been stored for this mailbox.");
             }
 
-            (int taken, int seen) = await FetchAsync(mailbox, password, ct);
+            // The register of customer domains, so a message the filter junked can be told from
+            // the spam beside it. Read here rather than in the fetch: one query per poll, not one
+            // per message.
+            HashSet<string> customerDomains = new(
+                await db.CustomerEmailDomains
+                    .Where(d => d.TenantId == tenantId)
+                    .Select(d => d.Domain)
+                    .ToListAsync(ct),
+                StringComparer.OrdinalIgnoreCase);
+
+            (int taken, int seen, int fromJunk) =
+                await FetchAsync(mailbox, password, customerDomains, ct);
 
             mailbox.LastPolledAt = DateTime.UtcNow;
             mailbox.LastError = null;
@@ -273,7 +290,7 @@ public class SupportMailboxService(
 
             await db.SaveChangesAsync(ct);
 
-            return new MailPollResult(true, null, taken, seen);
+            return new MailPollResult(true, null, taken, seen, FromJunk: fromJunk);
         }
         catch (Exception ex)
         {
@@ -294,8 +311,9 @@ public class SupportMailboxService(
     }
 
     /// <summary>The fetch itself, separated from the bookkeeping around it.</summary>
-    private async Task<(int Taken, int Seen)> FetchAsync(
-        SupportMailbox mailbox, string password, CancellationToken ct)
+    private async Task<(int Taken, int Seen, int FromJunk)> FetchAsync(
+        SupportMailbox mailbox, string password, IReadOnlySet<string> customerDomains,
+        CancellationToken ct)
     {
         using ImapClient client = new();
         await ConnectAsync(client, mailbox, password, ct);
@@ -352,9 +370,129 @@ public class SupportMailboxService(
         mailbox.LastUidValidity = folder.UidValidity;
 
         await folder.CloseAsync(false, ct);
+
+        int fromJunk = await SweepJunkAsync(client, mailbox, customerDomains, ct);
+
         await client.DisconnectAsync(true, ct);
 
-        return (taken, ids.Count);
+        return (taken + fromJunk, ids.Count, fromJunk);
+    }
+
+    /// <summary>
+    /// How far back the Junk folder is read on each poll.
+    ///
+    /// <para>A window rather than a cursor, because a cursor here would need two more columns and
+    /// buy nothing: ingestion dedupes on the message id, so re-reading the same messages is free,
+    /// and a window bounds the work as the folder grows. Fourteen days is longer than any support
+    /// mailbox should go unpolled, which is what it has to cover.</para>
+    /// </summary>
+    private static readonly TimeSpan JunkLookback = TimeSpan.FromDays(14);
+
+    /// <summary>
+    /// Takes in what the spam filter put in Junk, but only from a customer's own domain.
+    ///
+    /// <para>The reason this exists is that the filter cannot be made not to do it. Stalwart has no
+    /// allow-list — it is an open feature request — and its trusted-domains list only skips DNS
+    /// block-list checks, which is not what junks legitimate mail. A user Sieve script cannot rescue
+    /// one either: filing into INBOX is overridden by the spam filter, and only non-Inbox folders
+    /// are honoured. So the mailbox is where this has to be handled, not the mail server.</para>
+    ///
+    /// <para>And it has to be handled somewhere, because the alternative is silent. The poller reads
+    /// one folder; a support request the filter junked was not delayed, it was lost, and nothing
+    /// anywhere said so. A real one scored 6.00 against a threshold of 5 on VIOLATED_DIRECT_SPF and
+    /// RDNS_NONE alone — a message whose DKIM verified and whose DMARC passed — because a load
+    /// balancer had rewritten the sender's address.</para>
+    ///
+    /// <para>Scoped to the customer register on purpose. Sweeping all of Junk would turn spam
+    /// addressed to the support address into support tickets, which moves the filtering problem onto
+    /// whoever triages them. Matching the register means the only mail rescued is mail from somebody
+    /// entitled to support, and the register is the same one that decides which customer a message
+    /// belongs to — so a domain that is wrong here is wrong in a way already visible elsewhere.</para>
+    ///
+    /// <para>Nothing in Junk is flagged, moved or deleted. The message stays where the filter put it,
+    /// so an operator looking at the folder sees what it has been doing, and the copy EntKube took is
+    /// recognised by its message id if the folder is read again.</para>
+    /// </summary>
+    private async Task<int> SweepJunkAsync(
+        ImapClient client, SupportMailbox mailbox, IReadOnlySet<string> customerDomains,
+        CancellationToken ct)
+    {
+        if (customerDomains.Count == 0)
+        {
+            return 0;
+        }
+
+        IMailFolder? junk;
+        try
+        {
+            // By special-use flag, not by name: the folder is "Junk" on one server and "Junk Mail"
+            // on the next, and guessing wrong would silently do nothing at all.
+            junk = client.GetFolder(SpecialFolder.Junk);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex,
+                "No Junk folder for the support mailbox of tenant {Tenant}; nothing to sweep.",
+                mailbox.TenantId);
+            return 0;
+        }
+
+        if (junk is null)
+        {
+            return 0;
+        }
+
+        int rescued = 0;
+
+        try
+        {
+            await junk.OpenAsync(FolderAccess.ReadOnly, ct);
+
+            IList<UniqueId> ids = await junk.SearchAsync(
+                SearchQuery.DeliveredAfter(DateTime.UtcNow - JunkLookback), ct);
+
+            foreach (UniqueId id in ids)
+            {
+                ct.ThrowIfCancellationRequested();
+
+                MimeMessage message = await junk.GetMessageAsync(id, ct);
+
+                InboundMailMessage row = MailMessageReader.Read(
+                    message, mailbox.TenantId, DateTime.UtcNow, mailbox.TrustedAuthenticationServer);
+
+                string? senderDomain = SenderDomain.Of(row.FromAddress);
+
+                if (senderDomain is null
+                    || !customerDomains.Any(registered => SenderDomain.Claims(registered, senderDomain)))
+                {
+                    continue;
+                }
+
+                if (await mail.IngestAsync(row, ct) is not null)
+                {
+                    rescued++;
+
+                    logger.LogWarning(
+                        "Took a support message in from Junk for tenant {Tenant}: {From} is a "
+                        + "registered customer domain, so the spam filter classified a customer's "
+                        + "mail as spam. The message has not been moved.",
+                        mailbox.TenantId, row.FromAddress);
+                }
+            }
+
+            await junk.CloseAsync(false, ct);
+        }
+        catch (Exception ex)
+        {
+            // Never the reason a poll fails. The folder that matters has already been read, and a
+            // mailbox reported broken because its Junk folder could not be opened would send
+            // somebody looking in the wrong place.
+            logger.LogWarning(ex,
+                "Could not sweep Junk for the support mailbox of tenant {Tenant}. The configured "
+                + "folder was read normally.", mailbox.TenantId);
+        }
+
+        return rescued;
     }
 
     /// <summary>What happens to a message in the mailbox once it has been taken in.</summary>
