@@ -899,6 +899,38 @@ public class StalwartMailTests
     }
 
     [Fact]
+    public void TheProxyAnnotationIsNeverWrittenTwice()
+    {
+        // An operator who sets the same key keeps their value, and there is only ever one of it.
+        // Writing ours beside theirs would put two copies of one key in a YAML mapping, which is not
+        // "the later one wins" — that is undefined. A strict parser refuses the whole document and a
+        // lenient one silently picks one, so the manifest would either fail to apply or apply
+        // something nobody chose.
+        StalwartComponentConfig config = Config(c =>
+        {
+            c.ProxyProtocol = true;
+            c.ProxyTrustedNetworks = "10.240.3.0/24";
+            c.ExposeMode = StalwartMailExposeMode.LoadBalancer;
+            c.LoadBalancerAnnotations =
+                $"{StalwartManifestBuilder.OctaviaProxyProtocolAnnotation}: false";
+        });
+
+        YamlDocument mail = Parse(StalwartManifestBuilder.Build(config, "stalwart", "stalwart"))
+            .First(d => Scalar(d.RootNode, "metadata", "name") == "stalwart-mail");
+
+        YamlMappingNode annotations =
+            (YamlMappingNode)At(mail.RootNode, "metadata", "annotations")!;
+
+        annotations.Children.Keys
+            .Count(k => ((YamlScalarNode)k).Value == StalwartManifestBuilder.OctaviaProxyProtocolAnnotation)
+            .Should().Be(1);
+
+        // And theirs is the one that survives.
+        Scalar(annotations, StalwartManifestBuilder.OctaviaProxyProtocolAnnotation)
+            .Should().Be("false");
+    }
+
+    [Fact]
     public void WithoutTrustedNetworksProxyProtocolIsNotConfiguredAtAll()
     {
         // The list is what enables the protocol, so an empty one must leave both halves off. Enabling

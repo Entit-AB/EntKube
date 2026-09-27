@@ -576,7 +576,14 @@ public static class StalwartManifestBuilder
         //
         // Gated on the trusted-networks list rather than the toggle alone, so the two cannot disagree:
         // the plan enables the protocol by declaring that list, and this enables it on the balancer.
-        if (StalwartPlanBuilder.ProxyTrustedNetworks(config).Count > 0)
+        // Skipped when the operator has written the same key themselves, rather than added beside it.
+        // Emitting it twice would put a duplicate key in a YAML mapping, and "the later one wins" is
+        // not something YAML promises — it is undefined, and a strict parser refuses the document
+        // outright. So an operator who sets this deliberately simply keeps their value, and there is
+        // only ever one of it.
+        if (StalwartPlanBuilder.ProxyTrustedNetworks(config).Count > 0
+            && !annotations.Any(a => string.Equals(
+                a.Key, OctaviaProxyProtocolAnnotation, StringComparison.OrdinalIgnoreCase)))
         {
             annotations.Insert(0, (OctaviaProxyProtocolAnnotation, "true"));
         }
@@ -619,9 +626,11 @@ public static class StalwartManifestBuilder
     /// <summary>
     /// The OpenStack cloud controller's switch for the PROXY protocol on a TCP pool.
     ///
-    /// <para>Inserted before the operator's own annotations so a hand-written copy of the same key
-    /// wins, which is the direction to be wrong in: somebody overriding this deliberately knows
-    /// something about their balancer that EntKube does not.</para>
+    /// <para>Not written at all when the operator has set the same key themselves, which is the
+    /// direction to be wrong in: somebody overriding this deliberately knows something about their
+    /// balancer that EntKube does not. Skipped rather than added beside theirs, because two copies of
+    /// one key in a YAML mapping is undefined — a strict parser refuses the whole document, and a
+    /// lenient one silently picks one.</para>
     ///
     /// <para>The catch worth knowing about it: Octavia cannot change a pool's protocol, so the
     /// controller ignores this on a load balancer that already exists. It takes effect when the
