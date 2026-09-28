@@ -1534,8 +1534,20 @@ public class ElasticsearchService(
     /// to its own namespace — where an Elasticsearch exporter will never be.
     /// </param>
     /// <param name="Found">Whether a Prometheus resource was found to read any of this from.</param>
+    /// <param name="RuleMatchLabels">
+    /// The same, for <c>ruleSelector</c> — a PrometheusRule is selected by its own selector, and
+    /// kube-prometheus-stack sets both from the same release label, so getting one right and the
+    /// other wrong is entirely possible.
+    /// </param>
     public sealed record PrometheusSelector(
-        IReadOnlyDictionary<string, string> MatchLabels, bool WatchesOtherNamespaces, bool Found);
+        IReadOnlyDictionary<string, string> MatchLabels,
+        bool WatchesOtherNamespaces,
+        bool Found,
+        IReadOnlyDictionary<string, string>? RuleMatchLabels = null)
+    {
+        /// <summary>Labels a PrometheusRule needs, falling back to the ServiceMonitor's when unset.</summary>
+        public IReadOnlyDictionary<string, string> RuleLabels => RuleMatchLabels ?? MatchLabels;
+    }
 
     /// <summary>
     /// Reads what the cluster's Prometheus will actually select, so the ServiceMonitor can be
@@ -1582,9 +1594,18 @@ public class ElasticsearchService(
                         labels[label.Name] = label.Value.GetString() ?? "";
                 }
 
+                Dictionary<string, string>? ruleLabels = null;
+                if (spec.TryGetProperty("ruleSelector", out JsonElement ruleSelector)
+                    && ruleSelector.TryGetProperty("matchLabels", out JsonElement ruleMatchLabels))
+                {
+                    ruleLabels = [];
+                    foreach (JsonProperty label in ruleMatchLabels.EnumerateObject())
+                        ruleLabels[label.Name] = label.Value.GetString() ?? "";
+                }
+
                 // Absent (rather than empty) confines Prometheus to its own namespace.
                 bool watchesOthers = spec.TryGetProperty("serviceMonitorNamespaceSelector", out _);
-                return new PrometheusSelector(labels, watchesOthers, true);
+                return new PrometheusSelector(labels, watchesOthers, true, ruleLabels);
             }
         }
         catch { }
@@ -1636,6 +1657,7 @@ public class ElasticsearchService(
         await k8s.ApplyManifestAsync(BuildExporterDeployment(cluster), kubeconfig, ct);
         await k8s.ApplyManifestAsync(BuildExporterService(cluster), kubeconfig, ct);
         await k8s.ApplyManifestAsync(BuildExporterServiceMonitor(cluster, selector.MatchLabels), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(BuildExporterPrometheusRule(cluster, selector.RuleLabels), kubeconfig, ct);
 
         await db.SaveChangesAsync(ct);
         return cluster.MonitoringSelectorNote!;
@@ -1655,6 +1677,7 @@ public class ElasticsearchService(
 
         foreach ((string kind, string name) in new[]
         {
+            ("prometheusrule", cluster.ExporterName),
             ("servicemonitor", cluster.ExporterName),
             ("service", cluster.ExporterName),
             ("deployment", cluster.ExporterName),
@@ -1690,6 +1713,12 @@ public class ElasticsearchService(
             : "The ServiceMonitor was labelled "
                 + string.Join(", ", selector.MatchLabels.Select(kv => $"{kv.Key}={kv.Value}"))
                 + " to match what Prometheus selects on.");
+
+        notes.Add(selector.RuleLabels.Count == 0
+            ? "Alerting rules were installed and Prometheus selects every PrometheusRule."
+            : "Alerting rules were installed, labelled "
+                + string.Join(", ", selector.RuleLabels.Select(kv => $"{kv.Key}={kv.Value}"))
+                + " — they reach Alertmanager, and from there EntKube's incidents.");
 
         if (!selector.WatchesOtherNamespaces)
             notes.Add($"Prometheus has no serviceMonitorNamespaceSelector, so it only looks in its own namespace "
@@ -4146,6 +4175,131 @@ public class ElasticsearchService(
         return sb.ToString();
     }
 
+    /// <summary>Heap above this for a sustained period is the shape of a cluster about to stall.</summary>
+    public const int HeapPressurePercent = 85;
+
+    /// <summary>
+    /// Alerting rules for the metrics the exporter publishes.
+    ///
+    /// <para>These are not a second opinion on the Operations Advisor — they are the same facts
+    /// arriving somewhere else, and that matters. The advisor is a page somebody opens; a
+    /// Prometheus alert reaches Alertmanager, and from there EntKube's own alert sync turns it into
+    /// an incident with routing and an on-call rota behind it. Red at 03:00 should wake somebody,
+    /// not wait to be noticed.</para>
+    ///
+    /// <para>Every alert carries the cluster's name and namespace as labels, because an incident
+    /// that says "Elasticsearch is red" without saying which one is a page nobody can act on.</para>
+    /// </summary>
+    public static string BuildExporterPrometheusRule(
+        ElasticsearchCluster c, IReadOnlyDictionary<string, string> selectorLabels)
+    {
+        // The exporter labels every series with the cluster it read them from, which is what makes
+        // one rule group per EntKube-managed cluster safe on a shared Prometheus.
+        string scope = $"cluster=\"{c.Name}\"";
+
+        StringBuilder sb = new();
+        sb.AppendLine("apiVersion: monitoring.coreos.com/v1");
+        sb.AppendLine("kind: PrometheusRule");
+        sb.AppendLine("metadata:");
+        sb.AppendLine($"  name: {c.ExporterName}");
+        sb.AppendLine($"  namespace: {c.Namespace}");
+        sb.AppendLine("  labels:");
+        sb.AppendLine("    entkube.io/managed: \"true\"");
+        sb.AppendLine($"    entkube.io/elasticsearch: {c.Name}");
+        foreach ((string key, string value) in selectorLabels.OrderBy(kv => kv.Key))
+            sb.AppendLine($"    {key}: \"{value}\"");
+        sb.AppendLine("spec:");
+        sb.AppendLine("  groups:");
+        sb.AppendLine($"    - name: entkube-elasticsearch-{c.Name}");
+        sb.AppendLine("      rules:");
+
+        AppendRule(sb, c,
+            alert: "ElasticsearchRed",
+            expr: $"max(elasticsearch_cluster_health_status{{{scope},color=\"red\"}}) == 1",
+            forDuration: "5m",
+            severity: "critical",
+            summary: $"Elasticsearch \"{c.Name}\" is red",
+            description: "At least one primary shard is unavailable, so some data cannot be read or written. "
+                + "Usually a node that left or a disk that filled.");
+
+        AppendRule(sb, c,
+            alert: "ElasticsearchYellow",
+            expr: $"max(elasticsearch_cluster_health_status{{{scope},color=\"yellow\"}}) == 1",
+            // Long enough to ignore the yellow that every rolling restart and every rollover causes.
+            forDuration: "1h",
+            severity: "warning",
+            summary: $"Elasticsearch \"{c.Name}\" has been yellow for an hour",
+            description: "Replica shards have nowhere to live, so some data has no second copy. "
+                + "A restart or a rollover explains a few minutes of this; an hour does not.");
+
+        AppendRule(sb, c,
+            alert: "ElasticsearchDiskHigh",
+            expr: "max(1 - (elasticsearch_filesystem_data_available_bytes{" + scope + "} "
+                + "/ elasticsearch_filesystem_data_size_bytes{" + scope + "})) "
+                + "> " + Threshold(DiskHighWatermarkPercent),
+            forDuration: "15m",
+            severity: "warning",
+            summary: $"A node of \"{c.Name}\" is past the disk watermark",
+            description: $"Elasticsearch stops allocating shards to a node at {DiskHighWatermarkPercent}% and makes "
+                + $"its indices read-only at {DiskFloodStagePercent}%, which it does not undo when space is freed.");
+
+        AppendRule(sb, c,
+            alert: "ElasticsearchHeapPressure",
+            expr: "max(elasticsearch_jvm_memory_used_bytes{" + scope + ",area=\"heap\"} "
+                + "/ elasticsearch_jvm_memory_max_bytes{" + scope + ",area=\"heap\"}) "
+                + "> " + Threshold(HeapPressurePercent),
+            forDuration: "30m",
+            severity: "warning",
+            summary: $"A node of \"{c.Name}\" is low on heap",
+            description: "Sustained heap pressure means the node spends its time collecting garbage rather than "
+                + "answering queries, and is the step before it drops out of the cluster.");
+
+        AppendRule(sb, c,
+            alert: "ElasticsearchExporterDown",
+            expr: $"up{{job=~\".*{c.ExporterName}.*\"}} == 0",
+            forDuration: "15m",
+            severity: "warning",
+            summary: $"No metrics from \"{c.Name}\"",
+            description: "The exporter is not being scraped, so every other rule here is quiet for the wrong "
+                + "reason. Silence from a monitor is not the same as health.");
+
+        return sb.ToString();
+    }
+
+    private static void AppendRule(
+        StringBuilder sb, ElasticsearchCluster c, string alert, string expr, string forDuration,
+        string severity, string summary, string description)
+    {
+        sb.AppendLine($"        - alert: {alert}");
+        sb.AppendLine($"          expr: {expr}");
+        sb.AppendLine($"          for: {forDuration}");
+        sb.AppendLine("          labels:");
+        sb.AppendLine($"            severity: {severity}");
+        // Which cluster, in labels rather than only in prose: an incident that cannot be traced back
+        // to one cluster is a page nobody can act on.
+        sb.AppendLine($"            elasticsearch_cluster: {c.Name}");
+        sb.AppendLine($"            namespace: {c.Namespace}");
+        sb.AppendLine("          annotations:");
+        sb.AppendLine($"            summary: \"{YamlQuoted(summary)}\"");
+        sb.AppendLine($"            description: \"{YamlQuoted(description)}\"");
+    }
+
+    /// <summary>
+    /// A percentage as PromQL wants it. Explicitly invariant: on a machine with a Swedish or German
+    /// locale the default rendering is "0,85", which Prometheus rejects as a syntax error at rule
+    /// load time — on that machine only, which is the worst way to find out.
+    /// </summary>
+    private static string Threshold(int percent) =>
+        (percent / 100.0).ToString("0.00", CultureInfo.InvariantCulture);
+
+    /// <summary>
+    /// Escapes a value for a double-quoted YAML scalar. The alert prose names the cluster in quotes,
+    /// and an unescaped quote ends the scalar early — producing a manifest that parses as something
+    /// else entirely, or not at all.
+    /// </summary>
+    private static string YamlQuoted(string value) =>
+        value.Replace("\\", "\\\\").Replace("\"", "\\\"");
+
     /// <summary>The exporter account's password Secret.</summary>
     public static string BuildExporterCredentialsSecret(ElasticsearchCluster c, string password)
     {
@@ -4855,6 +5009,7 @@ public class ElasticsearchService(
         yield return ("secret", c.SnapshotCredentialsSecretName);
         yield return ("secret", c.ExporterSecretName);
         yield return ("configmap", SnapshotConfigMapName(c, "exporter-user"));
+        yield return ("prometheusrule", c.ExporterName);
         yield return ("servicemonitor", c.ExporterName);
         yield return ("service", c.ExporterName);
         yield return ("deployment", c.ExporterName);

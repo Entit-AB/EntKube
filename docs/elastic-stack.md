@@ -322,6 +322,32 @@ cluster with:
 each scrape ask the master nodes for all of their stats — the exporter's own README warns about it.
 On a cluster that rolls an index over daily, that is unbounded growth in Prometheus.
 
+### Alerting
+
+Turning metrics on also installs a PrometheusRule, so Elasticsearch problems reach the path
+everything else uses: Prometheus → Alertmanager → EntKube's alert sync → an incident with routing
+and an on-call rota behind it. This is not a second opinion on the Operations Advisor; it is the
+same facts arriving somewhere that can wake somebody. Red at 03:00 should not wait to be noticed.
+
+| Alert | Fires when | For |
+| --- | --- | --- |
+| `ElasticsearchRed` | a primary shard is unavailable | 5m, critical |
+| `ElasticsearchYellow` | replicas have nowhere to live | 1h, warning |
+| `ElasticsearchDiskHigh` | a node is past the 85% watermark | 15m, warning |
+| `ElasticsearchHeapPressure` | heap above 85% | 30m, warning |
+| `ElasticsearchExporterDown` | nothing is scraping the exporter | 15m, warning |
+
+Yellow waits an hour on purpose: every rolling restart and every rollover turns a cluster yellow for
+a few minutes, and an alert that fires on all of them gets muted. `ElasticsearchExporterDown` exists
+because silence from a monitor is not the same as health — without it, every other rule here goes
+quiet for the wrong reason.
+
+Each alert carries the cluster name and namespace as **labels**, not just in prose: an incident that
+says "Elasticsearch is red" without saying which one is a page nobody can act on. The rule is
+labelled from the Prometheus resource's `ruleSelector`, which is a *separate* selector from the
+`serviceMonitorSelector` — kube-prometheus-stack sets both from the same release value, so getting
+one right and the other wrong is entirely possible.
+
 ### The label that decides whether any of this works
 
 kube-prometheus-stack ships `serviceMonitorSelectorNilUsesHelmValues: true`, which becomes a

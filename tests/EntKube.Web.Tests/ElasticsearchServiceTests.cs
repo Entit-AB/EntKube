@@ -2126,8 +2126,9 @@ public class ElasticsearchServiceTests : IDisposable
         await sut.DisableMonitoringAsync(tenantId, c.Id);
 
         deleted.Should().BeEquivalentTo(
-            "servicemonitor/search-es-exporter", "service/search-es-exporter",
-            "deployment/search-es-exporter", "secret/search-es-exporter");
+            "prometheusrule/search-es-exporter", "servicemonitor/search-es-exporter",
+            "service/search-es-exporter", "deployment/search-es-exporter",
+            "secret/search-es-exporter");
         (await db.ElasticsearchClusters.AsNoTracking().SingleAsync()).MonitoringEnabled.Should().BeFalse();
     }
 
@@ -2709,5 +2710,161 @@ public class ElasticsearchServiceTests : IDisposable
         Func<Task> act = () => sut.SimulatePipelineAsync(tenantId, saved.Id, "not json at all");
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not valid JSON*");
+    }
+
+    // ──────── Alerting rules ────────
+
+    [Fact]
+    public void TheAlertsAreScopedToTheirOwnCluster()
+    {
+        string rule = ElasticsearchService.BuildExporterPrometheusRule(
+            SampleCluster(), new Dictionary<string, string>());
+
+        YamlMappingNode group = (YamlMappingNode)((YamlSequenceNode)((YamlMappingNode)Parse(rule)["spec"])["groups"])[0];
+        string[] alerts = [.. ((YamlSequenceNode)group["rules"]).Children.Cast<YamlMappingNode>()
+            .Select(r => ((YamlScalarNode)r["alert"]).Value!)];
+
+        alerts.Should().Equal(
+            "ElasticsearchRed", "ElasticsearchYellow", "ElasticsearchDiskHigh",
+            "ElasticsearchHeapPressure", "ElasticsearchExporterDown");
+
+        // One Prometheus scrapes many clusters; an expression without the cluster label would fire
+        // one cluster's alert for another's problem.
+        foreach (YamlMappingNode r in ((YamlSequenceNode)group["rules"]).Children.Cast<YamlMappingNode>())
+        {
+            string expr = ((YamlScalarNode)r["expr"]).Value!;
+            expr.Should().Contain("search");
+        }
+    }
+
+    [Fact]
+    public void EveryAlertSaysWhichClusterItIsAbout_InLabels()
+    {
+        string rule = ElasticsearchService.BuildExporterPrometheusRule(
+            SampleCluster(), new Dictionary<string, string>());
+
+        YamlMappingNode group = (YamlMappingNode)((YamlSequenceNode)((YamlMappingNode)Parse(rule)["spec"])["groups"])[0];
+
+        foreach (YamlMappingNode r in ((YamlSequenceNode)group["rules"]).Children.Cast<YamlMappingNode>())
+        {
+            YamlMappingNode labels = (YamlMappingNode)r["labels"];
+            // An incident that cannot be traced back to one cluster is a page nobody can act on.
+            ((YamlScalarNode)labels["elasticsearch_cluster"]).Value.Should().Be("search");
+            ((YamlScalarNode)labels["namespace"]).Value.Should().Be("search");
+            labels.Children.Should().ContainKey(new YamlScalarNode("severity"));
+            ((YamlMappingNode)r["annotations"]).Children.Should().ContainKey(new YamlScalarNode("summary"));
+        }
+    }
+
+    [Fact]
+    public void RedPagesQuickly_AndYellowWaitsOutARollingRestart()
+    {
+        string rule = ElasticsearchService.BuildExporterPrometheusRule(
+            SampleCluster(), new Dictionary<string, string>());
+
+        YamlSequenceNode rules = (YamlSequenceNode)((YamlMappingNode)((YamlSequenceNode)
+            ((YamlMappingNode)Parse(rule)["spec"])["groups"])[0])["rules"];
+
+        YamlMappingNode red = (YamlMappingNode)rules[0];
+        YamlMappingNode yellow = (YamlMappingNode)rules[1];
+
+        ((YamlScalarNode)red["for"]).Value.Should().Be("5m");
+        ((YamlScalarNode)((YamlMappingNode)red["labels"])["severity"]).Value.Should().Be("critical");
+
+        // Every rolling restart and every rollover turns a cluster yellow for a few minutes.
+        ((YamlScalarNode)yellow["for"]).Value.Should().Be("1h");
+        ((YamlScalarNode)((YamlMappingNode)yellow["labels"])["severity"]).Value.Should().Be("warning");
+    }
+
+    [Fact]
+    public void TheDiskAlertUsesElasticsearchsOwnWatermark()
+    {
+        string rule = ElasticsearchService.BuildExporterPrometheusRule(
+            SampleCluster(), new Dictionary<string, string>());
+
+        rule.Should().Contain("> 0.85");
+        rule.Should().Contain("elasticsearch_filesystem_data_available_bytes");
+    }
+
+    [Fact]
+    public void SilenceFromTheExporterIsItselfAnAlert()
+    {
+        string rule = ElasticsearchService.BuildExporterPrometheusRule(
+            SampleCluster(), new Dictionary<string, string>());
+
+        // Otherwise every other rule here goes quiet for the wrong reason.
+        rule.Should().Contain("ElasticsearchExporterDown");
+        rule.Should().Contain("up{job=~\".*search-es-exporter.*\"} == 0");
+    }
+
+    [Fact]
+    public void ThePrometheusRuleCarriesTheRuleSelectorsLabels_WhichNeedNotMatchTheMonitorsr()
+    {
+        // kube-prometheus-stack sets both from the same release value, but they are two separate
+        // selectors: getting one right and the other wrong is entirely possible.
+        ElasticsearchService.PrometheusSelector selector = ElasticsearchService.ParsePrometheusSelector("""
+            {"items":[{"spec":{
+              "serviceMonitorSelector":{"matchLabels":{"release":"kps"}},
+              "ruleSelector":{"matchLabels":{"prometheus":"main","role":"alert-rules"}},
+              "serviceMonitorNamespaceSelector":{}
+            }}]}
+            """);
+
+        selector.RuleLabels.Should().ContainKey("role").WhoseValue.Should().Be("alert-rules");
+
+        string rule = ElasticsearchService.BuildExporterPrometheusRule(SampleCluster(), selector.RuleLabels);
+        YamlMappingNode labels = (YamlMappingNode)((YamlMappingNode)Parse(rule)["metadata"])["labels"];
+        ((YamlScalarNode)labels["role"]).Value.Should().Be("alert-rules");
+        ((YamlScalarNode)labels["prometheus"]).Value.Should().Be("main");
+    }
+
+    [Fact]
+    public void WithNoRuleSelector_TheMonitorsLabelsAreUsed()
+    {
+        ElasticsearchService.PrometheusSelector selector = ElasticsearchService.ParsePrometheusSelector("""
+            {"items":[{"spec":{"serviceMonitorSelector":{"matchLabels":{"release":"kps"}},"serviceMonitorNamespaceSelector":{}}}]}
+            """);
+
+        selector.RuleLabels.Should().ContainKey("release").WhoseValue.Should().Be("kps");
+    }
+
+    [Fact]
+    public async Task TurningOnMetricsInstallsTheAlertsToo()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+
+        k8s.Setup(x => x.GetJsonAllNamespacesAsync("prometheuses.monitoring.coreos.com",
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""{"items":[{"spec":{"serviceMonitorSelector":{"matchLabels":{"release":"kps"}},"serviceMonitorNamespaceSelector":{}}}]}""");
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        string note = await sut.EnableMonitoringAsync(tenantId, c.Id, indexMetrics: false);
+
+        applied.Should().Contain(m => m.Contains("kind: PrometheusRule") && m.Contains("release: \"kps\""));
+        note.Should().Contain("Alerting rules were installed");
+    }
+
+    [Fact]
+    public async Task TurningOffMetricsRemovesTheAlertsFirst()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        c.MonitoringEnabled = true;
+        await db.SaveChangesAsync();
+
+        List<string> deleted = [];
+        k8s.Setup(x => x.DeleteManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, string, string, CancellationToken>((kind, name, _, _, _) => deleted.Add($"{kind}/{name}"))
+            .Returns(Task.CompletedTask);
+
+        await sut.DisableMonitoringAsync(tenantId, c.Id);
+
+        // Rules first: leaving them behind would fire ExporterDown for a monitor deliberately removed.
+        deleted[0].Should().Be("prometheusrule/search-es-exporter");
     }
 }
