@@ -145,6 +145,47 @@ public class StalwartMailTests
         // fc00::/8 and fd00::/8 together are exactly fc00::/7.
         addresses.Should().Contain("fc00::/8").And.Contain("fd00::/8");
         addresses.Should().NotContain("fc00::/7");
+
+        // Loopback is still covered, under the name the server keeps it by.
+        addresses.Should().Contain("::1").And.NotContain("::1/128");
+    }
+
+    /// <summary>
+    /// Addresses go into the plan written the way Stalwart writes them back.
+    ///
+    /// <para>The allow-list is upserted with <c>address</c> as the match key, and Stalwart drops a
+    /// full-length prefix when it stores the value — so <c>::1/128</c> is kept as <c>::1</c>. Sending
+    /// the longer spelling matches nothing, becomes a create, and collides with the row already there:
+    /// <c>primaryKeyViolation</c> for an entry that exists. And because the plan stops at its first
+    /// failure, that strands every operation after it, the accounts included.</para>
+    /// </summary>
+    [Theory]
+    // The one that failed on the cluster.
+    [InlineData("::1/128", "::1")]
+    [InlineData("10.0.0.5/32", "10.0.0.5")]
+    // Shorter prefixes are kept — Stalwart recovers them from the mask's bit count.
+    [InlineData("10.0.0.0/8", "10.0.0.0/8")]
+    [InlineData("fc00::/8", "fc00::/8")]
+    // Already bare, and left alone.
+    [InlineData("10.240.3.59", "10.240.3.59")]
+    public void Plan_WritesAddressesTheWayStalwartKeepsThem(string value, string expected) =>
+        StalwartPlanBuilder.CanonicalIpOrMask(value).Should().Be(expected);
+
+    /// <summary>
+    /// And the source list says what is actually sent.
+    ///
+    /// <para>Normalising at emission makes the plan correct whatever is written here, which is worth
+    /// having for the gateway addresses resolved from the live cluster. But an entry in this list that
+    /// needed normalising would mean the source read as one thing and the server held another, and the
+    /// next person reading it would have no way to know which spelling the match key uses.</para>
+    /// </summary>
+    [Fact]
+    public void Plan_InternalRangesAreWrittenAsStalwartKeepsThem()
+    {
+        foreach (string range in StalwartPlanBuilder.InternalRanges)
+        {
+            StalwartPlanBuilder.CanonicalIpOrMask(range).Should().Be(range);
+        }
     }
 
     /// <summary>
@@ -160,6 +201,10 @@ public class StalwartMailTests
     [InlineData("fc00::/7", false)]
     [InlineData("10.0.0.0/7", false)]
     [InlineData("0.0.0.0/0", false)]
+    // Stalwart's is_valid() refuses the unspecified address however the mask is written.
+    [InlineData("0.0.0.0", false)]
+    [InlineData("0.0.0.0/8", false)]
+    [InlineData("::", false)]
     // Longer than the family allows.
     [InlineData("10.0.0.0/33", false)]
     // .NET reads this as 10.0.0.1 and Rust refuses it, so agreeing with .NET is not enough.
@@ -192,6 +237,64 @@ public class StalwartMailTests
 
         addresses.Should().Contain("10.240.3.59").And.Contain("10.240.3.60");
         addresses.Should().NotContain("0.0.0.0/0");
+    }
+
+    /// <summary>
+    /// The accounts are written before the allow-list, and that order is the actual protection.
+    ///
+    /// <para>apply stops at its first failed operation. The allow-list ran at #12 and the accounts at
+    /// #19, so each of the two allow-list failures on the live cluster — an unparseable prefix, then a
+    /// spelling that turned a match into a colliding create — also took down the administrator account,
+    /// every mailbox, the spam settings and the milter. A fresh install became a server nobody could
+    /// sign into.</para>
+    ///
+    /// <para>Auto-ban is the one thing here a server can run without. So it goes last, and this test is
+    /// what stops it drifting back up: whatever fails there now, the mail server is still usable.</para>
+    /// </summary>
+    [Fact]
+    public void Plan_WritesTheAccountsBeforeAnythingAboutBanning()
+    {
+        StalwartComponentConfig config = Config(c => c.AdminUsername = "admin");
+
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+        List<string> objects = ParsePlan(plan)
+            .Select(op => op.GetProperty("object").GetString()!)
+            .ToList();
+
+        objects.Should().Contain("Account").And.Contain("AllowedIp");
+        objects.IndexOf("Account").Should().BeLessThan(objects.IndexOf("AllowedIp"));
+
+        // And the endpoint policy stays last of all, for the reason it was put there: it is the one
+        // operation built from an expression the server parses at apply time.
+        objects.IndexOf("Http").Should().BeGreaterThan(objects.IndexOf("Account"));
+    }
+
+    /// <summary>
+    /// A gateway address already covered by a named range is not emitted twice.
+    ///
+    /// <para>The allow-list is upserted with <c>address</c> as the match key, so two entries sharing one
+    /// is ambiguous — the same trap the account loop avoids by promoting the administrator in place
+    /// instead of emitting it separately.</para>
+    /// </summary>
+    [Fact]
+    public void Plan_DoesNotListOneAddressTwice()
+    {
+        StalwartComponentConfig config = Config();
+
+        string plan = StalwartPlanBuilder.BuildApplyPlan(
+            config, [Domain(config.Id, "example.com")], [],
+            // The same address three ways: repeated, and once spelled with a full-length prefix that
+            // canonicalises onto the other two.
+            trustedProxyAddresses: ["10.240.3.59", "10.240.3.59", "10.240.3.59/32"]);
+
+        List<string> addresses = Operation(plan, "AllowedIp")!.Value.GetProperty("value")
+            .EnumerateObject()
+            .Select(p => p.Value.GetProperty("address").GetString()!)
+            .ToList();
+
+        addresses.Should().OnlyHaveUniqueItems();
+        addresses.Should().ContainSingle(a => a == "10.240.3.59");
     }
 
     private static List<YamlDocument> Parse(string manifest)
