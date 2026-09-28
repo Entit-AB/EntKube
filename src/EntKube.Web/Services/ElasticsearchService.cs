@@ -915,6 +915,189 @@ public class ElasticsearchService(
     /// <summary>How a one-shot Job ended, as far as a bounded wait could tell.</summary>
     public enum JobOutcome { Succeeded, Failed, StillRunning }
 
+    // ── Metrics ────────────────────────────────────────────────────────────────
+
+    /// <summary>The exporter image. Pinned, like every other image EntKube puts on a cluster.</summary>
+    public const string ExporterImage = "quay.io/prometheuscommunity/elasticsearch-exporter:v1.11.0";
+
+    /// <summary>The port the exporter serves /metrics on.</summary>
+    public const int ExporterPort = 9114;
+
+    /// <summary>What Prometheus wants on a ServiceMonitor before it will scrape it.</summary>
+    /// <param name="MatchLabels">
+    /// The labels from the live Prometheus resource's <c>serviceMonitorSelector</c>. Empty means it
+    /// selects every ServiceMonitor.
+    /// </param>
+    /// <param name="WatchesOtherNamespaces">
+    /// False when Prometheus has no <c>serviceMonitorNamespaceSelector</c> at all, which confines it
+    /// to its own namespace — where an Elasticsearch exporter will never be.
+    /// </param>
+    /// <param name="Found">Whether a Prometheus resource was found to read any of this from.</param>
+    public sealed record PrometheusSelector(
+        IReadOnlyDictionary<string, string> MatchLabels, bool WatchesOtherNamespaces, bool Found);
+
+    /// <summary>
+    /// Reads what the cluster's Prometheus will actually select, so the ServiceMonitor can be
+    /// labelled to match instead of being diagnosed afterwards.
+    ///
+    /// <para>This is the failure everyone meets once: kube-prometheus-stack ships
+    /// <c>serviceMonitorSelectorNilUsesHelmValues: true</c>, which turns into a selector of
+    /// <c>release: &lt;its release name&gt;</c>. A monitor created by anything else carries no such
+    /// label, is silently ignored, and the metrics simply never appear — with nothing anywhere
+    /// reporting an error.</para>
+    /// </summary>
+    public async Task<PrometheusSelector> ReadPrometheusSelectorAsync(
+        string kubeconfig, CancellationToken ct = default)
+    {
+        try
+        {
+            string json = await k8s.GetJsonAllNamespacesAsync(
+                "prometheuses.monitoring.coreos.com", kubeconfig, ct: ct);
+            return ParsePrometheusSelector(json);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "No Prometheus resource could be read; the ServiceMonitor will be left unlabelled");
+            return new PrometheusSelector(new Dictionary<string, string>(), true, false);
+        }
+    }
+
+    public static PrometheusSelector ParsePrometheusSelector(string json)
+    {
+        Dictionary<string, string> labels = [];
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("items", out JsonElement items)) return new(labels, true, false);
+
+            foreach (JsonElement prom in items.EnumerateArray())
+            {
+                if (!prom.TryGetProperty("spec", out JsonElement spec)) continue;
+
+                if (spec.TryGetProperty("serviceMonitorSelector", out JsonElement selector)
+                    && selector.TryGetProperty("matchLabels", out JsonElement matchLabels))
+                {
+                    foreach (JsonProperty label in matchLabels.EnumerateObject())
+                        labels[label.Name] = label.Value.GetString() ?? "";
+                }
+
+                // Absent (rather than empty) confines Prometheus to its own namespace.
+                bool watchesOthers = spec.TryGetProperty("serviceMonitorNamespaceSelector", out _);
+                return new PrometheusSelector(labels, watchesOthers, true);
+            }
+        }
+        catch { }
+        return new PrometheusSelector(labels, true, false);
+    }
+
+    /// <summary>
+    /// Puts an Elasticsearch exporter beside the cluster and wires it to Prometheus: a read-only
+    /// account of its own, a Deployment, a Service, and a ServiceMonitor labelled with whatever the
+    /// live Prometheus selects on.
+    /// </summary>
+    public async Task<string> EnableMonitoringAsync(
+        Guid tenantId, Guid clusterId, bool indexMetrics, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string password = GeneratePassword();
+
+        // The exporter gets its own account with cluster monitor and nothing else — the metrics it
+        // reads are all read-only operations, and this credential sits in a pod for years.
+        await k8s.ApplyManifestAsync(
+            BuildExporterCredentialsSecret(cluster, password), kubeconfig, ct);
+
+        string configMap = SnapshotConfigMapName(cluster, "exporter-user");
+        string jobName = JobName(cluster, "exporter-user");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildExporterUserScript(cluster)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap, cluster.ExporterSecretName), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        if (outcome == JobOutcome.Failed)
+            throw new InvalidOperationException(
+                "Creating the exporter's Elasticsearch account failed:\n" + Truncate(log, 1200));
+
+        PrometheusSelector selector = await ReadPrometheusSelectorAsync(kubeconfig, ct);
+
+        cluster.MonitoringEnabled = true;
+        cluster.MonitoringIndexMetrics = indexMetrics;
+        cluster.MonitoringSelectorNote = DescribeSelector(selector, cluster.Namespace);
+
+        await k8s.ApplyManifestAsync(BuildExporterDeployment(cluster), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(BuildExporterService(cluster), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(BuildExporterServiceMonitor(cluster, selector.MatchLabels), kubeconfig, ct);
+
+        await db.SaveChangesAsync(ct);
+        return cluster.MonitoringSelectorNote!;
+    }
+
+    /// <summary>Removes the exporter and its account.</summary>
+    public async Task DisableMonitoringAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+
+        foreach ((string kind, string name) in new[]
+        {
+            ("servicemonitor", cluster.ExporterName),
+            ("service", cluster.ExporterName),
+            ("deployment", cluster.ExporterName),
+            ("secret", cluster.ExporterSecretName)
+        })
+        {
+            try
+            {
+                await k8s.DeleteManifestAsync(kind, name, cluster.Namespace, kubeconfig, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "No {Kind}/{Name} to remove", kind, name);
+            }
+        }
+
+        cluster.MonitoringEnabled = false;
+        cluster.MonitoringSelectorNote = null;
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>Says plainly whether these metrics will be scraped, and what to do when they will not.</summary>
+    public static string DescribeSelector(PrometheusSelector selector, string ns)
+    {
+        if (!selector.Found)
+            return "No Prometheus was found on this cluster, so the ServiceMonitor is unlabelled. "
+                + "Nothing will scrape it until one is installed.";
+
+        List<string> notes = [];
+
+        notes.Add(selector.MatchLabels.Count == 0
+            ? "Prometheus selects every ServiceMonitor, so no labels were needed."
+            : "The ServiceMonitor was labelled "
+                + string.Join(", ", selector.MatchLabels.Select(kv => $"{kv.Key}={kv.Value}"))
+                + " to match what Prometheus selects on.");
+
+        if (!selector.WatchesOtherNamespaces)
+            notes.Add($"Prometheus has no serviceMonitorNamespaceSelector, so it only looks in its own namespace "
+                + $"and will not see anything in {ns}. Set serviceMonitorNamespaceSelector: {{}} on the "
+                + "kube-prometheus-stack values to let it look everywhere.");
+
+        return string.Join(" ", notes);
+    }
+
     // ── Version upgrades ───────────────────────────────────────────────────────
 
     /// <summary>
@@ -3074,6 +3257,199 @@ public class ElasticsearchService(
         return sb.ToString();
     }
 
+    /// <summary>The exporter account's password Secret.</summary>
+    public static string BuildExporterCredentialsSecret(ElasticsearchCluster c, string password)
+    {
+        StringBuilder sb = new();
+        sb.AppendLine("apiVersion: v1");
+        sb.AppendLine("kind: Secret");
+        sb.AppendLine("metadata:");
+        sb.AppendLine($"  name: {c.ExporterSecretName}");
+        sb.AppendLine($"  namespace: {c.Namespace}");
+        sb.AppendLine("  labels:");
+        sb.AppendLine("    entkube.io/managed: \"true\"");
+        sb.AppendLine($"    entkube.io/elasticsearch: {c.Name}");
+        sb.AppendLine("type: Opaque");
+        sb.AppendLine("data:");
+        sb.AppendLine($"  password: {Base64(password)}");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The exporter's Elasticsearch account: cluster <c>monitor</c>, and <c>monitor</c> on all
+    /// indices so index-level collectors work if they are turned on. Everything it reads is a
+    /// read-only operation, which is the whole of what this credential can ever do.
+    /// </summary>
+    public static string BuildExporterUserScript(ElasticsearchCluster c)
+    {
+        string roleBody = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["cluster"] = new[] { "monitor" },
+            ["indices"] = new[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["names"] = new[] { "*" },
+                    ["privileges"] = new[] { "monitor" },
+                    ["allow_restricted_indices"] = false
+                }
+            }
+        }, JsonOpts);
+
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine("cat > /tmp/role.json <<'ENTKUBE_EOF'");
+        sb.AppendLine(roleBody);
+        sb.AppendLine("ENTKUBE_EOF");
+        sb.AppendLine();
+        sb.AppendLine($"put \"/_security/role/entkube-exporter\" /tmp/role.json");
+        sb.AppendLine();
+        sb.AppendLine("umask 077");
+        sb.AppendLine("cat > /tmp/user.json <<ENTKUBE_EOF");
+        sb.AppendLine("{");
+        sb.AppendLine("  \"password\": \"${ES_USER_PASSWORD}\",");
+        sb.AppendLine("  \"roles\": [\"entkube-exporter\"],");
+        sb.AppendLine("  \"full_name\": \"EntKube metrics exporter\"");
+        sb.AppendLine("}");
+        sb.AppendLine("ENTKUBE_EOF");
+        sb.AppendLine();
+        sb.AppendLine($"put \"/_security/user/{c.ExporterUsername}\" /tmp/user.json");
+        sb.AppendLine("rm -f /tmp/user.json");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The exporter itself. It verifies the cluster's certificate against the operator's CA — it is
+    /// talking across the network like any other client — and is given explicit, small resources,
+    /// because a metrics sidecar that competes with the data nodes it measures is worse than none.
+    /// </summary>
+    public static string BuildExporterDeployment(ElasticsearchCluster c)
+    {
+        StringBuilder sb = new();
+        sb.AppendLine("apiVersion: apps/v1");
+        sb.AppendLine("kind: Deployment");
+        sb.AppendLine("metadata:");
+        sb.AppendLine($"  name: {c.ExporterName}");
+        sb.AppendLine($"  namespace: {c.Namespace}");
+        sb.AppendLine("  labels:");
+        sb.AppendLine("    entkube.io/managed: \"true\"");
+        sb.AppendLine($"    entkube.io/elasticsearch: {c.Name}");
+        sb.AppendLine($"    app.kubernetes.io/name: {c.ExporterName}");
+        sb.AppendLine("spec:");
+        sb.AppendLine("  replicas: 1");
+        sb.AppendLine("  selector:");
+        sb.AppendLine("    matchLabels:");
+        sb.AppendLine($"      app.kubernetes.io/name: {c.ExporterName}");
+        sb.AppendLine("  template:");
+        sb.AppendLine("    metadata:");
+        sb.AppendLine("      labels:");
+        sb.AppendLine($"        app.kubernetes.io/name: {c.ExporterName}");
+        sb.AppendLine("    spec:");
+        sb.AppendLine("      securityContext:");
+        sb.AppendLine("        runAsNonRoot: true");
+        sb.AppendLine("        runAsUser: 1000");
+        sb.AppendLine("        seccompProfile:");
+        sb.AppendLine("          type: RuntimeDefault");
+        sb.AppendLine("      volumes:");
+        sb.AppendLine("        - name: es-ca");
+        sb.AppendLine("          secret:");
+        sb.AppendLine($"            secretName: {c.HttpCertsSecretName}");
+        sb.AppendLine("      containers:");
+        sb.AppendLine("        - name: exporter");
+        sb.AppendLine($"          image: {ExporterImage}");
+        sb.AppendLine("          args:");
+        sb.AppendLine($"            - \"--es.uri={c.HttpEndpoint}\"");
+        sb.AppendLine("            - \"--es.ca=/es-ca/ca.crt\"");
+        sb.AppendLine("            - \"--es.all\"");
+        if (c.MonitoringIndexMetrics)
+        {
+            // Opt-in: every index becomes its own set of series, and the exporter's own README warns
+            // that this asks the master nodes for /_all/_stats on every scrape.
+            sb.AppendLine("            - \"--es.indices\"");
+            sb.AppendLine("            - \"--es.indices_settings\"");
+        }
+        sb.AppendLine("          env:");
+        sb.AppendLine("            - name: ES_USERNAME");
+        sb.AppendLine($"              value: {c.ExporterUsername}");
+        sb.AppendLine("            - name: ES_PASSWORD");
+        sb.AppendLine("              valueFrom:");
+        sb.AppendLine("                secretKeyRef:");
+        sb.AppendLine($"                  name: {c.ExporterSecretName}");
+        sb.AppendLine("                  key: password");
+        sb.AppendLine("          ports:");
+        sb.AppendLine($"            - name: metrics");
+        sb.AppendLine($"              containerPort: {ExporterPort}");
+        sb.AppendLine("          resources:");
+        sb.AppendLine("            requests:");
+        sb.AppendLine($"              cpu: {c.MonitoringCpuRequest}");
+        sb.AppendLine($"              memory: {c.MonitoringMemory}");
+        sb.AppendLine("            limits:");
+        sb.AppendLine($"              memory: {c.MonitoringMemory}");
+        sb.AppendLine("          securityContext:");
+        sb.AppendLine("            allowPrivilegeEscalation: false");
+        sb.AppendLine("            readOnlyRootFilesystem: true");
+        sb.AppendLine("            capabilities:");
+        sb.AppendLine("              drop: [\"ALL\"]");
+        sb.AppendLine("          volumeMounts:");
+        sb.AppendLine("            - name: es-ca");
+        sb.AppendLine("              mountPath: /es-ca");
+        sb.AppendLine("              readOnly: true");
+        return sb.ToString();
+    }
+
+    public static string BuildExporterService(ElasticsearchCluster c)
+    {
+        StringBuilder sb = new();
+        sb.AppendLine("apiVersion: v1");
+        sb.AppendLine("kind: Service");
+        sb.AppendLine("metadata:");
+        sb.AppendLine($"  name: {c.ExporterName}");
+        sb.AppendLine($"  namespace: {c.Namespace}");
+        sb.AppendLine("  labels:");
+        sb.AppendLine("    entkube.io/managed: \"true\"");
+        sb.AppendLine($"    app.kubernetes.io/name: {c.ExporterName}");
+        sb.AppendLine("spec:");
+        sb.AppendLine("  selector:");
+        sb.AppendLine($"    app.kubernetes.io/name: {c.ExporterName}");
+        sb.AppendLine("  ports:");
+        sb.AppendLine("    - name: metrics");
+        sb.AppendLine($"      port: {ExporterPort}");
+        sb.AppendLine($"      targetPort: {ExporterPort}");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The ServiceMonitor, carrying whatever labels the live Prometheus selects on. Stamping them
+    /// here is the difference between metrics that appear and metrics that silently do not: a
+    /// monitor Prometheus does not select is not an error anywhere, it is just never scraped.
+    /// </summary>
+    public static string BuildExporterServiceMonitor(
+        ElasticsearchCluster c, IReadOnlyDictionary<string, string> selectorLabels)
+    {
+        StringBuilder sb = new();
+        sb.AppendLine("apiVersion: monitoring.coreos.com/v1");
+        sb.AppendLine("kind: ServiceMonitor");
+        sb.AppendLine("metadata:");
+        sb.AppendLine($"  name: {c.ExporterName}");
+        sb.AppendLine($"  namespace: {c.Namespace}");
+        sb.AppendLine("  labels:");
+        sb.AppendLine("    entkube.io/managed: \"true\"");
+        sb.AppendLine($"    entkube.io/elasticsearch: {c.Name}");
+        foreach ((string key, string value) in selectorLabels.OrderBy(kv => kv.Key))
+            sb.AppendLine($"    {key}: \"{value}\"");
+        sb.AppendLine("spec:");
+        sb.AppendLine("  selector:");
+        sb.AppendLine("    matchLabels:");
+        sb.AppendLine($"      app.kubernetes.io/name: {c.ExporterName}");
+        sb.AppendLine("  endpoints:");
+        sb.AppendLine("    - port: metrics");
+        // The exporter asks Elasticsearch for everything on each scrape, so a short interval turns
+        // monitoring into load on the master nodes — its own README says as much.
+        sb.AppendLine("      interval: 60s");
+        sb.AppendLine("      scrapeTimeout: 30s");
+        return sb.ToString();
+    }
+
     /// <summary>The Secret written into the application's own namespace.</summary>
     public static string BuildBindingSecretManifest(
         string secretName, string ns, IReadOnlyDictionary<string, string> data)
@@ -3588,6 +3964,11 @@ public class ElasticsearchService(
         yield return ("configmap", SnapshotConfigMapName(c, "list"));
         yield return ("configmap", SnapshotConfigMapName(c, "restore"));
         yield return ("secret", c.SnapshotCredentialsSecretName);
+        yield return ("secret", c.ExporterSecretName);
+        yield return ("configmap", SnapshotConfigMapName(c, "exporter-user"));
+        yield return ("servicemonitor", c.ExporterName);
+        yield return ("service", c.ExporterName);
+        yield return ("deployment", c.ExporterName);
     }
 
     /// <summary>The password Secret and scripts of each application user on this cluster.</summary>

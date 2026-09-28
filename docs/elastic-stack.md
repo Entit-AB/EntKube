@@ -14,6 +14,7 @@ managed under **Services › Search**.
 | Lifecycle policies | ILM policies + composable index templates, applied by a Job inside the cluster |
 | Snapshots | S3 repository + SLM policy, registered by a Job; restores run the same way |
 | Application users | Native-realm users + per-user roles, created by a Job; bound into an app's namespace as a Secret |
+| Metrics | Community Elasticsearch exporter + Service + ServiceMonitor, labelled to match the live Prometheus |
 
 The operator on its own starts nothing. Installing it and stopping there leaves a working controller
 with no clusters, which is why its catalog entry points at Services › Search.
@@ -255,6 +256,34 @@ Elasticsearch and Kibana are applied together at the new version. ECK rolls the 
 one at a time with the masters last, and holds Kibana at its current version until the cluster can
 serve it. A single-node cluster is told plainly that it will be down for the restart rather than
 rolling through it.
+
+## Metrics in Prometheus
+
+The cluster's own metrics are visible in Kibana; **Export to Prometheus** also puts them in the
+Prometheus that scrapes everything else. It deploys the community Elasticsearch exporter beside the
+cluster with:
+
+- **its own Elasticsearch account**, holding cluster `monitor` and `monitor` on all indices and
+  nothing else — every metric it reads is a read-only operation, and this credential sits in a pod
+  for years;
+- **the operator's CA mounted**, because unlike the in-pod reads this one crosses the network;
+- **explicit small resources**, since a metrics sidecar that competes with the data nodes it
+  measures is worse than no metrics at all.
+
+**Per-index metrics are opt-in.** Turning them on makes every index its own set of series and makes
+each scrape ask the master nodes for all of their stats — the exporter's own README warns about it.
+On a cluster that rolls an index over daily, that is unbounded growth in Prometheus.
+
+### The label that decides whether any of this works
+
+kube-prometheus-stack ships `serviceMonitorSelectorNilUsesHelmValues: true`, which becomes a
+selector of `release: <its release name>`. A ServiceMonitor created by anything else carries no such
+label, is silently ignored, and the metrics simply never appear — with no error anywhere.
+
+So the ServiceMonitor is not written blind: the live Prometheus resource is read first and the
+monitor is stamped with exactly the labels it selects on. The result is reported back in the UI —
+including the case where Prometheus has no `serviceMonitorNamespaceSelector` at all and therefore
+only looks in its own namespace, which no Elasticsearch namespace will ever satisfy.
 
 ## Publishing Kibana
 

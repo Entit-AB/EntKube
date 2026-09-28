@@ -197,6 +197,28 @@ public class ElasticsearchCluster
     /// </summary>
     public DateTime? InsightCheckedAt { get; set; }
 
+    // ── Metrics (Prometheus exporter) ──────────────────────────────────────────
+
+    /// <summary>
+    /// Whether an Elasticsearch exporter runs beside the cluster, so its metrics land in the
+    /// Prometheus already scraping everything else rather than only in Kibana.
+    /// </summary>
+    public bool MonitoringEnabled { get; set; }
+
+    /// <summary>
+    /// Also export per-index metrics. Off by default and deliberately so: every index becomes its
+    /// own set of series, and a cluster that rolls an index over daily turns that into unbounded
+    /// growth in Prometheus rather than in Elasticsearch.
+    /// </summary>
+    public bool MonitoringIndexMetrics { get; set; }
+
+    public string MonitoringCpuRequest { get; set; } = "50m";
+
+    public string MonitoringMemory { get; set; } = "128Mi";
+
+    /// <summary>What the ServiceMonitor was last labelled with, and whether Prometheus accepted it.</summary>
+    public string? MonitoringSelectorNote { get; set; }
+
     // ── State ──────────────────────────────────────────────────────────────────
 
     public ElasticsearchClusterStatus Status { get; set; } = ElasticsearchClusterStatus.Creating;
@@ -230,6 +252,15 @@ public class ElasticsearchCluster
 
     /// <summary>Secret carrying the public CA of the HTTP layer (key: "ca.crt").</summary>
     public string HttpCertsSecretName => $"{Name}-es-http-certs-public";
+
+    /// <summary>The exporter's own Elasticsearch account — read-only, and nothing to do with the apps'.</summary>
+    public string ExporterUsername => $"{Name}-exporter";
+
+    /// <summary>Secret holding the exporter account's password.</summary>
+    public string ExporterSecretName => $"{Name}-es-exporter";
+
+    /// <summary>Deployment, Service and ServiceMonitor all share this name.</summary>
+    public string ExporterName => $"{Name}-es-exporter";
 
     /// <summary>The Kibana CR shares the Elasticsearch name; ECK suffixes its Service itself.</summary>
     public string KibanaServiceName => $"{Name}-kb-http";

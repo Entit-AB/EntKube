@@ -1964,4 +1964,170 @@ public class ElasticsearchServiceTests : IDisposable
         stored.PasswordSetAt.Should().Be(passwordSet);
         applied.Should().NotContain(m => m.Contains("kind: Secret"));
     }
+
+    // ──────── Metrics ────────
+
+    [Fact]
+    public void TheExporterAccountCanOnlyRead()
+    {
+        string script = ElasticsearchService.BuildExporterUserScript(SampleCluster());
+
+        script.Should().Contain("_security/role/entkube-exporter");
+        script.Should().Contain("_security/user/search-exporter");
+        script.Should().Contain("\"monitor\"");
+        // This credential sits in a pod for years — nothing it holds may write.
+        script.Should().NotContain("\"all\"");
+        script.Should().NotContain("\"write\"");
+        script.Should().NotContain("manage");
+    }
+
+    [Fact]
+    public void TheExporterVerifiesTheClusterCertificate_AndIsBounded()
+    {
+        string manifest = ElasticsearchService.BuildExporterDeployment(SampleCluster());
+        YamlMappingNode root = Parse(manifest);
+
+        YamlMappingNode container = (YamlMappingNode)((YamlSequenceNode)
+            ((YamlMappingNode)((YamlMappingNode)((YamlMappingNode)root["spec"])["template"])["spec"])["containers"])[0];
+
+        string[] args = [.. ((YamlSequenceNode)container["args"]).Children.Cast<YamlScalarNode>().Select(a => a.Value!)];
+        args.Should().Contain("--es.ca=/es-ca/ca.crt");
+        args.Should().Contain("--es.uri=https://search-es-http.search.svc:9200");
+
+        // A metrics sidecar that competes with the data nodes it measures is worse than none.
+        YamlMappingNode resources = (YamlMappingNode)container["resources"];
+        ((YamlScalarNode)((YamlMappingNode)resources["requests"])["memory"]).Value.Should().Be("128Mi");
+        ((YamlScalarNode)((YamlMappingNode)resources["limits"])["memory"]).Value.Should().Be("128Mi");
+
+        // The password comes from the Secret, never from an arg or a plain value.
+        string manifestText = manifest;
+        manifestText.Should().Contain("secretKeyRef");
+        manifestText.Should().Contain("name: search-es-exporter");
+    }
+
+    [Fact]
+    public void PerIndexMetricsAreOptIn()
+    {
+        ElasticsearchCluster off = SampleCluster();
+        ElasticsearchCluster on = SampleCluster();
+        on.MonitoringIndexMetrics = true;
+
+        // Each scrape would otherwise ask the masters for every index's stats, and every index
+        // becomes its own set of series in Prometheus.
+        ElasticsearchService.BuildExporterDeployment(off).Should().NotContain("--es.indices");
+        ElasticsearchService.BuildExporterDeployment(on).Should().Contain("--es.indices");
+    }
+
+    [Fact]
+    public void TheServiceMonitorCarriesWhateverPrometheusSelectsOn()
+    {
+        string manifest = ElasticsearchService.BuildExporterServiceMonitor(
+            SampleCluster(), new Dictionary<string, string> { ["release"] = "kube-prometheus-stack" });
+
+        YamlMappingNode labels = (YamlMappingNode)((YamlMappingNode)Parse(manifest)["metadata"])["labels"];
+
+        // A monitor Prometheus does not select is not an error anywhere — it is simply never
+        // scraped, and the metrics never appear.
+        ((YamlScalarNode)labels["release"]).Value.Should().Be("kube-prometheus-stack");
+    }
+
+    [Fact]
+    public void ThePrometheusSelectorIsReadFromTheLiveResource()
+    {
+        ElasticsearchService.PrometheusSelector selector = ElasticsearchService.ParsePrometheusSelector("""
+            {"items":[{"spec":{
+              "serviceMonitorSelector":{"matchLabels":{"release":"kps"}},
+              "serviceMonitorNamespaceSelector":{}
+            }}]}
+            """);
+
+        selector.Found.Should().BeTrue();
+        selector.MatchLabels.Should().ContainKey("release").WhoseValue.Should().Be("kps");
+        selector.WatchesOtherNamespaces.Should().BeTrue();
+    }
+
+    [Fact]
+    public void APrometheusConfinedToItsOwnNamespaceIsCalledOut()
+    {
+        // An absent (rather than empty) namespace selector confines Prometheus to its own
+        // namespace, where an Elasticsearch exporter will never be.
+        ElasticsearchService.PrometheusSelector selector = ElasticsearchService.ParsePrometheusSelector("""
+            {"items":[{"spec":{"serviceMonitorSelector":{"matchLabels":{"release":"kps"}}}}]}
+            """);
+
+        selector.WatchesOtherNamespaces.Should().BeFalse();
+
+        string note = ElasticsearchService.DescribeSelector(selector, "search");
+        note.Should().Contain("only looks in its own namespace");
+        note.Should().Contain("serviceMonitorNamespaceSelector");
+    }
+
+    [Fact]
+    public void NoPrometheusAtAllIsSaidPlainly()
+    {
+        ElasticsearchService.PrometheusSelector selector =
+            ElasticsearchService.ParsePrometheusSelector("""{"items":[]}""");
+
+        selector.Found.Should().BeFalse();
+        ElasticsearchService.DescribeSelector(selector, "search")
+            .Should().Contain("Nothing will scrape it");
+    }
+
+    [Fact]
+    public void APrometheusThatSelectsEverythingNeedsNoLabels()
+    {
+        ElasticsearchService.PrometheusSelector selector = ElasticsearchService.ParsePrometheusSelector("""
+            {"items":[{"spec":{"serviceMonitorSelector":{},"serviceMonitorNamespaceSelector":{}}}]}
+            """);
+
+        selector.MatchLabels.Should().BeEmpty();
+        ElasticsearchService.DescribeSelector(selector, "search").Should().Contain("selects every ServiceMonitor");
+    }
+
+    [Fact]
+    public async Task TurningOnMetricsAppliesTheAccount_TheExporterAndTheMonitor()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+
+        k8s.Setup(x => x.GetJsonAllNamespacesAsync("prometheuses.monitoring.coreos.com",
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""{"items":[{"spec":{"serviceMonitorSelector":{"matchLabels":{"release":"kps"}},"serviceMonitorNamespaceSelector":{}}}]}""");
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        string note = await sut.EnableMonitoringAsync(tenantId, c.Id, indexMetrics: false);
+
+        applied.Should().Contain(m => m.Contains("kind: Deployment"));
+        applied.Should().Contain(m => m.Contains("kind: ServiceMonitor") && m.Contains("release: \"kps\""));
+        note.Should().Contain("release=kps");
+
+        ElasticsearchCluster stored = await db.ElasticsearchClusters.AsNoTracking().SingleAsync();
+        stored.MonitoringEnabled.Should().BeTrue();
+        stored.MonitoringIndexMetrics.Should().BeFalse();
+    }
+
+    [Fact]
+    public async Task TurningOffMetricsRemovesEverythingItPutThere()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        c.MonitoringEnabled = true;
+        await db.SaveChangesAsync();
+
+        List<string> deleted = [];
+        k8s.Setup(x => x.DeleteManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, string, string, CancellationToken>((kind, name, _, _, _) => deleted.Add($"{kind}/{name}"))
+            .Returns(Task.CompletedTask);
+
+        await sut.DisableMonitoringAsync(tenantId, c.Id);
+
+        deleted.Should().BeEquivalentTo(
+            "servicemonitor/search-es-exporter", "service/search-es-exporter",
+            "deployment/search-es-exporter", "secret/search-es-exporter");
+        (await db.ElasticsearchClusters.AsNoTracking().SingleAsync()).MonitoringEnabled.Should().BeFalse();
+    }
 }

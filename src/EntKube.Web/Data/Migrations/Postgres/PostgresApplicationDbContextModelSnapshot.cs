@@ -3334,6 +3334,23 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
 
+                    b.Property<string>("MonitoringCpuRequest")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<bool>("MonitoringEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<bool>("MonitoringIndexMetrics")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("MonitoringMemory")
+                        .IsRequired()
+                        .HasColumnType("text");
+
+                    b.Property<string>("MonitoringSelectorNote")
+                        .HasColumnType("text");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(36)

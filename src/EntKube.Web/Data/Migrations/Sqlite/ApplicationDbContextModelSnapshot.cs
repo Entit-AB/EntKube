@@ -3329,6 +3329,23 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(20)
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("MonitoringCpuRequest")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("MonitoringEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("MonitoringIndexMetrics")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("MonitoringMemory")
+                        .IsRequired()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("MonitoringSelectorNote")
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(36)

@@ -1061,6 +1061,61 @@
                             }
                         </div>
 
+                        @* ── Metrics ── *@
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-graph-up me-1"></i>Metrics</strong>
+                                @if (cluster.MonitoringEnabled)
+                                {
+                                    <span class="badge bg-success-subtle text-success border border-success-subtle ms-2">exporting</span>
+                                    <button class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2"
+                                            @onclick="() => EnableMonitoringAsync(cluster, cluster.MonitoringIndexMetrics)"
+                                            disabled="@monitoringBusy">
+                                        Re-apply
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-danger ms-2 py-0 px-2"
+                                            @onclick="() => DisableMonitoringAsync(cluster)" disabled="@monitoringBusy">
+                                        Turn off
+                                    </button>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                            @onclick="() => EnableMonitoringAsync(cluster, false)" disabled="@monitoringBusy">
+                                        @if (monitoringBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        Export to Prometheus
+                                    </button>
+                                }
+                            </div>
+
+                            @if (cluster.MonitoringEnabled)
+                            {
+                                <div class="form-check mb-1">
+                                    <input class="form-check-input" type="checkbox" id="indexMetrics"
+                                           checked="@cluster.MonitoringIndexMetrics" disabled="@monitoringBusy"
+                                           @onchange="e => EnableMonitoringAsync(cluster, (bool)(e.Value ?? false))" />
+                                    <label class="form-check-label small" for="indexMetrics">
+                                        Per-index metrics
+                                        <span class="text-muted">— every index becomes its own set of series, and each scrape asks
+                                        the masters for all of them. Leave off on a cluster that rolls indices over daily.</span>
+                                    </label>
+                                </div>
+                                @if (cluster.MonitoringSelectorNote is not null)
+                                {
+                                    <div class="alert @(cluster.MonitoringSelectorNote.Contains("Nothing will scrape") || cluster.MonitoringSelectorNote.Contains("will not see") ? "alert-warning" : "alert-secondary") py-1 px-2 small mb-0">
+                                        @cluster.MonitoringSelectorNote
+                                    </div>
+                                }
+                            }
+                            else
+                            {
+                                <p class="text-muted small mb-0">
+                                    Not exported. The cluster's own metrics are visible in Kibana; this puts them in the
+                                    Prometheus that scrapes everything else, with an account that can only read them.
+                                </p>
+                            }
+                        </div>
+
                         @* ── Version upgrade ── *@
                         <div class="mb-3 border-top pt-3">
                             <div class="d-flex align-items-center mb-2">
@@ -1227,6 +1282,8 @@
         EnvironmentId is Guid envId
             ? [.. allDeployments.Where(d => d.EnvironmentId == envId)]
             : allDeployments;
+
+    private bool monitoringBusy;
 
     // Upgrade
     private Guid? upgradeClusterId;
@@ -1944,6 +2001,34 @@
         }
         catch (Exception ex) { Toasts.Error(ex.Message); }
         finally { loadingInsight = false; }
+    }
+
+    // ── Metrics ───────────────────────────────────────────────────────────────
+
+    private async Task EnableMonitoringAsync(ElasticsearchCluster cluster, bool indexMetrics)
+    {
+        monitoringBusy = true;
+        try
+        {
+            string note = await Search.EnableMonitoringAsync(TenantId, cluster.Id, indexMetrics);
+            await LoadAsync();
+            Toasts.Success("Exporter running. " + note);
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { monitoringBusy = false; }
+    }
+
+    private async Task DisableMonitoringAsync(ElasticsearchCluster cluster)
+    {
+        monitoringBusy = true;
+        try
+        {
+            await Search.DisableMonitoringAsync(TenantId, cluster.Id);
+            await LoadAsync();
+            Toasts.Success("Exporter removed.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { monitoringBusy = false; }
     }
 
     // ── Upgrade ───────────────────────────────────────────────────────────────
