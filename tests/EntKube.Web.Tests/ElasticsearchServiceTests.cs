@@ -2282,4 +2282,203 @@ public class ElasticsearchServiceTests : IDisposable
         recorded.PerformedBy.Should().Be("nils");
         recorded.Details.Should().Contain("orders");
     }
+
+    // ──────── Cross-cluster search ────────
+
+    private async Task<(ElasticsearchCluster Local, ElasticsearchCluster Remote)> SeedTwoClustersAsync(
+        string localVersion = "9.5.0", string remoteVersion = "9.5.0", bool sameK8s = true)
+    {
+        await SeedClusterAsync();
+
+        ElasticsearchCluster local = SampleCluster();
+        local.Name = "search";
+        local.TenantId = tenantId;
+        local.KubernetesClusterId = k8sClusterId;
+        local.Version = localVersion;
+
+        Guid otherK8s = k8sClusterId;
+        if (!sameK8s)
+        {
+            Guid envId = await db.Set<Data.Environment>().Select(e => e.Id).FirstAsync();
+            otherK8s = Guid.NewGuid();
+            db.KubernetesClusters.Add(new KubernetesCluster
+            {
+                Id = otherK8s, TenantId = tenantId, EnvironmentId = envId,
+                Name = "other", ApiServerUrl = "https://other.example.com"
+            });
+        }
+
+        ElasticsearchCluster remote = SampleCluster();
+        remote.Name = "archive";
+        remote.Namespace = "archive";
+        remote.TenantId = tenantId;
+        remote.KubernetesClusterId = otherK8s;
+        remote.Version = remoteVersion;
+
+        db.ElasticsearchClusters.AddRange(local, remote);
+        await db.SaveChangesAsync();
+        return (local, remote);
+    }
+
+    [Fact]
+    public void AClusterWithNoLinksRendersNoRemoteSection()
+    {
+        string manifest = ElasticsearchService.BuildElasticsearchManifest(SampleCluster());
+
+        manifest.Should().NotContain("remoteClusters");
+        manifest.Should().NotContain("remoteClusterServer");
+    }
+
+    [Fact]
+    public void ALinkedClusterNamesTheRemoteAndScopesTheApiKey()
+    {
+        string manifest = ElasticsearchService.BuildElasticsearchManifest(
+            SampleCluster(), s3: null,
+            remotes: [new ElasticsearchRemoteRef("prod", "archive", "archive", ["logs-*", "metrics-*"])]);
+
+        YamlMappingNode remote = (YamlMappingNode)((YamlSequenceNode)
+            ((YamlMappingNode)Parse(manifest)["spec"])["remoteClusters"])[0];
+
+        ((YamlScalarNode)remote["name"]).Value.Should().Be("prod");
+        ((YamlScalarNode)((YamlMappingNode)remote["elasticsearchRef"])["namespace"]).Value.Should().Be("archive");
+
+        // The key grants search on exactly these and nothing else; ECK creates and rotates it.
+        YamlSequenceNode names = (YamlSequenceNode)((YamlMappingNode)((YamlMappingNode)((YamlMappingNode)
+            remote["apiKey"])["access"])["search"])["names"];
+        names.Children.Cast<YamlScalarNode>().Select(n => n.Value).Should().Equal("logs-*", "metrics-*");
+    }
+
+    [Fact]
+    public void AClusterSomebodySearchesOpensItsRemoteClusterServer()
+    {
+        string manifest = ElasticsearchService.BuildElasticsearchManifest(
+            SampleCluster(), s3: null, remotes: null, serveAsRemote: true);
+
+        YamlMappingNode spec = (YamlMappingNode)Parse(manifest)["spec"];
+        ((YamlScalarNode)((YamlMappingNode)spec["remoteClusterServer"])["enabled"]).Value.Should().Be("true");
+    }
+
+    [Theory]
+    [InlineData("8.14.0", true)]
+    [InlineData("8.13.4", false)]
+    [InlineData("9.0.0", true)]
+    [InlineData("7.17.0", false)]
+    public void CrossClusterApiKeysNeedAtLeast814(string version, bool supported)
+    {
+        ElasticsearchService.IsNewEnoughForRemoteClusters(version).Should().Be(supported);
+    }
+
+    [Fact]
+    public async Task AClusterCannotSearchItself()
+    {
+        (ElasticsearchCluster local, _) = await SeedTwoClustersAsync();
+
+        Func<Task> act = () => sut.CreateRemoteLinkAsync(tenantId, local.Id, local.Id, "self", "*");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*already can, locally*");
+    }
+
+    [Fact]
+    public async Task ClustersOnDifferentKubernetesClustersCannotBeLinkedHere()
+    {
+        (ElasticsearchCluster local, ElasticsearchCluster remote) = await SeedTwoClustersAsync(sameK8s: false);
+
+        // ECK can only wire a connection between clusters it manages together.
+        Func<Task> act = () => sut.CreateRemoteLinkAsync(tenantId, local.Id, remote.Id, "prod", "*");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*different Kubernetes clusters*");
+    }
+
+    [Fact]
+    public async Task AClusterTooOldForCrossClusterApiKeysIsRefused()
+    {
+        (ElasticsearchCluster local, ElasticsearchCluster remote) = await SeedTwoClustersAsync(remoteVersion: "8.12.0");
+
+        Func<Task> act = () => sut.CreateRemoteLinkAsync(tenantId, local.Id, remote.Id, "prod", "*");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*8.14 or later*");
+    }
+
+    [Theory]
+    [InlineData("Prod Cluster")]
+    [InlineData("prod:cluster")]
+    [InlineData("")]
+    public async Task AliasesThatWouldNotWorkInAQueryAreRefused(string alias)
+    {
+        (ElasticsearchCluster local, ElasticsearchCluster remote) = await SeedTwoClustersAsync();
+
+        Func<Task> act = () => sut.CreateRemoteLinkAsync(tenantId, local.Id, remote.Id, alias, "*");
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task LinkingAppliesTheSearchedClusterFirst()
+    {
+        (ElasticsearchCluster local, ElasticsearchCluster remote) = await SeedTwoClustersAsync();
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        string note = await sut.CreateRemoteLinkAsync(tenantId, local.Id, remote.Id, "prod", "logs-*");
+
+        // The local cluster's connection has nothing to land on until the remote server is open.
+        applied.Should().HaveCount(2);
+        applied[0].Should().Contain("name: archive").And.Contain("remoteClusterServer");
+        applied[1].Should().Contain("name: search").And.Contain("remoteClusters");
+        note.Should().Contain("restarting");
+
+        ElasticsearchRemoteLink stored = await db.ElasticsearchRemoteLinks.AsNoTracking().SingleAsync();
+        stored.LastAppliedAt.Should().NotBeNull();
+        stored.SearchIndexPatterns.Should().Be("logs-*");
+    }
+
+    [Fact]
+    public async Task TwoRemotesCannotShareAnAliasOnOneCluster()
+    {
+        (ElasticsearchCluster local, ElasticsearchCluster remote) = await SeedTwoClustersAsync();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        await sut.CreateRemoteLinkAsync(tenantId, local.Id, remote.Id, "prod", "*");
+
+        Func<Task> act = () => sut.CreateRemoteLinkAsync(tenantId, local.Id, remote.Id, "prod", "*");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*already searches something*");
+    }
+
+    [Fact]
+    public async Task RemovingALinkReappliesTheSearchingClusterWithoutIt()
+    {
+        (ElasticsearchCluster local, ElasticsearchCluster remote) = await SeedTwoClustersAsync();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        await sut.CreateRemoteLinkAsync(tenantId, local.Id, remote.Id, "prod", "*");
+        ElasticsearchRemoteLink link = await db.ElasticsearchRemoteLinks.AsNoTracking().SingleAsync();
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        await sut.DeleteRemoteLinkAsync(tenantId, link.Id);
+
+        applied.Should().ContainSingle();
+        applied[0].Should().NotContain("remoteClusters");
+        (await db.ElasticsearchRemoteLinks.CountAsync()).Should().Be(0);
+    }
+
+    [Fact]
+    public async Task OnlyClustersThatCouldActuallyBeLinkedAreOffered()
+    {
+        (ElasticsearchCluster local, _) = await SeedTwoClustersAsync(remoteVersion: "8.12.0");
+
+        List<ElasticsearchCluster> candidates = await sut.GetRemoteCandidatesAsync(tenantId, local.Id);
+
+        // Offering a cluster the link would then refuse is worse than not offering it.
+        candidates.Should().BeEmpty();
+    }
 }

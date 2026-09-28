@@ -120,6 +120,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<ElasticsearchUser> ElasticsearchUsers => Set<ElasticsearchUser>();
     public DbSet<ElasticsearchBinding> ElasticsearchBindings => Set<ElasticsearchBinding>();
     public DbSet<ElasticsearchKibanaSpace> ElasticsearchKibanaSpaces => Set<ElasticsearchKibanaSpace>();
+    public DbSet<ElasticsearchRemoteLink> ElasticsearchRemoteLinks => Set<ElasticsearchRemoteLink>();
     public DbSet<GitRepository> GitRepositories => Set<GitRepository>();
     public DbSet<GitKnownHost> GitKnownHosts => Set<GitKnownHost>();
     public DbSet<CustomerGitRepoPolicy> CustomerGitRepoPolicies => Set<CustomerGitRepoPolicy>();
@@ -2367,6 +2368,31 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithOne(s => s.ElasticsearchCluster)
                 .HasForeignKey(s => s.ElasticsearchClusterId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ElasticsearchRemoteLink>(entity =>
+        {
+            entity.HasKey(l => l.Id);
+            entity.Property(l => l.Alias).HasMaxLength(63).IsRequired();
+            entity.Property(l => l.SearchIndexPatterns).HasMaxLength(500).IsRequired();
+            entity.Property(l => l.LastError).HasMaxLength(2000);
+
+            // An alias is how a query names the remote, so it has to be unique on the cluster doing
+            // the searching — not globally.
+            entity.HasIndex(l => new { l.LocalClusterId, l.Alias }).IsUnique();
+
+            entity.HasOne(l => l.LocalCluster)
+                .WithMany()
+                .HasForeignKey(l => l.LocalClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict, not cascade: two cascade paths into the same table is what SQL Server
+            // refuses outright, and deleting the cluster whose data is being searched should be a
+            // deliberate act with the links removed first anyway.
+            entity.HasOne(l => l.RemoteCluster)
+                .WithMany()
+                .HasForeignKey(l => l.RemoteClusterId)
+                .OnDelete(DeleteBehavior.Restrict);
         });
 
         builder.Entity<ElasticsearchKibanaSpace>(entity =>

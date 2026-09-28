@@ -16,6 +16,7 @@ managed under **Services › Search**.
 | Application users | Native-realm users + per-user roles, created by a Job; bound into an app's namespace as a Secret |
 | Metrics | Community Elasticsearch exporter + Service + ServiceMonitor, labelled to match the live Prometheus |
 | Kibana spaces | Created through Kibana's API by a Job; accounts are scoped to one by privilege |
+| Cross-cluster search | `remoteClusters` + `remoteClusterServer` on the CRs, with an ECK-managed API key |
 
 The operator on its own starts nothing. Installing it and stopping there leaves a working controller
 with no clusters, which is why its catalog entry points at Services › Search.
@@ -301,6 +302,32 @@ So the ServiceMonitor is not written blind: the live Prometheus resource is read
 monitor is stamped with exactly the labels it selects on. The result is reported back in the UI —
 including the case where Prometheus has no `serviceMonitorNamespaceSelector` at all and therefore
 only looks in its own namespace, which no Elasticsearch namespace will ever satisfy.
+
+## Searching another cluster
+
+A cluster can be given a one-way link to another one, so a single Kibana answers a question that
+spans both — `prod:logs-*` beside `staging:logs-*` — without either side's data being copied. The
+alternative is one cluster holding everyone's data, which is the arrangement every isolation
+decision in this feature exists to avoid.
+
+ECK wires this declaratively: the cluster being searched opens its **remote cluster server**, and
+the searching one gains the connection plus a **cross-cluster API key scoped to the index patterns
+you name**. ECK creates and rotates that key, so nothing here holds a credential for it.
+
+- **Replication is not offered.** Cross-cluster *search* is free; cross-cluster *replication* is a
+  Platinum feature of Elasticsearch.
+- **Both clusters must be on 8.14 or later** — that is when cross-cluster API keys arrived. Clusters
+  that are not are left out of the picker rather than offered and then refused.
+- **Both must be on the same Kubernetes cluster.** ECK can only wire clusters it manages together;
+  across Kubernetes clusters the addresses and the trust have to be arranged by hand, and EntKube
+  does not pretend otherwise.
+- **Opening the remote cluster server restarts the searched cluster's nodes**, one at a time, because
+  it is a transport change. You are told that before the link is created, not after the restarts
+  start.
+
+Removing a link re-applies the searching cluster without it and deliberately leaves the remote
+cluster server open: closing it is a second rolling restart, and an open server nobody holds a key
+for reaches nothing.
 
 ## Publishing Kibana
 

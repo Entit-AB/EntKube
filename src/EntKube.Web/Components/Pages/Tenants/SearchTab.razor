@@ -1216,6 +1216,104 @@
                             }
                         </div>
 
+                        @* ── Cross-cluster search ── *@
+                        @{ List<ElasticsearchRemoteLink> remotes = RemotesFor(cluster); }
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-diagram-3 me-1"></i>Searches other clusters</strong>
+                                <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                        @onclick="() => ShowAddRemoteAsync(cluster)">
+                                    <i class="bi bi-plus-lg me-1"></i>Link a cluster
+                                </button>
+                            </div>
+
+                            @if (addRemoteClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    @if (remoteCandidates.Count == 0)
+                                    {
+                                        <p class="text-muted small mb-0">
+                                            No other Elasticsearch cluster on the same Kubernetes cluster is new enough to link.
+                                            Cross-cluster API keys need 8.14 or later on both, and ECK can only wire clusters it
+                                            manages together.
+                                        </p>
+                                    }
+                                    else
+                                    {
+                                        <div class="row g-2">
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Cluster to search</label>
+                                                <select class="form-select form-select-sm" @bind="remoteClusterId">
+                                                    <option value="@Guid.Empty">Select cluster...</option>
+                                                    @foreach (ElasticsearchCluster candidate in remoteCandidates)
+                                                    {
+                                                        <option value="@candidate.Id">@candidate.Name (@candidate.Namespace)</option>
+                                                    }
+                                                </select>
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Alias</label>
+                                                <input class="form-control form-control-sm" @bind="remoteAlias" placeholder="prod" />
+                                                <div class="form-text small">Queried as <code>alias:logs-*</code>. Fixed once created.</div>
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Indices it may search</label>
+                                                <input class="form-control form-control-sm" @bind="remotePatterns" placeholder="logs-*" />
+                                            </div>
+                                            <div class="col-md-2 d-flex align-items-end gap-1">
+                                                <button class="btn btn-sm btn-primary" @onclick="() => AddRemoteAsync(cluster)"
+                                                        disabled="@(savingRemote || remoteClusterId == Guid.Empty || string.IsNullOrWhiteSpace(remoteAlias))">
+                                                    @if (savingRemote) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Link
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => addRemoteClusterId = null">Cancel</button>
+                                            </div>
+                                        </div>
+                                        <div class="alert alert-warning py-1 px-2 small mt-2 mb-0">
+                                            The cluster being searched has to open its remote cluster server, which is a transport
+                                            change — ECK will restart its nodes one at a time.
+                                        </div>
+                                    }
+                                    @if (remoteError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@remoteError</div> }
+                                </div></div>
+                            }
+
+                            @if (remotes.Count == 0)
+                            {
+                                <p class="text-muted small mb-0">
+                                    Searches only its own indices. Linking another cluster lets one Kibana answer a question that
+                                    spans both, without copying the data into either.
+                                </p>
+                            }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>Alias</th><th>Cluster</th><th>Indices</th><th>Applied</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchRemoteLink link in remotes)
+                                        {
+                                            <tr>
+                                                <td><code>@link.Alias:</code></td>
+                                                <td>@link.RemoteCluster.Name <span class="text-muted">· @link.RemoteCluster.Namespace</span></td>
+                                                <td><code>@link.SearchIndexPatterns</code></td>
+                                                <td class="text-muted">
+                                                    @if (link.LastError is not null)
+                                                    {
+                                                        <span class="text-danger" title="@link.LastError">failed</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        @(link.LastAppliedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                                    }
+                                                </td>
+                                                <td>@RenderDeleteCell($"Remove the \"{link.Alias}\" link? Saved searches and dashboards that query {link.Alias}: stop returning anything from it.", "Remove link", () => RemoveRemoteAsync(cluster.Id, link.Id, link.Alias))</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
                         @* ── Version upgrade ── *@
                         <div class="mb-3 border-top pt-3">
                             <div class="d-flex align-items-center mb-2">
@@ -1390,6 +1488,16 @@
         EnvironmentId is Guid envId
             ? [.. allDeployments.Where(d => d.EnvironmentId == envId)]
             : allDeployments;
+
+    // Cross-cluster search
+    private readonly Dictionary<Guid, List<ElasticsearchRemoteLink>> allRemotes = [];
+    private List<ElasticsearchCluster> remoteCandidates = [];
+    private Guid? addRemoteClusterId;
+    private Guid remoteClusterId;
+    private string remoteAlias = "";
+    private string remotePatterns = "*";
+    private bool savingRemote;
+    private string? remoteError;
 
     private bool monitoringBusy;
 
@@ -1572,12 +1680,14 @@
         allPolicies.Clear();
         allUsers.Clear();
         allSpaces.Clear();
+        allRemotes.Clear();
         allBindings.Clear();
         foreach (ElasticsearchCluster c in clusters)
         {
             allPolicies[c.Id] = await Search.GetPoliciesAsync(TenantId, c.Id);
             allUsers[c.Id] = await Search.GetUsersAsync(TenantId, c.Id);
             allSpaces[c.Id] = await Search.GetSpacesAsync(TenantId, c.Id);
+            allRemotes[c.Id] = await Search.GetRemoteLinksAsync(TenantId, c.Id);
             allBindings[c.Id] = await Search.GetBindingsAsync(TenantId, c.Id);
         }
 
@@ -2168,6 +2278,52 @@
         }
         catch (Exception ex) { Toasts.Error(ex.Message); }
         finally { loadingInsight = false; }
+    }
+
+    // ── Cross-cluster search ──────────────────────────────────────────────────
+
+    private List<ElasticsearchRemoteLink> RemotesFor(ElasticsearchCluster cluster) =>
+        allRemotes.TryGetValue(cluster.Id, out List<ElasticsearchRemoteLink>? r) ? r : [];
+
+    private async Task ShowAddRemoteAsync(ElasticsearchCluster cluster)
+    {
+        addRemoteClusterId = cluster.Id;
+        remoteClusterId = Guid.Empty;
+        remoteAlias = "";
+        remotePatterns = "*";
+        remoteError = null;
+        remoteCandidates = await Search.GetRemoteCandidatesAsync(TenantId, cluster.Id);
+    }
+
+    private async Task AddRemoteAsync(ElasticsearchCluster cluster)
+    {
+        savingRemote = true;
+        remoteError = null;
+        try
+        {
+            string note = await Search.CreateRemoteLinkAsync(
+                TenantId, cluster.Id, remoteClusterId, remoteAlias, remotePatterns);
+            addRemoteClusterId = null;
+            await LoadAsync();
+            Toasts.Success(note);
+        }
+        catch (Exception ex)
+        {
+            remoteError = ex.Message;
+            allRemotes[cluster.Id] = await Search.GetRemoteLinksAsync(TenantId, cluster.Id);
+        }
+        finally { savingRemote = false; }
+    }
+
+    private async Task RemoveRemoteAsync(Guid clusterId, Guid linkId, string alias)
+    {
+        try
+        {
+            await Search.DeleteRemoteLinkAsync(TenantId, linkId);
+            allRemotes[clusterId] = await Search.GetRemoteLinksAsync(TenantId, clusterId);
+            Toasts.Success($"Removed the \"{alias}\" link.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
     }
 
     // ── Metrics ───────────────────────────────────────────────────────────────

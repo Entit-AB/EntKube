@@ -136,6 +136,14 @@ public sealed record ElasticsearchS3Settings(
     }
 }
 
+/// <summary>One remote cluster as the Elasticsearch CR names it.</summary>
+/// <param name="Alias">What a query calls it, as in <c>{alias}:logs-*</c>.</param>
+/// <param name="Name">The remote Elasticsearch resource's name.</param>
+/// <param name="Namespace">Its namespace.</param>
+/// <param name="SearchPatterns">The index patterns the API key grants search on.</param>
+public sealed record ElasticsearchRemoteRef(
+    string Alias, string Name, string Namespace, IReadOnlyList<string> SearchPatterns);
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 /// <summary>
@@ -420,8 +428,7 @@ public class ElasticsearchService(
                 ?? throw new InvalidOperationException("The Kubernetes cluster has no kubeconfig.");
 
             await k8s.EnsureNamespaceAsync(cluster.Namespace, kubeconfig, ct);
-            await k8s.ApplyManifestAsync(
-                BuildElasticsearchManifest(cluster, await ResolveS3Async(db, cluster, ct)), kubeconfig, ct);
+            await ApplyClusterAsync(db, cluster, kubeconfig, ct);
             if (cluster.KibanaEnabled)
                 await k8s.ApplyManifestAsync(BuildKibanaManifest(cluster), kubeconfig, ct);
         }
@@ -470,8 +477,7 @@ public class ElasticsearchService(
         try
         {
             string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
-            await k8s.ApplyManifestAsync(
-                BuildElasticsearchManifest(cluster, await ResolveS3Async(db, cluster, ct)), kubeconfig, ct);
+            await ApplyClusterAsync(db, cluster, kubeconfig, ct);
 
             if (cluster.KibanaEnabled)
                 await k8s.ApplyManifestAsync(BuildKibanaManifest(cluster), kubeconfig, ct);
@@ -914,6 +920,195 @@ public class ElasticsearchService(
 
     /// <summary>How a one-shot Job ended, as far as a bounded wait could tell.</summary>
     public enum JobOutcome { Succeeded, Failed, StillRunning }
+
+    // ── Cross-cluster search ───────────────────────────────────────────────────
+
+    /// <summary>Cross-cluster API keys, and therefore this whole path, need at least this version.</summary>
+    public static readonly (int Major, int Minor, int Patch) MinimumRemoteClusterVersion = (8, 14, 0);
+
+    public async Task<List<ElasticsearchRemoteLink>> GetRemoteLinksAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.ElasticsearchRemoteLinks
+            .Include(l => l.RemoteCluster)
+            .Where(l => l.TenantId == tenantId && l.LocalClusterId == clusterId)
+            .OrderBy(l => l.Alias)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Links a cluster to another one it may search.
+    ///
+    /// <para>Both CRs change: the remote one opens its remote cluster server, and the local one
+    /// gains the connection and an API key scoped to the named patterns. Opening that server is a
+    /// transport change, so ECK restarts the remote cluster's nodes — which is why this returns a
+    /// note saying so rather than leaving somebody to notice a rolling restart they did not ask
+    /// for.</para>
+    /// </summary>
+    public async Task<string> CreateRemoteLinkAsync(
+        Guid tenantId, Guid localClusterId, Guid remoteClusterId, string alias, string searchPatterns,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster local = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == localClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("The searching cluster was not found.");
+
+        ElasticsearchCluster remote = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == remoteClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("The cluster to be searched was not found.");
+
+        alias = (alias ?? "").Trim().ToLowerInvariant();
+        ValidateRemoteLink(local, remote, alias);
+
+        if (await db.ElasticsearchRemoteLinks.AnyAsync(
+                l => l.LocalClusterId == localClusterId && l.Alias == alias, ct))
+            throw new InvalidOperationException($"'{local.Name}' already searches something under the alias '{alias}'.");
+
+        ElasticsearchRemoteLink link = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            LocalClusterId = localClusterId,
+            RemoteClusterId = remoteClusterId,
+            Alias = alias,
+            SearchIndexPatterns = string.IsNullOrWhiteSpace(searchPatterns) ? "*" : searchPatterns.Trim()
+        };
+
+        db.ElasticsearchRemoteLinks.Add(link);
+        await db.SaveChangesAsync(ct);
+
+        try
+        {
+            string kubeconfig = local.KubernetesCluster.Kubeconfig!;
+
+            // The remote first: the local cluster's connection has nothing to land on until the
+            // remote cluster server is open.
+            await ApplyClusterAsync(db, remote, kubeconfig, ct);
+            await ApplyClusterAsync(db, local, kubeconfig, ct);
+
+            link.LastAppliedAt = DateTime.UtcNow;
+            link.LastError = null;
+        }
+        catch (Exception ex)
+        {
+            link.LastError = Truncate(ex.Message, 2000);
+            await db.SaveChangesAsync(ct);
+            throw;
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        return $"'{local.Name}' can now search '{remote.Name}' as \"{alias}:\". "
+            + "Opening the remote cluster server is a transport change, so ECK is restarting the searched cluster's "
+            + "nodes one at a time; queries against it will be answered throughout by the nodes that are up.";
+    }
+
+    /// <summary>
+    /// Removes a link. The remote cluster server is deliberately left open: closing it is a second
+    /// rolling restart, and an open server with no API key granted to anybody reaches nothing.
+    /// </summary>
+    public async Task DeleteRemoteLinkAsync(Guid tenantId, Guid linkId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchRemoteLink link = await db.ElasticsearchRemoteLinks
+            .Include(l => l.LocalCluster).ThenInclude(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(l => l.Id == linkId && l.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Link not found.");
+
+        ElasticsearchCluster local = link.LocalCluster;
+
+        db.ElasticsearchRemoteLinks.Remove(link);
+        await db.SaveChangesAsync(ct);
+
+        await ApplyClusterAsync(db, local, local.KubernetesCluster.Kubeconfig!, ct);
+    }
+
+    /// <summary>The clusters a given one could be linked to — same Kubernetes cluster, new enough, not itself.</summary>
+    public async Task<List<ElasticsearchCluster>> GetRemoteCandidatesAsync(
+        Guid tenantId, Guid localClusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster? local = await db.ElasticsearchClusters
+            .FirstOrDefaultAsync(c => c.Id == localClusterId && c.TenantId == tenantId, ct);
+        if (local is null) return [];
+
+        List<ElasticsearchCluster> candidates = await db.ElasticsearchClusters
+            .Where(c => c.TenantId == tenantId
+                && c.Id != localClusterId
+                && c.KubernetesClusterId == local.KubernetesClusterId)
+            .OrderBy(c => c.Name)
+            .ToListAsync(ct);
+
+        return [.. candidates.Where(c => IsNewEnoughForRemoteClusters(c.Version))];
+    }
+
+    public static bool IsNewEnoughForRemoteClusters(string? version) =>
+        TryParseVersion(version, out (int Major, int Minor, int Patch) v)
+        && (v.Major > MinimumRemoteClusterVersion.Major
+            || (v.Major == MinimumRemoteClusterVersion.Major && v.Minor >= MinimumRemoteClusterVersion.Minor));
+
+    private static void ValidateRemoteLink(ElasticsearchCluster local, ElasticsearchCluster remote, string alias)
+    {
+        if (local.Id == remote.Id)
+            throw new InvalidOperationException("A cluster cannot search itself remotely — it already can, locally.");
+
+        if (local.KubernetesClusterId != remote.KubernetesClusterId)
+            throw new InvalidOperationException(
+                $"'{local.Name}' and '{remote.Name}' are on different Kubernetes clusters. ECK can only wire a remote "
+                + "connection between clusters it manages together; across Kubernetes clusters the addresses and trust "
+                + "have to be arranged by hand, which EntKube does not do here.");
+
+        if (!IsNewEnoughForRemoteClusters(local.Version) || !IsNewEnoughForRemoteClusters(remote.Version))
+            throw new InvalidOperationException(
+                $"Both clusters must be on {MinimumRemoteClusterVersion.Major}.{MinimumRemoteClusterVersion.Minor} or "
+                + $"later for cross-cluster API keys — '{local.Name}' is {local.Version} and '{remote.Name}' is "
+                + $"{remote.Version}.");
+
+        if (string.IsNullOrWhiteSpace(alias))
+            throw new InvalidOperationException("The remote needs an alias — it is what a query calls it.");
+
+        if (alias.Length > 63 || !alias.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_'))
+            throw new InvalidOperationException(
+                "An alias may only contain lowercase letters, digits, '-' and '_' — it is used in index expressions "
+                + "like \"alias:logs-*\".");
+    }
+
+    /// <summary>Re-applies one cluster's CR with everything currently true of it.</summary>
+    private async Task ApplyClusterAsync(
+        ApplicationDbContext db, ElasticsearchCluster cluster, string kubeconfig, CancellationToken ct)
+    {
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchManifest(
+                cluster,
+                await ResolveS3Async(db, cluster, ct),
+                await ResolveRemotesAsync(db, cluster, ct),
+                await IsSearchedRemotelyAsync(db, cluster, ct)),
+            kubeconfig, ct);
+    }
+
+    private static async Task<List<ElasticsearchRemoteRef>> ResolveRemotesAsync(
+        ApplicationDbContext db, ElasticsearchCluster cluster, CancellationToken ct)
+    {
+        List<ElasticsearchRemoteLink> links = await db.ElasticsearchRemoteLinks
+            .Include(l => l.RemoteCluster)
+            .Where(l => l.LocalClusterId == cluster.Id)
+            .OrderBy(l => l.Alias)
+            .ToListAsync(ct);
+
+        return [.. links.Select(l => new ElasticsearchRemoteRef(
+            l.Alias, l.RemoteCluster.Name, l.RemoteCluster.Namespace, l.Patterns))];
+    }
+
+    private static Task<bool> IsSearchedRemotelyAsync(
+        ApplicationDbContext db, ElasticsearchCluster cluster, CancellationToken ct) =>
+        db.ElasticsearchRemoteLinks.AnyAsync(l => l.RemoteClusterId == cluster.Id, ct);
 
     // ── Kibana spaces ──────────────────────────────────────────────────────────
 
@@ -1475,8 +1670,7 @@ public class ElasticsearchService(
 
             // Elasticsearch first. ECK holds Kibana at its current version until the cluster it is
             // associated with can serve it, so applying both is safe and saves a second visit.
-            await k8s.ApplyManifestAsync(
-                BuildElasticsearchManifest(cluster, await ResolveS3Async(db, cluster, ct)), kubeconfig, ct);
+            await ApplyClusterAsync(db, cluster, kubeconfig, ct);
 
             if (cluster.KibanaEnabled)
                 await k8s.ApplyManifestAsync(BuildKibanaManifest(cluster), kubeconfig, ct);
@@ -2769,7 +2963,16 @@ public class ElasticsearchService(
     /// Renders the Elasticsearch CR: one nodeSet per enabled tier, each with its roles, its
     /// resources, its heap and its volume claim.
     /// </summary>
-    public static string BuildElasticsearchManifest(ElasticsearchCluster c, ElasticsearchS3Settings? s3 = null)
+    /// <param name="remotes">Remote clusters this one may search, if any.</param>
+    /// <param name="serveAsRemote">
+    /// Whether another cluster searches this one. Turning it on opens the remote cluster server,
+    /// which changes the transport configuration and therefore restarts the nodes.
+    /// </param>
+    public static string BuildElasticsearchManifest(
+        ElasticsearchCluster c,
+        ElasticsearchS3Settings? s3 = null,
+        IReadOnlyList<ElasticsearchRemoteRef>? remotes = null,
+        bool serveAsRemote = false)
     {
         StringBuilder sb = new();
         sb.AppendLine($"apiVersion: {EsApiVersion}");
@@ -2793,6 +2996,35 @@ public class ElasticsearchService(
             // settings — where the bucket is and how to talk to it — goes in elasticsearch.yml below.
             sb.AppendLine("  secureSettings:");
             sb.AppendLine($"    - secretName: {c.SnapshotCredentialsSecretName}");
+        }
+
+        if (serveAsRemote)
+        {
+            // The remote cluster server is what an API-key connection lands on. It is a transport
+            // change, so ECK rolls the nodes when it is switched on — the caller is told that
+            // before the link is created rather than after the restart starts.
+            sb.AppendLine("  remoteClusterServer:");
+            sb.AppendLine("    enabled: true");
+        }
+
+        if (remotes is { Count: > 0 })
+        {
+            sb.AppendLine("  remoteClusters:");
+            foreach (ElasticsearchRemoteRef remote in remotes)
+            {
+                sb.AppendLine($"    - name: {remote.Alias}");
+                sb.AppendLine("      elasticsearchRef:");
+                sb.AppendLine($"        name: {remote.Name}");
+                sb.AppendLine($"        namespace: {remote.Namespace}");
+                // A cross-cluster API key scoped to these patterns: the searching cluster reaches
+                // exactly them, and ECK creates and rotates the key itself.
+                sb.AppendLine("      apiKey:");
+                sb.AppendLine("        access:");
+                sb.AppendLine("          search:");
+                sb.AppendLine("            names:");
+                foreach (string pattern in remote.SearchPatterns)
+                    sb.AppendLine($"              - \"{pattern}\"");
+            }
         }
 
         sb.AppendLine("  nodeSets:");

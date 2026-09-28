@@ -3554,6 +3554,51 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("ElasticsearchKibanaSpaces");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchRemoteLink", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Alias")
+                        .IsRequired()
+                        .HasMaxLength(63)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("LastAppliedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("LocalClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("RemoteClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SearchIndexPatterns")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("RemoteClusterId");
+
+                    b.HasIndex("LocalClusterId", "Alias")
+                        .IsUnique();
+
+                    b.ToTable("ElasticsearchRemoteLinks");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchUser", b =>
                 {
                     b.Property<Guid>("Id")
@@ -9591,6 +9636,25 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .IsRequired();
 
                     b.Navigation("ElasticsearchCluster");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchRemoteLink", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "LocalCluster")
+                        .WithMany()
+                        .HasForeignKey("LocalClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "RemoteCluster")
+                        .WithMany()
+                        .HasForeignKey("RemoteClusterId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("LocalCluster");
+
+                    b.Navigation("RemoteCluster");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchUser", b =>
