@@ -1021,6 +1021,74 @@
                             }
                         </div>
 
+                        @* ── Version upgrade ── *@
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-arrow-up-circle me-1"></i>Version</strong>
+                                <span class="text-muted small ms-2">running @cluster.Version</span>
+                                <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                        @onclick="() => ShowUpgradeForm(cluster)">
+                                    Upgrade…
+                                </button>
+                            </div>
+
+                            @if (upgradeClusterId == cluster.Id)
+                            {
+                                <div class="card border-warning"><div class="card-body py-2">
+                                    <div class="row g-2 align-items-end">
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Target version</label>
+                                            <input class="form-control form-control-sm" @bind="upgradeTarget"
+                                                   @bind:after="() => PlanUpgradeAsync(cluster)" placeholder="9.5.1" />
+                                        </div>
+                                        <div class="col-md-9 d-flex gap-1">
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => PlanUpgradeAsync(cluster)"
+                                                    disabled="@(upgrading || string.IsNullOrWhiteSpace(upgradeTarget))">
+                                                Check
+                                            </button>
+                                            <button class="btn btn-sm btn-warning" @onclick="() => ConfirmUpgrade(cluster)"
+                                                    disabled="@(upgrading || upgradePlan is null || (!upgradePlan.CanProceed && !acceptBlockers))">
+                                                @if (upgrading) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Upgrade
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => upgradeClusterId = null">Cancel</button>
+                                        </div>
+                                    </div>
+
+                                    @if (upgradePlan is not null)
+                                    {
+                                        <div class="mt-2">
+                                            @foreach (string blocker in upgradePlan.Blockers)
+                                            {
+                                                <div class="alert alert-danger py-1 px-2 small mb-1">@blocker</div>
+                                            }
+                                            @foreach (string warning in upgradePlan.Warnings)
+                                            {
+                                                <div class="alert alert-warning py-1 px-2 small mb-1">@warning</div>
+                                            }
+                                            @foreach (string note in upgradePlan.Notes)
+                                            {
+                                                <div class="text-muted small mb-1"><i class="bi bi-info-circle me-1"></i>@note</div>
+                                            }
+
+                                            @if (!upgradePlan.CanProceed)
+                                            {
+                                                <div class="form-check mt-1">
+                                                    <input class="form-check-input" type="checkbox" id="acceptBlockers" @bind="acceptBlockers" />
+                                                    <label class="form-check-label small" for="acceptBlockers">
+                                                        I have a reason to go ahead anyway — every one of those is a way this goes wrong,
+                                                        and it is recorded against my name.
+                                                    </label>
+                                                </div>
+                                            }
+                                        </div>
+                                    }
+
+                                    @if (upgradeError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@upgradeError</div> }
+                                </div></div>
+                            }
+                        </div>
+
                         @* ── Actions ── *@
                         <div class="d-flex gap-2 border-top pt-3">
                             <button class="btn btn-sm btn-outline-warning" @onclick="() => ShowEditForm(cluster)" disabled="@(form is not null)">
@@ -1116,6 +1184,14 @@
         EnvironmentId is Guid envId
             ? [.. allDeployments.Where(d => d.EnvironmentId == envId)]
             : allDeployments;
+
+    // Upgrade
+    private Guid? upgradeClusterId;
+    private string upgradeTarget = "";
+    private ElasticsearchService.ElasticsearchUpgradePlan? upgradePlan;
+    private bool acceptBlockers;
+    private bool upgrading;
+    private string? upgradeError;
 
     // Live look: disk per node and the indices
     private Guid? insightFor;
@@ -1794,6 +1870,55 @@
         }
         catch (Exception ex) { Toasts.Error(ex.Message); }
         finally { loadingInsight = false; }
+    }
+
+    // ── Upgrade ───────────────────────────────────────────────────────────────
+
+    private void ShowUpgradeForm(ElasticsearchCluster cluster)
+    {
+        upgradeClusterId = cluster.Id;
+        upgradeTarget = cluster.Version;
+        upgradePlan = null;
+        acceptBlockers = false;
+        upgradeError = null;
+    }
+
+    private async Task PlanUpgradeAsync(ElasticsearchCluster cluster)
+    {
+        upgradeError = null;
+        acceptBlockers = false;
+        try
+        {
+            upgradePlan = await Search.PlanUpgradeAsync(TenantId, cluster.Id, upgradeTarget);
+        }
+        catch (Exception ex) { upgradeError = ex.Message; }
+    }
+
+    private void ConfirmUpgrade(ElasticsearchCluster cluster)
+    {
+        pendingConfirm = new PendingConfirm(
+            $"Upgrade \"{cluster.Name}\" from {cluster.Version} to {upgradeTarget}? Every node restarts in turn, and "
+            + "Elasticsearch cannot be downgraded afterwards.",
+            "Upgrade",
+            () => RunUpgradeAsync(cluster));
+    }
+
+    private async Task RunUpgradeAsync(ElasticsearchCluster cluster)
+    {
+        upgrading = true;
+        upgradeError = null;
+        try
+        {
+            await Search.UpgradeAsync(TenantId, cluster.Id, upgradeTarget, await Actor.NameAsync(), acceptBlockers);
+            upgradeClusterId = null;
+            await LoadAsync();
+            Toasts.Success($"Upgrading \"{cluster.Name}\" to {upgradeTarget} — ECK rolls the nodes one at a time.");
+        }
+        catch (Exception ex)
+        {
+            upgradeError = ex.Message;
+        }
+        finally { upgrading = false; StateHasChanged(); }
     }
 
     // ── Restore ───────────────────────────────────────────────────────────────

@@ -1598,4 +1598,226 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchService.DiskHighWatermarkPercent.Should().Be(85);
         ElasticsearchService.DiskFloodStagePercent.Should().Be(95);
     }
+
+    // ──────── Version upgrades ────────
+
+    private static ElasticsearchCluster UpgradeableCluster(string version = "9.5.0")
+    {
+        ElasticsearchCluster c = SampleCluster();
+        c.Version = version;
+        c.Status = ElasticsearchClusterStatus.Running;
+        c.Health = "green";
+        c.SnapshotsEnabled = true;
+        c.SnapshotStorageLinkId = Guid.NewGuid();
+        c.SnapshotLastSuccessAt = DateTime.UtcNow.AddHours(-3);
+        c.HighestNodeDiskPercent = 40;
+        return c;
+    }
+
+    private static readonly DateTime Now = new(2026, 9, 28, 12, 0, 0, DateTimeKind.Utc);
+
+    [Theory]
+    [InlineData("9.5.0", 9, 5, 0)]
+    [InlineData("10.0.1", 10, 0, 1)]
+    [InlineData("9.5.0-SNAPSHOT", 9, 5, 0)]
+    public void VersionsParse(string version, int major, int minor, int patch)
+    {
+        ElasticsearchService.TryParseVersion(version, out (int Major, int Minor, int Patch) parsed).Should().BeTrue();
+        parsed.Should().Be((major, minor, patch));
+    }
+
+    [Theory]
+    [InlineData("9.5")]
+    [InlineData("latest")]
+    [InlineData("")]
+    [InlineData("9.x.0")]
+    public void ThingsThatAreNotVersionsDoNotParse(string version)
+    {
+        ElasticsearchService.TryParseVersion(version, out _).Should().BeFalse();
+    }
+
+    [Fact]
+    public void APatchUpgradeOnAHealthyBackedUpClusterIsAllowed()
+    {
+        ElasticsearchService.ElasticsearchUpgradePlan plan =
+            ElasticsearchService.PlanUpgrade(UpgradeableCluster(), "9.5.1", Now);
+
+        plan.CanProceed.Should().BeTrue();
+        plan.Warnings.Should().BeEmpty();
+        plan.Notes.Should().Contain(n => n.Contains("one at a time"));
+    }
+
+    [Fact]
+    public void ADowngradeIsRefused_BecauseTheDataDirectoryHasAlreadyMoved()
+    {
+        ElasticsearchService.ElasticsearchUpgradePlan plan =
+            ElasticsearchService.PlanUpgrade(UpgradeableCluster("9.5.0"), "9.4.0", Now);
+
+        plan.CanProceed.Should().BeFalse();
+        plan.Blockers.Should().ContainSingle(b => b.Contains("cannot be downgraded"));
+    }
+
+    [Fact]
+    public void SkippingAMajorIsRefused()
+    {
+        ElasticsearchService.ElasticsearchUpgradePlan plan =
+            ElasticsearchService.PlanUpgrade(UpgradeableCluster("9.5.0"), "11.0.0", Now);
+
+        plan.CanProceed.Should().BeFalse();
+        plan.Blockers.Should().Contain(b => b.Contains("one major at a time"));
+    }
+
+    [Fact]
+    public void OneMajorIsAllowed_ButSaysWhereItHasToStartFrom()
+    {
+        ElasticsearchService.ElasticsearchUpgradePlan plan =
+            ElasticsearchService.PlanUpgrade(UpgradeableCluster("9.5.0"), "10.0.0", Now);
+
+        plan.CanProceed.Should().BeTrue();
+        plan.Notes.Should().Contain(n => n.Contains("final minor"));
+        plan.Warnings.Should().Contain(w => w.Contains("breaking changes"));
+    }
+
+    [Fact]
+    public void UpgradingToTheVersionAlreadyRunningIsRefused()
+    {
+        ElasticsearchService.ElasticsearchUpgradePlan plan =
+            ElasticsearchService.PlanUpgrade(UpgradeableCluster("9.5.0"), "9.5.0", Now);
+
+        plan.CanProceed.Should().BeFalse();
+        plan.Blockers.Should().ContainSingle(b => b.Contains("already runs"));
+    }
+
+    [Fact]
+    public void ARedClusterIsNotUpgraded()
+    {
+        ElasticsearchCluster c = UpgradeableCluster();
+        c.Health = "red";
+
+        ElasticsearchService.ElasticsearchUpgradePlan plan = ElasticsearchService.PlanUpgrade(c, "9.5.1", Now);
+
+        // Restarting every node in turn while shards are already unavailable is how a recoverable
+        // problem becomes a lost index.
+        plan.CanProceed.Should().BeFalse();
+        plan.Blockers.Should().Contain(b => b.Contains("red"));
+    }
+
+    [Fact]
+    public void AYellowClusterIsWarnedAboutRatherThanBlocked()
+    {
+        ElasticsearchCluster c = UpgradeableCluster();
+        c.Health = "yellow";
+
+        ElasticsearchService.ElasticsearchUpgradePlan plan = ElasticsearchService.PlanUpgrade(c, "9.5.1", Now);
+
+        plan.CanProceed.Should().BeTrue();
+        plan.Warnings.Should().Contain(w => w.Contains("no replica"));
+    }
+
+    [Fact]
+    public void AClusterWithNoSnapshotsIsNotUpgraded()
+    {
+        ElasticsearchCluster c = UpgradeableCluster();
+        c.SnapshotsEnabled = false;
+
+        ElasticsearchService.ElasticsearchUpgradePlan plan = ElasticsearchService.PlanUpgrade(c, "9.5.1", Now);
+
+        // An upgrade cannot be undone; the only way back is a restore.
+        plan.CanProceed.Should().BeFalse();
+        plan.Blockers.Should().Contain(b => b.Contains("cannot be undone"));
+    }
+
+    [Fact]
+    public void SnapshotsConfiguredButNeverTaken_CountAsNoWayBack()
+    {
+        ElasticsearchCluster c = UpgradeableCluster();
+        c.SnapshotLastSuccessAt = null;
+
+        ElasticsearchService.ElasticsearchUpgradePlan plan = ElasticsearchService.PlanUpgrade(c, "9.5.1", Now);
+
+        plan.CanProceed.Should().BeFalse();
+        plan.Blockers.Should().Contain(b => b.Contains("nothing to go back to"));
+    }
+
+    [Fact]
+    public void AnAgeingSnapshotIsAWarning()
+    {
+        ElasticsearchCluster c = UpgradeableCluster();
+        c.SnapshotLastSuccessAt = Now.AddDays(-5);
+
+        ElasticsearchService.ElasticsearchUpgradePlan plan = ElasticsearchService.PlanUpgrade(c, "9.5.1", Now);
+
+        plan.CanProceed.Should().BeTrue();
+        plan.Warnings.Should().Contain(w => w.Contains("5 days ago"));
+    }
+
+    [Fact]
+    public void AFullDiskIsAWarning_BecauseShardsHaveNowhereToMove()
+    {
+        ElasticsearchCluster c = UpgradeableCluster();
+        c.HighestNodeDiskPercent = 90;
+
+        ElasticsearchService.ElasticsearchUpgradePlan plan = ElasticsearchService.PlanUpgrade(c, "9.5.1", Now);
+
+        plan.CanProceed.Should().BeTrue();
+        plan.Warnings.Should().Contain(w => w.Contains("90% full"));
+    }
+
+    [Fact]
+    public void ASingleNodeIsToldItWillBeDown_NotRolled()
+    {
+        ElasticsearchCluster c = UpgradeableCluster();
+        c.MasterCount = 1;
+        c.HotCount = 0;
+
+        ElasticsearchService.ElasticsearchUpgradePlan plan = ElasticsearchService.PlanUpgrade(c, "9.5.1", Now);
+
+        plan.Notes.Should().Contain(n => n.Contains("down for the duration"));
+    }
+
+    [Fact]
+    public async Task AnUpgradeWithBlockersIsRefusedUnlessAccepted()
+    {
+        await SeedClusterAsync();
+        ElasticsearchCluster c = UpgradeableCluster();
+        c.TenantId = tenantId;
+        c.KubernetesClusterId = k8sClusterId;
+        c.Health = "red";
+        db.ElasticsearchClusters.Add(c);
+        await db.SaveChangesAsync();
+
+        Func<Task> act = () => sut.UpgradeAsync(tenantId, c.Id, "9.5.1", "nils");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*red*");
+        (await db.ElasticsearchClusters.AsNoTracking().SingleAsync()).Version.Should().Be("9.5.0");
+    }
+
+    [Fact]
+    public async Task AnAcceptedUpgradeAppliesBothCrs_AndSaysWhoAcceptedWhat()
+    {
+        await SeedClusterAsync();
+        ElasticsearchCluster c = UpgradeableCluster();
+        c.TenantId = tenantId;
+        c.KubernetesClusterId = k8sClusterId;
+        c.Health = "red";
+        db.ElasticsearchClusters.Add(c);
+        await db.SaveChangesAsync();
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        await sut.UpgradeAsync(tenantId, c.Id, "9.5.1", "nils", acceptBlockers: true);
+
+        applied.Should().HaveCount(2);
+        applied[0].Should().Contain("version: 9.5.1").And.Contain("kind: Elasticsearch");
+        applied[1].Should().Contain("kind: Kibana").And.Contain("version: 9.5.1");
+
+        (await db.ElasticsearchClusters.AsNoTracking().SingleAsync()).Version.Should().Be("9.5.1");
+
+        AuditEvent recorded = await db.AuditEvents.AsNoTracking().SingleAsync(e => e.Action == "elasticsearch.upgrade");
+        recorded.PerformedBy.Should().Be("nils");
+        recorded.Details.Should().Contain("9.5.0 → 9.5.1").And.Contain("accepted blockers");
+    }
 }

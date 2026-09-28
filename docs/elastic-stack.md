@@ -206,6 +206,35 @@ two watermarks, and the indices biggest-first with their lifecycle phase. An ind
 has stalled is shown as *stuck*, with the reason — that failure is otherwise invisible, because the
 index simply stays where it is.
 
+## Upgrading
+
+An upgrade is checked before it is applied, because ECK's webhook will otherwise refuse it in one
+line — or accept it and start restarting nodes.
+
+**Refused outright:**
+
+- **A downgrade.** Not a policy: Elasticsearch migrates its data directory in place on first start,
+  and the older version will not open it. The way back from a bad upgrade is a restore into a new
+  cluster.
+- **Skipping a major.** One major at a time, as Elasticsearch supports it.
+- **A red cluster.** A rolling upgrade restarts every node in turn, and doing that while shards are
+  already unavailable is how a recoverable problem becomes a lost index.
+- **No snapshots, or none that ever succeeded.** An upgrade cannot be undone, so there has to be
+  something to go back to.
+
+**Warned about:** a yellow cluster (some shards have no replica, and each restart takes their only
+copy offline), a snapshot more than two days old, a node past the 85% watermark (a rolling upgrade
+moves shards, and there is nowhere for them to go), a major upgrade's breaking changes, and a
+cluster that is not in the Running state yet.
+
+Blockers can be accepted deliberately — sometimes there is a reason — and the acceptance is written
+to the audit log with the operator's name and which blockers they overrode.
+
+Elasticsearch and Kibana are applied together at the new version. ECK rolls the Elasticsearch nodes
+one at a time with the masters last, and holds Kibana at its current version until the cluster can
+serve it. A single-node cluster is told plainly that it will be down for the restart rather than
+rolling through it.
+
 ## Publishing Kibana
 
 Kibana's Service is `{cluster}-kb-http` on port 5601. Publish it like any other service from

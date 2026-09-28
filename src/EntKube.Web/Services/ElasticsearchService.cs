@@ -915,6 +915,249 @@ public class ElasticsearchService(
     /// <summary>How a one-shot Job ended, as far as a bounded wait could tell.</summary>
     public enum JobOutcome { Succeeded, Failed, StillRunning }
 
+    // ── Version upgrades ───────────────────────────────────────────────────────
+
+    /// <summary>
+    /// What an upgrade would do, and every reason it should not happen yet.
+    /// </summary>
+    /// <param name="CurrentVersion">The version the cluster runs now.</param>
+    /// <param name="TargetVersion">The version asked for.</param>
+    /// <param name="Blockers">
+    /// Reasons this will fail, or lose data if it does not. Non-empty means refuse unless the
+    /// operator explicitly accepts them.
+    /// </param>
+    /// <param name="Warnings">Reasons to pick a better moment. Never refuse on their own.</param>
+    /// <param name="Notes">What will happen, so nobody has to infer it from the version numbers.</param>
+    public sealed record ElasticsearchUpgradePlan(
+        string CurrentVersion,
+        string TargetVersion,
+        IReadOnlyList<string> Blockers,
+        IReadOnlyList<string> Warnings,
+        IReadOnlyList<string> Notes)
+    {
+        public bool CanProceed => Blockers.Count == 0;
+    }
+
+    /// <summary>
+    /// Works out whether a cluster can move to a version, before ECK's webhook says no in one line
+    /// or — worse — accepts it and rolls the pods.
+    ///
+    /// <para>The version rules are Elasticsearch's: it cannot be downgraded at all, because the data
+    /// directory is migrated in place on first start, and a major can only be reached from the one
+    /// directly below it. The rest of the checks are about the moment rather than the versions: a
+    /// rolling upgrade restarts every node in turn, which a red cluster, a full disk or a missing
+    /// backup each turn from routine into an incident.</para>
+    /// </summary>
+    public async Task<ElasticsearchUpgradePlan> PlanUpgradeAsync(
+        Guid tenantId, Guid clusterId, string targetVersion, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        return PlanUpgrade(cluster, targetVersion, DateTime.UtcNow);
+    }
+
+    /// <summary>The plan, as pure arithmetic over the cluster's stored state. Split out to be tested.</summary>
+    public static ElasticsearchUpgradePlan PlanUpgrade(
+        ElasticsearchCluster cluster, string targetVersion, DateTime now)
+    {
+        List<string> blockers = [];
+        List<string> warnings = [];
+        List<string> notes = [];
+
+        string target = (targetVersion ?? "").Trim();
+
+        if (!TryParseVersion(cluster.Version, out (int Major, int Minor, int Patch) from))
+            blockers.Add($"The cluster's current version ('{cluster.Version}') is not a version number this can reason about.");
+
+        if (!TryParseVersion(target, out (int Major, int Minor, int Patch) to))
+            blockers.Add($"'{target}' is not an Elastic Stack version, e.g. 9.5.0.");
+
+        if (blockers.Count > 0)
+            return new ElasticsearchUpgradePlan(cluster.Version, target, blockers, warnings, notes);
+
+        int comparison = Compare(from, to);
+
+        if (comparison == 0)
+        {
+            blockers.Add($"The cluster already runs {target}.");
+            return new ElasticsearchUpgradePlan(cluster.Version, target, blockers, warnings, notes);
+        }
+
+        if (comparison > 0)
+        {
+            // Not a policy: Elasticsearch migrates the data directory in place on first start, and
+            // an older node will not open a newer one's data at all.
+            blockers.Add(
+                $"Elasticsearch cannot be downgraded. {cluster.Version} has already migrated its data directory, and "
+                + $"{target} would refuse to start on it. Restore a snapshot into a new cluster instead.");
+            return new ElasticsearchUpgradePlan(cluster.Version, target, blockers, warnings, notes);
+        }
+
+        if (to.Major - from.Major > 1)
+        {
+            blockers.Add(
+                $"{from.Major}.x cannot reach {to.Major}.x directly. Elasticsearch supports one major at a time, so go to "
+                + $"the last {from.Major + 1}.x release first, then on from there.");
+        }
+        else if (to.Major > from.Major)
+        {
+            notes.Add(
+                $"This is a major upgrade. Elasticsearch supports it from the final minor of {from.Major}.x — if this "
+                + $"cluster is not on that minor yet, upgrade within {from.Major}.x first.");
+            warnings.Add(
+                "Read the release notes for breaking changes before starting: a major upgrade is the one that removes "
+                + "settings and APIs an application may still be using.");
+        }
+
+        // The moment, rather than the versions.
+
+        if (string.Equals(cluster.Health, "red", StringComparison.OrdinalIgnoreCase))
+        {
+            blockers.Add(
+                "The cluster is red. A rolling upgrade restarts every node in turn, and doing that while shards are "
+                + "already unavailable is how a recoverable problem becomes a lost index.");
+        }
+        else if (string.Equals(cluster.Health, "yellow", StringComparison.OrdinalIgnoreCase))
+        {
+            warnings.Add(
+                "The cluster is yellow, so some shards have no replica. Each node restart takes their only copy offline "
+                + "for the duration.");
+        }
+
+        if (!cluster.SnapshotsEnabled)
+        {
+            blockers.Add(
+                "This cluster has no snapshots. An upgrade cannot be undone — the only way back from a bad one is a "
+                + "restore, and there is nothing to restore from.");
+        }
+        else if (cluster.SnapshotLastSuccessAt is null)
+        {
+            blockers.Add("Snapshots are configured but none has ever succeeded, so there is nothing to go back to.");
+        }
+        else if (now - cluster.SnapshotLastSuccessAt.Value > TimeSpan.FromDays(2))
+        {
+            warnings.Add(
+                $"The last successful snapshot was {(int)(now - cluster.SnapshotLastSuccessAt.Value).TotalDays} days ago. "
+                + "Take one first so the way back is recent.");
+        }
+
+        if (cluster.HighestNodeDiskPercent is int disk && disk >= DiskHighWatermarkPercent)
+        {
+            warnings.Add(
+                $"A node is {disk}% full. A rolling upgrade moves shards around, and past the {DiskHighWatermarkPercent}% "
+                + "watermark there is nowhere for them to move to.");
+        }
+
+        if (cluster.Status != ElasticsearchClusterStatus.Running)
+            warnings.Add($"The cluster is {cluster.Status}, not Running — let it settle before adding an upgrade to it.");
+
+        notes.Add(
+            $"ECK rolls the nodes one at a time, masters last. Kibana is applied at {target} too and stays on the old "
+            + "version until Elasticsearch is ready for it.");
+
+        if (cluster.MasterCount == 1 && !cluster.HasDataTiers)
+            notes.Add("This is a single node, so it will be down for the duration of the restart rather than rolling.");
+
+        return new ElasticsearchUpgradePlan(cluster.Version, target, blockers, warnings, notes);
+    }
+
+    /// <summary>
+    /// Moves the cluster (and Kibana) to a new version.
+    /// </summary>
+    /// <param name="acceptBlockers">
+    /// Goes ahead despite the plan's blockers. Every one of them is a real failure mode, so this is
+    /// recorded with the operator's name against it.
+    /// </param>
+    public async Task<ElasticsearchUpgradePlan> UpgradeAsync(
+        Guid tenantId, Guid clusterId, string targetVersion, string performedBy,
+        bool acceptBlockers = false, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        ElasticsearchUpgradePlan plan = PlanUpgrade(cluster, targetVersion, DateTime.UtcNow);
+
+        if (!plan.CanProceed && !acceptBlockers)
+            throw new InvalidOperationException(
+                string.Join("\n", plan.Blockers)
+                + "\n\nEvery one of these is a way this goes wrong. Accept them explicitly if you have a reason to.");
+
+        await auditService.RecordAsync(
+            deploymentId: null,
+            action: "elasticsearch.upgrade",
+            resourceKind: "Elasticsearch",
+            resourceName: $"{cluster.Namespace}/{cluster.Name}",
+            details: $"{plan.CurrentVersion} → {plan.TargetVersion}"
+                + (plan.CanProceed ? "" : $"; accepted blockers: {string.Join("; ", plan.Blockers)}"),
+            performedBy: performedBy,
+            ct: ct);
+
+        cluster.Version = plan.TargetVersion;
+        cluster.Status = ElasticsearchClusterStatus.Updating;
+        await db.SaveChangesAsync(ct);
+
+        try
+        {
+            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+
+            // Elasticsearch first. ECK holds Kibana at its current version until the cluster it is
+            // associated with can serve it, so applying both is safe and saves a second visit.
+            await k8s.ApplyManifestAsync(
+                BuildElasticsearchManifest(cluster, await ResolveS3Async(db, cluster, ct)), kubeconfig, ct);
+
+            if (cluster.KibanaEnabled)
+                await k8s.ApplyManifestAsync(BuildKibanaManifest(cluster), kubeconfig, ct);
+
+            cluster.LastError = null;
+        }
+        catch (Exception ex)
+        {
+            cluster.Status = ElasticsearchClusterStatus.Failed;
+            cluster.LastError = ex.Message;
+            await db.SaveChangesAsync(ct);
+            throw;
+        }
+
+        await db.SaveChangesAsync(ct);
+        return plan;
+    }
+
+    /// <summary>Parses "9.5.0" and "9.5.0-SNAPSHOT" into its three numbers.</summary>
+    public static bool TryParseVersion(string? version, out (int Major, int Minor, int Patch) parsed)
+    {
+        parsed = default;
+        if (string.IsNullOrWhiteSpace(version)) return false;
+
+        // A pre-release suffix does not change which release it is a build of.
+        string core = version.Trim().Split('-', '+')[0];
+        string[] parts = core.Split('.');
+        if (parts.Length != 3) return false;
+
+        if (!int.TryParse(parts[0], out int major) || !int.TryParse(parts[1], out int minor)
+            || !int.TryParse(parts[2], out int patch))
+            return false;
+
+        if (major < 0 || minor < 0 || patch < 0) return false;
+
+        parsed = (major, minor, patch);
+        return true;
+    }
+
+    private static int Compare((int Major, int Minor, int Patch) a, (int Major, int Minor, int Patch) b)
+    {
+        if (a.Major != b.Major) return a.Major.CompareTo(b.Major);
+        if (a.Minor != b.Minor) return a.Minor.CompareTo(b.Minor);
+        return a.Patch.CompareTo(b.Patch);
+    }
+
     // ── Live cluster reads ─────────────────────────────────────────────────────
 
     /// <summary>Disk as one Elasticsearch node reports it.</summary>
