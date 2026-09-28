@@ -122,6 +122,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<ElasticsearchKibanaSpace> ElasticsearchKibanaSpaces => Set<ElasticsearchKibanaSpace>();
     public DbSet<ElasticsearchRemoteLink> ElasticsearchRemoteLinks => Set<ElasticsearchRemoteLink>();
     public DbSet<ElasticsearchIngestPipeline> ElasticsearchIngestPipelines => Set<ElasticsearchIngestPipeline>();
+    public DbSet<ElasticsearchDataView> ElasticsearchDataViews => Set<ElasticsearchDataView>();
     public DbSet<GitRepository> GitRepositories => Set<GitRepository>();
     public DbSet<GitKnownHost> GitKnownHosts => Set<GitKnownHost>();
     public DbSet<CustomerGitRepoPolicy> CustomerGitRepoPolicies => Set<CustomerGitRepoPolicy>();
@@ -2368,6 +2369,25 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasMany(c => c.KibanaSpaces)
                 .WithOne(s => s.ElasticsearchCluster)
                 .HasForeignKey(s => s.ElasticsearchClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ElasticsearchDataView>(entity =>
+        {
+            entity.HasKey(v => v.Id);
+            entity.Property(v => v.SpaceId).HasMaxLength(63);
+            entity.Property(v => v.Title).HasMaxLength(255).IsRequired();
+            entity.Property(v => v.Name).HasMaxLength(255);
+            entity.Property(v => v.TimeFieldName).HasMaxLength(255).IsRequired();
+            entity.Property(v => v.LastError).HasMaxLength(2000);
+
+            // A pattern can exist once per space: the same indices are a different data view in
+            // each, and Kibana treats them as unrelated objects.
+            entity.HasIndex(v => new { v.ElasticsearchClusterId, v.SpaceId, v.Title }).IsUnique();
+
+            entity.HasOne(v => v.ElasticsearchCluster)
+                .WithMany(c => c.DataViews)
+                .HasForeignKey(v => v.ElasticsearchClusterId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

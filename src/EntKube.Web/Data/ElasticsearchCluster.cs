@@ -237,6 +237,7 @@ public class ElasticsearchCluster
     public ICollection<ElasticsearchUser> Users { get; set; } = [];
     public ICollection<ElasticsearchKibanaSpace> KibanaSpaces { get; set; } = [];
     public ICollection<ElasticsearchIngestPipeline> IngestPipelines { get; set; } = [];
+    public ICollection<ElasticsearchDataView> DataViews { get; set; } = [];
 
     // ── Derived names (all fixed by ECK's own conventions) ─────────────────────
 

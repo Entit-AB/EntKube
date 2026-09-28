@@ -1074,6 +1074,102 @@
                             </div>
                         }
 
+                        @* ── Data views ── *@
+                        @if (cluster.KibanaEnabled)
+                        {
+                            List<ElasticsearchDataView> views = DataViewsFor(cluster);
+                            <div class="mb-3 border-top pt-3">
+                                <div class="d-flex align-items-center mb-2">
+                                    <strong class="small"><i class="bi bi-table me-1"></i>Data views</strong>
+                                    <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2" @onclick="() => ShowAddDataView(cluster)">
+                                        <i class="bi bi-plus-lg me-1"></i>Add
+                                    </button>
+                                </div>
+
+                                @if (addDataViewClusterId == cluster.Id)
+                                {
+                                    <div class="card border-primary mb-2"><div class="card-body py-2">
+                                        <div class="row g-2">
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Index pattern</label>
+                                                <input class="form-control form-control-sm" @bind="dataViewTitle" placeholder="logs-orders-*" />
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Shown as</label>
+                                                <input class="form-control form-control-sm" @bind="dataViewName" placeholder="same as the pattern" />
+                                            </div>
+                                            <div class="col-md-2">
+                                                <label class="form-label small mb-1">Time field</label>
+                                                <input class="form-control form-control-sm" @bind="dataViewTimeField" placeholder="@("@timestamp")" />
+                                                <div class="form-text small">Blank for reference data.</div>
+                                            </div>
+                                            <div class="col-md-2">
+                                                <label class="form-label small mb-1">Space</label>
+                                                <select class="form-select form-select-sm" @bind="dataViewSpaceId">
+                                                    <option value="">Default space</option>
+                                                    @foreach (ElasticsearchKibanaSpace space in SpacesFor(cluster))
+                                                    {
+                                                        <option value="@space.SpaceId">@space.Name</option>
+                                                    }
+                                                </select>
+                                            </div>
+                                            <div class="col-md-2 d-flex align-items-end gap-1">
+                                                <button class="btn btn-sm btn-primary" @onclick="() => AddDataViewAsync(cluster)"
+                                                        disabled="@(savingDataView || string.IsNullOrWhiteSpace(dataViewTitle))">
+                                                    @if (savingDataView) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Add
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => addDataViewClusterId = null">Cancel</button>
+                                            </div>
+                                        </div>
+                                        @if (dataViewError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@dataViewError</div> }
+                                    </div></div>
+                                }
+
+                                @if (views.Count == 0)
+                                {
+                                    <p class="text-muted small mb-0">
+                                        None. An account with a Kibana login and an index pattern still opens an empty Discover
+                                        until a data view says the pattern exists and which field carries its time.
+                                    </p>
+                                }
+                                else
+                                {
+                                    <table class="table table-sm table-borderless small mb-0">
+                                        <thead class="text-muted"><tr><th>Pattern</th><th>Shown as</th><th>Time field</th><th>Space</th><th>Applied</th><th></th></tr></thead>
+                                        <tbody>
+                                            @foreach (ElasticsearchDataView view in views)
+                                            {
+                                                <tr>
+                                                    <td><code>@view.Title</code></td>
+                                                    <td>@(view.Name ?? view.Title)</td>
+                                                    <td class="text-muted">@(string.IsNullOrWhiteSpace(view.TimeFieldName) ? "none" : view.TimeFieldName)</td>
+                                                    <td class="text-muted">@(view.SpaceId ?? "default")</td>
+                                                    <td class="text-muted">
+                                                        @if (view.LastError is not null)
+                                                        {
+                                                            <span class="text-danger" title="@view.LastError">failed</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            @(view.LastAppliedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                                        }
+                                                    </td>
+                                                    <td class="text-nowrap">
+                                                        <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Re-apply"
+                                                                aria-label="@($"Re-apply {view.Title}")" @onclick="() => ApplyDataViewAsync(cluster, view)">
+                                                            <i class="bi bi-arrow-repeat"></i>
+                                                        </button>
+                                                        @RenderDeleteCell($"Delete the data view for \"{view.Title}\"? Saved searches and dashboards built on it stop working; the indices are untouched.", "Delete data view", () => DeleteDataViewAsync(cluster.Id, view.Id, view.Title))
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            </div>
+                        }
+
                         @* ── Application users ── *@
                         @{ List<ElasticsearchUser> users = allUsers.TryGetValue(cluster.Id, out List<ElasticsearchUser>? ul) ? ul : []; }
                         <div class="mb-3 border-top pt-3">
@@ -1633,6 +1729,16 @@
             ? [.. allDeployments.Where(d => d.EnvironmentId == envId)]
             : allDeployments;
 
+    // Data views
+    private readonly Dictionary<Guid, List<ElasticsearchDataView>> allDataViews = [];
+    private Guid? addDataViewClusterId;
+    private string dataViewTitle = "";
+    private string? dataViewName;
+    private string dataViewTimeField = "@timestamp";
+    private string? dataViewSpaceId;
+    private bool savingDataView;
+    private string? dataViewError;
+
     // Ingest pipelines
     private readonly Dictionary<Guid, List<ElasticsearchIngestPipeline>> allPipelines = [];
     private Guid? pipelineClusterId;
@@ -1846,6 +1952,7 @@
         allSpaces.Clear();
         allRemotes.Clear();
         allPipelines.Clear();
+        allDataViews.Clear();
         allBindings.Clear();
         foreach (ElasticsearchCluster c in clusters)
         {
@@ -1854,6 +1961,7 @@
             allSpaces[c.Id] = await Search.GetSpacesAsync(TenantId, c.Id);
             allRemotes[c.Id] = await Search.GetRemoteLinksAsync(TenantId, c.Id);
             allPipelines[c.Id] = await Search.GetPipelinesAsync(TenantId, c.Id);
+            allDataViews[c.Id] = await Search.GetDataViewsAsync(TenantId, c.Id);
             allBindings[c.Id] = await Search.GetBindingsAsync(TenantId, c.Id);
         }
 
@@ -2446,6 +2554,63 @@
         }
         catch (Exception ex) { Toasts.Error(ex.Message); }
         finally { loadingInsight = false; }
+    }
+
+    // ── Data views ────────────────────────────────────────────────────────────
+
+    private List<ElasticsearchDataView> DataViewsFor(ElasticsearchCluster cluster) =>
+        allDataViews.TryGetValue(cluster.Id, out List<ElasticsearchDataView>? v) ? v : [];
+
+    private void ShowAddDataView(ElasticsearchCluster cluster)
+    {
+        addDataViewClusterId = cluster.Id;
+        dataViewTitle = "";
+        dataViewName = null;
+        dataViewTimeField = "@timestamp";
+        dataViewSpaceId = null;
+        dataViewError = null;
+    }
+
+    private async Task AddDataViewAsync(ElasticsearchCluster cluster)
+    {
+        savingDataView = true;
+        dataViewError = null;
+        try
+        {
+            await Search.CreateDataViewAsync(
+                TenantId, cluster.Id, dataViewSpaceId, dataViewTitle, dataViewName, dataViewTimeField);
+            addDataViewClusterId = null;
+            allDataViews[cluster.Id] = await Search.GetDataViewsAsync(TenantId, cluster.Id);
+            Toasts.Success($"Created a data view for \"{dataViewTitle}\".");
+        }
+        catch (Exception ex)
+        {
+            dataViewError = ex.Message;
+            allDataViews[cluster.Id] = await Search.GetDataViewsAsync(TenantId, cluster.Id);
+        }
+        finally { savingDataView = false; }
+    }
+
+    private async Task ApplyDataViewAsync(ElasticsearchCluster cluster, ElasticsearchDataView view)
+    {
+        try
+        {
+            await Search.ApplyDataViewAsync(TenantId, view.Id);
+            Toasts.Success($"Re-applied \"{view.Title}\".");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { allDataViews[cluster.Id] = await Search.GetDataViewsAsync(TenantId, cluster.Id); }
+    }
+
+    private async Task DeleteDataViewAsync(Guid clusterId, Guid viewId, string title)
+    {
+        try
+        {
+            await Search.DeleteDataViewAsync(TenantId, viewId);
+            allDataViews[clusterId] = await Search.GetDataViewsAsync(TenantId, clusterId);
+            Toasts.Success($"Deleted the data view for \"{title}\".");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
     }
 
     // ── Ingest pipelines ──────────────────────────────────────────────────────

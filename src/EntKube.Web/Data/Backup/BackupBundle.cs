@@ -119,6 +119,7 @@ public class BackupBundle
     public List<ElasticsearchKibanaSpace> ElasticsearchKibanaSpaces { get; set; } = [];
     public List<ElasticsearchRemoteLink> ElasticsearchRemoteLinks { get; set; } = [];
     public List<ElasticsearchIngestPipeline> ElasticsearchIngestPipelines { get; set; } = [];
+    public List<ElasticsearchDataView> ElasticsearchDataViews { get; set; } = [];
 
     // VPN
     public List<VpnTunnel> VpnTunnels { get; set; } = [];

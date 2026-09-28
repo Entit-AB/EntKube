@@ -921,6 +921,142 @@ public class ElasticsearchService(
     /// <summary>How a one-shot Job ended, as far as a bounded wait could tell.</summary>
     public enum JobOutcome { Succeeded, Failed, StillRunning }
 
+    // ── Kibana data views ──────────────────────────────────────────────────────
+
+    public async Task<List<ElasticsearchDataView>> GetDataViewsAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.ElasticsearchDataViews
+            .Where(v => v.TenantId == tenantId && v.ElasticsearchClusterId == clusterId)
+            .OrderBy(v => v.SpaceId).ThenBy(v => v.Title)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Creates a data view, so an account with a Kibana login and an index pattern has something to
+    /// open rather than an empty Discover.
+    /// </summary>
+    public async Task<ElasticsearchDataView> CreateDataViewAsync(
+        Guid tenantId, Guid clusterId, string? spaceId, string title, string? name, string timeFieldName,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        if (!cluster.KibanaEnabled)
+            throw new InvalidOperationException("This cluster has no Kibana, so a data view has nothing to appear in.");
+
+        title = (title ?? "").Trim();
+        if (string.IsNullOrWhiteSpace(title))
+            throw new InvalidOperationException("A data view needs an index pattern, e.g. \"logs-orders-*\".");
+
+        spaceId = string.IsNullOrWhiteSpace(spaceId) ? null : spaceId.Trim();
+
+        if (spaceId is not null && !await db.ElasticsearchKibanaSpaces.AnyAsync(
+                sp => sp.ElasticsearchClusterId == clusterId && sp.SpaceId == spaceId, ct))
+            throw new InvalidOperationException(
+                $"There is no '{spaceId}' space on this cluster. Create the space first — a data view in a space that "
+                + "does not exist is a saved object nobody can reach.");
+
+        if (await db.ElasticsearchDataViews.AnyAsync(
+                v => v.ElasticsearchClusterId == clusterId && v.SpaceId == spaceId && v.Title == title, ct))
+            throw new InvalidOperationException(
+                $"'{title}' already has a data view in {(spaceId is null ? "the default space" : $"the '{spaceId}' space")}.");
+
+        ElasticsearchDataView view = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            ElasticsearchClusterId = clusterId,
+            SpaceId = spaceId,
+            Title = title,
+            Name = string.IsNullOrWhiteSpace(name) ? title : name!.Trim(),
+            TimeFieldName = (timeFieldName ?? "").Trim()
+        };
+
+        db.ElasticsearchDataViews.Add(view);
+        await db.SaveChangesAsync(ct);
+
+        await ApplyDataViewInternalAsync(db, cluster, view, ct);
+        return view;
+    }
+
+    /// <summary>Re-applies a data view, e.g. after the space or the cluster was rebuilt.</summary>
+    public async Task ApplyDataViewAsync(Guid tenantId, Guid dataViewId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchDataView view = await db.ElasticsearchDataViews
+            .Include(v => v.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(v => v.Id == dataViewId && v.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Data view not found.");
+
+        await ApplyDataViewInternalAsync(db, view.ElasticsearchCluster, view, ct);
+    }
+
+    public async Task DeleteDataViewAsync(Guid tenantId, Guid dataViewId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchDataView view = await db.ElasticsearchDataViews
+            .Include(v => v.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(v => v.Id == dataViewId && v.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Data view not found.");
+
+        ElasticsearchCluster cluster = view.ElasticsearchCluster;
+
+        try
+        {
+            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            string configMap = SnapshotConfigMapName(cluster, $"dataview-del-{view.Id:N}");
+            string jobName = JobName(cluster, $"dataview-del-{view.Id:N}"[..Math.Min(40, $"dataview-del-{view.Id:N}".Length)]);
+
+            await k8s.ApplyManifestAsync(
+                BuildScriptConfigMap(cluster, configMap, BuildDataViewDeleteScript(cluster, view)), kubeconfig, ct);
+            await k8s.ApplyManifestAsync(
+                BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+            await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Removing data view {Title} failed", view.Title);
+        }
+
+        db.ElasticsearchDataViews.Remove(view);
+        await db.SaveChangesAsync(ct);
+    }
+
+    private async Task ApplyDataViewInternalAsync(
+        ApplicationDbContext db, ElasticsearchCluster cluster, ElasticsearchDataView view, CancellationToken ct)
+    {
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string configMap = SnapshotConfigMapName(cluster, $"dataview-{view.Id:N}");
+        string jobName = JobName(cluster, "dataview");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildDataViewApplyScript(cluster, view)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+        view.LastError = outcome == JobOutcome.Succeeded ? null : Truncate(log, 2000);
+        if (outcome == JobOutcome.Succeeded) view.LastAppliedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        if (outcome == JobOutcome.Failed)
+            throw new InvalidOperationException("Kibana rejected the data view:\n" + Truncate(log, 1200));
+        if (outcome == JobOutcome.StillRunning)
+            throw new InvalidOperationException(
+                "Kibana did not answer in time — it starts well after Elasticsearch does. The data view is recorded "
+                + "here and can be re-applied once it is up.");
+    }
+
     // ── Ingest pipelines ───────────────────────────────────────────────────────
 
     public async Task<List<ElasticsearchIngestPipeline>> GetPipelinesAsync(
@@ -3983,6 +4119,63 @@ public class ElasticsearchService(
         sb.AppendLine($"echo \"space {space.SpaceId} applied (HTTP $code)\"");
         return sb.ToString();
     }
+
+    /// <summary>
+    /// Creates or replaces a data view in Kibana.
+    ///
+    /// <para>The id is EntKube's own, which is what makes this idempotent: Kibana would otherwise
+    /// generate one, and a second apply would leave two data views over the same pattern with no way
+    /// to tell which the dashboards were built on.</para>
+    /// </summary>
+    public static string BuildDataViewApplyScript(ElasticsearchCluster c, ElasticsearchDataView view)
+    {
+        Dictionary<string, object> dataView = new()
+        {
+            ["id"] = view.KibanaObjectId,
+            ["title"] = view.Title,
+            ["name"] = string.IsNullOrWhiteSpace(view.Name) ? view.Title : view.Name!
+        };
+
+        // An empty time field is a valid choice — reference data has no time axis — but it has to be
+        // omitted rather than sent empty, which Kibana rejects.
+        if (!string.IsNullOrWhiteSpace(view.TimeFieldName))
+            dataView["timeFieldName"] = view.TimeFieldName;
+
+        string body = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["data_view"] = dataView,
+            // Replace the object with this id rather than failing on the second apply.
+            ["override"] = true
+        }, JsonOpts);
+
+        StringBuilder sb = new();
+        AppendKibanaPreamble(sb, c);
+        sb.AppendLine("cat > /tmp/dataview.json <<'ENTKUBE_EOF'");
+        sb.AppendLine(body);
+        sb.AppendLine("ENTKUBE_EOF");
+        sb.AppendLine();
+        sb.AppendLine($"code=$($KCURL -o /tmp/resp -w '%{{http_code}}' -X POST \"$KB{SpacePath(view.SpaceId)}/api/data_views/data_view\" -d @/tmp/dataview.json)");
+        sb.AppendLine("if [ \"$code\" -ge 300 ]; then echo \"data view -> HTTP $code\"; cat /tmp/resp; echo; exit 1; fi");
+        sb.AppendLine($"echo \"data view {view.Title} applied (HTTP $code)\"");
+        return sb.ToString();
+    }
+
+    public static string BuildDataViewDeleteScript(ElasticsearchCluster c, ElasticsearchDataView view)
+    {
+        StringBuilder sb = new();
+        AppendKibanaPreamble(sb, c);
+        sb.AppendLine($"code=$($KCURL -o /tmp/resp -w '%{{http_code}}' -X DELETE \"$KB{SpacePath(view.SpaceId)}/api/data_views/data_view/{view.KibanaObjectId}\")");
+        sb.AppendLine("if [ \"$code\" -ge 300 ] && [ \"$code\" != \"404\" ]; then cat /tmp/resp; echo; exit 1; fi");
+        sb.AppendLine($"echo \"data view {view.Title} removed (HTTP $code)\"");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The path prefix that puts a Kibana API call inside a space. The default space has no prefix —
+    /// "/s/default" is not the same URL, and saved objects created through it land elsewhere.
+    /// </summary>
+    public static string SpacePath(string? spaceId) =>
+        string.IsNullOrWhiteSpace(spaceId) ? "" : $"/s/{spaceId}";
 
     /// <summary>Deletes a space, and with it everything saved inside it.</summary>
     public static string BuildSpaceDeleteScript(ElasticsearchCluster c, ElasticsearchKibanaSpace space)

@@ -2867,4 +2867,138 @@ public class ElasticsearchServiceTests : IDisposable
         // Rules first: leaving them behind would fire ExporterDown for a monitor deliberately removed.
         deleted[0].Should().Be("prometheusrule/search-es-exporter");
     }
+
+    // ──────── Data views ────────
+
+    [Fact]
+    public void ADataViewCarriesEntKubesOwnId_SoAReapplyReplacesIt()
+    {
+        ElasticsearchDataView view = new()
+        {
+            Id = Guid.Parse("11111111-2222-3333-4444-555555555555"),
+            Title = "logs-orders-*", Name = "Orders", TimeFieldName = "@timestamp"
+        };
+
+        string script = ElasticsearchService.BuildDataViewApplyScript(SampleCluster(), view);
+
+        // Kibana would otherwise generate one, and a second apply would leave two data views over
+        // the same pattern with no way to tell which the dashboards were built on.
+        script.Should().Contain("entkube-11111111-2222-3333-4444-555555555555");
+        script.Should().Contain("\"override\": true");
+        script.Should().Contain("\"timeFieldName\": \"@timestamp\"");
+        script.Should().Contain("/api/data_views/data_view");
+    }
+
+    [Fact]
+    public void ADataViewWithNoTimeFieldOmitsIt_RatherThanSendingItEmpty()
+    {
+        ElasticsearchDataView view = new() { Id = Guid.NewGuid(), Title = "reference-data", TimeFieldName = "" };
+
+        // Reference data has no time axis, and Kibana rejects an empty string for the field.
+        ElasticsearchService.BuildDataViewApplyScript(SampleCluster(), view)
+            .Should().NotContain("timeFieldName");
+    }
+
+    [Theory]
+    [InlineData(null, "")]
+    [InlineData("", "")]
+    [InlineData("orders", "/s/orders")]
+    public void TheDefaultSpaceHasNoPathPrefix(string? spaceId, string expected)
+    {
+        // "/s/default" is a different URL, and saved objects created through it land elsewhere.
+        ElasticsearchService.SpacePath(spaceId).Should().Be(expected);
+    }
+
+    [Fact]
+    public void ASpacedDataViewIsCreatedInsideThatSpace()
+    {
+        ElasticsearchDataView view = new() { Id = Guid.NewGuid(), Title = "logs-*", SpaceId = "orders" };
+
+        string script = ElasticsearchService.BuildDataViewApplyScript(SampleCluster(), view);
+
+        script.Should().Contain("/s/orders/api/data_views/data_view");
+    }
+
+    [Fact]
+    public async Task ADataViewNeedsAKibanaToAppearIn()
+    {
+        await SeedClusterAsync();
+        ElasticsearchCluster c = SampleCluster();
+        c.TenantId = tenantId;
+        c.KubernetesClusterId = k8sClusterId;
+        c.KibanaEnabled = false;
+        db.ElasticsearchClusters.Add(c);
+        await db.SaveChangesAsync();
+
+        Func<Task> act = () => sut.CreateDataViewAsync(tenantId, c.Id, null, "logs-*", null, "@timestamp");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*nothing to appear in*");
+    }
+
+    [Fact]
+    public async Task ADataViewInASpaceThatDoesNotExistIsRefused()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+
+        // A saved object in a space nobody can reach is worse than an error here.
+        Func<Task> act = () => sut.CreateDataViewAsync(tenantId, c.Id, "orders", "logs-*", null, "@timestamp");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*no 'orders' space*");
+    }
+
+    [Fact]
+    public async Task ThePatternCanExistOncePerSpace()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        await sut.CreateSpaceAsync(tenantId, c.Id, "orders", "Orders", null);
+        await sut.CreateDataViewAsync(tenantId, c.Id, null, "logs-*", null, "@timestamp");
+
+        // The same indices are a different data view in each space; Kibana treats them as unrelated.
+        await sut.CreateDataViewAsync(tenantId, c.Id, "orders", "logs-*", null, "@timestamp");
+
+        (await db.ElasticsearchDataViews.CountAsync()).Should().Be(2);
+
+        Func<Task> act = () => sut.CreateDataViewAsync(tenantId, c.Id, "orders", "logs-*", null, "@timestamp");
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*already has a data view*");
+    }
+
+    [Fact]
+    public async Task CreatingADataViewAppliesItAndRecordsIt()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchDataView view = await sut.CreateDataViewAsync(
+            tenantId, c.Id, null, "logs-orders-*", "Orders", "@timestamp");
+
+        applied.Should().Contain(m => m.Contains("api/data_views/data_view"));
+        view.Name.Should().Be("Orders");
+
+        ElasticsearchDataView stored = await db.ElasticsearchDataViews.AsNoTracking().SingleAsync();
+        stored.LastAppliedAt.Should().NotBeNull();
+        stored.LastError.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ADataViewWithNoNameIsShownAsItsPattern()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchDataView view = await sut.CreateDataViewAsync(
+            tenantId, c.Id, null, "logs-orders-*", null, "@timestamp");
+
+        view.Name.Should().Be("logs-orders-*");
+    }
 }

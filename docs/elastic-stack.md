@@ -17,6 +17,7 @@ managed under **Services › Search**.
 | Application users | Native-realm users + per-user roles, created by a Job; bound into an app's namespace as a Secret |
 | Metrics | Community Elasticsearch exporter + Service + ServiceMonitor, labelled to match the live Prometheus |
 | Kibana spaces | Created through Kibana's API by a Job; accounts are scoped to one by privilege |
+| Data views | Kibana saved objects, one per space, with an id EntKube assigns |
 | Cross-cluster search | `remoteClusters` + `remoteClusterServer` on the CRs, with an ECK-managed API key |
 
 The operator on its own starts nothing. Installing it and stopping there leaves a working controller
@@ -226,6 +227,21 @@ Applying a space twice is harmless (it creates, or updates the one already there
 account is confined to cannot be deleted — that account would sign in to a space that no longer
 exists and simply see nothing, with nothing saying why — and deleting one is audited, because every
 dashboard in it goes at the same time.
+
+### Data views
+
+An account with a Kibana login and an index pattern still opens an empty Discover: Kibana does not
+know the pattern exists until a data view says so, and saying so requires knowing which field
+carries the time. Creating one alongside the account turns "you have access" into "there is
+something to look at".
+
+A data view belongs to one space and is invisible from the others, so the same pattern can exist
+once per space. The time field can be left blank — reference data has no time axis — and is then
+omitted rather than sent empty, which Kibana rejects.
+
+The saved object's id is EntKube's own rather than the one Kibana would generate. That is what makes
+re-applying replace the same object: otherwise a second apply leaves two data views over the same
+pattern, with no way to tell which the dashboards were built on.
 
 ### Rotating a password
 

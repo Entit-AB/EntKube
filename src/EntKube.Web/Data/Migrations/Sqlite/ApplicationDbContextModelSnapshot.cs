@@ -3443,6 +3443,54 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("ElasticsearchClusters");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchDataView", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ElasticsearchClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("LastAppliedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SpaceId")
+                        .HasMaxLength(63)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TimeFieldName")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ElasticsearchClusterId", "SpaceId", "Title")
+                        .IsUnique();
+
+                    b.ToTable("ElasticsearchDataViews");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIlmPolicy", b =>
                 {
                     b.Property<Guid>("Id")
@@ -9691,6 +9739,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchDataView", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
+                        .WithMany("DataViews")
+                        .HasForeignKey("ElasticsearchClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ElasticsearchCluster");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIlmPolicy", b =>
                 {
                     b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
@@ -11628,6 +11687,8 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
                 {
+                    b.Navigation("DataViews");
+
                     b.Navigation("IlmPolicies");
 
                     b.Navigation("IngestPipelines");
