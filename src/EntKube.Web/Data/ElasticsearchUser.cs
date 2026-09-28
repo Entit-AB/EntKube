@@ -16,8 +16,28 @@ public enum ElasticsearchAccess
 }
 
 /// <summary>
-/// A native-realm Elasticsearch user scoped to one index pattern, created for an application rather
-/// than for a person.
+/// Whether this account can sign in to Kibana, and with how much of it.
+///
+/// <para>Kibana access is granted as application privileges on the user's own role rather than
+/// through the built-in <c>viewer</c> and <c>editor</c> roles, because those two carry read (or
+/// write) on <em>every</em> index — which would quietly undo the index scoping this user exists
+/// for.</para>
+/// </summary>
+public enum ElasticsearchKibanaAccess
+{
+    /// <summary>No Kibana. The account is for an application, not a person.</summary>
+    None,
+
+    /// <summary>Can open Kibana, search its own indices and read dashboards, but save nothing.</summary>
+    Read,
+
+    /// <summary>Can also create data views, dashboards and saved searches.</summary>
+    All
+}
+
+/// <summary>
+/// A native-realm Elasticsearch user scoped to one index pattern — an application, or a person who
+/// signs in to Kibana with it.
 ///
 /// <para><b>Why this exists at all.</b> Without it the only account on the cluster is the
 /// operator-generated <c>elastic</c> superuser, so every application that needs to write a log line
@@ -44,6 +64,15 @@ public class ElasticsearchUser
     public required string IndexPattern { get; set; }
 
     public ElasticsearchAccess Access { get; set; } = ElasticsearchAccess.Writer;
+
+    /// <summary>
+    /// Whether a person can sign in to Kibana with this account. Default None: most of these are
+    /// applications, and an application has no use for a UI it will never open.
+    /// </summary>
+    public ElasticsearchKibanaAccess KibanaAccess { get; set; } = ElasticsearchKibanaAccess.None;
+
+    /// <summary>When the password was last generated — for the account, and for whoever holds it.</summary>
+    public DateTime? PasswordSetAt { get; set; }
 
     /// <summary>When the user was last successfully applied to the cluster.</summary>
     public DateTime? LastAppliedAt { get; set; }

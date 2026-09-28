@@ -166,6 +166,27 @@ A user an application is still bound to cannot be deleted; the binding goes firs
 cluster removes the bindings' Secrets from their namespaces too, rather than leaving applications
 holding working-looking credentials for something that is gone.
 
+### People signing in to Kibana
+
+The same account can be a person's Kibana login, at **Read** (open Kibana and search its own indices,
+save nothing) or **Build** (also create data views, dashboards and saved searches). That is granted
+as application privileges on the user's own role rather than through Elasticsearch's built-in
+`viewer` and `editor` roles — those carry read, or write, on *every* index, and would undo the index
+scoping in the same breath as granting the login. A person with Read on `logs-orders-*` sees exactly
+that data in Kibana and nothing else.
+
+This needs no licence beyond Basic. Signing in to Kibana with an external identity provider (OIDC,
+SAML, LDAP) is a **Platinum** feature of Elasticsearch, not something ECK or EntKube can grant.
+
+### Rotating a password
+
+**Reset password** generates a new one, sets it through Elasticsearch's dedicated password endpoint —
+so the account's roles are left exactly as they are — and then re-syncs every bound application, in
+that order. A bound application holds the old password from the moment it changes, so the re-sync is
+part of the reset rather than something to remember afterwards. The new password is shown once, for
+handing to a person; it lives in the cluster's Secret, never here. If the change fails, the old
+password is still in force and the message says so.
+
 ## Watching it
 
 A search cluster's usual way of stopping is not a crash: the disk fills, Elasticsearch stops

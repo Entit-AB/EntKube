@@ -875,7 +875,15 @@
                                                 <option value="@ElasticsearchAccess.Manager">Manager — everything on those indices</option>
                                             </select>
                                         </div>
-                                        <div class="col-md-2 d-flex align-items-end gap-1">
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Kibana</label>
+                                            <select class="form-select form-select-sm" @bind="userKibanaAccess">
+                                                <option value="@ElasticsearchKibanaAccess.None">No sign-in — an application</option>
+                                                <option value="@ElasticsearchKibanaAccess.Read">Read — open Kibana, save nothing</option>
+                                                <option value="@ElasticsearchKibanaAccess.All">Build — data views and dashboards</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-3 d-flex align-items-end gap-1">
                                             <button class="btn btn-sm btn-primary" @onclick="() => AddUserAsync(cluster)"
                                                     disabled="@(savingUser || string.IsNullOrWhiteSpace(userName))">
                                                 @if (savingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
@@ -902,14 +910,33 @@
                             else
                             {
                                 <table class="table table-sm table-borderless small mb-0">
-                                    <thead class="text-muted"><tr><th>User</th><th>Indices</th><th>Access</th><th>Applied</th><th></th></tr></thead>
+                                    <thead class="text-muted"><tr><th>User</th><th>Indices</th><th>Access</th><th>Kibana</th><th>Applied</th><th></th></tr></thead>
                                     <tbody>
                                         @foreach (ElasticsearchUser u in users)
                                         {
                                             <tr>
-                                                <td><code>@u.Username</code></td>
+                                                <td>
+                                                    <code>@u.Username</code>
+                                                    @if (revealedUserPasswordFor == u.Id)
+                                                    {
+                                                        <div class="mt-1">
+                                                            <code class="user-select-all">@(revealedUserPassword ?? "could not be read")</code>
+                                                            <div class="form-text small mb-0">Shown once here; it lives in the cluster, not in EntKube.</div>
+                                                        </div>
+                                                    }
+                                                </td>
                                                 <td><code>@u.IndexPattern</code></td>
                                                 <td><span class="badge bg-secondary">@u.Access</span></td>
+                                                <td>
+                                                    @if (u.KibanaAccess == ElasticsearchKibanaAccess.None)
+                                                    {
+                                                        <span class="text-muted">—</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <span class="badge bg-info-subtle text-info border border-info-subtle">@u.KibanaAccess</span>
+                                                    }
+                                                </td>
                                                 <td class="text-muted">
                                                     @if (u.LastError is not null)
                                                     {
@@ -921,6 +948,19 @@
                                                     }
                                                 </td>
                                                 <td class="text-nowrap">
+                                                    @if (u.KibanaAccess != ElasticsearchKibanaAccess.None)
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Show password"
+                                                                aria-label="@($"Show the password for {u.Username}")"
+                                                                @onclick="() => RevealUserPasswordAsync(u)">
+                                                            <i class="bi bi-eye"></i>
+                                                        </button>
+                                                    }
+                                                    <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Reset password"
+                                                            aria-label="@($"Reset the password for {u.Username}")"
+                                                            @onclick='() => pendingConfirm = new PendingConfirm($"Reset the password for \"{u.Username}\"? Every bound application is re-synced straight away; anything holding the password by hand stops working.", "Reset password", () => ResetUserPasswordAsync(cluster, u))'>
+                                                        <i class="bi bi-key"></i>
+                                                    </button>
                                                     <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Re-apply"
                                                             aria-label="@($"Re-apply {u.Username}")" @onclick="() => ApplyUserAsync(cluster, u)">
                                                         <i class="bi bi-arrow-repeat"></i>
@@ -1167,6 +1207,9 @@
     private string userName = "";
     private string userIndexPattern = "";
     private ElasticsearchAccess userAccess = ElasticsearchAccess.Writer;
+    private ElasticsearchKibanaAccess userKibanaAccess = ElasticsearchKibanaAccess.None;
+    private Guid? revealedUserPasswordFor;
+    private string? revealedUserPassword;
     private bool savingUser;
     private string? userError;
     private Guid? addBindingClusterId;
@@ -1757,6 +1800,7 @@
         userName = "";
         userIndexPattern = "";
         userAccess = ElasticsearchAccess.Writer;
+        userKibanaAccess = ElasticsearchKibanaAccess.None;
         userError = null;
     }
 
@@ -1766,7 +1810,7 @@
         userError = null;
         try
         {
-            await Search.CreateUserAsync(TenantId, cluster.Id, userName, userIndexPattern, userAccess);
+            await Search.CreateUserAsync(TenantId, cluster.Id, userName, userIndexPattern, userAccess, userKibanaAccess);
             addUserClusterId = null;
             allUsers[cluster.Id] = await Search.GetUsersAsync(TenantId, cluster.Id);
             Toasts.Success($"Created \"{userName.Trim().ToLowerInvariant()}\".");
@@ -1799,6 +1843,36 @@
             Toasts.Success($"Deleted \"{username}\".");
         }
         catch (Exception ex) { Toasts.Error(ex.Message); }
+    }
+
+    private async Task RevealUserPasswordAsync(ElasticsearchUser user)
+    {
+        if (revealedUserPasswordFor == user.Id)
+        {
+            revealedUserPasswordFor = null;
+            revealedUserPassword = null;
+            return;
+        }
+
+        revealedUserPassword = await Search.GetUserPasswordAsync(TenantId, user.Id);
+        revealedUserPasswordFor = user.Id;
+    }
+
+    private async Task ResetUserPasswordAsync(ElasticsearchCluster cluster, ElasticsearchUser user)
+    {
+        try
+        {
+            revealedUserPassword = await Search.ResetPasswordAsync(TenantId, user.Id, await Actor.NameAsync());
+            revealedUserPasswordFor = user.Id;
+            allUsers[cluster.Id] = await Search.GetUsersAsync(TenantId, cluster.Id);
+            allBindings[cluster.Id] = await Search.GetBindingsAsync(TenantId, cluster.Id);
+            Toasts.Success($"New password for \"{user.Username}\" — bound applications were re-synced.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+            allUsers[cluster.Id] = await Search.GetUsersAsync(TenantId, cluster.Id);
+        }
     }
 
     private void ShowAddBinding(ElasticsearchCluster cluster)

@@ -1308,9 +1308,11 @@ public class ElasticsearchServiceTests : IDisposable
         stored.LastError.Should().BeNull();
 
         // Nothing on the entity can hold a password, which is the point of reading it back from the
-        // cluster when a binding needs it.
-        typeof(ElasticsearchUser).GetProperties().Select(pr => pr.Name)
-            .Should().NotContain(n => n.Contains("Password", StringComparison.OrdinalIgnoreCase));
+        // cluster when a binding needs it. A timestamp saying when one was last set is fine — what
+        // must never appear is somewhere to put the password itself.
+        typeof(ElasticsearchUser).GetProperties()
+            .Where(pr => pr.Name.Contains("Password", StringComparison.OrdinalIgnoreCase))
+            .Should().OnlyContain(pr => pr.PropertyType != typeof(string));
         user.CredentialsSecretName.Should().Be("es-user-orders");
     }
 
@@ -1819,5 +1821,147 @@ public class ElasticsearchServiceTests : IDisposable
         AuditEvent recorded = await db.AuditEvents.AsNoTracking().SingleAsync(e => e.Action == "elasticsearch.upgrade");
         recorded.PerformedBy.Should().Be("nils");
         recorded.Details.Should().Contain("9.5.0 → 9.5.1").And.Contain("accepted blockers");
+    }
+
+    // ──────── Kibana sign-in and password rotation ────────
+
+    [Fact]
+    public void AnApplicationUserGetsNoKibanaPrivileges()
+    {
+        ElasticsearchUser app = new()
+        {
+            Username = "orders", IndexPattern = "logs-orders-*",
+            Access = ElasticsearchAccess.Writer, KibanaAccess = ElasticsearchKibanaAccess.None
+        };
+
+        string script = ElasticsearchService.BuildUserApplyScript(SampleCluster(), app);
+
+        script.Should().NotContain("applications");
+        script.Should().NotContain("kibana-.kibana");
+    }
+
+    [Theory]
+    [InlineData(ElasticsearchKibanaAccess.Read, "read")]
+    [InlineData(ElasticsearchKibanaAccess.All, "all")]
+    public void APersonGetsKibanaAsAnApplicationPrivilegeOnTheirOwnRole(
+        ElasticsearchKibanaAccess access, string privilege)
+    {
+        ElasticsearchUser person = new()
+        {
+            Username = "nils", IndexPattern = "logs-orders-*",
+            Access = ElasticsearchAccess.Viewer, KibanaAccess = access
+        };
+
+        string script = ElasticsearchService.BuildUserApplyScript(SampleCluster(), person);
+
+        script.Should().Contain("\"application\": \"kibana-.kibana\"");
+        script.Should().Contain($"\"{privilege}\"");
+
+        // Not the built-in viewer/editor roles: those carry read (or write) on every index, which
+        // would undo the index scoping in the same breath as granting the login.
+        script.Should().NotContain("\"roles\": [\"viewer\"]");
+        script.Should().NotContain("\"roles\": [\"editor\"]");
+        script.Should().Contain("\"logs-orders-*\"");
+    }
+
+    [Fact]
+    public void ThePasswordResetTouchesThePasswordAndNothingElse()
+    {
+        ElasticsearchUser user = new() { Username = "nils", IndexPattern = "logs-*" };
+
+        string script = ElasticsearchService.BuildPasswordResetScript(SampleCluster(), user);
+
+        // The dedicated endpoint, so the account's roles are left as they are rather than
+        // re-asserted from a stale copy of them here.
+        script.Should().Contain("_security/user/nils/_password");
+        script.Should().NotContain("_security/role/");
+        script.Should().Contain("\"password\": \"${ES_USER_PASSWORD}\"");
+        script.Should().Contain("rm -f /tmp/pw.json");
+    }
+
+    [Fact]
+    public async Task AResetPushesTheNewPasswordToEveryBoundApplication()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        k8s.Setup(x => x.GetSecretValueAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("whatever-is-in-the-secret");
+
+        ElasticsearchUser user = await sut.CreateUserAsync(
+            tenantId, c.Id, "orders", "logs-*", ElasticsearchAccess.Writer);
+        AppDeployment deployment = await SeedDeploymentAsync();
+        await sut.CreateBindingAsync(tenantId, c.Id, deployment.Id, user.Id, "elasticsearch");
+
+        DateTime? before = (await db.ElasticsearchBindings.AsNoTracking().SingleAsync()).LastSyncedAt;
+        await Task.Delay(10);
+
+        string password = await sut.ResetPasswordAsync(tenantId, user.Id, "nils");
+
+        // A bound application holds the old password from the moment it changes, so the re-sync is
+        // part of the reset rather than something to remember afterwards.
+        password.Should().NotBeNullOrWhiteSpace();
+        ElasticsearchBinding binding = await db.ElasticsearchBindings.AsNoTracking().SingleAsync();
+        binding.LastSyncedAt.Should().BeAfter(before!.Value);
+
+        ElasticsearchUser stored = await db.ElasticsearchUsers.AsNoTracking().SingleAsync();
+        stored.PasswordSetAt.Should().NotBeNull();
+
+        AuditEvent recorded = await db.AuditEvents.AsNoTracking()
+            .SingleAsync(e => e.Action == "elasticsearch.user.password-reset");
+        recorded.PerformedBy.Should().Be("nils");
+        recorded.Details.Should().Contain("orders");
+    }
+
+    [Fact]
+    public async Task AFailedResetLeavesTheOldPasswordInForce_AndSaysSo()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchUser user = await sut.CreateUserAsync(
+            tenantId, c.Id, "orders", "logs-*", ElasticsearchAccess.Writer);
+
+        k8s.Setup(x => x.GetJsonAsync(It.IsRegex("^job/"), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""{"status":{"failed":1}}""");
+        k8s.Setup(x => x.GetPodLogsAsync(It.IsRegex("^job/"), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("password change -> HTTP 400");
+
+        Func<Task> act = () => sut.ResetPasswordAsync(tenantId, user.Id, "nils");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*old one is still in force*");
+    }
+
+    [Fact]
+    public async Task AccessCanBeChangedWithoutTouchingThePassword()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchUser user = await sut.CreateUserAsync(
+            tenantId, c.Id, "nils", "logs-*", ElasticsearchAccess.Viewer, ElasticsearchKibanaAccess.Read);
+        DateTime? passwordSet = (await db.ElasticsearchUsers.AsNoTracking().SingleAsync()).PasswordSetAt;
+        applied.Clear();
+
+        await sut.UpdateUserAccessAsync(
+            tenantId, user.Id, "logs-orders-*", ElasticsearchAccess.Viewer, ElasticsearchKibanaAccess.All);
+
+        ElasticsearchUser stored = await db.ElasticsearchUsers.AsNoTracking().SingleAsync();
+        stored.KibanaAccess.Should().Be(ElasticsearchKibanaAccess.All);
+        stored.IndexPattern.Should().Be("logs-orders-*");
+        // Promoting somebody from reading Kibana to building in it must not log them out of it.
+        stored.PasswordSetAt.Should().Be(passwordSet);
+        applied.Should().NotContain(m => m.Contains("kind: Secret"));
     }
 }

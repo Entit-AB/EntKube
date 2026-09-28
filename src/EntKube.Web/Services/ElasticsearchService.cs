@@ -1488,6 +1488,7 @@ public class ElasticsearchService(
         string username,
         string indexPattern,
         ElasticsearchAccess access,
+        ElasticsearchKibanaAccess kibanaAccess = ElasticsearchKibanaAccess.None,
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
@@ -1517,7 +1518,9 @@ public class ElasticsearchService(
             ElasticsearchClusterId = clusterId,
             Username = username,
             IndexPattern = indexPattern,
-            Access = access
+            Access = access,
+            KibanaAccess = kibanaAccess,
+            PasswordSetAt = DateTime.UtcNow
         };
 
         string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
@@ -1579,6 +1582,126 @@ public class ElasticsearchService(
 
         if (outcome != JobOutcome.Succeeded)
             throw new InvalidOperationException("Applying the user failed:\n" + Truncate(log, 1200));
+    }
+
+    /// <summary>
+    /// Changes a user's access without touching its password, so a person can be promoted from
+    /// reading Kibana to building in it — or an application narrowed — without a redeploy.
+    /// </summary>
+    public async Task UpdateUserAccessAsync(
+        Guid tenantId, Guid userId, string indexPattern, ElasticsearchAccess access,
+        ElasticsearchKibanaAccess kibanaAccess, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchUser user = await db.ElasticsearchUsers
+            .FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("User not found.");
+
+        if (string.IsNullOrWhiteSpace(indexPattern))
+            throw new InvalidOperationException("An index pattern is required.");
+
+        user.IndexPattern = indexPattern.Trim();
+        user.Access = access;
+        user.KibanaAccess = kibanaAccess;
+        await db.SaveChangesAsync(ct);
+
+        await ApplyUserAsync(tenantId, userId, ct);
+    }
+
+    /// <summary>
+    /// Generates a new password, tells Elasticsearch about it, and pushes it to every application
+    /// bound to the account — in that order, because an application holding the old password is
+    /// broken for exactly as long as the gap between the second step and the third.
+    ///
+    /// <para>Returns the new password once, for handing to a person. It is not stored here; the
+    /// Secret in the cluster is where it lives afterwards.</para>
+    /// </summary>
+    public async Task<string> ResetPasswordAsync(
+        Guid tenantId, Guid userId, string performedBy, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchUser user = await db.ElasticsearchUsers
+            .Include(u => u.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("User not found.");
+
+        ElasticsearchCluster cluster = user.ElasticsearchCluster;
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string password = GeneratePassword();
+
+        await auditService.RecordAsync(
+            deploymentId: null,
+            action: "elasticsearch.user.password-reset",
+            resourceKind: "Elasticsearch",
+            resourceName: $"{cluster.Namespace}/{cluster.Name}",
+            details: $"user '{user.Username}'",
+            performedBy: performedBy,
+            ct: ct);
+
+        await k8s.ApplyManifestAsync(BuildUserCredentialsSecret(cluster, user, password), kubeconfig, ct);
+
+        string configMap = UserConfigMapName(cluster, user, "password");
+        string jobName = JobName(cluster, $"user-pw-{user.Username}");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildPasswordResetScript(cluster, user)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap, user.CredentialsSecretName), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+        if (outcome != JobOutcome.Succeeded)
+        {
+            user.LastError = Truncate(log, 2000);
+            await db.SaveChangesAsync(ct);
+            throw new InvalidOperationException(
+                "Setting the new password failed, so the old one is still in force. Elasticsearch said:\n"
+                + Truncate(log, 1200));
+        }
+
+        user.PasswordSetAt = DateTime.UtcNow;
+        user.LastError = null;
+        await db.SaveChangesAsync(ct);
+
+        // Every bound application is holding the old password from this moment on, so push the new
+        // one straight away rather than waiting for somebody to notice.
+        List<Guid> bindingIds = await db.ElasticsearchBindings
+            .Where(b => b.ElasticsearchUserId == userId && b.SyncEnabled)
+            .Select(b => b.Id)
+            .ToListAsync(ct);
+
+        foreach (Guid bindingId in bindingIds)
+        {
+            try
+            {
+                await SyncBindingAsync(tenantId, bindingId, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Re-syncing binding {Binding} after a password reset failed", bindingId);
+            }
+        }
+
+        return password;
+    }
+
+    /// <summary>Reads a user's current password back, for handing to the person who signs in with it.</summary>
+    public async Task<string?> GetUserPasswordAsync(
+        Guid tenantId, Guid userId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchUser? user = await db.ElasticsearchUsers
+            .Include(u => u.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId, ct);
+
+        if (user is null) return null;
+
+        return await k8s.GetSecretValueAsync(
+            user.CredentialsSecretName, "password", user.ElasticsearchCluster.Namespace,
+            user.ElasticsearchCluster.KubernetesCluster.Kubeconfig!, ct);
     }
 
     /// <summary>
@@ -2833,6 +2956,12 @@ public class ElasticsearchService(
     }
 
     /// <summary>
+    /// The application Kibana registers its privileges under. The suffix is Kibana's index name,
+    /// which is <c>.kibana</c> unless somebody has renamed it — nothing here renames it.
+    /// </summary>
+    public const string KibanaApplication = "kibana-.kibana";
+
+    /// <summary>
     /// The privileges each access level grants, on the user's own index pattern and nowhere else.
     /// </summary>
     public static IReadOnlyList<string> PrivilegesFor(ElasticsearchAccess access) => access switch
@@ -2851,7 +2980,7 @@ public class ElasticsearchService(
     /// </summary>
     public static string BuildUserApplyScript(ElasticsearchCluster c, ElasticsearchUser user)
     {
-        string roleBody = JsonSerializer.Serialize(new Dictionary<string, object>
+        Dictionary<string, object> role = new()
         {
             // A "manager" may need to see whether the cluster is healthy; a writer does not.
             ["cluster"] = user.Access == ElasticsearchAccess.Manager ? new[] { "monitor" } : [],
@@ -2864,7 +2993,25 @@ public class ElasticsearchService(
                     ["allow_restricted_indices"] = false
                 }
             }
-        }, JsonOpts);
+        };
+
+        if (user.KibanaAccess != ElasticsearchKibanaAccess.None)
+        {
+            // Kibana access as an application privilege on this user's own role, not the built-in
+            // viewer/editor roles: those carry read (or write) on every index, which would undo the
+            // index scoping in the same breath as granting a login.
+            role["applications"] = new[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["application"] = KibanaApplication,
+                    ["privileges"] = new[] { user.KibanaAccess == ElasticsearchKibanaAccess.All ? "all" : "read" },
+                    ["resources"] = new[] { "*" }
+                }
+            };
+        }
+
+        string roleBody = JsonSerializer.Serialize(role, JsonOpts);
 
         StringBuilder sb = new();
         AppendScriptPreamble(sb, c);
@@ -2887,6 +3034,26 @@ public class ElasticsearchService(
         sb.AppendLine();
         sb.AppendLine($"put \"/_security/user/{user.Username}\" /tmp/user.json");
         sb.AppendLine("rm -f /tmp/user.json");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Sets a new password on an existing user. A separate endpoint from the user document, so the
+    /// account's roles are left exactly as they are rather than re-asserted from here.
+    /// </summary>
+    public static string BuildPasswordResetScript(ElasticsearchCluster c, ElasticsearchUser user)
+    {
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine("umask 077");
+        sb.AppendLine("cat > /tmp/pw.json <<ENTKUBE_EOF");
+        sb.AppendLine("{ \"password\": \"${ES_USER_PASSWORD}\" }");
+        sb.AppendLine("ENTKUBE_EOF");
+        sb.AppendLine();
+        sb.AppendLine($"code=$($CURL -o /tmp/resp -w '%{{http_code}}' -X POST \"$ES/_security/user/{user.Username}/_password\" -d @/tmp/pw.json)");
+        sb.AppendLine("rm -f /tmp/pw.json");
+        sb.AppendLine("if [ \"$code\" -ge 300 ]; then echo \"password change -> HTTP $code\"; cat /tmp/resp; echo; exit 1; fi");
+        sb.AppendLine($"echo \"password changed for {user.Username}\"");
         return sb.ToString();
     }
 
@@ -3431,6 +3598,7 @@ public class ElasticsearchService(
             yield return ("secret", user.CredentialsSecretName);
             yield return ("configmap", UserConfigMapName(c, user));
             yield return ("configmap", UserConfigMapName(c, user, "delete"));
+            yield return ("configmap", UserConfigMapName(c, user, "password"));
         }
     }
 

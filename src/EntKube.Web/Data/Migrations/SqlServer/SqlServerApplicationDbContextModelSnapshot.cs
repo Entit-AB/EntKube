@@ -3519,12 +3519,18 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(255)
                         .HasColumnType("nvarchar(255)");
 
+                    b.Property<int>("KibanaAccess")
+                        .HasColumnType("int");
+
                     b.Property<DateTime?>("LastAppliedAt")
                         .HasColumnType("datetime2");
 
                     b.Property<string>("LastError")
                         .HasMaxLength(2000)
                         .HasColumnType("nvarchar(2000)");
+
+                    b.Property<DateTime?>("PasswordSetAt")
+                        .HasColumnType("datetime2");
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uniqueidentifier");

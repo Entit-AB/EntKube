@@ -3513,11 +3513,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(255)
                         .HasColumnType("TEXT");
 
+                    b.Property<int>("KibanaAccess")
+                        .HasColumnType("INTEGER");
+
                     b.Property<DateTime?>("LastAppliedAt")
                         .HasColumnType("TEXT");
 
                     b.Property<string>("LastError")
                         .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("PasswordSetAt")
                         .HasColumnType("TEXT");
 
                     b.Property<Guid>("TenantId")
