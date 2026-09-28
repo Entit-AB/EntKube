@@ -162,6 +162,7 @@ public class OperationsAdvisorService(
         findings.AddRange(await BuildJitFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildSloFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildBackupFindingsAsync(tenantId, now, ct));
+        findings.AddRange(await BuildSearchFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildPostureFindingsAsync(tenantId, ct));
         findings.AddRange(await BuildCapacityFindingsAsync(tenantId, now, ct));
         findings.AddRange(await BuildBlueprintFindingsAsync(tenantId, now, ct));
@@ -745,6 +746,155 @@ public class OperationsAdvisorService(
     // ── Posture: deployment drift + best-practice gaps (all DB-cheap; no live cluster calls) ──
     // k8s-version EOL and PVC/memory-trend finders are intentionally omitted here — they need
     // live Prometheus/external-EOL data unsuitable for compute-on-read; a cached collector is TODO.
+    /// <summary>
+    /// Elasticsearch clusters: whether their data is being backed up, whether the cluster can place
+    /// its shards, and whether it is about to run out of disk.
+    ///
+    /// <para>All three read figures the poller already wrote, so this stays what the rest of the
+    /// advisor is — a synthesis of signals, not a fan-out of cluster calls onto a page load. The
+    /// staleness of those figures is itself a finding: a cluster nobody has been able to ask for a
+    /// day is not a cluster that is fine.</para>
+    /// </summary>
+    private async Task<List<OperationsFinding>> BuildSearchFindingsAsync(
+        Guid tenantId, DateTime now, CancellationToken ct)
+    {
+        var result = new List<OperationsFinding>();
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<ElasticsearchCluster> clusters = await db.ElasticsearchClusters
+            .Where(c => c.TenantId == tenantId && c.Status != ElasticsearchClusterStatus.Deleting)
+            .ToListAsync(ct);
+
+        foreach (ElasticsearchCluster c in clusters)
+        {
+            string scope = $"Elasticsearch: {c.Name}";
+
+            // Snapshots, through the same evaluator every other managed datastore uses — an
+            // Elasticsearch cluster with lifecycle policies deletes data on purpose, so "no backup"
+            // is a sharper problem here than almost anywhere else.
+            EvaluateScheduledBackup(result, now, "Elasticsearch", "elasticsearch", c.Id, c.Name,
+                c.KubernetesClusterId, "search",
+                scheduleConfigured: c.SnapshotsEnabled,
+                hasDestination: c.SnapshotStorageLinkId is not null,
+                c.SnapshotLastSuccessAt,
+                c.SnapshotLastFailure is not null ? c.SnapshotLastCheckedAt : null,
+                c.SnapshotLastFailure);
+
+            if (c.Status != ElasticsearchClusterStatus.Running) continue;
+
+            // Health. Red means data is missing right now; yellow means the copies are.
+            if (string.Equals(c.Health, "red", StringComparison.OrdinalIgnoreCase))
+            {
+                result.Add(new OperationsFinding
+                {
+                    Id = $"es-health:{c.Id}",
+                    Category = AdvisorCategory.Reliability,
+                    Severity = AdvisorSeverity.Critical,
+                    Horizon = AdvisorHorizon.Overdue,
+                    Title = $"Elasticsearch “{c.Name}” is red",
+                    Detail = c.UnassignedShards is int red && red > 0
+                        ? $"{red} shard(s) cannot be placed, so some searches return incomplete results and some writes fail."
+                        : "At least one primary shard is unavailable, so some data cannot be read or written.",
+                    ScopeLabel = scope,
+                    TimingText = "now",
+                    Remediation = "Check the node disk figures and the cluster's allocation explain — a red cluster is "
+                        + "usually a node that left or a disk that filled.",
+                    LinkSection = "search",
+                    ClusterId = c.KubernetesClusterId,
+                    Source = "elasticsearch",
+                });
+            }
+            else if (string.Equals(c.Health, "yellow", StringComparison.OrdinalIgnoreCase)
+                && c.UnassignedShards is int yellow && yellow > 0)
+            {
+                result.Add(new OperationsFinding
+                {
+                    Id = $"es-health:{c.Id}",
+                    Category = AdvisorCategory.Reliability,
+                    Severity = AdvisorSeverity.Warning,
+                    Horizon = AdvisorHorizon.ThisWeek,
+                    Title = $"Elasticsearch “{c.Name}” is yellow",
+                    Detail = $"{yellow} replica shard(s) have nowhere to live. The data is readable, but it has no copy — "
+                        + "losing one more node loses it.",
+                    ScopeLabel = scope,
+                    TimingText = "no deadline",
+                    Remediation = "Usually a tier with fewer nodes than the index asks for replicas. Add a node, or lower "
+                        + "the replica count on the lifecycle policy.",
+                    LinkSection = "search",
+                    ClusterId = c.KubernetesClusterId,
+                    Source = "elasticsearch",
+                });
+            }
+
+            // Disk. These two numbers are Elasticsearch's own, not ours: it stops allocating at 85%
+            // and makes indices read-only at 95%, so this is a deadline rather than a worry.
+            if (c.HighestNodeDiskPercent is int disk)
+            {
+                if (disk >= ElasticsearchService.DiskFloodStagePercent)
+                {
+                    result.Add(new OperationsFinding
+                    {
+                        Id = $"es-disk:{c.Id}",
+                        Category = AdvisorCategory.Capacity,
+                        Severity = AdvisorSeverity.Critical,
+                        Horizon = AdvisorHorizon.Overdue,
+                        Title = $"Elasticsearch “{c.Name}” is out of disk",
+                        Detail = $"A node is {disk}% full. Past 95% Elasticsearch makes every index with a shard on that "
+                            + "node read-only, and it does not undo that by itself once space is freed.",
+                        ScopeLabel = scope,
+                        TimingText = "now",
+                        Remediation = "Free space or grow the volumes, then clear the read-only block on the affected indices.",
+                        LinkSection = "search",
+                        ClusterId = c.KubernetesClusterId,
+                        Source = "elasticsearch",
+                    });
+                }
+                else if (disk >= ElasticsearchService.DiskHighWatermarkPercent)
+                {
+                    result.Add(new OperationsFinding
+                    {
+                        Id = $"es-disk:{c.Id}",
+                        Category = AdvisorCategory.Capacity,
+                        Severity = AdvisorSeverity.Warning,
+                        Horizon = AdvisorHorizon.Today,
+                        Title = $"Elasticsearch “{c.Name}” is near its disk watermark",
+                        Detail = $"A node is {disk}% full. Elasticsearch has stopped putting new shards there, so the next "
+                            + "rollover has fewer places to go.",
+                        ScopeLabel = scope,
+                        TimingText = "within days",
+                        Remediation = "Grow the tier's volumes, add a node, or shorten the lifecycle policy's retention.",
+                        LinkSection = "search",
+                        ClusterId = c.KubernetesClusterId,
+                        Source = "elasticsearch",
+                    });
+                }
+            }
+
+            // Figures nobody has been able to refresh are not reassurance.
+            if (c.InsightCheckedAt is DateTime checkedAt && now - checkedAt > TimeSpan.FromHours(24))
+            {
+                result.Add(new OperationsFinding
+                {
+                    Id = $"es-stale:{c.Id}",
+                    Category = AdvisorCategory.Reliability,
+                    Severity = AdvisorSeverity.Info,
+                    Horizon = AdvisorHorizon.ThisWeek,
+                    Title = $"Elasticsearch “{c.Name}” has not answered for {(int)(now - checkedAt).TotalHours} h",
+                    Detail = "Its health and disk figures here are that old. Nothing below is being watched in the meantime.",
+                    ScopeLabel = scope,
+                    TimingText = $"last read {DueText(checkedAt, now)}",
+                    DueAt = checkedAt,
+                    Remediation = "Check that the cluster's pods are Ready and that EntKube can still reach the Kubernetes cluster.",
+                    LinkSection = "search",
+                    ClusterId = c.KubernetesClusterId,
+                    Source = "elasticsearch",
+                });
+            }
+        }
+
+        return result;
+    }
+
     private async Task<List<OperationsFinding>> BuildPostureFindingsAsync(Guid tenantId, CancellationToken ct)
     {
         var result = new List<OperationsFinding>();

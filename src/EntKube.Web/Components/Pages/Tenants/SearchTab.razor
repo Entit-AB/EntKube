@@ -616,6 +616,112 @@
                             </div>
                         }
 
+                        @* ── Indices and disk ── *@
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-hdd me-1"></i>Indices &amp; disk</strong>
+                                @if (cluster.HighestNodeDiskPercent is int stored)
+                                {
+                                    <span class="badge @DiskBadgeClass(stored) ms-2">fullest node @stored%</span>
+                                }
+                                @if (cluster.UnassignedShards is int unassigned && unassigned > 0)
+                                {
+                                    <span class="badge bg-warning-subtle text-warning border border-warning-subtle ms-1">
+                                        @unassigned unassigned shard(s)
+                                    </span>
+                                }
+                                <button class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2"
+                                        @onclick="() => LoadInsightAsync(cluster)" disabled="@loadingInsight">
+                                    @if (loadingInsight) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Look now
+                                </button>
+                            </div>
+
+                            @if (insightFor == cluster.Id && insight is not null)
+                            {
+                                <table class="table table-sm table-borderless small mb-3">
+                                    <thead class="text-muted"><tr><th>Node</th><th>Disk</th><th>Used</th><th>Shards</th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchService.ElasticsearchNodeDisk node in insight.Nodes)
+                                        {
+                                            <tr>
+                                                <td><code>@node.Node</code></td>
+                                                <td style="min-width:10rem">
+                                                    <div class="progress" style="height:.75rem">
+                                                        <div class="progress-bar @DiskBarClass(node.PercentUsed)"
+                                                             style="width:@(node.PercentUsed)%"></div>
+                                                    </div>
+                                                </td>
+                                                <td class="text-muted">
+                                                    @node.PercentUsed% — @ElasticsearchService.FormatBytes(node.UsedBytes)
+                                                    of @ElasticsearchService.FormatBytes(node.TotalBytes)
+                                                </td>
+                                                <td class="text-muted">@node.Shards</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+
+                                <div class="form-text small mb-2">
+                                    Elasticsearch stops putting new shards on a node at 85%, and makes every index with a shard
+                                    there read-only at 95% — which it does not undo by itself once space is freed.
+                                </div>
+
+                                @if (insight.Indices.Count > 0)
+                                {
+                                    <table class="table table-sm table-borderless small mb-0">
+                                        <thead class="text-muted"><tr><th>Index</th><th>Health</th><th>Size</th><th>Docs</th><th>Shards</th><th>Lifecycle</th></tr></thead>
+                                        <tbody>
+                                            @foreach (ElasticsearchService.ElasticsearchIndexInfo index in insight.Indices.Take(showAllIndices ? 500 : 15))
+                                            {
+                                                <tr>
+                                                    <td><code>@index.Name</code></td>
+                                                    <td><span class="badge @HealthBadgeClass(index.Health)">@index.Health</span></td>
+                                                    <td>@ElasticsearchService.FormatBytes(index.StoreBytes)</td>
+                                                    <td class="text-muted">@index.DocCount.ToString("N0")</td>
+                                                    <td class="text-muted">@index.PrimaryShards p / @index.Replicas r</td>
+                                                    <td>
+                                                        @if (index.IlmError is not null)
+                                                        {
+                                                            <span class="badge bg-danger-subtle text-danger border border-danger-subtle"
+                                                                  title="@index.IlmError">stuck in @(index.IlmPhase ?? "?")</span>
+                                                        }
+                                                        else if (index.IlmPhase is not null)
+                                                        {
+                                                            <span class="badge bg-secondary">@index.IlmPhase</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="text-muted">unmanaged</span>
+                                                        }
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+
+                                    @if (insight.Indices.Count > 15)
+                                    {
+                                        <button class="btn btn-sm btn-link p-0" @onclick="() => showAllIndices = !showAllIndices">
+                                            @(showAllIndices ? "Show the 15 largest only" : $"Show all {insight.Indices.Count} indices")
+                                        </button>
+                                    }
+                                }
+                                else
+                                {
+                                    <p class="text-muted small mb-0">No indices yet.</p>
+                                }
+                            }
+                            else if (cluster.InsightCheckedAt is DateTime seen)
+                            {
+                                <p class="text-muted small mb-0">Last read @seen.ToString("yyyy-MM-dd HH:mm") UTC.</p>
+                            }
+                            else
+                            {
+                                <p class="text-muted small mb-0">Not read yet.</p>
+                            }
+                        </div>
+
                         @* ── Index lifecycle policies ── *@
                         @{ List<ElasticsearchIlmPolicy> policies = allPolicies.TryGetValue(cluster.Id, out List<ElasticsearchIlmPolicy>? pl) ? pl : []; }
                         <div class="mb-3 border-top pt-3">
@@ -1010,6 +1116,12 @@
         EnvironmentId is Guid envId
             ? [.. allDeployments.Where(d => d.EnvironmentId == envId)]
             : allDeployments;
+
+    // Live look: disk per node and the indices
+    private Guid? insightFor;
+    private ElasticsearchService.ElasticsearchInsight? insight;
+    private bool loadingInsight;
+    private bool showAllIndices;
 
     // Repository listing + restore
     private Guid? repositorySnapshotsFor;
@@ -1664,6 +1776,26 @@
         catch (Exception ex) { Toasts.Error(ex.Message); }
     }
 
+    private async Task LoadInsightAsync(ElasticsearchCluster cluster)
+    {
+        loadingInsight = true;
+        showAllIndices = false;
+        try
+        {
+            insight = await Search.GetInsightAsync(TenantId, cluster.Id);
+            insightFor = cluster.Id;
+
+            // Reflect what the live look found, so the badges stop showing a stale number the
+            // moment a fresher one is on screen beside them.
+            cluster.HighestNodeDiskPercent = insight.Nodes.Count == 0 ? null : insight.HighestDiskPercent;
+            cluster.UnassignedShards = insight.UnassignedShards;
+            cluster.InsightCheckedAt = DateTime.UtcNow;
+            if (insight.Health is not null) cluster.Health = insight.Health;
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { loadingInsight = false; }
+    }
+
     // ── Restore ───────────────────────────────────────────────────────────────
 
     private async Task LoadSnapshotsAsync(ElasticsearchCluster cluster)
@@ -1793,6 +1925,20 @@
         ElasticsearchClusterStatus.Failed => "badge bg-danger",
         ElasticsearchClusterStatus.Deleting => "badge bg-secondary",
         _ => "badge bg-secondary"
+    };
+
+    private static string DiskBadgeClass(int percent) => percent switch
+    {
+        >= ElasticsearchService.DiskFloodStagePercent => "bg-danger-subtle text-danger border border-danger-subtle",
+        >= ElasticsearchService.DiskHighWatermarkPercent => "bg-warning-subtle text-warning border border-warning-subtle",
+        _ => "bg-secondary-subtle text-secondary border"
+    };
+
+    private static string DiskBarClass(int percent) => percent switch
+    {
+        >= ElasticsearchService.DiskFloodStagePercent => "bg-danger",
+        >= ElasticsearchService.DiskHighWatermarkPercent => "bg-warning",
+        _ => "bg-success"
     };
 
     private static string HealthBadgeClass(string health) => health.ToLowerInvariant() switch

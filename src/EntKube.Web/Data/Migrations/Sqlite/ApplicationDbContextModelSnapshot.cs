@@ -3247,6 +3247,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(20)
                         .HasColumnType("TEXT");
 
+                    b.Property<int?>("HighestNodeDiskPercent")
+                        .HasColumnType("INTEGER");
+
                     b.Property<int>("HotCount")
                         .HasColumnType("INTEGER");
 
@@ -3281,6 +3284,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<string>("IngestStorageSize")
                         .IsRequired()
                         .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("InsightCheckedAt")
                         .HasColumnType("TEXT");
 
                     b.Property<int>("KibanaCount")
@@ -3380,6 +3386,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("TEXT");
+
+                    b.Property<int?>("UnassignedShards")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("Version")
                         .IsRequired()

@@ -166,6 +166,46 @@ A user an application is still bound to cannot be deleted; the binding goes firs
 cluster removes the bindings' Secrets from their namespaces too, rather than leaving applications
 holding working-looking credentials for something that is gone.
 
+## Watching it
+
+A search cluster's usual way of stopping is not a crash: the disk fills, Elasticsearch stops
+allocating shards, and eventually turns indices read-only. So three figures are kept current and
+turned into Operations Advisor findings.
+
+**How it is read.** The API server's proxy strips the caller's `Authorization` header before
+forwarding — it exists precisely so a user's token never reaches a pod — which is the header
+Elasticsearch needs. The Jobs elsewhere here get around that by running inside the cluster, but a
+Job costs the better part of a minute. So live reads `kubectl exec` into a Ready node and ask over
+loopback, with the password on stdin so it never lands in an argument list. That is also the one
+place in this feature where certificate verification may be skipped, and only as a fallback: the
+request never leaves the container that serves it, so there is no position to intercept it from.
+
+**Three cadences, because they cost three different amounts:**
+
+| Reading | How | How often |
+| --- | --- | --- |
+| Orchestration phase and health | `kubectl get` on the CR | every poll (60 s) |
+| Disk per node, unassigned shards | exec into a node | when the stored reading is older than 15 min |
+| Snapshot success/failure | a Job against SLM | every 6 h |
+
+**Findings** (all computed from what the poller stored, so opening the Priorities page never fans
+out into cluster calls):
+
+- Snapshots never taken, stale, failing, or not configured at all — through the same evaluator every
+  other managed datastore uses.
+- Cluster **red** (critical) — shards cannot be placed, so some reads and writes fail.
+- Cluster **yellow** with unassigned shards (warning) — the data is readable but has no copy.
+- A node **at or past 95%** (critical) — Elasticsearch has made indices read-only, and does not undo
+  that by itself once space is freed.
+- A node **at or past 85%** (warning) — no new shards are going there, so the next rollover has
+  fewer places to land.
+- Figures **nobody has been able to refresh for a day** (info) — stale numbers are not reassurance.
+
+**Indices & disk** in the Search tab shows the same thing live on demand: per-node disk against the
+two watermarks, and the indices biggest-first with their lifecycle phase. An index whose ILM policy
+has stalled is shown as *stuck*, with the reason — that failure is otherwise invisible, because the
+index simply stays where it is.
+
 ## Publishing Kibana
 
 Kibana's Service is `{cluster}-kb-http` on port 5601. Publish it like any other service from

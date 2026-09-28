@@ -179,6 +179,24 @@ public class ElasticsearchCluster
     /// <summary>When EntKube last read the snapshot state out of the cluster.</summary>
     public DateTime? SnapshotLastCheckedAt { get; set; }
 
+    // ── Last live reading (written by the poller, read by the advisor) ─────────
+
+    /// <summary>
+    /// The fullest node's disk usage, as a percentage. Elasticsearch stops allocating shards to a
+    /// node at 85% and makes every index with a shard on it read-only at 95%, so this number going
+    /// up is the cluster's most common way of stopping.
+    /// </summary>
+    public int? HighestNodeDiskPercent { get; set; }
+
+    /// <summary>Shards Elasticsearch cannot place. Non-zero is why a cluster is yellow or red.</summary>
+    public int? UnassignedShards { get; set; }
+
+    /// <summary>
+    /// When the two figures above were last read. It not moving is what tells the advisor they are
+    /// stale rather than good news.
+    /// </summary>
+    public DateTime? InsightCheckedAt { get; set; }
+
     // ── State ──────────────────────────────────────────────────────────────────
 
     public ElasticsearchClusterStatus Status { get; set; } = ElasticsearchClusterStatus.Creating;

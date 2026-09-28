@@ -657,7 +657,22 @@ public class ElasticsearchService(
         await db.SaveChangesAsync(ct);
     }
 
-    /// <summary>Reconciles every tenant's clusters — used by the background poller.</summary>
+    /// <summary>How stale a disk/shard reading may get before the poller takes another.</summary>
+    public static readonly TimeSpan InsightMaxAge = TimeSpan.FromMinutes(15);
+
+    /// <summary>How often the poller asks SLM whether the snapshots are still happening.</summary>
+    public static readonly TimeSpan SnapshotCheckInterval = TimeSpan.FromHours(6);
+
+    /// <summary>
+    /// Reconciles every tenant's clusters — used by the background poller.
+    ///
+    /// <para>Three readings, at three cadences, because they cost three different amounts. The CR's
+    /// phase is a kubectl get and happens every run. Disk and unassigned shards need an exec into a
+    /// node, so they are taken when the stored reading is older than <see cref="InsightMaxAge"/>.
+    /// Snapshot state costs a Job, so it is taken every <see cref="SnapshotCheckInterval"/> — often
+    /// enough that "nothing has been backed up for days" is noticed within hours of being true,
+    /// which is the whole point of the advisor knowing about it at all.</para>
+    /// </summary>
     public async Task ReconcileAllAsync(CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
@@ -666,19 +681,43 @@ public class ElasticsearchService(
             .Where(c => c.Status != ElasticsearchClusterStatus.Failed)
             .ToListAsync(ct);
 
+        DateTime now = DateTime.UtcNow;
+
         foreach (ElasticsearchCluster cluster in clusters)
         {
             if (string.IsNullOrWhiteSpace(cluster.KubernetesCluster.Kubeconfig)) continue;
+
+            bool ready = false;
             try
             {
                 string json = await k8s.GetJsonAsync(
                     $"elasticsearch.elasticsearch.k8s.elastic.co/{cluster.Name}", cluster.Namespace,
                     cluster.KubernetesCluster.Kubeconfig!, ct: ct);
                 (string? health, string? phase, _) = ParseElasticsearchStatus(json);
-                await ReconcileStatusAsync(
-                    cluster.Id, string.Equals(phase, "Ready", StringComparison.OrdinalIgnoreCase), health, ct);
+                ready = string.Equals(phase, "Ready", StringComparison.OrdinalIgnoreCase);
+                await ReconcileStatusAsync(cluster.Id, ready, health, ct);
             }
             catch { /* cluster unreachable — leave status as-is */ }
+
+            // Only worth asking a cluster that is up; a starting one has no disk story to tell.
+            if (!ready) continue;
+
+            if (cluster.InsightCheckedAt is null || now - cluster.InsightCheckedAt.Value > InsightMaxAge)
+                await RefreshInsightAsync(cluster.Id, ct);
+
+            if (cluster.SnapshotsEnabled
+                && (cluster.SnapshotLastCheckedAt is null
+                    || now - cluster.SnapshotLastCheckedAt.Value > SnapshotCheckInterval))
+            {
+                try
+                {
+                    await RefreshSnapshotStatusAsync(cluster.TenantId, cluster.Id, ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogDebug(ex, "Snapshot status refresh failed for {Cluster}", cluster.Name);
+                }
+            }
         }
     }
 
@@ -875,6 +914,310 @@ public class ElasticsearchService(
 
     /// <summary>How a one-shot Job ended, as far as a bounded wait could tell.</summary>
     public enum JobOutcome { Succeeded, Failed, StillRunning }
+
+    // ── Live cluster reads ─────────────────────────────────────────────────────
+
+    /// <summary>Disk as one Elasticsearch node reports it.</summary>
+    public sealed record ElasticsearchNodeDisk(string Node, long UsedBytes, long TotalBytes, int Shards)
+    {
+        public int PercentUsed => TotalBytes <= 0 ? 0 : (int)Math.Round(UsedBytes * 100.0 / TotalBytes);
+    }
+
+    /// <summary>One index, as the browser shows it.</summary>
+    public sealed record ElasticsearchIndexInfo(
+        string Name, string Health, string Status, long DocCount, long StoreBytes,
+        int PrimaryShards, int Replicas, string? IlmPhase, string? IlmError);
+
+    /// <summary>What a live look at the cluster turned up.</summary>
+    public sealed class ElasticsearchInsight
+    {
+        public string? Health { get; init; }
+        public int UnassignedShards { get; init; }
+        public List<ElasticsearchNodeDisk> Nodes { get; init; } = [];
+        public List<ElasticsearchIndexInfo> Indices { get; init; } = [];
+
+        /// <summary>The fullest node. Elasticsearch stops allocating at 85% and goes read-only at 95%.</summary>
+        public int HighestDiskPercent => Nodes.Count == 0 ? 0 : Nodes.Max(n => n.PercentUsed);
+    }
+
+    /// <summary>Elasticsearch stops allocating new shards to a node past this.</summary>
+    public const int DiskHighWatermarkPercent = 85;
+
+    /// <summary>Past this, Elasticsearch makes every index with a shard on the node read-only.</summary>
+    public const int DiskFloodStagePercent = 95;
+
+    /// <summary>
+    /// Asks Elasticsearch something, from inside one of its own pods.
+    ///
+    /// <para><b>Why exec rather than the API server's proxy.</b> The proxy strips the caller's
+    /// Authorization header before forwarding — it exists so a user's token never reaches a pod —
+    /// which is exactly the header Elasticsearch needs. The Jobs elsewhere in this service solve
+    /// that by running inside the cluster, but a Job costs the better part of a minute, and this
+    /// path is used by a background poller and a page. So: exec into a node, ask over loopback, and
+    /// pass the password on stdin so it is never in an argument list.</para>
+    /// </summary>
+    public async Task<string> QueryAsync(
+        ElasticsearchCluster cluster, string path, CancellationToken ct = default)
+    {
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig
+            ?? throw new InvalidOperationException("The Kubernetes cluster has no kubeconfig.");
+
+        string podsJson = await k8s.GetJsonAsync(
+            "pods", cluster.Namespace, kubeconfig,
+            $"elasticsearch.k8s.elastic.co/cluster-name={cluster.Name}", ct);
+
+        string pod = FirstReadyPodName(podsJson)
+            ?? throw new InvalidOperationException(
+                $"No Ready Elasticsearch pod in '{cluster.Namespace}' to ask — the cluster may still be starting.");
+
+        string password = await k8s.GetSecretValueAsync(
+            cluster.ElasticUserSecretName, "elastic", cluster.Namespace, kubeconfig, ct)
+            ?? throw new InvalidOperationException(
+                $"The '{cluster.ElasticUserSecretName}' Secret is not readable, so there is no way to authenticate.");
+
+        return await k8s.RunCommandOnPodWithStdinAsync(
+            pod, cluster.Namespace, ["sh", "-c", BuildQueryCommand(path)], password + "\n",
+            kubeconfig, ct, "elasticsearch");
+    }
+
+    /// <summary>
+    /// The shell run inside the node. The password arrives on stdin; the CA is whichever of ECK's
+    /// two mount points exists in this version, and if neither does the request still goes over
+    /// loopback inside the very container that serves it — there is no position to intercept it
+    /// from, which is the only reason skipping verification is defensible anywhere in this service.
+    /// </summary>
+    public static string BuildQueryCommand(string path) =>
+        "read -r ES_PW; " +
+        "CA=''; " +
+        "for f in /usr/share/elasticsearch/config/http-certs/ca.crt /mnt/elastic-internal/http-certs/ca.crt; do " +
+        "  if [ -f \"$f\" ]; then CA=\"--cacert $f\"; break; fi; " +
+        "done; " +
+        "if [ -z \"$CA\" ]; then CA='--insecure'; fi; " +
+        $"curl -sS $CA -u \"elastic:$ES_PW\" \"https://localhost:9200{path}\"";
+
+    /// <summary>
+    /// Reads health, per-node disk, and the indices with their lifecycle phase. One place, because
+    /// every caller wants the same three things and each one costs an exec.
+    /// </summary>
+    public async Task<ElasticsearchInsight> GetInsightAsync(
+        Guid tenantId, Guid clusterId, bool includeIndices = true, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        (string? health, int unassigned) = ParseClusterHealth(
+            await QueryAsync(cluster, "/_cluster/health", ct));
+
+        List<ElasticsearchNodeDisk> nodes = ParseAllocation(
+            await QueryAsync(cluster, "/_cat/allocation?format=json&bytes=b", ct));
+
+        List<ElasticsearchIndexInfo> indices = [];
+        if (includeIndices)
+        {
+            string catJson = await QueryAsync(cluster,
+                "/_cat/indices?format=json&bytes=b&h=index,health,status,pri,rep,docs.count,store.size", ct);
+
+            // Best effort: a cluster with no ILM-managed index answers this perfectly well, but an
+            // older one, or one still starting, should not cost us the index list.
+            string ilmJson = "";
+            try { ilmJson = await QueryAsync(cluster, "/_all/_ilm/explain", ct); }
+            catch (Exception ex) { logger.LogDebug(ex, "ILM explain unavailable on {Cluster}", cluster.Name); }
+
+            indices = ParseIndices(catJson, ilmJson);
+        }
+
+        return new ElasticsearchInsight
+        {
+            Health = health,
+            UnassignedShards = unassigned,
+            Nodes = nodes,
+            Indices = indices
+        };
+    }
+
+    /// <summary>
+    /// Records what a live look found, so the advisor and the list can read it without touching the
+    /// cluster. Called by the poller; never throws at the caller.
+    /// </summary>
+    public async Task RefreshInsightAsync(Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster? cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+
+        if (cluster is null || string.IsNullOrWhiteSpace(cluster.KubernetesCluster.Kubeconfig)) return;
+
+        try
+        {
+            (string? health, int unassigned) = ParseClusterHealth(
+                await QueryAsync(cluster, "/_cluster/health", ct));
+            List<ElasticsearchNodeDisk> nodes = ParseAllocation(
+                await QueryAsync(cluster, "/_cat/allocation?format=json&bytes=b", ct));
+
+            if (health is not null) cluster.Health = health;
+            cluster.UnassignedShards = unassigned;
+            cluster.HighestNodeDiskPercent = nodes.Count == 0 ? null : nodes.Max(n => n.PercentUsed);
+            cluster.InsightCheckedAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+        }
+        catch (Exception ex)
+        {
+            // A cluster that cannot be asked keeps its last reading, and InsightCheckedAt stops
+            // moving — which is what tells the advisor the numbers are stale rather than fine.
+            logger.LogDebug(ex, "Insight refresh failed for {Cluster}", cluster.Name);
+        }
+    }
+
+    // ── Live-read parsing ──────────────────────────────────────────────────────
+
+    public static string? FirstReadyPodName(string podsJson)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(podsJson);
+            if (!doc.RootElement.TryGetProperty("items", out JsonElement items)) return null;
+
+            foreach (JsonElement pod in items.EnumerateArray())
+            {
+                if (!pod.TryGetProperty("status", out JsonElement status)) continue;
+                if (!status.TryGetProperty("containerStatuses", out JsonElement containers)) continue;
+
+                bool ready = containers.EnumerateArray().All(
+                    c => c.TryGetProperty("ready", out JsonElement r) && r.GetBoolean());
+
+                if (ready) return pod.GetProperty("metadata").GetProperty("name").GetString();
+            }
+        }
+        catch { }
+        return null;
+    }
+
+    public static (string? Status, int UnassignedShards) ParseClusterHealth(string json)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            string? status = doc.RootElement.TryGetProperty("status", out JsonElement s) ? s.GetString() : null;
+            int unassigned = doc.RootElement.TryGetProperty("unassigned_shards", out JsonElement u)
+                && u.TryGetInt32(out int n) ? n : 0;
+            return (status, unassigned);
+        }
+        catch { return (null, 0); }
+    }
+
+    public static List<ElasticsearchNodeDisk> ParseAllocation(string json)
+    {
+        List<ElasticsearchNodeDisk> nodes = [];
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            foreach (JsonElement row in doc.RootElement.EnumerateArray())
+            {
+                string node = Str(row, "node") ?? "";
+
+                // _cat/allocation ends with an UNASSIGNED row that has no node and no disk figures.
+                // Counting it as a node at 0% would quietly drag the fleet's worst disk down.
+                if (node.Length == 0 || node == "UNASSIGNED") continue;
+
+                nodes.Add(new ElasticsearchNodeDisk(
+                    node,
+                    Num(row, "disk.used"),
+                    Num(row, "disk.total"),
+                    (int)Num(row, "shards")));
+            }
+        }
+        catch { }
+        return [.. nodes.OrderByDescending(n => n.PercentUsed)];
+    }
+
+    public static List<ElasticsearchIndexInfo> ParseIndices(string catJson, string ilmJson)
+    {
+        Dictionary<string, (string? Phase, string? Error)> ilm = ParseIlmExplain(ilmJson);
+
+        List<ElasticsearchIndexInfo> indices = [];
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(catJson);
+            foreach (JsonElement row in doc.RootElement.EnumerateArray())
+            {
+                string name = Str(row, "index") ?? "";
+                if (name.Length == 0) continue;
+
+                ilm.TryGetValue(name, out (string? Phase, string? Error) lifecycle);
+
+                indices.Add(new ElasticsearchIndexInfo(
+                    name,
+                    Str(row, "health") ?? "",
+                    Str(row, "status") ?? "",
+                    Num(row, "docs.count"),
+                    Num(row, "store.size"),
+                    (int)Num(row, "pri"),
+                    (int)Num(row, "rep"),
+                    lifecycle.Phase,
+                    lifecycle.Error));
+            }
+        }
+        catch { }
+
+        // Biggest first: the question behind opening this list is nearly always "what is eating the
+        // disk", and a hidden index does not answer it.
+        return [.. indices.OrderByDescending(i => i.StoreBytes).ThenBy(i => i.Name, StringComparer.Ordinal)];
+    }
+
+    /// <summary>Index → lifecycle phase, and the failure message when a policy has stalled.</summary>
+    public static Dictionary<string, (string? Phase, string? Error)> ParseIlmExplain(string json)
+    {
+        Dictionary<string, (string?, string?)> result = [];
+        if (string.IsNullOrWhiteSpace(json)) return result;
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("indices", out JsonElement indices)) return result;
+
+            foreach (JsonProperty index in indices.EnumerateObject())
+            {
+                if (index.Value.TryGetProperty("managed", out JsonElement managed)
+                    && managed.ValueKind == JsonValueKind.False)
+                    continue;
+
+                string? phase = index.Value.TryGetProperty("phase", out JsonElement p) ? p.GetString() : null;
+
+                // A policy that has stopped is reported as the ERROR step, with the reason nested
+                // under step_info. Anything else there is a step name, not a problem.
+                string? error = null;
+                if (index.Value.TryGetProperty("step", out JsonElement step)
+                    && step.GetString() == "ERROR"
+                    && index.Value.TryGetProperty("step_info", out JsonElement info))
+                {
+                    error = info.TryGetProperty("reason", out JsonElement reason)
+                        ? reason.GetString()
+                        : info.ToString();
+                }
+
+                result[index.Name] = (phase, error);
+            }
+        }
+        catch { }
+        return result;
+    }
+
+    private static string? Str(JsonElement row, string name) =>
+        row.TryGetProperty(name, out JsonElement v) ? v.GetString() : null;
+
+    private static long Num(JsonElement row, string name)
+    {
+        // _cat with format=json returns every column as a string, including the numeric ones.
+        if (!row.TryGetProperty(name, out JsonElement v)) return 0;
+        if (v.ValueKind == JsonValueKind.Number) return v.TryGetInt64(out long direct) ? direct : 0;
+        return long.TryParse(v.GetString(), out long parsed) ? parsed : 0;
+    }
 
     // ── Users and app bindings ─────────────────────────────────────────────────
 

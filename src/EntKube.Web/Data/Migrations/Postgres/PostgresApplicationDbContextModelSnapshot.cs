@@ -3252,6 +3252,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
 
+                    b.Property<int?>("HighestNodeDiskPercent")
+                        .HasColumnType("integer");
+
                     b.Property<int>("HotCount")
                         .HasColumnType("integer");
 
@@ -3287,6 +3290,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .IsRequired()
                         .HasMaxLength(20)
                         .HasColumnType("character varying(20)");
+
+                    b.Property<DateTime?>("InsightCheckedAt")
+                        .HasColumnType("timestamp with time zone");
 
                     b.Property<int>("KibanaCount")
                         .HasColumnType("integer");
@@ -3385,6 +3391,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uuid");
+
+                    b.Property<int?>("UnassignedShards")
+                        .HasColumnType("integer");
 
                     b.Property<string>("Version")
                         .IsRequired()

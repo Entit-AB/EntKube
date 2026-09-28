@@ -1419,4 +1419,183 @@ public class ElasticsearchServiceTests : IDisposable
         await db.SaveChangesAsync();
         return deployment;
     }
+
+    // ──────── Live reads: disk, indices and lifecycle state ────────
+
+    [Fact]
+    public void TheQueryRunsOnLoopbackAndTakesThePasswordFromStdin()
+    {
+        string command = ElasticsearchService.BuildQueryCommand("/_cluster/health");
+
+        // The password is read from stdin, so it is never in an argument list a "ps" would show.
+        command.Should().StartWith("read -r ES_PW;");
+        command.Should().Contain("https://localhost:9200/_cluster/health");
+        command.Should().Contain("--cacert");
+        command.Should().NotContain("ELASTIC_PASSWORD=");
+    }
+
+    [Fact]
+    public void OnlyAReadyPodIsAsked()
+    {
+        string? pod = ElasticsearchService.FirstReadyPodName("""
+            {"items":[
+              {"metadata":{"name":"search-es-master-0"},"status":{"containerStatuses":[{"ready":false}]}},
+              {"metadata":{"name":"search-es-hot-0"},"status":{"containerStatuses":[{"ready":true}]}}
+            ]}
+            """);
+
+        // Asking a pod that is still starting gets a connection refused, not an answer.
+        pod.Should().Be("search-es-hot-0");
+    }
+
+    [Fact]
+    public void NoReadyPodReadsAsNothingToAsk()
+    {
+        ElasticsearchService.FirstReadyPodName("""{"items":[]}""").Should().BeNull();
+    }
+
+    [Fact]
+    public void ClusterHealthCarriesTheUnassignedShardCount()
+    {
+        (string? status, int unassigned) = ElasticsearchService.ParseClusterHealth(
+            """{"status":"yellow","number_of_nodes":5,"unassigned_shards":3}""");
+
+        status.Should().Be("yellow");
+        unassigned.Should().Be(3);
+    }
+
+    [Fact]
+    public void AllocationIgnoresTheUnassignedRow_AndPutsTheFullestNodeFirst()
+    {
+        List<ElasticsearchService.ElasticsearchNodeDisk> nodes = ElasticsearchService.ParseAllocation("""
+            [
+              {"shards":"12","disk.used":"50","disk.total":"100","node":"search-es-hot-0"},
+              {"shards":"40","disk.used":"91","disk.total":"100","node":"search-es-hot-1"},
+              {"shards":"3","disk.used":null,"disk.total":null,"node":"UNASSIGNED"}
+            ]
+            """);
+
+        // The UNASSIGNED row has no disk figures; counting it as a node at 0% would drag the
+        // fleet's worst disk down and hide exactly the problem this is read for.
+        nodes.Select(n => n.Node).Should().Equal("search-es-hot-1", "search-es-hot-0");
+        nodes[0].PercentUsed.Should().Be(91);
+        nodes[0].Shards.Should().Be(40);
+    }
+
+    [Fact]
+    public void IndicesComeBackBiggestFirst_WithTheirLifecyclePhase()
+    {
+        string cat = """
+            [
+              {"index":"logs-app-000001","health":"green","status":"open","pri":"1","rep":"1","docs.count":"1000","store.size":"500"},
+              {"index":"logs-app-000002","health":"green","status":"open","pri":"1","rep":"1","docs.count":"9000","store.size":"9000"}
+            ]
+            """;
+        string ilm = """
+            {"indices":{
+              "logs-app-000001":{"managed":true,"phase":"warm","step":"complete"},
+              "logs-app-000002":{"managed":true,"phase":"hot","step":"check-rollover-ready"}
+            }}
+            """;
+
+        List<ElasticsearchService.ElasticsearchIndexInfo> indices = ElasticsearchService.ParseIndices(cat, ilm);
+
+        // The question behind opening this list is nearly always "what is eating the disk".
+        indices.Select(i => i.Name).Should().Equal("logs-app-000002", "logs-app-000001");
+        indices[0].IlmPhase.Should().Be("hot");
+        indices[0].DocCount.Should().Be(9000);
+        indices[1].IlmPhase.Should().Be("warm");
+        indices.Should().OnlyContain(i => i.IlmError == null);
+    }
+
+    [Fact]
+    public void AStalledLifecyclePolicyIsSurfacedWithItsReason()
+    {
+        Dictionary<string, (string? Phase, string? Error)> explained = ElasticsearchService.ParseIlmExplain("""
+            {"indices":{
+              "logs-app-000003":{"managed":true,"phase":"warm","step":"ERROR",
+                "step_info":{"type":"illegal_argument_exception","reason":"no shrink node available"}},
+              "logs-app-000004":{"managed":true,"phase":"hot","step":"rollover"},
+              "kibana-internal":{"managed":false}
+            }}
+            """);
+
+        // An ILM policy that has stopped is the failure mode tiers are most likely to hit, and it
+        // is invisible anywhere else: the index simply stays where it is.
+        explained["logs-app-000003"].Error.Should().Be("no shrink node available");
+        explained["logs-app-000004"].Error.Should().BeNull();
+        explained.Should().NotContainKey("kibana-internal");
+    }
+
+    [Fact]
+    public void IndicesStillListWhenIlmCannotBeRead()
+    {
+        // The explain call is best-effort — an older cluster, or one still starting, must not cost
+        // the index list it was asked for.
+        List<ElasticsearchService.ElasticsearchIndexInfo> indices = ElasticsearchService.ParseIndices(
+            """[{"index":"logs-app-000001","health":"green","status":"open","pri":"1","rep":"0","docs.count":"1","store.size":"10"}]""",
+            "");
+
+        indices.Should().ContainSingle();
+        indices[0].IlmPhase.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ARefreshedInsightIsStored_SoTheAdvisorNeedNotAskTheCluster()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+
+        k8s.Setup(x => x.GetJsonAsync("pods", "search", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""{"items":[{"metadata":{"name":"search-es-hot-0"},"status":{"containerStatuses":[{"ready":true}]}}]}""");
+        k8s.Setup(x => x.GetSecretValueAsync("search-es-elastic-user", "elastic", "search",
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("pw");
+
+        k8s.Setup(x => x.RunCommandOnPodWithStdinAsync(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.Is<IReadOnlyList<string>>(cmd => cmd[2].Contains("_cluster/health")),
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>(), It.IsAny<string>()))
+            .ReturnsAsync("""{"status":"yellow","unassigned_shards":2}""");
+        k8s.Setup(x => x.RunCommandOnPodWithStdinAsync(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.Is<IReadOnlyList<string>>(cmd => cmd[2].Contains("_cat/allocation")),
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>(), It.IsAny<string>()))
+            .ReturnsAsync("""[{"shards":"9","disk.used":"88","disk.total":"100","node":"search-es-hot-0"}]""");
+
+        await sut.RefreshInsightAsync(c.Id);
+
+        ElasticsearchCluster stored = await db.ElasticsearchClusters.AsNoTracking().SingleAsync();
+        stored.Health.Should().Be("yellow");
+        stored.UnassignedShards.Should().Be(2);
+        stored.HighestNodeDiskPercent.Should().Be(88);
+        stored.InsightCheckedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task AClusterThatCannotBeAsked_KeepsItsLastReadingAndItsStaleness()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        c.HighestNodeDiskPercent = 42;
+        c.InsightCheckedAt = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        await db.SaveChangesAsync();
+
+        k8s.Setup(x => x.GetJsonAsync("pods", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("connection refused"));
+
+        // Not throwing matters — this runs in the background poller — and so does not moving
+        // InsightCheckedAt, which is how the advisor tells stale figures from good news.
+        await sut.RefreshInsightAsync(c.Id);
+
+        ElasticsearchCluster stored = await db.ElasticsearchClusters.AsNoTracking().SingleAsync();
+        stored.HighestNodeDiskPercent.Should().Be(42);
+        stored.InsightCheckedAt.Should().Be(new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+    }
+
+    [Fact]
+    public void TheWatermarksAreElasticsearchsOwn()
+    {
+        // Not opinions: Elasticsearch stops allocating at 85 and turns indices read-only at 95.
+        ElasticsearchService.DiskHighWatermarkPercent.Should().Be(85);
+        ElasticsearchService.DiskFloodStagePercent.Should().Be(95);
+    }
 }
