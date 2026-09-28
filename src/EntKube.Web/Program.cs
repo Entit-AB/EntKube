@@ -509,6 +509,7 @@ public class Program
         builder.Services.AddScoped<RabbitMQService>();
         builder.Services.AddScoped<RedisService>();
         builder.Services.AddScoped<KafkaService>();
+        builder.Services.AddScoped<ElasticsearchService>();
         builder.Services.AddScoped<HarborService>();
         builder.Services.AddScoped<OpenLdapService>();
         builder.Services.AddScoped<StalwartService>();
@@ -630,6 +631,7 @@ public class Program
         builder.Services.AddHostedService<SecretExpiryNotificationService>();
         builder.Services.AddHostedService<ObservedSecretRefreshService>();
         builder.Services.AddHostedService<MessagingStatusPollingService>();
+        builder.Services.AddHostedService<SearchStatusPollingService>();
         builder.Services.AddHostedService<BootstrapRunnerService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<GitSyncService>());
 

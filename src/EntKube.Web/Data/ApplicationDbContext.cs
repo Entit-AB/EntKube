@@ -115,6 +115,14 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<KafkaTopic> KafkaTopics => Set<KafkaTopic>();
     public DbSet<KafkaUser> KafkaUsers => Set<KafkaUser>();
     public DbSet<KafkaBinding> KafkaBindings => Set<KafkaBinding>();
+    public DbSet<ElasticsearchCluster> ElasticsearchClusters => Set<ElasticsearchCluster>();
+    public DbSet<ElasticsearchIlmPolicy> ElasticsearchIlmPolicies => Set<ElasticsearchIlmPolicy>();
+    public DbSet<ElasticsearchUser> ElasticsearchUsers => Set<ElasticsearchUser>();
+    public DbSet<ElasticsearchBinding> ElasticsearchBindings => Set<ElasticsearchBinding>();
+    public DbSet<ElasticsearchKibanaSpace> ElasticsearchKibanaSpaces => Set<ElasticsearchKibanaSpace>();
+    public DbSet<ElasticsearchRemoteLink> ElasticsearchRemoteLinks => Set<ElasticsearchRemoteLink>();
+    public DbSet<ElasticsearchIngestPipeline> ElasticsearchIngestPipelines => Set<ElasticsearchIngestPipeline>();
+    public DbSet<ElasticsearchDataView> ElasticsearchDataViews => Set<ElasticsearchDataView>();
     public DbSet<GitRepository> GitRepositories => Set<GitRepository>();
     public DbSet<GitKnownHost> GitKnownHosts => Set<GitKnownHost>();
     public DbSet<CustomerGitRepoPolicy> CustomerGitRepoPolicies => Set<CustomerGitRepoPolicy>();
@@ -2298,6 +2306,191 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithMany()
                 .HasForeignKey(b => b.AppDeploymentId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ElasticsearchCluster>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.Name).HasMaxLength(36).IsRequired();
+            entity.Property(c => c.Namespace).HasMaxLength(63).IsRequired();
+            entity.Property(c => c.Version).HasMaxLength(20).IsRequired();
+            entity.Property(c => c.StorageClass).HasMaxLength(63);
+            entity.Property(c => c.Health).HasMaxLength(20);
+
+            foreach (string quantity in new[]
+            {
+                nameof(ElasticsearchCluster.MasterCpuRequest), nameof(ElasticsearchCluster.MasterMemory),
+                nameof(ElasticsearchCluster.MasterStorageSize),
+                nameof(ElasticsearchCluster.HotCpuRequest), nameof(ElasticsearchCluster.HotMemory),
+                nameof(ElasticsearchCluster.HotStorageSize),
+                nameof(ElasticsearchCluster.WarmCpuRequest), nameof(ElasticsearchCluster.WarmMemory),
+                nameof(ElasticsearchCluster.WarmStorageSize),
+                nameof(ElasticsearchCluster.ColdCpuRequest), nameof(ElasticsearchCluster.ColdMemory),
+                nameof(ElasticsearchCluster.ColdStorageSize),
+                nameof(ElasticsearchCluster.IngestCpuRequest), nameof(ElasticsearchCluster.IngestMemory),
+                nameof(ElasticsearchCluster.IngestStorageSize),
+                nameof(ElasticsearchCluster.KibanaCpuRequest), nameof(ElasticsearchCluster.KibanaMemory)
+            })
+            {
+                entity.Property(quantity).HasMaxLength(20).IsRequired();
+            }
+
+            entity.Property(c => c.SnapshotBasePath).HasMaxLength(255);
+            entity.Property(c => c.SnapshotScheduleCron).HasMaxLength(64).IsRequired();
+            entity.Property(c => c.SnapshotLastSuccessName).HasMaxLength(255);
+            entity.Property(c => c.SnapshotLastFailure).HasMaxLength(2000);
+
+            entity.HasIndex(c => new { c.KubernetesClusterId, c.Name, c.Namespace }).IsUnique();
+
+            entity.HasOne(c => c.Tenant)
+                .WithMany()
+                .HasForeignKey(c => c.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(c => c.KubernetesCluster)
+                .WithMany()
+                .HasForeignKey(c => c.KubernetesClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // SnapshotStorageLinkId is deliberately a soft reference, like RumSite.AppId: a real FK
+            // between two tables that both cascade from Tenant is a second cascade path SQL Server
+            // refuses, and the service already copes with a storage link that has gone away.
+
+            entity.HasMany(c => c.IlmPolicies)
+                .WithOne(p => p.ElasticsearchCluster)
+                .HasForeignKey(p => p.ElasticsearchClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasMany(c => c.Users)
+                .WithOne(u => u.ElasticsearchCluster)
+                .HasForeignKey(u => u.ElasticsearchClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasMany(c => c.KibanaSpaces)
+                .WithOne(s => s.ElasticsearchCluster)
+                .HasForeignKey(s => s.ElasticsearchClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ElasticsearchDataView>(entity =>
+        {
+            entity.HasKey(v => v.Id);
+            entity.Property(v => v.SpaceId).HasMaxLength(63);
+            entity.Property(v => v.Title).HasMaxLength(255).IsRequired();
+            entity.Property(v => v.Name).HasMaxLength(255);
+            entity.Property(v => v.TimeFieldName).HasMaxLength(255).IsRequired();
+            entity.Property(v => v.LastError).HasMaxLength(2000);
+
+            // A pattern can exist once per space: the same indices are a different data view in
+            // each, and Kibana treats them as unrelated objects.
+            entity.HasIndex(v => new { v.ElasticsearchClusterId, v.SpaceId, v.Title }).IsUnique();
+
+            entity.HasOne(v => v.ElasticsearchCluster)
+                .WithMany(c => c.DataViews)
+                .HasForeignKey(v => v.ElasticsearchClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ElasticsearchIngestPipeline>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.Property(p => p.Name).HasMaxLength(128).IsRequired();
+            entity.Property(p => p.Description).HasMaxLength(500);
+            entity.Property(p => p.TimestampField).HasMaxLength(255);
+            entity.Property(p => p.TimestampFormats).HasMaxLength(500).IsRequired();
+            entity.Property(p => p.GrokField).HasMaxLength(255);
+            entity.Property(p => p.GrokPattern).HasMaxLength(2000);
+            entity.Property(p => p.RenameFields).HasMaxLength(1000);
+            entity.Property(p => p.RemoveFields).HasMaxLength(1000);
+            entity.Property(p => p.SetFields).HasMaxLength(1000);
+            entity.Property(p => p.LastError).HasMaxLength(2000);
+            entity.HasIndex(p => new { p.ElasticsearchClusterId, p.Name }).IsUnique();
+
+            entity.HasOne(p => p.ElasticsearchCluster)
+                .WithMany(c => c.IngestPipelines)
+                .HasForeignKey(p => p.ElasticsearchClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ElasticsearchRemoteLink>(entity =>
+        {
+            entity.HasKey(l => l.Id);
+            entity.Property(l => l.Alias).HasMaxLength(63).IsRequired();
+            entity.Property(l => l.SearchIndexPatterns).HasMaxLength(500).IsRequired();
+            entity.Property(l => l.LastError).HasMaxLength(2000);
+
+            // An alias is how a query names the remote, so it has to be unique on the cluster doing
+            // the searching — not globally.
+            entity.HasIndex(l => new { l.LocalClusterId, l.Alias }).IsUnique();
+
+            entity.HasOne(l => l.LocalCluster)
+                .WithMany()
+                .HasForeignKey(l => l.LocalClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict, not cascade: two cascade paths into the same table is what SQL Server
+            // refuses outright, and deleting the cluster whose data is being searched should be a
+            // deliberate act with the links removed first anyway.
+            entity.HasOne(l => l.RemoteCluster)
+                .WithMany()
+                .HasForeignKey(l => l.RemoteClusterId)
+                .OnDelete(DeleteBehavior.Restrict);
+        });
+
+        builder.Entity<ElasticsearchKibanaSpace>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.Property(s => s.SpaceId).HasMaxLength(63).IsRequired();
+            entity.Property(s => s.Name).HasMaxLength(128).IsRequired();
+            entity.Property(s => s.Description).HasMaxLength(500);
+            entity.Property(s => s.LastError).HasMaxLength(2000);
+            entity.HasIndex(s => new { s.ElasticsearchClusterId, s.SpaceId }).IsUnique();
+        });
+
+        builder.Entity<ElasticsearchUser>(entity =>
+        {
+            entity.HasKey(u => u.Id);
+            entity.Property(u => u.Username).HasMaxLength(63).IsRequired();
+            entity.Property(u => u.IndexPattern).HasMaxLength(255).IsRequired();
+            entity.Property(u => u.KibanaSpaceId).HasMaxLength(63);
+            entity.Property(u => u.LastError).HasMaxLength(2000);
+            entity.HasIndex(u => new { u.ElasticsearchClusterId, u.Username }).IsUnique();
+        });
+
+        builder.Entity<ElasticsearchBinding>(entity =>
+        {
+            entity.HasKey(b => b.Id);
+            entity.Property(b => b.KubernetesSecretName).HasMaxLength(253).IsRequired();
+
+            entity.HasOne(b => b.ElasticsearchCluster)
+                .WithMany()
+                .HasForeignKey(b => b.ElasticsearchClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict rather than cascade: deleting a user an app is still bound to would leave the
+            // app holding a Secret whose credentials no longer work, and nothing saying why. The
+            // service removes the bindings first, deliberately and visibly.
+            entity.HasOne(b => b.ElasticsearchUser)
+                .WithMany()
+                .HasForeignKey(b => b.ElasticsearchUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(b => b.AppDeployment)
+                .WithMany()
+                .HasForeignKey(b => b.AppDeploymentId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasIndex(b => new { b.AppDeploymentId, b.KubernetesSecretName }).IsUnique();
+        });
+
+        builder.Entity<ElasticsearchIlmPolicy>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.Property(p => p.Name).HasMaxLength(128).IsRequired();
+            entity.Property(p => p.IndexPattern).HasMaxLength(255).IsRequired();
+            entity.Property(p => p.LastError).HasMaxLength(2000);
+            entity.Property(p => p.DefaultPipelineName).HasMaxLength(128);
+            entity.HasIndex(p => new { p.ElasticsearchClusterId, p.Name }).IsUnique();
         });
 
         builder.Entity<RumSite>(entity =>

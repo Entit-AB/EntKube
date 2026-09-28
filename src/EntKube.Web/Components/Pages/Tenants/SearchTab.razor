@@ -1,0 +1,2986 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject ElasticsearchService Search
+@inject TenantService TenantService
+@inject StorageService StorageService
+@inject CurrentActor Actor
+@inject ToastService Toasts
+
+@* ===========================================================================
+   Search Tab — Elasticsearch + Kibana via the ECK operator.
+
+   The form is built around two things the quickstart leaves to chance: which
+   roles the nodes carry, and what the whole thing will cost the Kubernetes
+   cluster. Both are shown before anything is applied.
+   =========================================================================== *@
+
+<LoadingPanel Loading="@loading" LoadingText="Loading Elasticsearch clusters…">
+@if (!loading)
+{
+    <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                   Message="@(pendingConfirm?.Message ?? "")"
+                   ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+                   IsBusy="confirmBusy"
+                   OnConfirm="RunPendingConfirmAsync"
+                   OnCancel="() => pendingConfirm = null" />
+
+    @* ── Operator availability badge ── *@
+    <div class="d-flex gap-2 mb-4 flex-wrap">
+        @if (operatorStatus?.OperatorAvailable == true)
+        {
+            <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2">
+                <i class="bi bi-search me-1"></i>ECK operator
+                @if (operatorStatus.OperatorClusterName is not null)
+                {
+                    <small class="ms-1 opacity-75">on @operatorStatus.OperatorClusterName</small>
+                }
+            </span>
+        }
+        else
+        {
+            <span class="badge bg-secondary-subtle text-secondary border px-3 py-2">
+                <i class="bi bi-search me-1"></i>ECK operator — not installed
+            </span>
+        }
+    </div>
+
+    <div class="mb-4">
+        <h5 class="d-flex align-items-center gap-2 mb-3">
+            <i class="bi bi-search text-primary"></i>Elasticsearch clusters
+            <span class="badge bg-secondary rounded-pill">@clusters.Count</span>
+            <button class="btn btn-sm btn-secondary ms-auto" @onclick="ShowCreateForm"
+                    disabled="@(form is not null || operatorStatus?.OperatorAvailable != true)">
+                <i class="bi bi-plus-lg me-1"></i>Create cluster
+            </button>
+        </h5>
+
+        @if (form is not null)
+        {
+            <div class="card shadow-sm mb-3 border-secondary">
+                <div class="card-header bg-secondary bg-opacity-10 d-flex align-items-center justify-content-between">
+                    <h6 class="mb-0">
+                        <i class="bi @(editingId is null ? "bi-plus-circle" : "bi-pencil") me-2"></i>
+                        @(editingId is null ? "New Elasticsearch cluster" : $"Edit {form.Name}")
+                    </h6>
+                    <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CancelForm"><i class="bi bi-x-lg"></i></button>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label small">Cluster name</label>
+                            <input class="form-control form-control-sm" @bind="form.Name" disabled="@(editingId is not null)" placeholder="search" />
+                            <div class="form-text small">DNS-safe, 36 characters or fewer — ECK appends the tier and ordinal.</div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Kubernetes cluster</label>
+                            <select class="form-select form-select-sm" @bind="form.K8sClusterId" @bind:after="RefreshCapacityAsync"
+                                    disabled="@(editingId is not null)">
+                                <option value="@Guid.Empty">Select cluster...</option>
+                                @foreach (KubernetesCluster k in formK8sClusters)
+                                {
+                                    <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Namespace</label>
+                            <input class="form-control form-control-sm" @bind="form.Namespace" disabled="@(editingId is not null)" />
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Stack version</label>
+                            <input class="form-control form-control-sm" @bind="form.Version" placeholder="9.5.0" />
+                        </div>
+                    </div>
+
+                    @if (editingId is null)
+                    {
+                        <div class="mb-3">
+                            <label class="form-label small">Topology preset</label>
+                            <div class="btn-group btn-group-sm d-flex flex-wrap" role="group">
+                                @foreach ((string key, string label, string help) in Presets)
+                                {
+                                    <button type="button" class="btn @(selectedPreset == key ? "btn-primary" : "btn-outline-primary")"
+                                            title="@help" @onclick="() => ApplyPreset(key)">@label</button>
+                                }
+                            </div>
+                            <div class="form-text small">@(Presets.FirstOrDefault(p => p.Key == selectedPreset).Help)</div>
+                        </div>
+                    }
+
+                    @* ── Node tiers ── *@
+                    <div class="table-responsive mb-2">
+                        <table class="table table-sm align-middle small mb-0">
+                            <thead class="text-muted">
+                                <tr>
+                                    <th style="min-width:13rem">Tier</th>
+                                    <th style="width:6rem">Nodes</th>
+                                    <th style="width:7rem">CPU</th>
+                                    <th style="width:7rem">Memory</th>
+                                    <th style="width:7rem">Heap</th>
+                                    <th style="width:8rem">Storage / node</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (TierEdit tier in form.Tiers)
+                                {
+                                    bool off = tier.Count <= 0;
+                                    <tr class="@(off ? "opacity-50" : "")">
+                                        <td>
+                                            <strong>@TierLabel(tier)</strong>
+                                            <div class="text-muted">@tier.Help</div>
+                                        </td>
+                                        <td><input type="number" class="form-control form-control-sm" min="0" max="30" @bind="tier.Count" /></td>
+                                        <td><input class="form-control form-control-sm" @bind="tier.Cpu" placeholder="500m" /></td>
+                                        <td><input class="form-control form-control-sm" @bind="tier.Memory" placeholder="2Gi" /></td>
+                                        <td class="text-muted">@(off ? "—" : $"{ElasticsearchService.HeapMbFor(tier.Memory)}m")</td>
+                                        <td><input class="form-control form-control-sm" @bind="tier.Storage" placeholder="50Gi" /></td>
+                                    </tr>
+                                }
+                                <tr class="@(form.KibanaEnabled ? "" : "opacity-50")">
+                                    <td>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="kibanaEnabled" @bind="form.KibanaEnabled" />
+                                            <label class="form-check-label" for="kibanaEnabled"><strong>Kibana</strong></label>
+                                        </div>
+                                        <div class="text-muted">The UI. Published like any other service from Routes &amp; Ingress.</div>
+                                    </td>
+                                    <td><input type="number" class="form-control form-control-sm" min="1" max="5" @bind="form.KibanaCount" disabled="@(!form.KibanaEnabled)" /></td>
+                                    <td><input class="form-control form-control-sm" @bind="form.KibanaCpu" disabled="@(!form.KibanaEnabled)" /></td>
+                                    <td><input class="form-control form-control-sm" @bind="form.KibanaMemory" disabled="@(!form.KibanaEnabled)" /></td>
+                                    <td class="text-muted">—</td>
+                                    <td class="text-muted">—</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="form-text small mb-3">
+                        Memory is both the request and the limit, and the JVM heap is half of it — the other half is the file cache
+                        Lucene searches through. Heap is never taken above 31Gi, where the JVM loses compressed object pointers.
+                    </div>
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label small">Storage class (optional)</label>
+                            <input class="form-control form-control-sm" @bind="form.StorageClass" placeholder="cluster default" />
+                        </div>
+                        <div class="col-md-8 d-flex align-items-end gap-4 flex-wrap">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="allowMmap" @bind="form.AllowMmap" />
+                                <label class="form-check-label small" for="allowMmap">
+                                    Allow memory-mapped storage
+                                    <span class="text-muted">— needs <code>vm.max_map_count=262144</code> on the nodes; turn it off if they cannot be tuned.</span>
+                                </label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="zoneAware" @bind="form.ZoneAware" />
+                                <label class="form-check-label small" for="zoneAware">
+                                    Zone-aware placement
+                                    <span class="text-muted">— spreads each tier across <code>topology.kubernetes.io/zone</code>.</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    @* ── Footprint + capacity ── *@
+                    @{ ElasticsearchFootprint footprint = ElasticsearchService.Footprint(form.ToEntity()); }
+                    <div class="card bg-body-tertiary border-0 mb-3">
+                        <div class="card-body py-2">
+                            <div class="d-flex align-items-center gap-2 mb-1">
+                                <strong class="small"><i class="bi bi-rulers me-1"></i>What this asks the cluster for</strong>
+                                <button class="btn btn-sm btn-link p-0 ms-auto" @onclick="RefreshCapacityAsync" disabled="@checkingCapacity">
+                                    @if (checkingCapacity) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Re-check
+                                </button>
+                            </div>
+                            <div class="small">
+                                <span class="me-3">@footprint.PodCount pods</span>
+                                <span class="me-3">@ElasticsearchService.FormatCpu(footprint.CpuMilliTotal) requested</span>
+                                <span class="me-3">@ElasticsearchService.FormatBytes(footprint.MemoryBytesTotal) memory</span>
+                                <span class="me-3">@ElasticsearchService.FormatBytes(footprint.StorageBytesTotal) storage</span>
+                            </div>
+                            @if (capacity is not null && capacity.CapacityKnown)
+                            {
+                                <div class="small text-muted mt-1">
+                                    Cluster has @ElasticsearchService.FormatBytes(capacity.FreeMemoryBytes) memory and
+                                    @ElasticsearchService.FormatCpu(capacity.FreeCpuMilli) unallocated across @capacity.NodeCount node(s);
+                                    roomiest single node has @ElasticsearchService.FormatBytes(capacity.LargestNodeFreeMemoryBytes) free.
+                                </div>
+                            }
+                            @foreach (string blocker in capacity?.Blocking ?? [])
+                            {
+                                <div class="alert alert-danger py-1 px-2 small mt-2 mb-0">@blocker</div>
+                            }
+                            @foreach (string warning in capacity?.Warnings ?? [])
+                            {
+                                <div class="alert alert-warning py-1 px-2 small mt-2 mb-0">@warning</div>
+                            }
+                            @if (capacity is { Fits: false })
+                            {
+                                <div class="form-check mt-2">
+                                    <input class="form-check-input" type="checkbox" id="ackCapacity" @bind="form.Acknowledge" />
+                                    <label class="form-check-label small" for="ackCapacity">
+                                        Apply it anyway — the cluster is about to grow (an autoscaler that has not added the nodes yet).
+                                    </label>
+                                </div>
+                            }
+                        </div>
+                    </div>
+
+                    @if (formError is not null)
+                    {
+                        <div class="alert alert-danger py-2 small" style="white-space:pre-wrap">@formError</div>
+                    }
+
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="SaveFormAsync" disabled="@saving">
+                            @if (saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            @(editingId is null ? "Create cluster" : "Save changes")
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelForm">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @foreach (ElasticsearchCluster cluster in clusters)
+        {
+            bool expanded = expandedId == cluster.Id;
+            ElasticsearchFootprint fp = ElasticsearchService.Footprint(cluster);
+
+            <div class="card shadow-sm mb-3">
+                <div class="card-header d-flex align-items-center gap-2 py-2"
+                     style="cursor:pointer" @onclick="() => ToggleCluster(cluster.Id)">
+                    <i class="bi bi-search text-primary"></i>
+                    <strong>@cluster.Name</strong>
+                    <small class="text-muted ms-1">@cluster.Namespace · @cluster.KubernetesCluster.Name</small>
+                    <span class="badge @StatusBadgeClass(cluster.Status) ms-1">@cluster.Status</span>
+                    @if (cluster.Health is not null)
+                    {
+                        <span class="badge @HealthBadgeClass(cluster.Health)">@cluster.Health</span>
+                    }
+                    <small class="text-muted ms-auto">
+                        @TopologySummary(cluster) · @ElasticsearchService.FormatBytes(fp.MemoryBytesTotal) · @ElasticsearchService.FormatBytes(fp.StorageBytesTotal) disk
+                    </small>
+                    <i class="bi @(expanded ? "bi-chevron-up" : "bi-chevron-down") ms-2 text-muted"></i>
+                </div>
+
+                @if (cluster.LastError is not null && cluster.Status == ElasticsearchClusterStatus.Failed)
+                {
+                    <div class="alert alert-danger m-2 py-2 small mb-0" style="white-space:pre-wrap">@cluster.LastError</div>
+                }
+
+                @if (expanded)
+                {
+                    <div class="card-body pt-2">
+                        <dl class="row small mb-3">
+                            <dt class="col-sm-3">Endpoint</dt>
+                            <dd class="col-sm-9"><code>@cluster.HttpEndpoint</code></dd>
+                            <dt class="col-sm-3">Kibana</dt>
+                            <dd class="col-sm-9">
+                                @if (cluster.KibanaEnabled)
+                                {
+                                    <code>@cluster.KibanaServiceName</code> <span class="text-muted">· port @ElasticsearchCluster.KibanaPort — publish it from Routes &amp; Ingress</span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">not deployed</span>
+                                }
+                            </dd>
+                            <dt class="col-sm-3">Credentials</dt>
+                            <dd class="col-sm-9">
+                                user <code>elastic</code>, password in secret <code>@cluster.ElasticUserSecretName</code>
+                                <button class="btn btn-sm btn-link p-0 ms-2" @onclick="() => RevealPasswordAsync(cluster.Id)">
+                                    @(revealedPasswordFor == cluster.Id ? "Hide" : "Show")
+                                </button>
+                                @if (revealedPasswordFor == cluster.Id)
+                                {
+                                    <div><code>@(revealedPassword ?? "could not be read")</code></div>
+                                }
+                            </dd>
+                            <dt class="col-sm-3">Version</dt>
+                            <dd class="col-sm-9">@cluster.Version</dd>
+                            <dt class="col-sm-3">Storage class</dt>
+                            <dd class="col-sm-9">@(cluster.StorageClass ?? "cluster default")@(cluster.AllowMmap ? "" : " · mmap disabled")@(cluster.ZoneAware ? " · zone-aware" : "")</dd>
+                            <dt class="col-sm-3">Created</dt>
+                            <dd class="col-sm-9">@cluster.CreatedAt.ToString("yyyy-MM-dd HH:mm") UTC</dd>
+                        </dl>
+
+                        @* ── Tier footprint ── *@
+                        <table class="table table-sm table-borderless small mb-3">
+                            <thead class="text-muted"><tr><th>Tier</th><th>Nodes</th><th>CPU each</th><th>Memory each</th><th>Heap</th><th>Storage each</th></tr></thead>
+                            <tbody>
+                                @foreach (ElasticsearchTierFootprint t in fp.Tiers)
+                                {
+                                    <tr>
+                                        <td><span class="badge bg-secondary">@t.Tier</span></td>
+                                        <td>@t.Count</td>
+                                        <td>@ElasticsearchService.FormatCpu(t.CpuMilliPerPod)</td>
+                                        <td>@ElasticsearchService.FormatBytes(t.MemoryBytesPerPod)</td>
+                                        <td>@(t.HeapMb > 0 ? $"{t.HeapMb}m" : "—")</td>
+                                        <td>@(t.StorageBytesPerPod > 0 ? ElasticsearchService.FormatBytes(t.StorageBytesPerPod) : "—")</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+
+                        @* ── Live pods ── *@
+                        <div class="mb-3">
+                            <div class="d-flex align-items-center gap-2 mb-2">
+                                <small class="text-muted">Phase:</small>
+                                @if (loadingDetail && expandedId == cluster.Id)
+                                {
+                                    <span class="spinner-border spinner-border-sm"></span>
+                                }
+                                else
+                                {
+                                    <small>@(expandedDetail?.Phase ?? "—")</small>
+                                }
+                                @if (expandedDetail?.KibanaHealth is string kbHealth)
+                                {
+                                    <span class="badge @HealthBadgeClass(kbHealth)">kibana @kbHealth</span>
+                                }
+                                <button class="btn btn-sm btn-link p-0 ms-2" @onclick="() => RefreshDetail(cluster.Id)">
+                                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                                </button>
+                            </div>
+                            @if (expandedDetail?.Cluster.Id == cluster.Id && expandedDetail.Pods.Count > 0)
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>Pod</th><th>Tier</th><th>Status</th><th>Ready</th><th>Restarts</th><th>Node</th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchPodInfo pod in expandedDetail.Pods)
+                                        {
+                                            <tr>
+                                                <td><code>@pod.Name</code></td>
+                                                <td><span class="badge bg-secondary">@pod.Tier</span></td>
+                                                <td>@pod.Status</td>
+                                                <td>
+                                                    @if (pod.Ready) { <i class="bi bi-check-circle-fill text-success"></i> }
+                                                    else { <i class="bi bi-clock text-warning"></i> }
+                                                </td>
+                                                <td>@pod.Restarts</td>
+                                                <td class="text-muted">@(pod.Node ?? "—")</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        @* ── Snapshots ── *@
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-shield-check me-1"></i>Snapshots</strong>
+                                @if (cluster.SnapshotsEnabled)
+                                {
+                                    <button class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2"
+                                            @onclick="() => RefreshSnapshotStatusAsync(cluster)" disabled="@snapshotBusy">
+                                        Check now
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary ms-2 py-0 px-2"
+                                            @onclick="() => RunSnapshotNowAsync(cluster)" disabled="@snapshotBusy">
+                                        Snapshot now
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-primary ms-2 py-0 px-2"
+                                            @onclick="() => ShowSnapshotForm(cluster)" disabled="@snapshotBusy">
+                                        Edit
+                                    </button>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                            @onclick="() => ShowSnapshotForm(cluster)">
+                                        <i class="bi bi-plus-lg me-1"></i>Configure
+                                    </button>
+                                }
+                            </div>
+
+                            @if (snapshotFormClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Storage link (S3 bucket)</label>
+                                            <select class="form-select form-select-sm" @bind="snapshotStorageLinkId">
+                                                <option value="@Guid.Empty">Select storage...</option>
+                                                @foreach (StorageLink link in storageLinks)
+                                                {
+                                                    <option value="@link.Id">@link.Name (@link.Provider · @(link.BucketName ?? "no bucket"))</option>
+                                                }
+                                            </select>
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Path in bucket</label>
+                                            <input class="form-control form-control-sm" @bind="snapshotBasePath" placeholder="@cluster.Name" />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Schedule (cron)</label>
+                                            <input class="form-control form-control-sm" @bind="snapshotCron" placeholder="0 30 1 * * ?" />
+                                            <div class="form-text small">Elasticsearch cron: second minute hour day month weekday.</div>
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Keep for (d)</label>
+                                            <input type="number" class="form-control form-control-sm" min="1" @bind="snapshotExpireDays" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Keep at least</label>
+                                            <input type="number" class="form-control form-control-sm" min="1" @bind="snapshotMinCount" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Keep at most</label>
+                                            <input type="number" class="form-control form-control-sm" min="1" @bind="snapshotMaxCount" />
+                                        </div>
+                                        <div class="col-md-8 d-flex align-items-end gap-1">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => SaveSnapshotsAsync(cluster)"
+                                                    disabled="@(snapshotBusy || snapshotStorageLinkId == Guid.Empty)">
+                                                @if (snapshotBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Save &amp; register
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => snapshotFormClusterId = null">Cancel</button>
+                                            @if (cluster.SnapshotsEnabled)
+                                            {
+                                                <button class="btn btn-sm btn-outline-danger ms-auto"
+                                                        @onclick='() => pendingConfirm = new PendingConfirm("Stop taking snapshots of \"" + cluster.Name + "\"? The repository and everything already in the bucket are left untouched.", "Stop snapshots", () => DisableSnapshotsAsync(cluster))'>
+                                                    Stop snapshots
+                                                </button>
+                                            }
+                                        </div>
+                                    </div>
+                                    <div class="form-text small mt-1">
+                                        The S3 keys go into the Elasticsearch keystore, not into a manifest. Registering the repository can take a
+                                        minute while the keystore reaches every node.
+                                    </div>
+                                    @if (snapshotError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@snapshotError</div> }
+                                </div></div>
+                            }
+
+                            @if (!cluster.SnapshotsEnabled)
+                            {
+                                <p class="text-muted small mb-0">
+                                    No snapshots. Worth fixing before a lifecycle policy starts deleting anything — ILM's delete phase
+                                    is not a mistake it can take back.
+                                </p>
+                            }
+                            else
+                            {
+                                <dl class="row small mb-0">
+                                    <dt class="col-sm-3">Destination</dt>
+                                    <dd class="col-sm-9">
+                                        @(storageLinks.FirstOrDefault(l => l.Id == cluster.SnapshotStorageLinkId)?.Name ?? "storage link missing")
+                                        <span class="text-muted">· path <code>@(cluster.SnapshotBasePath ?? cluster.Name)</code></span>
+                                    </dd>
+                                    <dt class="col-sm-3">Schedule</dt>
+                                    <dd class="col-sm-9">
+                                        <code>@cluster.SnapshotScheduleCron</code>
+                                        <span class="text-muted">· keep @cluster.SnapshotExpireAfterDays d, at least @cluster.SnapshotMinCount, at most @cluster.SnapshotMaxCount</span>
+                                    </dd>
+                                    <dt class="col-sm-3">Last success</dt>
+                                    <dd class="col-sm-9">
+                                        @if (cluster.SnapshotLastSuccessAt is DateTime at)
+                                        {
+                                            <span>@at.ToString("yyyy-MM-dd HH:mm") UTC</span>
+                                            <code class="ms-1">@cluster.SnapshotLastSuccessName</code>
+                                        }
+                                        else
+                                        {
+                                            <span class="text-warning">none recorded yet</span>
+                                        }
+                                        @if (cluster.SnapshotLastCheckedAt is DateTime checkedAt)
+                                        {
+                                            <span class="text-muted ms-1">(checked @checkedAt.ToString("yyyy-MM-dd HH:mm") UTC)</span>
+                                        }
+                                    </dd>
+                                    @if (cluster.SnapshotLastFailure is not null)
+                                    {
+                                        <dt class="col-sm-3 text-danger">Last failure</dt>
+                                        <dd class="col-sm-9 text-danger" style="white-space:pre-wrap">@cluster.SnapshotLastFailure</dd>
+                                    }
+                                </dl>
+                            }
+                        </div>
+
+                        @* ── Snapshots in the repository, and restoring one ── *@
+                        @if (cluster.SnapshotsEnabled)
+                        {
+                            <div class="mb-3 border-top pt-3">
+                                <div class="d-flex align-items-center mb-2">
+                                    <strong class="small"><i class="bi bi-archive me-1"></i>In the repository</strong>
+                                    <button class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2"
+                                            @onclick="() => LoadSnapshotsAsync(cluster)" disabled="@snapshotBusy">
+                                        @if (snapshotBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        List snapshots
+                                    </button>
+                                </div>
+
+                                @if (repositorySnapshotsFor == cluster.Id)
+                                {
+                                    @if (repositorySnapshots.Count == 0)
+                                    {
+                                        <p class="text-muted small mb-0">The repository is empty — nothing has been snapshotted yet.</p>
+                                    }
+                                    else
+                                    {
+                                        <table class="table table-sm table-borderless small mb-0">
+                                            <thead class="text-muted"><tr><th>Snapshot</th><th>State</th><th>Taken</th><th>Indices</th><th></th></tr></thead>
+                                            <tbody>
+                                                @foreach (ElasticsearchService.ElasticsearchSnapshotInfo snap in repositorySnapshots)
+                                                {
+                                                    <tr>
+                                                        <td><code>@snap.Name</code></td>
+                                                        <td>
+                                                            @if (snap.Complete)
+                                                            {
+                                                                <span class="badge bg-success-subtle text-success border border-success-subtle">@snap.State</span>
+                                                            }
+                                                            else
+                                                            {
+                                                                <span class="badge bg-warning-subtle text-warning border border-warning-subtle"
+                                                                      title="@($"{snap.FailedShards} shard(s) did not make it in")">@snap.State</span>
+                                                            }
+                                                        </td>
+                                                        <td class="text-muted">@(snap.StartedAt?.ToString("yyyy-MM-dd HH:mm") ?? "—")</td>
+                                                        <td class="text-muted">@snap.IndexCount</td>
+                                                        <td>
+                                                            <button class="btn btn-sm btn-outline-secondary border-0 py-0"
+                                                                    @onclick="() => ShowRestoreForm(cluster, snap)">
+                                                                Restore…
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                }
+                                            </tbody>
+                                        </table>
+                                    }
+                                }
+
+                                @if (restoreSnapshotName is not null && restoreClusterId == cluster.Id)
+                                {
+                                    <div class="card border-warning mt-2"><div class="card-body py-2">
+                                        <h6 class="small fw-semibold mb-2">
+                                            <i class="bi bi-arrow-counterclockwise me-1"></i>Restore <code>@restoreSnapshotName</code>
+                                        </h6>
+                                        <div class="row g-2">
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Indices to restore</label>
+                                                <input class="form-control form-control-sm" @bind="restoreIndexPattern" placeholder="*" />
+                                                <div class="form-text small">A pattern within the snapshot. <code>*</code> is everything in it.</div>
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Mode</label>
+                                                <select class="form-select form-select-sm" @bind="restoreInPlace">
+                                                    <option value="false">Side by side — restore under a prefix</option>
+                                                    <option value="true">In place — replace the live indices</option>
+                                                </select>
+                                            </div>
+                                            @if (!restoreInPlace)
+                                            {
+                                                <div class="col-md-4">
+                                                    <label class="form-label small mb-1">Restore under prefix</label>
+                                                    <input class="form-control form-control-sm" @bind="restorePrefix" placeholder="restored-" />
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <div class="col-md-4 d-flex align-items-end">
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="checkbox" id="restoreGlobal" @bind="restoreGlobalState" />
+                                                        <label class="form-check-label small" for="restoreGlobal">
+                                                            Also restore the cluster state
+                                                            <span class="text-muted">— templates, ILM policies and roles, overwriting the live ones.</span>
+                                                        </label>
+                                                    </div>
+                                                </div>
+                                            }
+                                        </div>
+
+                                        @if (restoreInPlace)
+                                        {
+                                            <div class="alert alert-warning py-1 px-2 small mt-2 mb-0">
+                                                The matching indices are closed and their contents replaced by the snapshot's. Anything written to them
+                                                since <code>@restoreSnapshotName</code> was taken is gone.
+                                            </div>
+                                        }
+
+                                        @if (restoreError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@restoreError</div> }
+                                        @if (restoreLog is not null) { <pre class="small bg-body-tertiary p-2 mt-2 mb-0" style="max-height:12rem;overflow:auto">@restoreLog</pre> }
+
+                                        <div class="mt-2 d-flex gap-1">
+                                            <button class="btn btn-sm btn-warning" @onclick="() => ConfirmRestore(cluster)" disabled="@restoring">
+                                                @if (restoring) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Restore
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="CancelRestore">Cancel</button>
+                                        </div>
+                                    </div></div>
+                                }
+                            </div>
+                        }
+
+                        @* ── Indices and disk ── *@
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-hdd me-1"></i>Indices &amp; disk</strong>
+                                @if (cluster.HighestNodeDiskPercent is int stored)
+                                {
+                                    <span class="badge @DiskBadgeClass(stored) ms-2">fullest node @stored%</span>
+                                }
+                                @if (cluster.UnassignedShards is int unassigned && unassigned > 0)
+                                {
+                                    <span class="badge bg-warning-subtle text-warning border border-warning-subtle ms-1">
+                                        @unassigned unassigned shard(s)
+                                    </span>
+                                }
+                                <button class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2"
+                                        @onclick="() => LoadInsightAsync(cluster)" disabled="@loadingInsight">
+                                    @if (loadingInsight) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Look now
+                                </button>
+                            </div>
+
+                            @if (insightFor == cluster.Id && insight is not null)
+                            {
+                                <table class="table table-sm table-borderless small mb-3">
+                                    <thead class="text-muted"><tr><th>Node</th><th>Disk</th><th>Used</th><th>Shards</th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchService.ElasticsearchNodeDisk node in insight.Nodes)
+                                        {
+                                            <tr>
+                                                <td><code>@node.Node</code></td>
+                                                <td style="min-width:10rem">
+                                                    <div class="progress" style="height:.75rem">
+                                                        <div class="progress-bar @DiskBarClass(node.PercentUsed)"
+                                                             style="width:@(node.PercentUsed)%"></div>
+                                                    </div>
+                                                </td>
+                                                <td class="text-muted">
+                                                    @node.PercentUsed% — @ElasticsearchService.FormatBytes(node.UsedBytes)
+                                                    of @ElasticsearchService.FormatBytes(node.TotalBytes)
+                                                </td>
+                                                <td class="text-muted">@node.Shards</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+
+                                <div class="form-text small mb-2">
+                                    Elasticsearch stops putting new shards on a node at 85%, and makes every index with a shard
+                                    there read-only at 95% — which it does not undo by itself once space is freed.
+                                </div>
+
+                                @if (insight.Indices.Count > 0)
+                                {
+                                    <table class="table table-sm table-borderless small mb-0">
+                                        <thead class="text-muted"><tr><th>Index</th><th>Health</th><th>Size</th><th>Docs</th><th>Shards</th><th>Lifecycle</th></tr></thead>
+                                        <tbody>
+                                            @foreach (ElasticsearchService.ElasticsearchIndexInfo index in insight.Indices.Take(showAllIndices ? 500 : 15))
+                                            {
+                                                <tr>
+                                                    <td><code>@index.Name</code></td>
+                                                    <td><span class="badge @HealthBadgeClass(index.Health)">@index.Health</span></td>
+                                                    <td>@ElasticsearchService.FormatBytes(index.StoreBytes)</td>
+                                                    <td class="text-muted">@index.DocCount.ToString("N0")</td>
+                                                    <td class="text-muted">@index.PrimaryShards p / @index.Replicas r</td>
+                                                    <td>
+                                                        @if (index.IlmError is not null)
+                                                        {
+                                                            <span class="badge bg-danger-subtle text-danger border border-danger-subtle"
+                                                                  title="@index.IlmError">stuck in @(index.IlmPhase ?? "?")</span>
+                                                        }
+                                                        else if (index.IlmPhase is not null)
+                                                        {
+                                                            <span class="badge bg-secondary">@index.IlmPhase</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            <span class="text-muted">unmanaged</span>
+                                                        }
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+
+                                    @if (insight.Indices.Count > 15)
+                                    {
+                                        <button class="btn btn-sm btn-link p-0" @onclick="() => showAllIndices = !showAllIndices">
+                                            @(showAllIndices ? "Show the 15 largest only" : $"Show all {insight.Indices.Count} indices")
+                                        </button>
+                                    }
+                                }
+                                else
+                                {
+                                    <p class="text-muted small mb-0">No indices yet.</p>
+                                }
+                            }
+                            else if (cluster.InsightCheckedAt is DateTime seen)
+                            {
+                                <p class="text-muted small mb-0">Last read @seen.ToString("yyyy-MM-dd HH:mm") UTC.</p>
+                            }
+                            else
+                            {
+                                <p class="text-muted small mb-0">Not read yet.</p>
+                            }
+                        </div>
+
+                        @* ── Ingest pipelines ── *@
+                        @{ List<ElasticsearchIngestPipeline> pipelines = PipelinesFor(cluster); }
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-funnel me-1"></i>Ingest pipelines</strong>
+                                <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2" @onclick="() => ShowPipelineForm(cluster, null)">
+                                    <i class="bi bi-plus-lg me-1"></i>Add
+                                </button>
+                            </div>
+
+                            @if (pipelineClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Name</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineName"
+                                                   disabled="@(editingPipelineId is not null)" placeholder="app-logs" />
+                                        </div>
+                                        <div class="col-md-5">
+                                            <label class="form-label small mb-1">Description</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineDescription" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Timestamp field</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineTimestampField" placeholder="time" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Formats</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineTimestampFormats" placeholder="ISO8601" />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Grok field</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineGrokField" placeholder="message" />
+                                        </div>
+                                        <div class="col-md-9">
+                                            <label class="form-label small mb-1">Grok pattern</label>
+                                            <input class="form-control form-control-sm font-monospace" @bind="pipelineGrokPattern"
+                                                   placeholder="%{LOGLEVEL:level} %{GREEDYDATA:msg}" />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Rename (from:to, …)</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineRename" placeholder="msg:message" />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Remove fields</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineRemove" placeholder="agent,host.raw" />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Set (key=value, …)</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineSet" placeholder="env=production" />
+                                        </div>
+                                        <div class="col-md-12">
+                                            <label class="form-label small mb-1">Anything else (JSON array of processors)</label>
+                                            <textarea class="form-control form-control-sm font-monospace" rows="3"
+                                                      @bind="pipelineCustom" placeholder='[{"lowercase": {"field": "level"}}]'></textarea>
+                                        </div>
+                                    </div>
+                                    <div class="form-text small mt-1">
+                                        Every pipeline gets an on-failure handler that records the error on the document rather than
+                                        rejecting it — a grok pattern that does not match should cost you a field, not the line.
+                                    </div>
+
+                                    <div class="row g-2 mt-1">
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-1">Sample document (JSON)</label>
+                                            <textarea class="form-control form-control-sm font-monospace" rows="3"
+                                                      @bind="pipelineSample" placeholder='{"message": "WARN disk almost full", "time": "2026-09-28T10:00:00Z"}'></textarea>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-1">What comes out</label>
+                                            <pre class="small bg-body-tertiary p-2 mb-0" style="max-height:8rem;overflow:auto">@(pipelineSimulation ?? "— run it to see")</pre>
+                                        </div>
+                                    </div>
+
+                                    @if (pipelineError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@pipelineError</div> }
+
+                                    <div class="mt-2 d-flex gap-1">
+                                        <button class="btn btn-sm btn-primary" @onclick="() => SavePipelineAsync(cluster)"
+                                                disabled="@(savingPipeline || string.IsNullOrWhiteSpace(pipelineName))">
+                                            @if (savingPipeline) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            Save &amp; apply
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => SimulatePipelineAsync(cluster)"
+                                                disabled="@(savingPipeline || editingPipelineId is null || string.IsNullOrWhiteSpace(pipelineSample))"
+                                                title="@(editingPipelineId is null ? "Save it once first" : "Run the sample through it")">
+                                            Test it
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => pipelineClusterId = null">Cancel</button>
+                                    </div>
+                                </div></div>
+                            }
+
+                            @if (pipelines.Count == 0)
+                            {
+                                <p class="text-muted small mb-0">
+                                    No pipelines. Documents are indexed exactly as they arrive — which for a log line means one
+                                    opaque field that cannot be filtered by level or aged by its own timestamp.
+                                </p>
+                            }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>Pipeline</th><th>Does</th><th>Applied</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchIngestPipeline pipe in pipelines)
+                                        {
+                                            <tr>
+                                                <td><code>@pipe.Name</code></td>
+                                                <td class="text-muted">@PipelineSummary(pipe)</td>
+                                                <td class="text-muted">
+                                                    @if (pipe.LastError is not null)
+                                                    {
+                                                        <span class="text-danger" title="@pipe.LastError">failed</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        @(pipe.LastAppliedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                                    }
+                                                </td>
+                                                <td class="text-nowrap">
+                                                    <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Edit"
+                                                            aria-label="@($"Edit {pipe.Name}")" @onclick="() => ShowPipelineForm(cluster, pipe)">
+                                                        <i class="bi bi-pencil"></i>
+                                                    </button>
+                                                    @RenderDeleteCell($"Delete the ingest pipeline \"{pipe.Name}\"? Documents stop being processed on their way in.", "Delete pipeline", () => DeletePipelineAsync(cluster.Id, pipe.Id, pipe.Name))
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        @* ── Index lifecycle policies ── *@
+                        @{ List<ElasticsearchIlmPolicy> policies = allPolicies.TryGetValue(cluster.Id, out List<ElasticsearchIlmPolicy>? pl) ? pl : []; }
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-hourglass-split me-1"></i>Index lifecycle</strong>
+                                <button class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2"
+                                        @onclick="() => ApplyPoliciesAsync(cluster)" disabled="@(policies.Count == 0 || applyingPolicies)">
+                                    @if (applyingPolicies) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Re-apply
+                                </button>
+                                <button class="btn btn-sm btn-outline-primary ms-2 py-0 px-2" @onclick="() => ShowAddPolicy(cluster)">
+                                    <i class="bi bi-plus-lg me-1"></i>Add
+                                </button>
+                            </div>
+
+                            @if (addPolicyClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Policy name</label>
+                                            <input class="form-control form-control-sm" @bind="policyName" placeholder="app-logs" />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Index pattern</label>
+                                            <input class="form-control form-control-sm" @bind="policyPattern" placeholder="logs-app-*" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Roll over at</label>
+                                            <div class="input-group input-group-sm">
+                                                <input type="number" class="form-control" min="1" @bind="policyRolloverGb" />
+                                                <span class="input-group-text">GB</span>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">or after</label>
+                                            <div class="input-group input-group-sm">
+                                                <input type="number" class="form-control" min="1" @bind="policyRolloverDays" />
+                                                <span class="input-group-text">d</span>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-1">
+                                            <label class="form-label small mb-1">Shards</label>
+                                            <input type="number" class="form-control form-control-sm" min="1" @bind="policyShards" />
+                                        </div>
+                                        <div class="col-md-1">
+                                            <label class="form-label small mb-1">Replicas</label>
+                                            <input type="number" class="form-control form-control-sm" min="0" @bind="policyReplicas" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Warm after (d)</label>
+                                            <input type="number" class="form-control form-control-sm" min="0" @bind="policyWarmDays"
+                                                   disabled="@(cluster.WarmCount == 0)" placeholder="@(cluster.WarmCount == 0 ? "no warm tier" : "—")" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Cold after (d)</label>
+                                            <input type="number" class="form-control form-control-sm" min="0" @bind="policyColdDays"
+                                                   disabled="@(cluster.ColdCount == 0)" placeholder="@(cluster.ColdCount == 0 ? "no cold tier" : "—")" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Delete after (d)</label>
+                                            <input type="number" class="form-control form-control-sm" min="0" @bind="policyDeleteDays" placeholder="keep forever" />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Through pipeline</label>
+                                            <select class="form-select form-select-sm" @bind="policyPipelineName">
+                                                <option value="">None — index as sent</option>
+                                                @foreach (ElasticsearchIngestPipeline pipe in PipelinesFor(cluster))
+                                                {
+                                                    <option value="@pipe.Name">@pipe.Name</option>
+                                                }
+                                            </select>
+                                        </div>
+                                        <div class="col-md-3 d-flex align-items-end">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="policyDataStream" @bind="policyDataStream" />
+                                                <label class="form-check-label small" for="policyDataStream">Data stream (append-only)</label>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-3 d-flex align-items-end gap-1">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => AddPolicyAsync(cluster)"
+                                                    disabled="@(savingPolicy || string.IsNullOrWhiteSpace(policyName))">
+                                                @if (savingPolicy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Add &amp; apply
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => addPolicyClusterId = null">Cancel</button>
+                                        </div>
+                                    </div>
+                                    <div class="form-text small mt-1">
+                                        Zero days means the phase is skipped. The policy and its index template are pushed to Elasticsearch by a
+                                        short-lived Job inside the cluster, so the password never leaves it.
+                                    </div>
+                                    @if (policyError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@policyError</div> }
+                                </div></div>
+                            }
+
+                            @if (policies.Count == 0)
+                            {
+                                <EmptyState Icon="bi-hourglass-split" Title="No lifecycle policies"
+                                            Message="Node tiers give data somewhere to move to; a lifecycle policy is what moves it. Without one the hot tier fills and stays full."
+                                            ActionLabel="Add policy" OnAction="() => ShowAddPolicy(cluster)" />
+                            }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>Policy</th><th>Pattern</th><th>Rollover</th><th>Ages</th><th>Shape</th><th>Applied</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchIlmPolicy p in policies)
+                                        {
+                                            <tr>
+                                                <td><code>@p.Name</code></td>
+                                                <td><code>@p.IndexPattern</code>@(p.UseDataStream ? "" : " (alias)")</td>
+                                                <td>@p.RolloverMaxPrimaryShardGb GB / @p.RolloverMaxAgeDays d</td>
+                                                <td class="text-muted">@AgeSummary(p)</td>
+                                                <td class="text-muted">@p.Shards shard(s), @p.Replicas replica(s)</td>
+                                                <td class="text-muted">
+                                                    @if (p.LastError is not null)
+                                                    {
+                                                        <span class="text-danger" title="@p.LastError">failed</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        @(p.LastAppliedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                                    }
+                                                </td>
+                                                <td>@RenderDeleteCell($"Delete lifecycle policy \"{p.Name}\"? Its index template is removed from Elasticsearch too; indices already created keep their settings.", "Delete policy", () => DeletePolicyAsync(cluster.Id, p.Id, p.Name))</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        @* ── Kibana spaces ── *@
+                        @if (cluster.KibanaEnabled)
+                        {
+                            List<ElasticsearchKibanaSpace> spaces = SpacesFor(cluster);
+                            <div class="mb-3 border-top pt-3">
+                                <div class="d-flex align-items-center mb-2">
+                                    <strong class="small"><i class="bi bi-columns-gap me-1"></i>Kibana spaces</strong>
+                                    <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2" @onclick="() => ShowAddSpace(cluster)">
+                                        <i class="bi bi-plus-lg me-1"></i>Add
+                                    </button>
+                                </div>
+
+                                @if (addSpaceClusterId == cluster.Id)
+                                {
+                                    <div class="card border-primary mb-2"><div class="card-body py-2">
+                                        <div class="row g-2">
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Id</label>
+                                                <input class="form-control form-control-sm" @bind="spaceIdValue" placeholder="orders" />
+                                                <div class="form-text small">Appears in Kibana's URLs. Fixed once created.</div>
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Name</label>
+                                                <input class="form-control form-control-sm" @bind="spaceName" placeholder="Orders team" />
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Description (optional)</label>
+                                                <input class="form-control form-control-sm" @bind="spaceDescription" />
+                                            </div>
+                                            <div class="col-md-2 d-flex align-items-end gap-1">
+                                                <button class="btn btn-sm btn-primary" @onclick="() => AddSpaceAsync(cluster)"
+                                                        disabled="@(savingSpace || string.IsNullOrWhiteSpace(spaceIdValue))">
+                                                    @if (savingSpace) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Add
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => addSpaceClusterId = null">Cancel</button>
+                                            </div>
+                                        </div>
+                                        @if (spaceError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@spaceError</div> }
+                                    </div></div>
+                                }
+
+                                @if (spaces.Count == 0)
+                                {
+                                    <p class="text-muted small mb-0">
+                                        Only Kibana's default space. Add one per team and scope their accounts to it, and they stop
+                                        seeing each other's dashboards.
+                                    </p>
+                                }
+                                else
+                                {
+                                    <table class="table table-sm table-borderless small mb-0">
+                                        <thead class="text-muted"><tr><th>Space</th><th>Id</th><th>Description</th><th>Applied</th><th></th></tr></thead>
+                                        <tbody>
+                                            @foreach (ElasticsearchKibanaSpace space in spaces)
+                                            {
+                                                <tr>
+                                                    <td>@space.Name</td>
+                                                    <td><code>@space.SpaceId</code></td>
+                                                    <td class="text-muted">@(space.Description ?? "—")</td>
+                                                    <td class="text-muted">
+                                                        @if (space.LastError is not null)
+                                                        {
+                                                            <span class="text-danger" title="@space.LastError">failed</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            @(space.LastAppliedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                                        }
+                                                    </td>
+                                                    <td class="text-nowrap">
+                                                        <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Re-apply"
+                                                                aria-label="@($"Re-apply {space.Name}")" @onclick="() => ApplySpaceAsync(cluster, space)">
+                                                            <i class="bi bi-arrow-repeat"></i>
+                                                        </button>
+                                                        @RenderDeleteCell($"Delete the Kibana space \"{space.Name}\"? Every dashboard, data view and saved search in it goes with it.", "Delete space", () => DeleteSpaceAsync(cluster.Id, space.Id, space.Name))
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            </div>
+                        }
+
+                        @* ── Data views ── *@
+                        @if (cluster.KibanaEnabled)
+                        {
+                            List<ElasticsearchDataView> views = DataViewsFor(cluster);
+                            <div class="mb-3 border-top pt-3">
+                                <div class="d-flex align-items-center mb-2">
+                                    <strong class="small"><i class="bi bi-table me-1"></i>Data views</strong>
+                                    <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2" @onclick="() => ShowAddDataView(cluster)">
+                                        <i class="bi bi-plus-lg me-1"></i>Add
+                                    </button>
+                                </div>
+
+                                @if (addDataViewClusterId == cluster.Id)
+                                {
+                                    <div class="card border-primary mb-2"><div class="card-body py-2">
+                                        <div class="row g-2">
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Index pattern</label>
+                                                <input class="form-control form-control-sm" @bind="dataViewTitle" placeholder="logs-orders-*" />
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Shown as</label>
+                                                <input class="form-control form-control-sm" @bind="dataViewName" placeholder="same as the pattern" />
+                                            </div>
+                                            <div class="col-md-2">
+                                                <label class="form-label small mb-1">Time field</label>
+                                                <input class="form-control form-control-sm" @bind="dataViewTimeField" placeholder="@("@timestamp")" />
+                                                <div class="form-text small">Blank for reference data.</div>
+                                            </div>
+                                            <div class="col-md-2">
+                                                <label class="form-label small mb-1">Space</label>
+                                                <select class="form-select form-select-sm" @bind="dataViewSpaceId">
+                                                    <option value="">Default space</option>
+                                                    @foreach (ElasticsearchKibanaSpace space in SpacesFor(cluster))
+                                                    {
+                                                        <option value="@space.SpaceId">@space.Name</option>
+                                                    }
+                                                </select>
+                                            </div>
+                                            <div class="col-md-2 d-flex align-items-end gap-1">
+                                                <button class="btn btn-sm btn-primary" @onclick="() => AddDataViewAsync(cluster)"
+                                                        disabled="@(savingDataView || string.IsNullOrWhiteSpace(dataViewTitle))">
+                                                    @if (savingDataView) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Add
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => addDataViewClusterId = null">Cancel</button>
+                                            </div>
+                                        </div>
+                                        @if (dataViewError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@dataViewError</div> }
+                                    </div></div>
+                                }
+
+                                @if (views.Count == 0)
+                                {
+                                    <p class="text-muted small mb-0">
+                                        None. An account with a Kibana login and an index pattern still opens an empty Discover
+                                        until a data view says the pattern exists and which field carries its time.
+                                    </p>
+                                }
+                                else
+                                {
+                                    <table class="table table-sm table-borderless small mb-0">
+                                        <thead class="text-muted"><tr><th>Pattern</th><th>Shown as</th><th>Time field</th><th>Space</th><th>Applied</th><th></th></tr></thead>
+                                        <tbody>
+                                            @foreach (ElasticsearchDataView view in views)
+                                            {
+                                                <tr>
+                                                    <td><code>@view.Title</code></td>
+                                                    <td>@(view.Name ?? view.Title)</td>
+                                                    <td class="text-muted">@(string.IsNullOrWhiteSpace(view.TimeFieldName) ? "none" : view.TimeFieldName)</td>
+                                                    <td class="text-muted">@(view.SpaceId ?? "default")</td>
+                                                    <td class="text-muted">
+                                                        @if (view.LastError is not null)
+                                                        {
+                                                            <span class="text-danger" title="@view.LastError">failed</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            @(view.LastAppliedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                                        }
+                                                    </td>
+                                                    <td class="text-nowrap">
+                                                        <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Re-apply"
+                                                                aria-label="@($"Re-apply {view.Title}")" @onclick="() => ApplyDataViewAsync(cluster, view)">
+                                                            <i class="bi bi-arrow-repeat"></i>
+                                                        </button>
+                                                        @RenderDeleteCell($"Delete the data view for \"{view.Title}\"? Saved searches and dashboards built on it stop working; the indices are untouched.", "Delete data view", () => DeleteDataViewAsync(cluster.Id, view.Id, view.Title))
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            </div>
+                        }
+
+                        @* ── Application users ── *@
+                        @{ List<ElasticsearchUser> users = allUsers.TryGetValue(cluster.Id, out List<ElasticsearchUser>? ul) ? ul : []; }
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-person-badge me-1"></i>Application users</strong>
+                                <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2" @onclick="() => ShowAddUser(cluster)">
+                                    <i class="bi bi-plus-lg me-1"></i>Add
+                                </button>
+                            </div>
+
+                            @if (addUserClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Username</label>
+                                            <input class="form-control form-control-sm" @bind="userName" placeholder="orders-api" />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Indices it may touch</label>
+                                            <input class="form-control form-control-sm" @bind="userIndexPattern" placeholder="logs-orders-*" />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Access</label>
+                                            <select class="form-select form-select-sm" @bind="userAccess">
+                                                <option value="@ElasticsearchAccess.Viewer">Viewer — search and read</option>
+                                                <option value="@ElasticsearchAccess.Writer">Writer — read, write, create</option>
+                                                <option value="@ElasticsearchAccess.Manager">Manager — everything on those indices</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Kibana</label>
+                                            <select class="form-select form-select-sm" @bind="userKibanaAccess">
+                                                <option value="@ElasticsearchKibanaAccess.None">No sign-in — an application</option>
+                                                <option value="@ElasticsearchKibanaAccess.Read">Read — open Kibana, save nothing</option>
+                                                <option value="@ElasticsearchKibanaAccess.All">Build — data views and dashboards</option>
+                                            </select>
+                                        </div>
+                                        @if (userKibanaAccess != ElasticsearchKibanaAccess.None)
+                                        {
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Space</label>
+                                                <select class="form-select form-select-sm" @bind="userSpaceId">
+                                                    <option value="">Every space</option>
+                                                    @foreach (ElasticsearchKibanaSpace space in SpacesFor(cluster))
+                                                    {
+                                                        <option value="@space.SpaceId">@space.Name</option>
+                                                    }
+                                                </select>
+                                            </div>
+                                        }
+                                        <div class="col-md-3 d-flex align-items-end gap-1">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => AddUserAsync(cluster)"
+                                                    disabled="@(savingUser || string.IsNullOrWhiteSpace(userName))">
+                                                @if (savingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Add
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => addUserClusterId = null">Cancel</button>
+                                        </div>
+                                    </div>
+                                    <div class="form-text small mt-1">
+                                        The password is generated here, kept in a Secret beside the cluster, and never stored by EntKube.
+                                        Bind an application to the user to get it into that application's namespace.
+                                    </div>
+                                    @if (userError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@userError</div> }
+                                </div></div>
+                            }
+
+                            @if (users.Count == 0)
+                            {
+                                <p class="text-muted small mb-0">
+                                    No application users. Until one exists the only account on this cluster is <code>elastic</code>,
+                                    which can also delete every index.
+                                </p>
+                            }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>User</th><th>Indices</th><th>Access</th><th>Kibana</th><th>Applied</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchUser u in users)
+                                        {
+                                            <tr>
+                                                <td>
+                                                    <code>@u.Username</code>
+                                                    @if (revealedUserPasswordFor == u.Id)
+                                                    {
+                                                        <div class="mt-1">
+                                                            <code class="user-select-all">@(revealedUserPassword ?? "could not be read")</code>
+                                                            <div class="form-text small mb-0">Shown once here; it lives in the cluster, not in EntKube.</div>
+                                                        </div>
+                                                    }
+                                                </td>
+                                                <td><code>@u.IndexPattern</code></td>
+                                                <td><span class="badge bg-secondary">@u.Access</span></td>
+                                                <td>
+                                                    @if (u.KibanaAccess == ElasticsearchKibanaAccess.None)
+                                                    {
+                                                        <span class="text-muted">—</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        <span class="badge bg-info-subtle text-info border border-info-subtle">
+                                                            @u.KibanaAccess@(u.KibanaSpaceId is null ? "" : $" · {u.KibanaSpaceId}")
+                                                        </span>
+                                                    }
+                                                </td>
+                                                <td class="text-muted">
+                                                    @if (u.LastError is not null)
+                                                    {
+                                                        <span class="text-danger" title="@u.LastError">failed</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        @(u.LastAppliedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                                    }
+                                                </td>
+                                                <td class="text-nowrap">
+                                                    @if (u.KibanaAccess != ElasticsearchKibanaAccess.None)
+                                                    {
+                                                        <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Show password"
+                                                                aria-label="@($"Show the password for {u.Username}")"
+                                                                @onclick="() => RevealUserPasswordAsync(u)">
+                                                            <i class="bi bi-eye"></i>
+                                                        </button>
+                                                    }
+                                                    <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Reset password"
+                                                            aria-label="@($"Reset the password for {u.Username}")"
+                                                            @onclick='() => pendingConfirm = new PendingConfirm($"Reset the password for \"{u.Username}\"? Every bound application is re-synced straight away; anything holding the password by hand stops working.", "Reset password", () => ResetUserPasswordAsync(cluster, u))'>
+                                                        <i class="bi bi-key"></i>
+                                                    </button>
+                                                    <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Re-apply"
+                                                            aria-label="@($"Re-apply {u.Username}")" @onclick="() => ApplyUserAsync(cluster, u)">
+                                                        <i class="bi bi-arrow-repeat"></i>
+                                                    </button>
+                                                    @RenderDeleteCell($"Delete Elasticsearch user \"{u.Username}\" and its role? Anything still using those credentials stops working.", "Delete user", () => DeleteUserAsync(cluster.Id, u.Id, u.Username))
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        @* ── App bindings ── *@
+                        @{ List<ElasticsearchBinding> bindings = allBindings.TryGetValue(cluster.Id, out List<ElasticsearchBinding>? bl) ? bl : []; }
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-link-45deg me-1"></i>Application bindings</strong>
+                                <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                        @onclick="() => ShowAddBinding(cluster)" disabled="@(users.Count == 0)">
+                                    <i class="bi bi-plus-lg me-1"></i>Bind app
+                                </button>
+                            </div>
+
+                            @if (addBindingClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Deployment</label>
+                                            <select class="form-select form-select-sm" @bind="bindingDeploymentId">
+                                                <option value="@Guid.Empty">Select deployment...</option>
+                                                @foreach (AppDeployment d in BindingDeploymentOptions)
+                                                {
+                                                    <option value="@d.Id">@d.App.Name / @d.Name (@d.Namespace)</option>
+                                                }
+                                            </select>
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Connect as</label>
+                                            <select class="form-select form-select-sm" @bind="bindingUserId">
+                                                <option value="@Guid.Empty">Select user...</option>
+                                                @foreach (ElasticsearchUser u in users)
+                                                {
+                                                    <option value="@u.Id">@u.Username (@u.Access on @u.IndexPattern)</option>
+                                                }
+                                            </select>
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Secret name</label>
+                                            <input class="form-control form-control-sm" @bind="bindingSecretName" placeholder="elasticsearch" />
+                                        </div>
+                                        <div class="col-md-2 d-flex align-items-end gap-1">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => AddBindingAsync(cluster)"
+                                                    disabled="@(savingBinding || bindingDeploymentId == Guid.Empty || bindingUserId == Guid.Empty)">
+                                                @if (savingBinding) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Bind
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => addBindingClusterId = null">Cancel</button>
+                                        </div>
+                                    </div>
+                                    <div class="form-text small mt-1">
+                                        Writes <code>ELASTICSEARCH_URL</code>, <code>_USERNAME</code>, <code>_PASSWORD</code> and
+                                        <code>_CA_CRT</code> into the deployment's namespace.
+                                    </div>
+                                    @if (bindingError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@bindingError</div> }
+                                </div></div>
+                            }
+
+                            @if (bindings.Count == 0)
+                            {
+                                <p class="text-muted small mb-0">No applications bound.</p>
+                            }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>Application</th><th>Namespace</th><th>User</th><th>Secret</th><th>Synced</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchBinding b in bindings)
+                                        {
+                                            <tr>
+                                                <td>@b.AppDeployment.App.Name / @b.AppDeployment.Name</td>
+                                                <td class="text-muted"><code>@b.AppDeployment.Namespace</code></td>
+                                                <td><code>@b.ElasticsearchUser.Username</code></td>
+                                                <td><code>@b.KubernetesSecretName</code></td>
+                                                <td class="text-muted">@(b.LastSyncedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")</td>
+                                                <td class="text-nowrap">
+                                                    <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Re-sync"
+                                                            aria-label="@($"Re-sync {b.AppDeployment.App.Name}")" @onclick="() => SyncBindingAsync(cluster.Id, b.Id)">
+                                                        <i class="bi bi-arrow-repeat"></i>
+                                                    </button>
+                                                    @RenderDeleteCell($"Remove the Elasticsearch binding for \"{b.AppDeployment.App.Name}/{b.AppDeployment.Name}\"? The Secret is deleted from its namespace.", "Remove binding", () => RemoveBindingAsync(cluster.Id, b.Id))
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        @* ── Metrics ── *@
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-graph-up me-1"></i>Metrics</strong>
+                                @if (cluster.MonitoringEnabled)
+                                {
+                                    <span class="badge bg-success-subtle text-success border border-success-subtle ms-2">exporting</span>
+                                    <button class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2"
+                                            @onclick="() => EnableMonitoringAsync(cluster, cluster.MonitoringIndexMetrics)"
+                                            disabled="@monitoringBusy">
+                                        Re-apply
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-danger ms-2 py-0 px-2"
+                                            @onclick="() => DisableMonitoringAsync(cluster)" disabled="@monitoringBusy">
+                                        Turn off
+                                    </button>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                            @onclick="() => EnableMonitoringAsync(cluster, false)" disabled="@monitoringBusy">
+                                        @if (monitoringBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        Export to Prometheus
+                                    </button>
+                                }
+                            </div>
+
+                            @if (cluster.MonitoringEnabled)
+                            {
+                                <div class="form-check mb-1">
+                                    <input class="form-check-input" type="checkbox" id="indexMetrics"
+                                           checked="@cluster.MonitoringIndexMetrics" disabled="@monitoringBusy"
+                                           @onchange="e => EnableMonitoringAsync(cluster, (bool)(e.Value ?? false))" />
+                                    <label class="form-check-label small" for="indexMetrics">
+                                        Per-index metrics
+                                        <span class="text-muted">— every index becomes its own set of series, and each scrape asks
+                                        the masters for all of them. Leave off on a cluster that rolls indices over daily.</span>
+                                    </label>
+                                </div>
+                                @if (cluster.MonitoringSelectorNote is not null)
+                                {
+                                    <div class="alert @(cluster.MonitoringSelectorNote.Contains("Nothing will scrape") || cluster.MonitoringSelectorNote.Contains("will not see") ? "alert-warning" : "alert-secondary") py-1 px-2 small mb-0">
+                                        @cluster.MonitoringSelectorNote
+                                    </div>
+                                }
+                            }
+                            else
+                            {
+                                <p class="text-muted small mb-0">
+                                    Not exported. The cluster's own metrics are visible in Kibana; this puts them in the
+                                    Prometheus that scrapes everything else, with an account that can only read them.
+                                </p>
+                            }
+                        </div>
+
+                        @* ── Cross-cluster search ── *@
+                        @{ List<ElasticsearchRemoteLink> remotes = RemotesFor(cluster); }
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-diagram-3 me-1"></i>Searches other clusters</strong>
+                                <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                        @onclick="() => ShowAddRemoteAsync(cluster)">
+                                    <i class="bi bi-plus-lg me-1"></i>Link a cluster
+                                </button>
+                            </div>
+
+                            @if (addRemoteClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    @if (remoteCandidates.Count == 0)
+                                    {
+                                        <p class="text-muted small mb-0">
+                                            No other Elasticsearch cluster on the same Kubernetes cluster is new enough to link.
+                                            Cross-cluster API keys need 8.14 or later on both, and ECK can only wire clusters it
+                                            manages together.
+                                        </p>
+                                    }
+                                    else
+                                    {
+                                        <div class="row g-2">
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Cluster to search</label>
+                                                <select class="form-select form-select-sm" @bind="remoteClusterId">
+                                                    <option value="@Guid.Empty">Select cluster...</option>
+                                                    @foreach (ElasticsearchCluster candidate in remoteCandidates)
+                                                    {
+                                                        <option value="@candidate.Id">@candidate.Name (@candidate.Namespace)</option>
+                                                    }
+                                                </select>
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Alias</label>
+                                                <input class="form-control form-control-sm" @bind="remoteAlias" placeholder="prod" />
+                                                <div class="form-text small">Queried as <code>alias:logs-*</code>. Fixed once created.</div>
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Indices it may search</label>
+                                                <input class="form-control form-control-sm" @bind="remotePatterns" placeholder="logs-*" />
+                                            </div>
+                                            <div class="col-md-2 d-flex align-items-end gap-1">
+                                                <button class="btn btn-sm btn-primary" @onclick="() => AddRemoteAsync(cluster)"
+                                                        disabled="@(savingRemote || remoteClusterId == Guid.Empty || string.IsNullOrWhiteSpace(remoteAlias))">
+                                                    @if (savingRemote) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Link
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => addRemoteClusterId = null">Cancel</button>
+                                            </div>
+                                        </div>
+                                        <div class="alert alert-warning py-1 px-2 small mt-2 mb-0">
+                                            The cluster being searched has to open its remote cluster server, which is a transport
+                                            change — ECK will restart its nodes one at a time.
+                                        </div>
+                                    }
+                                    @if (remoteError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@remoteError</div> }
+                                </div></div>
+                            }
+
+                            @if (remotes.Count == 0)
+                            {
+                                <p class="text-muted small mb-0">
+                                    Searches only its own indices. Linking another cluster lets one Kibana answer a question that
+                                    spans both, without copying the data into either.
+                                </p>
+                            }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>Alias</th><th>Cluster</th><th>Indices</th><th>Applied</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchRemoteLink link in remotes)
+                                        {
+                                            <tr>
+                                                <td><code>@link.Alias:</code></td>
+                                                <td>@link.RemoteCluster.Name <span class="text-muted">· @link.RemoteCluster.Namespace</span></td>
+                                                <td><code>@link.SearchIndexPatterns</code></td>
+                                                <td class="text-muted">
+                                                    @if (link.LastError is not null)
+                                                    {
+                                                        <span class="text-danger" title="@link.LastError">failed</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        @(link.LastAppliedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                                    }
+                                                </td>
+                                                <td>@RenderDeleteCell($"Remove the \"{link.Alias}\" link? Saved searches and dashboards that query {link.Alias}: stop returning anything from it.", "Remove link", () => RemoveRemoteAsync(cluster.Id, link.Id, link.Alias))</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        @* ── Version upgrade ── *@
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-arrow-up-circle me-1"></i>Version</strong>
+                                <span class="text-muted small ms-2">running @cluster.Version</span>
+                                <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                        @onclick="() => ShowUpgradeForm(cluster)">
+                                    Upgrade…
+                                </button>
+                            </div>
+
+                            @if (upgradeClusterId == cluster.Id)
+                            {
+                                <div class="card border-warning"><div class="card-body py-2">
+                                    <div class="row g-2 align-items-end">
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Target version</label>
+                                            <input class="form-control form-control-sm" @bind="upgradeTarget"
+                                                   @bind:after="() => PlanUpgradeAsync(cluster)" placeholder="9.5.1" />
+                                        </div>
+                                        <div class="col-md-9 d-flex gap-1">
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => PlanUpgradeAsync(cluster)"
+                                                    disabled="@(upgrading || string.IsNullOrWhiteSpace(upgradeTarget))">
+                                                Check
+                                            </button>
+                                            <button class="btn btn-sm btn-warning" @onclick="() => ConfirmUpgrade(cluster)"
+                                                    disabled="@(upgrading || upgradePlan is null || (!upgradePlan.CanProceed && !acceptBlockers))">
+                                                @if (upgrading) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Upgrade
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => upgradeClusterId = null">Cancel</button>
+                                        </div>
+                                    </div>
+
+                                    @if (upgradePlan is not null)
+                                    {
+                                        <div class="mt-2">
+                                            @foreach (string blocker in upgradePlan.Blockers)
+                                            {
+                                                <div class="alert alert-danger py-1 px-2 small mb-1">@blocker</div>
+                                            }
+                                            @foreach (string warning in upgradePlan.Warnings)
+                                            {
+                                                <div class="alert alert-warning py-1 px-2 small mb-1">@warning</div>
+                                            }
+                                            @foreach (string note in upgradePlan.Notes)
+                                            {
+                                                <div class="text-muted small mb-1"><i class="bi bi-info-circle me-1"></i>@note</div>
+                                            }
+
+                                            @if (!upgradePlan.CanProceed)
+                                            {
+                                                <div class="form-check mt-1">
+                                                    <input class="form-check-input" type="checkbox" id="acceptBlockers" @bind="acceptBlockers" />
+                                                    <label class="form-check-label small" for="acceptBlockers">
+                                                        I have a reason to go ahead anyway — every one of those is a way this goes wrong,
+                                                        and it is recorded against my name.
+                                                    </label>
+                                                </div>
+                                            }
+                                        </div>
+                                    }
+
+                                    @if (upgradeError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@upgradeError</div> }
+                                </div></div>
+                            }
+                        </div>
+
+                        @* ── Actions ── *@
+                        <div class="d-flex gap-2 border-top pt-3">
+                            <button class="btn btn-sm btn-outline-warning" @onclick="() => ShowEditForm(cluster)" disabled="@(form is not null)">
+                                <i class="bi bi-pencil me-1"></i>Edit topology
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger ms-auto"
+                                    @onclick='() => pendingConfirm = new PendingConfirm($"Delete Elasticsearch cluster \"{cluster.Name}\", its Kibana and ALL of its indices? The volumes go with it. This cannot be undone.", "Delete cluster", () => DeleteClusterAsync(cluster))'>
+                                <i class="bi bi-trash me-1"></i>Delete
+                            </button>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+
+        @if (clusters.Count == 0 && form is null)
+        {
+            <EmptyState Icon="bi-search" Title="No Elasticsearch clusters"
+                        Message="Install the ECK operator from the Components tab, then create a cluster here." />
+        }
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    /// <summary>
+    /// When set, scopes the tab to a single environment: only clusters whose Kubernetes cluster
+    /// belongs to it are listed, and the create form's picker is restricted to (and preselected
+    /// from) that environment.
+    /// </summary>
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
+    private bool loading = true;
+    private List<ElasticsearchCluster> clusters = [];
+    private List<KubernetesCluster> allK8sClusters = [];
+    private List<KubernetesCluster> formK8sClusters = [];
+    private HashSet<Guid>? envClusterIds;
+    private ElasticsearchOperatorStatus? operatorStatus;
+    private readonly Dictionary<Guid, List<ElasticsearchIlmPolicy>> allPolicies = [];
+
+    // Create/edit form (one at a time — the same shape serves both).
+    private EsForm? form;
+    private Guid? editingId;
+    private string selectedPreset = "small-ha";
+    private bool saving;
+    private string? formError;
+    private ElasticsearchCapacityCheck? capacity;
+    private bool checkingCapacity;
+
+    // Expand / detail
+    private Guid? expandedId;
+    private ElasticsearchClusterDetail? expandedDetail;
+    private bool loadingDetail;
+    private Guid? revealedPasswordFor;
+    private string? revealedPassword;
+
+    // Snapshot form
+    private List<StorageLink> storageLinks = [];
+    private Guid? snapshotFormClusterId;
+    private Guid snapshotStorageLinkId;
+    private string? snapshotBasePath;
+    private string snapshotCron = "0 30 1 * * ?";
+    private int snapshotExpireDays = 30;
+    private int snapshotMinCount = 5;
+    private int snapshotMaxCount = 50;
+    private bool snapshotBusy;
+    private string? snapshotError;
+
+    // Users and bindings
+    private readonly Dictionary<Guid, List<ElasticsearchUser>> allUsers = [];
+    private readonly Dictionary<Guid, List<ElasticsearchBinding>> allBindings = [];
+    private List<AppDeployment> allDeployments = [];
+    private Guid? addUserClusterId;
+    private string userName = "";
+    private string userIndexPattern = "";
+    private ElasticsearchAccess userAccess = ElasticsearchAccess.Writer;
+    private ElasticsearchKibanaAccess userKibanaAccess = ElasticsearchKibanaAccess.None;
+    private Guid? revealedUserPasswordFor;
+    private string? revealedUserPassword;
+    private bool savingUser;
+    private string? userError;
+    private readonly Dictionary<Guid, List<ElasticsearchKibanaSpace>> allSpaces = [];
+    private Guid? addSpaceClusterId;
+    private string spaceIdValue = "";
+    private string spaceName = "";
+    private string? spaceDescription;
+    private bool savingSpace;
+    private string? spaceError;
+    private string? userSpaceId;
+    private Guid? addBindingClusterId;
+    private Guid bindingDeploymentId;
+    private Guid bindingUserId;
+    private string bindingSecretName = "elasticsearch";
+    private bool savingBinding;
+    private string? bindingError;
+
+    /// <summary>
+    /// Deployments the binding form offers. Scoped to the environment when the tab is, so a
+    /// production cluster is not offered a staging app by a stray click.
+    /// </summary>
+    private List<AppDeployment> BindingDeploymentOptions =>
+        EnvironmentId is Guid envId
+            ? [.. allDeployments.Where(d => d.EnvironmentId == envId)]
+            : allDeployments;
+
+    // Data views
+    private readonly Dictionary<Guid, List<ElasticsearchDataView>> allDataViews = [];
+    private Guid? addDataViewClusterId;
+    private string dataViewTitle = "";
+    private string? dataViewName;
+    private string dataViewTimeField = "@timestamp";
+    private string? dataViewSpaceId;
+    private bool savingDataView;
+    private string? dataViewError;
+
+    // Ingest pipelines
+    private readonly Dictionary<Guid, List<ElasticsearchIngestPipeline>> allPipelines = [];
+    private Guid? pipelineClusterId;
+    private Guid? editingPipelineId;
+    private string pipelineName = "";
+    private string? pipelineDescription;
+    private string? pipelineTimestampField;
+    private string pipelineTimestampFormats = "ISO8601";
+    private string? pipelineGrokField;
+    private string? pipelineGrokPattern;
+    private string? pipelineRename;
+    private string? pipelineRemove;
+    private string? pipelineSet;
+    private string? pipelineCustom;
+    private string? pipelineSample;
+    private string? pipelineSimulation;
+    private bool savingPipeline;
+    private string? pipelineError;
+    private string? policyPipelineName;
+
+    // Cross-cluster search
+    private readonly Dictionary<Guid, List<ElasticsearchRemoteLink>> allRemotes = [];
+    private List<ElasticsearchCluster> remoteCandidates = [];
+    private Guid? addRemoteClusterId;
+    private Guid remoteClusterId;
+    private string remoteAlias = "";
+    private string remotePatterns = "*";
+    private bool savingRemote;
+    private string? remoteError;
+
+    private bool monitoringBusy;
+
+    // Upgrade
+    private Guid? upgradeClusterId;
+    private string upgradeTarget = "";
+    private ElasticsearchService.ElasticsearchUpgradePlan? upgradePlan;
+    private bool acceptBlockers;
+    private bool upgrading;
+    private string? upgradeError;
+
+    // Live look: disk per node and the indices
+    private Guid? insightFor;
+    private ElasticsearchService.ElasticsearchInsight? insight;
+    private bool loadingInsight;
+    private bool showAllIndices;
+
+    // Repository listing + restore
+    private Guid? repositorySnapshotsFor;
+    private List<ElasticsearchService.ElasticsearchSnapshotInfo> repositorySnapshots = [];
+    private Guid? restoreClusterId;
+    private string? restoreSnapshotName;
+    private string restoreIndexPattern = "*";
+    private bool restoreInPlace;
+    private string restorePrefix = "restored-";
+    private bool restoreGlobalState;
+    private bool restoring;
+    private string? restoreError;
+    private string? restoreLog;
+
+    // Policy form
+    private Guid? addPolicyClusterId;
+    private string policyName = "";
+    private string policyPattern = "";
+    private bool policyDataStream = true;
+    private int policyShards = 1;
+    private int policyReplicas = 1;
+    private int policyRolloverGb = 50;
+    private int policyRolloverDays = 7;
+    private int policyWarmDays;
+    private int policyColdDays;
+    private int policyDeleteDays;
+    private bool savingPolicy;
+    private bool applyingPolicies;
+    private string? policyError;
+
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
+
+    // ── Form model ────────────────────────────────────────────────────────────
+
+    private sealed class TierEdit
+    {
+        public required string Key { get; init; }
+        public required string Help { get; init; }
+        public int Count { get; set; }
+        public string Cpu { get; set; } = "";
+        public string Memory { get; set; } = "";
+        public string Storage { get; set; } = "";
+    }
+
+    private sealed class EsForm
+    {
+        public string Name { get; set; } = "";
+        public Guid K8sClusterId { get; set; }
+        public string Namespace { get; set; } = "search";
+        public string Version { get; set; } = "9.5.0";
+        public string? StorageClass { get; set; }
+        public bool AllowMmap { get; set; } = true;
+        public bool ZoneAware { get; set; }
+        public bool KibanaEnabled { get; set; } = true;
+        public int KibanaCount { get; set; } = 1;
+        public string KibanaCpu { get; set; } = "500m";
+        public string KibanaMemory { get; set; } = "1Gi";
+        public bool Acknowledge { get; set; }
+        public Guid Id { get; set; }
+
+        public List<TierEdit> Tiers { get; init; } =
+        [
+            new TierEdit { Key = "master", Help = "Holds the cluster state and nothing else — the nodes whose health is the cluster's health.", Count = 3, Cpu = "500m", Memory = "2Gi", Storage = "5Gi" },
+            new TierEdit { Key = "hot",    Help = "Takes every write, and holds the content indices Kibana's own state lives in.",              Count = 2, Cpu = "1",    Memory = "4Gi", Storage = "100Gi" },
+            new TierEdit { Key = "warm",   Help = "Recent data that is still searched but no longer written to. 0 disables the tier.",          Count = 0, Cpu = "500m", Memory = "4Gi", Storage = "200Gi" },
+            new TierEdit { Key = "cold",   Help = "Rarely searched data kept for retention rather than for speed. 0 disables the tier.",        Count = 0, Cpu = "500m", Memory = "2Gi", Storage = "500Gi" },
+            new TierEdit { Key = "ingest", Help = "Dedicated ingest + coordinating nodes. 0 leaves the ingest role on the hot tier.",           Count = 0, Cpu = "1",    Memory = "2Gi", Storage = "1Gi" },
+        ];
+
+        public TierEdit Tier(string key) => Tiers.First(t => t.Key == key);
+
+        public ElasticsearchCluster ToEntity() => new()
+        {
+            Id = Id,
+            Name = (Name ?? "").Trim(),
+            Namespace = (Namespace ?? "").Trim(),
+            Version = (Version ?? "").Trim(),
+            MasterCount = Tier("master").Count,
+            MasterCpuRequest = Tier("master").Cpu,
+            MasterMemory = Tier("master").Memory,
+            MasterStorageSize = Tier("master").Storage,
+            HotCount = Tier("hot").Count,
+            HotCpuRequest = Tier("hot").Cpu,
+            HotMemory = Tier("hot").Memory,
+            HotStorageSize = Tier("hot").Storage,
+            WarmCount = Tier("warm").Count,
+            WarmCpuRequest = Tier("warm").Cpu,
+            WarmMemory = Tier("warm").Memory,
+            WarmStorageSize = Tier("warm").Storage,
+            ColdCount = Tier("cold").Count,
+            ColdCpuRequest = Tier("cold").Cpu,
+            ColdMemory = Tier("cold").Memory,
+            ColdStorageSize = Tier("cold").Storage,
+            IngestCount = Tier("ingest").Count,
+            IngestCpuRequest = Tier("ingest").Cpu,
+            IngestMemory = Tier("ingest").Memory,
+            IngestStorageSize = Tier("ingest").Storage,
+            StorageClass = string.IsNullOrWhiteSpace(StorageClass) ? null : StorageClass!.Trim(),
+            AllowMmap = AllowMmap,
+            ZoneAware = ZoneAware,
+            KibanaEnabled = KibanaEnabled,
+            KibanaCount = KibanaCount,
+            KibanaCpuRequest = KibanaCpu,
+            KibanaMemory = KibanaMemory
+        };
+    }
+
+    // The presets exist because the shape of a search cluster is a decision people get wrong once
+    // and then live with: one node for a laptop-sized cluster, split roles for anything real.
+    private static readonly (string Key, string Label, string Help)[] Presets =
+    [
+        ("single", "Single node (dev)", "One all-roles node. No redundancy, no tiers — fine for a development environment and nothing else."),
+        ("small-ha", "Small HA", "Three dedicated masters and two hot data nodes. The smallest shape that survives losing a node."),
+        ("hot-warm", "Hot / warm", "Masters, a hot tier for writes and a warm tier for data ILM ages into."),
+        ("hot-warm-cold", "Hot / warm / cold", "Full tiering, plus dedicated ingest and coordinating nodes to keep pipelines off the data nodes.")
+    ];
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+
+        Task<List<ElasticsearchCluster>> clustersTask = Search.GetClustersAsync(TenantId);
+        Task<List<KubernetesCluster>> k8sTask = TenantService.GetClustersAsync(TenantId);
+        Task<ElasticsearchOperatorStatus> operatorTask = Search.GetOperatorStatusAsync(TenantId);
+        Task<List<StorageLink>> storageTask = StorageService.GetStorageLinksAsync(TenantId, EnvironmentId);
+        Task<List<AppDeployment>> deploymentsTask = Search.GetTenantDeploymentsAsync(TenantId);
+
+        await Task.WhenAll(clustersTask, k8sTask, operatorTask, storageTask, deploymentsTask);
+        allDeployments = deploymentsTask.Result;
+
+        clusters = clustersTask.Result;
+        allK8sClusters = k8sTask.Result;
+        operatorStatus = operatorTask.Result;
+        // Only S3-shaped links can hold snapshots; a link with no bucket has nowhere to put them.
+        storageLinks = [.. storageTask.Result.Where(l => !string.IsNullOrWhiteSpace(l.BucketName))];
+
+        if (EnvironmentId.HasValue)
+        {
+            envClusterIds = allK8sClusters
+                .Where(c => c.EnvironmentId == EnvironmentId.Value)
+                .Select(c => c.Id)
+                .ToHashSet();
+            formK8sClusters = allK8sClusters.Where(c => envClusterIds.Contains(c.Id)).ToList();
+            clusters = clusters.Where(c => envClusterIds.Contains(c.KubernetesClusterId)).ToList();
+        }
+        else
+        {
+            envClusterIds = null;
+            formK8sClusters = allK8sClusters;
+        }
+
+        allPolicies.Clear();
+        allUsers.Clear();
+        allSpaces.Clear();
+        allRemotes.Clear();
+        allPipelines.Clear();
+        allDataViews.Clear();
+        allBindings.Clear();
+        foreach (ElasticsearchCluster c in clusters)
+        {
+            allPolicies[c.Id] = await Search.GetPoliciesAsync(TenantId, c.Id);
+            allUsers[c.Id] = await Search.GetUsersAsync(TenantId, c.Id);
+            allSpaces[c.Id] = await Search.GetSpacesAsync(TenantId, c.Id);
+            allRemotes[c.Id] = await Search.GetRemoteLinksAsync(TenantId, c.Id);
+            allPipelines[c.Id] = await Search.GetPipelinesAsync(TenantId, c.Id);
+            allDataViews[c.Id] = await Search.GetDataViewsAsync(TenantId, c.Id);
+            allBindings[c.Id] = await Search.GetBindingsAsync(TenantId, c.Id);
+        }
+
+        loading = false;
+    }
+
+    // ── Create / edit ─────────────────────────────────────────────────────────
+
+    private void ShowCreateForm()
+    {
+        editingId = null;
+        formError = null;
+        capacity = null;
+        form = new EsForm
+        {
+            K8sClusterId = EnvironmentId.HasValue && formK8sClusters.Count == 1 ? formK8sClusters[0].Id : Guid.Empty
+        };
+        ApplyPreset(selectedPreset);
+    }
+
+    private void ShowEditForm(ElasticsearchCluster c)
+    {
+        editingId = c.Id;
+        formError = null;
+        capacity = null;
+        form = new EsForm
+        {
+            Id = c.Id,
+            Name = c.Name,
+            Namespace = c.Namespace,
+            Version = c.Version,
+            K8sClusterId = c.KubernetesClusterId,
+            StorageClass = c.StorageClass,
+            AllowMmap = c.AllowMmap,
+            ZoneAware = c.ZoneAware,
+            KibanaEnabled = c.KibanaEnabled,
+            KibanaCount = c.KibanaCount,
+            KibanaCpu = c.KibanaCpuRequest,
+            KibanaMemory = c.KibanaMemory
+        };
+
+        Set("master", c.MasterCount, c.MasterCpuRequest, c.MasterMemory, c.MasterStorageSize);
+        Set("hot", c.HotCount, c.HotCpuRequest, c.HotMemory, c.HotStorageSize);
+        Set("warm", c.WarmCount, c.WarmCpuRequest, c.WarmMemory, c.WarmStorageSize);
+        Set("cold", c.ColdCount, c.ColdCpuRequest, c.ColdMemory, c.ColdStorageSize);
+        Set("ingest", c.IngestCount, c.IngestCpuRequest, c.IngestMemory, c.IngestStorageSize);
+
+        _ = RefreshCapacityAsync();
+
+        void Set(string key, int count, string cpu, string memory, string storage)
+        {
+            TierEdit t = form!.Tier(key);
+            t.Count = count; t.Cpu = cpu; t.Memory = memory; t.Storage = storage;
+        }
+    }
+
+    private void CancelForm() { form = null; editingId = null; formError = null; capacity = null; }
+
+    private void ApplyPreset(string key)
+    {
+        if (form is null) return;
+        selectedPreset = key;
+
+        void Set(string tier, int count, string cpu, string memory, string storage)
+        {
+            TierEdit t = form!.Tier(tier);
+            t.Count = count; t.Cpu = cpu; t.Memory = memory; t.Storage = storage;
+        }
+
+        switch (key)
+        {
+            case "single":
+                Set("master", 1, "1", "2Gi", "50Gi");
+                Set("hot", 0, "1", "4Gi", "100Gi");
+                Set("warm", 0, "500m", "4Gi", "200Gi");
+                Set("cold", 0, "500m", "2Gi", "500Gi");
+                Set("ingest", 0, "1", "2Gi", "1Gi");
+                form.KibanaMemory = "1Gi";
+                break;
+            case "hot-warm":
+                Set("master", 3, "500m", "2Gi", "5Gi");
+                Set("hot", 2, "1", "4Gi", "100Gi");
+                Set("warm", 2, "500m", "4Gi", "200Gi");
+                Set("cold", 0, "500m", "2Gi", "500Gi");
+                Set("ingest", 0, "1", "2Gi", "1Gi");
+                break;
+            case "hot-warm-cold":
+                Set("master", 3, "500m", "2Gi", "5Gi");
+                Set("hot", 3, "2", "8Gi", "200Gi");
+                Set("warm", 2, "1", "4Gi", "500Gi");
+                Set("cold", 2, "500m", "2Gi", "1Ti");
+                Set("ingest", 2, "1", "2Gi", "1Gi");
+                break;
+            default: // small-ha
+                Set("master", 3, "500m", "2Gi", "5Gi");
+                Set("hot", 2, "1", "4Gi", "100Gi");
+                Set("warm", 0, "500m", "4Gi", "200Gi");
+                Set("cold", 0, "500m", "2Gi", "500Gi");
+                Set("ingest", 0, "1", "2Gi", "1Gi");
+                break;
+        }
+
+        _ = RefreshCapacityAsync();
+    }
+
+    private async Task RefreshCapacityAsync()
+    {
+        if (form is null || form.K8sClusterId == Guid.Empty) { capacity = null; return; }
+
+        checkingCapacity = true;
+        StateHasChanged();
+        try
+        {
+            ElasticsearchCluster? existing = editingId is Guid id
+                ? clusters.FirstOrDefault(c => c.Id == id)
+                : null;
+            capacity = await Search.CheckCapacityAsync(form.K8sClusterId, form.ToEntity(), existing);
+        }
+        catch (Exception ex)
+        {
+            formError = ex.Message;
+        }
+        finally
+        {
+            checkingCapacity = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task SaveFormAsync()
+    {
+        if (form is null) return;
+
+        if (form.K8sClusterId == Guid.Empty)
+        {
+            formError = "Pick the Kubernetes cluster this runs on.";
+            return;
+        }
+
+        saving = true;
+        formError = null;
+        try
+        {
+            ElasticsearchCluster entity = form.ToEntity();
+
+            if (editingId is Guid id)
+            {
+                entity.Id = id;
+                await Search.UpdateClusterAsync(TenantId, entity, form.Acknowledge);
+                Toasts.Success($"Updated \"{entity.Name}\".");
+            }
+            else
+            {
+                entity.TenantId = TenantId;
+                entity.KubernetesClusterId = form.K8sClusterId;
+                await Search.CreateClusterAsync(entity, form.Acknowledge);
+                Toasts.Success($"Creating \"{entity.Name}\" — the operator takes a few minutes to form the cluster.");
+            }
+
+            form = null;
+            editingId = null;
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            formError = ex.Message;
+            // A refusal is nearly always a capacity one; show the numbers it was based on.
+            await RefreshCapacityAsync();
+        }
+        finally { saving = false; }
+    }
+
+    private async Task DeleteClusterAsync(ElasticsearchCluster cluster)
+    {
+        try
+        {
+            await Search.DeleteClusterAsync(TenantId, cluster.Id);
+            expandedId = null;
+            await LoadAsync();
+            Toasts.Success($"Deleted \"{cluster.Name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete \"{cluster.Name}\": {ex.Message}");
+        }
+    }
+
+    // ── Detail ────────────────────────────────────────────────────────────────
+
+    private async Task ToggleCluster(Guid id)
+    {
+        if (expandedId == id) { expandedId = null; expandedDetail = null; return; }
+        expandedId = id;
+        revealedPasswordFor = null;
+        revealedPassword = null;
+        await RefreshDetail(id);
+    }
+
+    private async Task RefreshDetail(Guid id)
+    {
+        expandedDetail = null;
+        loadingDetail = true;
+        StateHasChanged();
+        expandedDetail = await Search.GetClusterDetailAsync(TenantId, id);
+        loadingDetail = false;
+
+        ElasticsearchCluster? c = clusters.FirstOrDefault(x => x.Id == id);
+        if (c is not null && expandedDetail is not null)
+        {
+            if (expandedDetail.Ready) c.Status = ElasticsearchClusterStatus.Running;
+            if (expandedDetail.Health is not null) c.Health = expandedDetail.Health;
+        }
+    }
+
+    private async Task RevealPasswordAsync(Guid id)
+    {
+        if (revealedPasswordFor == id) { revealedPasswordFor = null; revealedPassword = null; return; }
+        revealedPassword = await Search.GetElasticPasswordAsync(TenantId, id);
+        revealedPasswordFor = id;
+    }
+
+    // ── Lifecycle policies ────────────────────────────────────────────────────
+
+    private void ShowAddPolicy(ElasticsearchCluster cluster)
+    {
+        addPolicyClusterId = cluster.Id;
+        policyName = "";
+        policyPattern = "";
+        policyDataStream = true;
+        policyShards = 1;
+        policyReplicas = cluster.HotCount > 1 ? 1 : 0;
+        policyRolloverGb = 50;
+        policyRolloverDays = 7;
+        policyWarmDays = cluster.WarmCount > 0 ? 7 : 0;
+        policyColdDays = cluster.ColdCount > 0 ? 30 : 0;
+        policyDeleteDays = 90;
+        policyPipelineName = null;
+        policyError = null;
+    }
+
+    private async Task AddPolicyAsync(ElasticsearchCluster cluster)
+    {
+        savingPolicy = true;
+        policyError = null;
+        try
+        {
+            await Search.CreatePolicyAsync(new ElasticsearchIlmPolicy
+            {
+                TenantId = TenantId,
+                ElasticsearchClusterId = cluster.Id,
+                Name = policyName.Trim(),
+                IndexPattern = policyPattern.Trim(),
+                UseDataStream = policyDataStream,
+                Shards = policyShards,
+                Replicas = policyReplicas,
+                RolloverMaxPrimaryShardGb = policyRolloverGb,
+                RolloverMaxAgeDays = policyRolloverDays,
+                WarmAfterDays = policyWarmDays > 0 ? policyWarmDays : null,
+                ColdAfterDays = policyColdDays > 0 ? policyColdDays : null,
+                DeleteAfterDays = policyDeleteDays > 0 ? policyDeleteDays : null,
+                DefaultPipelineName = string.IsNullOrWhiteSpace(policyPipelineName) ? null : policyPipelineName
+            });
+
+            addPolicyClusterId = null;
+            allPolicies[cluster.Id] = await Search.GetPoliciesAsync(TenantId, cluster.Id);
+            Toasts.Success($"Applied lifecycle policy \"{policyName.Trim()}\".");
+        }
+        catch (Exception ex)
+        {
+            policyError = ex.Message;
+            allPolicies[cluster.Id] = await Search.GetPoliciesAsync(TenantId, cluster.Id);
+        }
+        finally { savingPolicy = false; }
+    }
+
+    private async Task ApplyPoliciesAsync(ElasticsearchCluster cluster)
+    {
+        applyingPolicies = true;
+        try
+        {
+            await Search.ApplyPoliciesAsync(TenantId, cluster.Id);
+            Toasts.Success("Lifecycle policies applied.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+        finally
+        {
+            applyingPolicies = false;
+            allPolicies[cluster.Id] = await Search.GetPoliciesAsync(TenantId, cluster.Id);
+        }
+    }
+
+    private async Task DeletePolicyAsync(Guid clusterId, Guid policyId, string name)
+    {
+        try
+        {
+            await Search.DeletePolicyAsync(TenantId, policyId);
+            allPolicies[clusterId] = await Search.GetPoliciesAsync(TenantId, clusterId);
+            Toasts.Success($"Deleted policy \"{name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete policy \"{name}\": {ex.Message}");
+        }
+    }
+
+    // ── Snapshots ─────────────────────────────────────────────────────────────
+
+    private void ShowSnapshotForm(ElasticsearchCluster cluster)
+    {
+        snapshotFormClusterId = cluster.Id;
+        snapshotStorageLinkId = cluster.SnapshotStorageLinkId ?? Guid.Empty;
+        snapshotBasePath = cluster.SnapshotBasePath;
+        snapshotCron = cluster.SnapshotScheduleCron;
+        snapshotExpireDays = cluster.SnapshotExpireAfterDays;
+        snapshotMinCount = cluster.SnapshotMinCount;
+        snapshotMaxCount = cluster.SnapshotMaxCount;
+        snapshotError = null;
+    }
+
+    private async Task SaveSnapshotsAsync(ElasticsearchCluster cluster)
+    {
+        snapshotBusy = true;
+        snapshotError = null;
+        try
+        {
+            await Search.ConfigureSnapshotsAsync(
+                TenantId, cluster.Id, snapshotStorageLinkId, snapshotBasePath,
+                snapshotCron, snapshotExpireDays, snapshotMinCount, snapshotMaxCount);
+
+            snapshotFormClusterId = null;
+            await LoadAsync();
+            Toasts.Success($"Snapshots configured for \"{cluster.Name}\".");
+        }
+        catch (Exception ex)
+        {
+            snapshotError = ex.Message;
+            await LoadAsync();
+        }
+        finally { snapshotBusy = false; }
+    }
+
+    private async Task DisableSnapshotsAsync(ElasticsearchCluster cluster)
+    {
+        snapshotBusy = true;
+        try
+        {
+            await Search.DisableSnapshotsAsync(TenantId, cluster.Id);
+            snapshotFormClusterId = null;
+            await LoadAsync();
+            Toasts.Success($"Stopped taking snapshots of \"{cluster.Name}\". Existing ones are untouched.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { snapshotBusy = false; }
+    }
+
+    private async Task RunSnapshotNowAsync(ElasticsearchCluster cluster)
+    {
+        snapshotBusy = true;
+        try
+        {
+            await Search.RunSnapshotNowAsync(TenantId, cluster.Id);
+            await LoadAsync();
+            Toasts.Success("Snapshot started — it runs in the background; use Check now for the result.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { snapshotBusy = false; }
+    }
+
+    private async Task RefreshSnapshotStatusAsync(ElasticsearchCluster cluster)
+    {
+        snapshotBusy = true;
+        try
+        {
+            await Search.RefreshSnapshotStatusAsync(TenantId, cluster.Id);
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { snapshotBusy = false; }
+    }
+
+    // ── Users and bindings ────────────────────────────────────────────────────
+
+    private List<ElasticsearchKibanaSpace> SpacesFor(ElasticsearchCluster cluster) =>
+        allSpaces.TryGetValue(cluster.Id, out List<ElasticsearchKibanaSpace>? s) ? s : [];
+
+    private void ShowAddSpace(ElasticsearchCluster cluster)
+    {
+        addSpaceClusterId = cluster.Id;
+        spaceIdValue = "";
+        spaceName = "";
+        spaceDescription = null;
+        spaceError = null;
+    }
+
+    private async Task AddSpaceAsync(ElasticsearchCluster cluster)
+    {
+        savingSpace = true;
+        spaceError = null;
+        try
+        {
+            await Search.CreateSpaceAsync(TenantId, cluster.Id, spaceIdValue,
+                string.IsNullOrWhiteSpace(spaceName) ? spaceIdValue : spaceName, spaceDescription);
+            addSpaceClusterId = null;
+            allSpaces[cluster.Id] = await Search.GetSpacesAsync(TenantId, cluster.Id);
+            Toasts.Success($"Created the \"{spaceName}\" space.");
+        }
+        catch (Exception ex)
+        {
+            spaceError = ex.Message;
+            allSpaces[cluster.Id] = await Search.GetSpacesAsync(TenantId, cluster.Id);
+        }
+        finally { savingSpace = false; }
+    }
+
+    private async Task ApplySpaceAsync(ElasticsearchCluster cluster, ElasticsearchKibanaSpace space)
+    {
+        try
+        {
+            await Search.ApplySpaceAsync(TenantId, space.Id);
+            Toasts.Success($"Re-applied \"{space.Name}\".");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { allSpaces[cluster.Id] = await Search.GetSpacesAsync(TenantId, cluster.Id); }
+    }
+
+    private async Task DeleteSpaceAsync(Guid clusterId, Guid spaceRowId, string name)
+    {
+        try
+        {
+            await Search.DeleteSpaceAsync(TenantId, spaceRowId, await Actor.NameAsync());
+            allSpaces[clusterId] = await Search.GetSpacesAsync(TenantId, clusterId);
+            Toasts.Success($"Deleted the \"{name}\" space.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+    }
+
+    private void ShowAddUser(ElasticsearchCluster cluster)
+    {
+        addUserClusterId = cluster.Id;
+        userName = "";
+        userIndexPattern = "";
+        userAccess = ElasticsearchAccess.Writer;
+        userKibanaAccess = ElasticsearchKibanaAccess.None;
+        userSpaceId = null;
+        userError = null;
+    }
+
+    private async Task AddUserAsync(ElasticsearchCluster cluster)
+    {
+        savingUser = true;
+        userError = null;
+        try
+        {
+            await Search.CreateUserAsync(
+                TenantId, cluster.Id, userName, userIndexPattern, userAccess, userKibanaAccess,
+                string.IsNullOrWhiteSpace(userSpaceId) ? null : userSpaceId);
+            addUserClusterId = null;
+            allUsers[cluster.Id] = await Search.GetUsersAsync(TenantId, cluster.Id);
+            Toasts.Success($"Created \"{userName.Trim().ToLowerInvariant()}\".");
+        }
+        catch (Exception ex)
+        {
+            userError = ex.Message;
+            allUsers[cluster.Id] = await Search.GetUsersAsync(TenantId, cluster.Id);
+        }
+        finally { savingUser = false; }
+    }
+
+    private async Task ApplyUserAsync(ElasticsearchCluster cluster, ElasticsearchUser user)
+    {
+        try
+        {
+            await Search.ApplyUserAsync(TenantId, user.Id);
+            Toasts.Success($"Re-applied \"{user.Username}\".");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { allUsers[cluster.Id] = await Search.GetUsersAsync(TenantId, cluster.Id); }
+    }
+
+    private async Task DeleteUserAsync(Guid clusterId, Guid userId, string username)
+    {
+        try
+        {
+            await Search.DeleteUserAsync(TenantId, userId);
+            allUsers[clusterId] = await Search.GetUsersAsync(TenantId, clusterId);
+            Toasts.Success($"Deleted \"{username}\".");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+    }
+
+    private async Task RevealUserPasswordAsync(ElasticsearchUser user)
+    {
+        if (revealedUserPasswordFor == user.Id)
+        {
+            revealedUserPasswordFor = null;
+            revealedUserPassword = null;
+            return;
+        }
+
+        revealedUserPassword = await Search.GetUserPasswordAsync(TenantId, user.Id);
+        revealedUserPasswordFor = user.Id;
+    }
+
+    private async Task ResetUserPasswordAsync(ElasticsearchCluster cluster, ElasticsearchUser user)
+    {
+        try
+        {
+            revealedUserPassword = await Search.ResetPasswordAsync(TenantId, user.Id, await Actor.NameAsync());
+            revealedUserPasswordFor = user.Id;
+            allUsers[cluster.Id] = await Search.GetUsersAsync(TenantId, cluster.Id);
+            allBindings[cluster.Id] = await Search.GetBindingsAsync(TenantId, cluster.Id);
+            Toasts.Success($"New password for \"{user.Username}\" — bound applications were re-synced.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+            allUsers[cluster.Id] = await Search.GetUsersAsync(TenantId, cluster.Id);
+        }
+    }
+
+    private void ShowAddBinding(ElasticsearchCluster cluster)
+    {
+        addBindingClusterId = cluster.Id;
+        List<AppDeployment> options = BindingDeploymentOptions;
+        bindingDeploymentId = EnvironmentId is not null && options.Count == 1 ? options[0].Id : Guid.Empty;
+        bindingUserId = Guid.Empty;
+        bindingSecretName = "elasticsearch";
+        bindingError = null;
+    }
+
+    private async Task AddBindingAsync(ElasticsearchCluster cluster)
+    {
+        savingBinding = true;
+        bindingError = null;
+        try
+        {
+            await Search.CreateBindingAsync(TenantId, cluster.Id, bindingDeploymentId, bindingUserId, bindingSecretName);
+            addBindingClusterId = null;
+            allBindings[cluster.Id] = await Search.GetBindingsAsync(TenantId, cluster.Id);
+            Toasts.Success("Bound — the credentials are in the application's namespace.");
+        }
+        catch (Exception ex)
+        {
+            bindingError = ex.Message;
+            allBindings[cluster.Id] = await Search.GetBindingsAsync(TenantId, cluster.Id);
+        }
+        finally { savingBinding = false; }
+    }
+
+    private async Task SyncBindingAsync(Guid clusterId, Guid bindingId)
+    {
+        try
+        {
+            await Search.SyncBindingAsync(TenantId, bindingId);
+            allBindings[clusterId] = await Search.GetBindingsAsync(TenantId, clusterId);
+            Toasts.Success("Re-synced.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+    }
+
+    private async Task RemoveBindingAsync(Guid clusterId, Guid bindingId)
+    {
+        try
+        {
+            await Search.DeleteBindingAsync(TenantId, bindingId);
+            allBindings[clusterId] = await Search.GetBindingsAsync(TenantId, clusterId);
+            Toasts.Success("Binding removed.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+    }
+
+    private async Task LoadInsightAsync(ElasticsearchCluster cluster)
+    {
+        loadingInsight = true;
+        showAllIndices = false;
+        try
+        {
+            insight = await Search.GetInsightAsync(TenantId, cluster.Id);
+            insightFor = cluster.Id;
+
+            // Reflect what the live look found, so the badges stop showing a stale number the
+            // moment a fresher one is on screen beside them.
+            cluster.HighestNodeDiskPercent = insight.Nodes.Count == 0 ? null : insight.HighestDiskPercent;
+            cluster.UnassignedShards = insight.UnassignedShards;
+            cluster.InsightCheckedAt = DateTime.UtcNow;
+            if (insight.Health is not null) cluster.Health = insight.Health;
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { loadingInsight = false; }
+    }
+
+    // ── Data views ────────────────────────────────────────────────────────────
+
+    private List<ElasticsearchDataView> DataViewsFor(ElasticsearchCluster cluster) =>
+        allDataViews.TryGetValue(cluster.Id, out List<ElasticsearchDataView>? v) ? v : [];
+
+    private void ShowAddDataView(ElasticsearchCluster cluster)
+    {
+        addDataViewClusterId = cluster.Id;
+        dataViewTitle = "";
+        dataViewName = null;
+        dataViewTimeField = "@timestamp";
+        dataViewSpaceId = null;
+        dataViewError = null;
+    }
+
+    private async Task AddDataViewAsync(ElasticsearchCluster cluster)
+    {
+        savingDataView = true;
+        dataViewError = null;
+        try
+        {
+            await Search.CreateDataViewAsync(
+                TenantId, cluster.Id, dataViewSpaceId, dataViewTitle, dataViewName, dataViewTimeField);
+            addDataViewClusterId = null;
+            allDataViews[cluster.Id] = await Search.GetDataViewsAsync(TenantId, cluster.Id);
+            Toasts.Success($"Created a data view for \"{dataViewTitle}\".");
+        }
+        catch (Exception ex)
+        {
+            dataViewError = ex.Message;
+            allDataViews[cluster.Id] = await Search.GetDataViewsAsync(TenantId, cluster.Id);
+        }
+        finally { savingDataView = false; }
+    }
+
+    private async Task ApplyDataViewAsync(ElasticsearchCluster cluster, ElasticsearchDataView view)
+    {
+        try
+        {
+            await Search.ApplyDataViewAsync(TenantId, view.Id);
+            Toasts.Success($"Re-applied \"{view.Title}\".");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { allDataViews[cluster.Id] = await Search.GetDataViewsAsync(TenantId, cluster.Id); }
+    }
+
+    private async Task DeleteDataViewAsync(Guid clusterId, Guid viewId, string title)
+    {
+        try
+        {
+            await Search.DeleteDataViewAsync(TenantId, viewId);
+            allDataViews[clusterId] = await Search.GetDataViewsAsync(TenantId, clusterId);
+            Toasts.Success($"Deleted the data view for \"{title}\".");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+    }
+
+    // ── Ingest pipelines ──────────────────────────────────────────────────────
+
+    private List<ElasticsearchIngestPipeline> PipelinesFor(ElasticsearchCluster cluster) =>
+        allPipelines.TryGetValue(cluster.Id, out List<ElasticsearchIngestPipeline>? p) ? p : [];
+
+    private static string PipelineSummary(ElasticsearchIngestPipeline p)
+    {
+        List<string> parts = [];
+        if (!string.IsNullOrWhiteSpace(p.GrokPattern)) parts.Add($"grok on {p.GrokField}");
+        if (!string.IsNullOrWhiteSpace(p.TimestampField)) parts.Add($"@timestamp from {p.TimestampField}");
+        if (!string.IsNullOrWhiteSpace(p.RenameFields)) parts.Add("renames");
+        if (!string.IsNullOrWhiteSpace(p.RemoveFields)) parts.Add("removals");
+        if (!string.IsNullOrWhiteSpace(p.SetFields)) parts.Add("constants");
+        if (!string.IsNullOrWhiteSpace(p.CustomProcessorsJson)) parts.Add("custom processors");
+        return parts.Count == 0 ? "nothing yet" : string.Join(", ", parts);
+    }
+
+    private void ShowPipelineForm(ElasticsearchCluster cluster, ElasticsearchIngestPipeline? existing)
+    {
+        pipelineClusterId = cluster.Id;
+        editingPipelineId = existing?.Id;
+        pipelineName = existing?.Name ?? "";
+        pipelineDescription = existing?.Description;
+        pipelineTimestampField = existing?.TimestampField;
+        pipelineTimestampFormats = existing?.TimestampFormats ?? "ISO8601";
+        pipelineGrokField = existing?.GrokField;
+        pipelineGrokPattern = existing?.GrokPattern;
+        pipelineRename = existing?.RenameFields;
+        pipelineRemove = existing?.RemoveFields;
+        pipelineSet = existing?.SetFields;
+        pipelineCustom = existing?.CustomProcessorsJson;
+        pipelineSimulation = null;
+        pipelineError = null;
+    }
+
+    private ElasticsearchIngestPipeline PipelineFromForm(ElasticsearchCluster cluster) => new()
+    {
+        Id = editingPipelineId ?? Guid.Empty,
+        TenantId = TenantId,
+        ElasticsearchClusterId = cluster.Id,
+        Name = pipelineName.Trim(),
+        Description = pipelineDescription,
+        TimestampField = pipelineTimestampField,
+        TimestampFormats = string.IsNullOrWhiteSpace(pipelineTimestampFormats) ? "ISO8601" : pipelineTimestampFormats,
+        GrokField = pipelineGrokField,
+        GrokPattern = pipelineGrokPattern,
+        RenameFields = pipelineRename,
+        RemoveFields = pipelineRemove,
+        SetFields = pipelineSet,
+        CustomProcessorsJson = pipelineCustom
+    };
+
+    private async Task SavePipelineAsync(ElasticsearchCluster cluster)
+    {
+        savingPipeline = true;
+        pipelineError = null;
+        try
+        {
+            ElasticsearchIngestPipeline saved = await Search.SavePipelineAsync(PipelineFromForm(cluster));
+            editingPipelineId = saved.Id;
+            allPipelines[cluster.Id] = await Search.GetPipelinesAsync(TenantId, cluster.Id);
+            Toasts.Success($"Applied \"{saved.Name}\".");
+        }
+        catch (Exception ex)
+        {
+            pipelineError = ex.Message;
+            allPipelines[cluster.Id] = await Search.GetPipelinesAsync(TenantId, cluster.Id);
+        }
+        finally { savingPipeline = false; }
+    }
+
+    private async Task SimulatePipelineAsync(ElasticsearchCluster cluster)
+    {
+        savingPipeline = true;
+        pipelineError = null;
+        try
+        {
+            pipelineSimulation = await Search.SimulatePipelineAsync(
+                TenantId, editingPipelineId!.Value, pipelineSample ?? "");
+        }
+        catch (Exception ex) { pipelineError = ex.Message; }
+        finally { savingPipeline = false; }
+    }
+
+    private async Task DeletePipelineAsync(Guid clusterId, Guid pipelineId, string name)
+    {
+        try
+        {
+            await Search.DeletePipelineAsync(TenantId, pipelineId);
+            allPipelines[clusterId] = await Search.GetPipelinesAsync(TenantId, clusterId);
+            Toasts.Success($"Deleted \"{name}\".");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+    }
+
+    // ── Cross-cluster search ──────────────────────────────────────────────────
+
+    private List<ElasticsearchRemoteLink> RemotesFor(ElasticsearchCluster cluster) =>
+        allRemotes.TryGetValue(cluster.Id, out List<ElasticsearchRemoteLink>? r) ? r : [];
+
+    private async Task ShowAddRemoteAsync(ElasticsearchCluster cluster)
+    {
+        addRemoteClusterId = cluster.Id;
+        remoteClusterId = Guid.Empty;
+        remoteAlias = "";
+        remotePatterns = "*";
+        remoteError = null;
+        remoteCandidates = await Search.GetRemoteCandidatesAsync(TenantId, cluster.Id);
+    }
+
+    private async Task AddRemoteAsync(ElasticsearchCluster cluster)
+    {
+        savingRemote = true;
+        remoteError = null;
+        try
+        {
+            string note = await Search.CreateRemoteLinkAsync(
+                TenantId, cluster.Id, remoteClusterId, remoteAlias, remotePatterns);
+            addRemoteClusterId = null;
+            await LoadAsync();
+            Toasts.Success(note);
+        }
+        catch (Exception ex)
+        {
+            remoteError = ex.Message;
+            allRemotes[cluster.Id] = await Search.GetRemoteLinksAsync(TenantId, cluster.Id);
+        }
+        finally { savingRemote = false; }
+    }
+
+    private async Task RemoveRemoteAsync(Guid clusterId, Guid linkId, string alias)
+    {
+        try
+        {
+            await Search.DeleteRemoteLinkAsync(TenantId, linkId);
+            allRemotes[clusterId] = await Search.GetRemoteLinksAsync(TenantId, clusterId);
+            Toasts.Success($"Removed the \"{alias}\" link.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+    }
+
+    // ── Metrics ───────────────────────────────────────────────────────────────
+
+    private async Task EnableMonitoringAsync(ElasticsearchCluster cluster, bool indexMetrics)
+    {
+        monitoringBusy = true;
+        try
+        {
+            string note = await Search.EnableMonitoringAsync(TenantId, cluster.Id, indexMetrics);
+            await LoadAsync();
+            Toasts.Success("Exporter running. " + note);
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { monitoringBusy = false; }
+    }
+
+    private async Task DisableMonitoringAsync(ElasticsearchCluster cluster)
+    {
+        monitoringBusy = true;
+        try
+        {
+            await Search.DisableMonitoringAsync(TenantId, cluster.Id);
+            await LoadAsync();
+            Toasts.Success("Exporter removed.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { monitoringBusy = false; }
+    }
+
+    // ── Upgrade ───────────────────────────────────────────────────────────────
+
+    private void ShowUpgradeForm(ElasticsearchCluster cluster)
+    {
+        upgradeClusterId = cluster.Id;
+        upgradeTarget = cluster.Version;
+        upgradePlan = null;
+        acceptBlockers = false;
+        upgradeError = null;
+    }
+
+    private async Task PlanUpgradeAsync(ElasticsearchCluster cluster)
+    {
+        upgradeError = null;
+        acceptBlockers = false;
+        try
+        {
+            upgradePlan = await Search.PlanUpgradeAsync(TenantId, cluster.Id, upgradeTarget);
+        }
+        catch (Exception ex) { upgradeError = ex.Message; }
+    }
+
+    private void ConfirmUpgrade(ElasticsearchCluster cluster)
+    {
+        pendingConfirm = new PendingConfirm(
+            $"Upgrade \"{cluster.Name}\" from {cluster.Version} to {upgradeTarget}? Every node restarts in turn, and "
+            + "Elasticsearch cannot be downgraded afterwards.",
+            "Upgrade",
+            () => RunUpgradeAsync(cluster));
+    }
+
+    private async Task RunUpgradeAsync(ElasticsearchCluster cluster)
+    {
+        upgrading = true;
+        upgradeError = null;
+        try
+        {
+            await Search.UpgradeAsync(TenantId, cluster.Id, upgradeTarget, await Actor.NameAsync(), acceptBlockers);
+            upgradeClusterId = null;
+            await LoadAsync();
+            Toasts.Success($"Upgrading \"{cluster.Name}\" to {upgradeTarget} — ECK rolls the nodes one at a time.");
+        }
+        catch (Exception ex)
+        {
+            upgradeError = ex.Message;
+        }
+        finally { upgrading = false; StateHasChanged(); }
+    }
+
+    // ── Restore ───────────────────────────────────────────────────────────────
+
+    private async Task LoadSnapshotsAsync(ElasticsearchCluster cluster)
+    {
+        snapshotBusy = true;
+        try
+        {
+            repositorySnapshots = await Search.ListSnapshotsAsync(TenantId, cluster.Id);
+            repositorySnapshotsFor = cluster.Id;
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { snapshotBusy = false; }
+    }
+
+    private void ShowRestoreForm(ElasticsearchCluster cluster, ElasticsearchService.ElasticsearchSnapshotInfo snap)
+    {
+        restoreClusterId = cluster.Id;
+        restoreSnapshotName = snap.Name;
+        restoreIndexPattern = "*";
+        restoreInPlace = false;
+        restorePrefix = "restored-";
+        restoreGlobalState = false;
+        restoreError = null;
+        restoreLog = null;
+    }
+
+    private void CancelRestore()
+    {
+        restoreClusterId = null;
+        restoreSnapshotName = null;
+        restoreError = null;
+        restoreLog = null;
+    }
+
+    private void ConfirmRestore(ElasticsearchCluster cluster)
+    {
+        // Side by side changes nothing that is live, so it runs on the button. In place replaces
+        // data, and gets the same confirmation as any other destructive action here.
+        if (!restoreInPlace)
+        {
+            _ = RunRestoreAsync(cluster);
+            return;
+        }
+
+        pendingConfirm = new PendingConfirm(
+            $"Restore \"{restoreSnapshotName}\" over the live indices matching \"{restoreIndexPattern}\" on \"{cluster.Name}\"? "
+            + "They are closed and their contents replaced — anything written since the snapshot was taken is gone.",
+            "Restore over live data",
+            () => RunRestoreAsync(cluster));
+    }
+
+    private async Task RunRestoreAsync(ElasticsearchCluster cluster)
+    {
+        restoring = true;
+        restoreError = null;
+        restoreLog = null;
+        try
+        {
+            string log = await Search.RestoreSnapshotAsync(
+                TenantId, cluster.Id, restoreSnapshotName!, restoreIndexPattern,
+                restoreInPlace ? ElasticsearchService.RestoreMode.InPlace : ElasticsearchService.RestoreMode.SideBySide,
+                restorePrefix, restoreInPlace && restoreGlobalState, await Actor.NameAsync());
+
+            // Show what Elasticsearch actually said rather than a claim that it worked.
+            restoreLog = log;
+            Toasts.Success($"Restored \"{restoreSnapshotName}\".");
+        }
+        catch (Exception ex)
+        {
+            restoreError = ex.Message;
+        }
+        finally { restoring = false; StateHasChanged(); }
+    }
+
+    // ── Presentation helpers ──────────────────────────────────────────────────
+
+    private static string TierLabel(TierEdit tier) => tier.Key switch
+    {
+        "master" => "Master-eligible",
+        "hot" => "Hot data",
+        "warm" => "Warm data",
+        "cold" => "Cold data",
+        "ingest" => "Ingest / coordinating",
+        _ => tier.Key
+    };
+
+    private static string TopologySummary(ElasticsearchCluster c)
+    {
+        if (!c.HasDataTiers) return $"{c.MasterCount} all-roles node";
+
+        List<string> parts = [$"{c.MasterCount} master", $"{c.HotCount} hot"];
+        if (c.WarmCount > 0) parts.Add($"{c.WarmCount} warm");
+        if (c.ColdCount > 0) parts.Add($"{c.ColdCount} cold");
+        if (c.IngestCount > 0) parts.Add($"{c.IngestCount} ingest");
+        if (c.KibanaEnabled) parts.Add("kibana");
+        return string.Join(" · ", parts);
+    }
+
+    private static string AgeSummary(ElasticsearchIlmPolicy p)
+    {
+        List<string> parts = [];
+        if (p.WarmAfterDays is int w) parts.Add($"warm {w}d");
+        if (p.ColdAfterDays is int c) parts.Add($"cold {c}d");
+        parts.Add(p.DeleteAfterDays is int d ? $"delete {d}d" : "kept forever");
+        return string.Join(" → ", parts);
+    }
+
+    private RenderFragment RenderDeleteCell(string confirmMessage, string confirmText, Func<Task> onConfirm) => builder =>
+    {
+        builder.OpenElement(0, "button");
+        builder.AddAttribute(1, "class", "btn btn-sm btn-outline-danger border-0 py-0");
+        builder.AddAttribute(2, "title", "Delete");
+        builder.AddAttribute(3, "aria-label", confirmText);
+        builder.AddAttribute(4, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this,
+            () => pendingConfirm = new PendingConfirm(confirmMessage, confirmText, onConfirm)));
+        builder.OpenElement(5, "i");
+        builder.AddAttribute(6, "class", "bi bi-trash");
+        builder.CloseElement();
+        builder.CloseElement();
+    };
+
+    private static string StatusBadgeClass(ElasticsearchClusterStatus status) => status switch
+    {
+        ElasticsearchClusterStatus.Running => "badge bg-success",
+        ElasticsearchClusterStatus.Creating => "badge bg-info text-dark",
+        ElasticsearchClusterStatus.Updating => "badge bg-info text-dark",
+        ElasticsearchClusterStatus.Failed => "badge bg-danger",
+        ElasticsearchClusterStatus.Deleting => "badge bg-secondary",
+        _ => "badge bg-secondary"
+    };
+
+    private static string DiskBadgeClass(int percent) => percent switch
+    {
+        >= ElasticsearchService.DiskFloodStagePercent => "bg-danger-subtle text-danger border border-danger-subtle",
+        >= ElasticsearchService.DiskHighWatermarkPercent => "bg-warning-subtle text-warning border border-warning-subtle",
+        _ => "bg-secondary-subtle text-secondary border"
+    };
+
+    private static string DiskBarClass(int percent) => percent switch
+    {
+        >= ElasticsearchService.DiskFloodStagePercent => "bg-danger",
+        >= ElasticsearchService.DiskHighWatermarkPercent => "bg-warning",
+        _ => "bg-success"
+    };
+
+    private static string HealthBadgeClass(string health) => health.ToLowerInvariant() switch
+    {
+        "green" => "badge bg-success-subtle text-success border border-success-subtle",
+        "yellow" => "badge bg-warning-subtle text-warning border border-warning-subtle",
+        "red" => "badge bg-danger-subtle text-danger border border-danger-subtle",
+        _ => "badge bg-secondary-subtle text-secondary border"
+    };
+}

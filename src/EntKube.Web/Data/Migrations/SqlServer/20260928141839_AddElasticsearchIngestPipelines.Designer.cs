@@ -4,6 +4,7 @@ using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.SqlServer
 {
     [DbContext(typeof(SqlServerApplicationDbContext))]
-    partial class SqlServerApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260928141839_AddElasticsearchIngestPipelines")]
+    partial class AddElasticsearchIngestPipelines
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3447,55 +3450,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsUnique();
 
                     b.ToTable("ElasticsearchClusters");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchDataView", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<Guid>("ElasticsearchClusterId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime?>("LastAppliedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("LastError")
-                        .HasMaxLength(2000)
-                        .HasColumnType("nvarchar(2000)");
-
-                    b.Property<string>("Name")
-                        .HasMaxLength(255)
-                        .HasColumnType("nvarchar(255)");
-
-                    b.Property<string>("SpaceId")
-                        .HasMaxLength(63)
-                        .HasColumnType("nvarchar(63)");
-
-                    b.Property<Guid>("TenantId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("TimeFieldName")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("nvarchar(255)");
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("nvarchar(255)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ElasticsearchClusterId", "SpaceId", "Title")
-                        .IsUnique()
-                        .HasFilter("[SpaceId] IS NOT NULL");
-
-                    b.ToTable("ElasticsearchDataViews");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIlmPolicy", b =>
@@ -9753,17 +9707,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Tenant");
                 });
 
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchDataView", b =>
-                {
-                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
-                        .WithMany("DataViews")
-                        .HasForeignKey("ElasticsearchClusterId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("ElasticsearchCluster");
-                });
-
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIlmPolicy", b =>
                 {
                     b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
@@ -11701,8 +11644,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
                 {
-                    b.Navigation("DataViews");
-
                     b.Navigation("IlmPolicies");
 
                     b.Navigation("IngestPipelines");

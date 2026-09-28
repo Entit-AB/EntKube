@@ -3975,6 +3975,110 @@ public static class ComponentCatalog
                 """
         },
 
+        // ── Search ──
+
+        new CatalogEntry
+        {
+            Key = "eck-operator",
+            DisplayName = "Elastic Cloud on Kubernetes (ECK)",
+            Description = "Elastic's Kubernetes operator for the Elastic Stack. Reconciles Elasticsearch and Kibana custom resources into StatefulSets and Deployments, and issues the cluster's certificates and the built-in 'elastic' user. Install this first; the Elasticsearch clusters, their node tiers and their index lifecycle policies are then created under Services › Search.",
+            Icon = "bi-search",
+            Category = "Search",
+            ComponentType = "HelmChart",
+            HelmRepoUrl = "https://helm.elastic.co",
+            HelmChartName = "eck-operator",
+            HelmChartVersion = "3.5.0",
+            DefaultNamespace = "elastic-system",
+            DefaultReleaseName = "elastic-operator",
+            // The operator registers these. Either being present means ECK is installed, including
+            // when somebody applied the all-in-one manifest rather than the chart.
+            DetectionCrds =
+            [
+                "elasticsearches.elasticsearch.k8s.elastic.co",
+                "kibanas.kibana.k8s.elastic.co"
+            ],
+            ConfiguredIn = new ServicesSection("search", "Services › Search"),
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "install-crds", Label = "Install CRDs",
+                    YamlPath = "installCRDs", Type = FormFieldType.Toggle,
+                    DefaultValue = "true",
+                    HelpText = "Turn this off only when the ECK CRDs are already installed cluster-wide by someone else — uninstalling a chart that owns them takes every Elasticsearch with it."
+                },
+                new ComponentFormField
+                {
+                    Key = "cpu-request", Label = "CPU Request",
+                    YamlPath = "resources.requests.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "100m", Placeholder = "e.g. 100m, 250m"
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-request", Label = "Memory Request",
+                    YamlPath = "resources.requests.memory", Type = FormFieldType.Text,
+                    DefaultValue = "150Mi", Placeholder = "e.g. 150Mi, 512Mi"
+                },
+                new ComponentFormField
+                {
+                    Key = "cpu-limit", Label = "CPU Limit",
+                    YamlPath = "resources.limits.cpu", Type = FormFieldType.Text,
+                    DefaultValue = "1", Placeholder = "e.g. 1, 2"
+                },
+                new ComponentFormField
+                {
+                    Key = "memory-limit", Label = "Memory Limit",
+                    YamlPath = "resources.limits.memory", Type = FormFieldType.Text,
+                    DefaultValue = "1Gi", Placeholder = "e.g. 1Gi, 2Gi",
+                    HelpText = "The operator caches every resource it watches, so its memory grows with the number of Elastic resources and namespaces — not with the size of the clusters it manages."
+                },
+                new ComponentFormField
+                {
+                    Key = "max-concurrent-reconciles", Label = "Concurrent Reconciles",
+                    YamlPath = "config.maxConcurrentReconciles", Type = FormFieldType.Number,
+                    DefaultValue = "3",
+                    HelpText = "How many Elastic resources the operator reconciles at once. Raising it speeds up a fleet of clusters and raises the operator's own CPU and API-server load."
+                }
+            ],
+            DefaultValues = """
+                # ECK operator — see https://www.elastic.co/docs/deploy-manage/deploy/cloud-on-k8s
+                #
+                # By default the operator watches every namespace. To confine it, set either
+                # managedNamespaces (a fixed list) or managedNamespaceSelector (by namespace label) —
+                # the two are mutually exclusive, and confining it is also the cheapest way to hold
+                # the operator's own memory down on a large cluster:
+                #
+                # managedNamespaces: ["elastic-system", "search"]
+
+                installCRDs: true
+
+                resources:
+                  requests:
+                    cpu: 100m
+                    memory: 150Mi
+                  limits:
+                    cpu: 1
+                    memory: 1Gi
+
+                # The chart's own defaults, restated so they are visible and survive an edit.
+                podSecurityContext:
+                  runAsNonRoot: true
+                securityContext:
+                  allowPrivilegeEscalation: false
+                  readOnlyRootFilesystem: true
+                  runAsNonRoot: true
+                  capabilities:
+                    drop: ["ALL"]
+
+                config:
+                  # Reconcile a handful of Elastic resources in parallel.
+                  maxConcurrentReconciles: 3
+                  # Metrics are off by default; set a port and scrape it if you want operator metrics.
+                  metrics:
+                    port: "0"
+                """
+        },
+
         // ── Security ──
 
         new CatalogEntry

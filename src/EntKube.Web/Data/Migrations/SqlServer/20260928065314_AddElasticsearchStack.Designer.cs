@@ -4,6 +4,7 @@ using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Metadata;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -11,9 +12,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.SqlServer
 {
     [DbContext(typeof(SqlServerApplicationDbContext))]
-    partial class SqlServerApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20260928065314_AddElasticsearchStack")]
+    partial class AddElasticsearchStack
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -3175,50 +3178,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("EgressAgents");
                 });
 
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchBinding", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<Guid>("AppDeploymentId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<Guid>("ElasticsearchClusterId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<Guid>("ElasticsearchUserId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("KubernetesSecretName")
-                        .IsRequired()
-                        .HasMaxLength(253)
-                        .HasColumnType("nvarchar(253)");
-
-                    b.Property<DateTime?>("LastSyncedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<bool>("SyncEnabled")
-                        .HasColumnType("bit");
-
-                    b.Property<Guid>("TenantId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ElasticsearchClusterId");
-
-                    b.HasIndex("ElasticsearchUserId");
-
-                    b.HasIndex("AppDeploymentId", "KubernetesSecretName")
-                        .IsUnique();
-
-                    b.ToTable("ElasticsearchBindings");
-                });
-
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3252,9 +3211,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<string>("Health")
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)");
-
-                    b.Property<int?>("HighestNodeDiskPercent")
-                        .HasColumnType("int");
 
                     b.Property<int>("HotCount")
                         .HasColumnType("int");
@@ -3291,9 +3247,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired()
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)");
-
-                    b.Property<DateTime?>("InsightCheckedAt")
-                        .HasColumnType("datetime2");
 
                     b.Property<int>("KibanaCount")
                         .HasColumnType("int");
@@ -3335,23 +3288,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(20)
                         .HasColumnType("nvarchar(20)");
 
-                    b.Property<string>("MonitoringCpuRequest")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<bool>("MonitoringEnabled")
-                        .HasColumnType("bit");
-
-                    b.Property<bool>("MonitoringIndexMetrics")
-                        .HasColumnType("bit");
-
-                    b.Property<string>("MonitoringMemory")
-                        .IsRequired()
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("MonitoringSelectorNote")
-                        .HasColumnType("nvarchar(max)");
-
                     b.Property<string>("Name")
                         .IsRequired()
                         .HasMaxLength(36)
@@ -3362,44 +3298,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(63)
                         .HasColumnType("nvarchar(63)");
 
-                    b.Property<string>("SnapshotBasePath")
-                        .HasMaxLength(255)
-                        .HasColumnType("nvarchar(255)");
-
-                    b.Property<int>("SnapshotExpireAfterDays")
-                        .HasColumnType("int");
-
-                    b.Property<DateTime?>("SnapshotLastCheckedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("SnapshotLastFailure")
-                        .HasMaxLength(2000)
-                        .HasColumnType("nvarchar(2000)");
-
-                    b.Property<DateTime?>("SnapshotLastSuccessAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("SnapshotLastSuccessName")
-                        .HasMaxLength(255)
-                        .HasColumnType("nvarchar(255)");
-
-                    b.Property<int>("SnapshotMaxCount")
-                        .HasColumnType("int");
-
-                    b.Property<int>("SnapshotMinCount")
-                        .HasColumnType("int");
-
-                    b.Property<string>("SnapshotScheduleCron")
-                        .IsRequired()
-                        .HasMaxLength(64)
-                        .HasColumnType("nvarchar(64)");
-
-                    b.Property<Guid?>("SnapshotStorageLinkId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<bool>("SnapshotsEnabled")
-                        .HasColumnType("bit");
-
                     b.Property<int>("Status")
                         .HasColumnType("int");
 
@@ -3409,9 +3307,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<Guid>("TenantId")
                         .HasColumnType("uniqueidentifier");
-
-                    b.Property<int?>("UnassignedShards")
-                        .HasColumnType("int");
 
                     b.Property<string>("Version")
                         .IsRequired()
@@ -3449,55 +3344,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("ElasticsearchClusters");
                 });
 
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchDataView", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<Guid>("ElasticsearchClusterId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime?>("LastAppliedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("LastError")
-                        .HasMaxLength(2000)
-                        .HasColumnType("nvarchar(2000)");
-
-                    b.Property<string>("Name")
-                        .HasMaxLength(255)
-                        .HasColumnType("nvarchar(255)");
-
-                    b.Property<string>("SpaceId")
-                        .HasMaxLength(63)
-                        .HasColumnType("nvarchar(63)");
-
-                    b.Property<Guid>("TenantId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("TimeFieldName")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("nvarchar(255)");
-
-                    b.Property<string>("Title")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("nvarchar(255)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ElasticsearchClusterId", "SpaceId", "Title")
-                        .IsUnique()
-                        .HasFilter("[SpaceId] IS NOT NULL");
-
-                    b.ToTable("ElasticsearchDataViews");
-                });
-
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIlmPolicy", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3509,10 +3355,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
-
-                    b.Property<string>("DefaultPipelineName")
-                        .HasMaxLength(128)
-                        .HasColumnType("nvarchar(128)");
 
                     b.Property<int?>("DeleteAfterDays")
                         .HasColumnType("int");
@@ -3567,219 +3409,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsUnique();
 
                     b.ToTable("ElasticsearchIlmPolicies");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIngestPipeline", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("CustomProcessorsJson")
-                        .HasColumnType("nvarchar(max)");
-
-                    b.Property<string>("Description")
-                        .HasMaxLength(500)
-                        .HasColumnType("nvarchar(500)");
-
-                    b.Property<Guid>("ElasticsearchClusterId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("GrokField")
-                        .HasMaxLength(255)
-                        .HasColumnType("nvarchar(255)");
-
-                    b.Property<string>("GrokPattern")
-                        .HasMaxLength(2000)
-                        .HasColumnType("nvarchar(2000)");
-
-                    b.Property<DateTime?>("LastAppliedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("LastError")
-                        .HasMaxLength(2000)
-                        .HasColumnType("nvarchar(2000)");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("nvarchar(128)");
-
-                    b.Property<string>("RemoveFields")
-                        .HasMaxLength(1000)
-                        .HasColumnType("nvarchar(1000)");
-
-                    b.Property<string>("RenameFields")
-                        .HasMaxLength(1000)
-                        .HasColumnType("nvarchar(1000)");
-
-                    b.Property<string>("SetFields")
-                        .HasMaxLength(1000)
-                        .HasColumnType("nvarchar(1000)");
-
-                    b.Property<Guid>("TenantId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("TimestampField")
-                        .HasMaxLength(255)
-                        .HasColumnType("nvarchar(255)");
-
-                    b.Property<string>("TimestampFormats")
-                        .IsRequired()
-                        .HasMaxLength(500)
-                        .HasColumnType("nvarchar(500)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ElasticsearchClusterId", "Name")
-                        .IsUnique();
-
-                    b.ToTable("ElasticsearchIngestPipelines");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchKibanaSpace", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("Description")
-                        .HasMaxLength(500)
-                        .HasColumnType("nvarchar(500)");
-
-                    b.Property<Guid>("ElasticsearchClusterId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<DateTime?>("LastAppliedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("LastError")
-                        .HasMaxLength(2000)
-                        .HasColumnType("nvarchar(2000)");
-
-                    b.Property<string>("Name")
-                        .IsRequired()
-                        .HasMaxLength(128)
-                        .HasColumnType("nvarchar(128)");
-
-                    b.Property<string>("SpaceId")
-                        .IsRequired()
-                        .HasMaxLength(63)
-                        .HasColumnType("nvarchar(63)");
-
-                    b.Property<Guid>("TenantId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ElasticsearchClusterId", "SpaceId")
-                        .IsUnique();
-
-                    b.ToTable("ElasticsearchKibanaSpaces");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchRemoteLink", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("Alias")
-                        .IsRequired()
-                        .HasMaxLength(63)
-                        .HasColumnType("nvarchar(63)");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<DateTime?>("LastAppliedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("LastError")
-                        .HasMaxLength(2000)
-                        .HasColumnType("nvarchar(2000)");
-
-                    b.Property<Guid>("LocalClusterId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<Guid>("RemoteClusterId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("SearchIndexPatterns")
-                        .IsRequired()
-                        .HasMaxLength(500)
-                        .HasColumnType("nvarchar(500)");
-
-                    b.Property<Guid>("TenantId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("RemoteClusterId");
-
-                    b.HasIndex("LocalClusterId", "Alias")
-                        .IsUnique();
-
-                    b.ToTable("ElasticsearchRemoteLinks");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchUser", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<int>("Access")
-                        .HasColumnType("int");
-
-                    b.Property<DateTime>("CreatedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<Guid>("ElasticsearchClusterId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("IndexPattern")
-                        .IsRequired()
-                        .HasMaxLength(255)
-                        .HasColumnType("nvarchar(255)");
-
-                    b.Property<int>("KibanaAccess")
-                        .HasColumnType("int");
-
-                    b.Property<string>("KibanaSpaceId")
-                        .HasMaxLength(63)
-                        .HasColumnType("nvarchar(63)");
-
-                    b.Property<DateTime?>("LastAppliedAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<string>("LastError")
-                        .HasMaxLength(2000)
-                        .HasColumnType("nvarchar(2000)");
-
-                    b.Property<DateTime?>("PasswordSetAt")
-                        .HasColumnType("datetime2");
-
-                    b.Property<Guid>("TenantId")
-                        .HasColumnType("uniqueidentifier");
-
-                    b.Property<string>("Username")
-                        .IsRequired()
-                        .HasMaxLength(63)
-                        .HasColumnType("nvarchar(63)");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("ElasticsearchClusterId", "Username")
-                        .IsUnique();
-
-                    b.ToTable("ElasticsearchUsers");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.EndOfLifeNotice", b =>
@@ -9707,33 +9336,6 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Tenant");
                 });
 
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchBinding", b =>
-                {
-                    b.HasOne("EntKube.Web.Data.AppDeployment", "AppDeployment")
-                        .WithMany()
-                        .HasForeignKey("AppDeploymentId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
-                        .WithMany()
-                        .HasForeignKey("ElasticsearchClusterId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("EntKube.Web.Data.ElasticsearchUser", "ElasticsearchUser")
-                        .WithMany()
-                        .HasForeignKey("ElasticsearchUserId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("AppDeployment");
-
-                    b.Navigation("ElasticsearchCluster");
-
-                    b.Navigation("ElasticsearchUser");
-                });
-
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
                 {
                     b.HasOne("EntKube.Web.Data.KubernetesCluster", "KubernetesCluster")
@@ -9753,73 +9355,10 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Tenant");
                 });
 
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchDataView", b =>
-                {
-                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
-                        .WithMany("DataViews")
-                        .HasForeignKey("ElasticsearchClusterId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("ElasticsearchCluster");
-                });
-
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIlmPolicy", b =>
                 {
                     b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
                         .WithMany("IlmPolicies")
-                        .HasForeignKey("ElasticsearchClusterId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("ElasticsearchCluster");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIngestPipeline", b =>
-                {
-                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
-                        .WithMany("IngestPipelines")
-                        .HasForeignKey("ElasticsearchClusterId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("ElasticsearchCluster");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchKibanaSpace", b =>
-                {
-                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
-                        .WithMany("KibanaSpaces")
-                        .HasForeignKey("ElasticsearchClusterId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.Navigation("ElasticsearchCluster");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchRemoteLink", b =>
-                {
-                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "LocalCluster")
-                        .WithMany()
-                        .HasForeignKey("LocalClusterId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
-
-                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "RemoteCluster")
-                        .WithMany()
-                        .HasForeignKey("RemoteClusterId")
-                        .OnDelete(DeleteBehavior.Restrict)
-                        .IsRequired();
-
-                    b.Navigation("LocalCluster");
-
-                    b.Navigation("RemoteCluster");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchUser", b =>
-                {
-                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
-                        .WithMany("Users")
                         .HasForeignKey("ElasticsearchClusterId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
@@ -11701,15 +11240,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
                 {
-                    b.Navigation("DataViews");
-
                     b.Navigation("IlmPolicies");
-
-                    b.Navigation("IngestPipelines");
-
-                    b.Navigation("KibanaSpaces");
-
-                    b.Navigation("Users");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>
