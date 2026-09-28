@@ -3174,6 +3174,50 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("EgressAgents");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchBinding", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("AppDeploymentId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("ElasticsearchClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ElasticsearchUserId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("KubernetesSecretName")
+                        .IsRequired()
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<DateTime?>("LastSyncedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<bool>("SyncEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ElasticsearchClusterId");
+
+                    b.HasIndex("ElasticsearchUserId");
+
+                    b.HasIndex("AppDeploymentId", "KubernetesSecretName")
+                        .IsUnique();
+
+                    b.ToTable("ElasticsearchBindings");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3443,6 +3487,49 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .IsUnique();
 
                     b.ToTable("ElasticsearchIlmPolicies");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchUser", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("Access")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("ElasticsearchClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("IndexPattern")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("LastAppliedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Username")
+                        .IsRequired()
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ElasticsearchClusterId", "Username")
+                        .IsUnique();
+
+                    b.ToTable("ElasticsearchUsers");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.EndOfLifeNotice", b =>
@@ -9367,6 +9454,33 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchBinding", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.AppDeployment", "AppDeployment")
+                        .WithMany()
+                        .HasForeignKey("AppDeploymentId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
+                        .WithMany()
+                        .HasForeignKey("ElasticsearchClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.ElasticsearchUser", "ElasticsearchUser")
+                        .WithMany()
+                        .HasForeignKey("ElasticsearchUserId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired();
+
+                    b.Navigation("AppDeployment");
+
+                    b.Navigation("ElasticsearchCluster");
+
+                    b.Navigation("ElasticsearchUser");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
                 {
                     b.HasOne("EntKube.Web.Data.KubernetesCluster", "KubernetesCluster")
@@ -9390,6 +9504,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                 {
                     b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
                         .WithMany("IlmPolicies")
+                        .HasForeignKey("ElasticsearchClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ElasticsearchCluster");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchUser", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
+                        .WithMany("Users")
                         .HasForeignKey("ElasticsearchClusterId")
                         .OnDelete(DeleteBehavior.Cascade)
                         .IsRequired();
@@ -11272,6 +11397,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
                 {
                     b.Navigation("IlmPolicies");
+
+                    b.Navigation("Users");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>

@@ -173,6 +173,8 @@ public class BackupService(
             KafkaBindings = await db.KafkaBindings.AsNoTracking().ToListAsync(),
             ElasticsearchClusters = await db.ElasticsearchClusters.AsNoTracking().ToListAsync(),
             ElasticsearchIlmPolicies = await db.ElasticsearchIlmPolicies.AsNoTracking().ToListAsync(),
+            ElasticsearchUsers = await db.ElasticsearchUsers.AsNoTracking().ToListAsync(),
+            ElasticsearchBindings = await db.ElasticsearchBindings.AsNoTracking().ToListAsync(),
             VpnTunnels = await db.VpnTunnels.AsNoTracking().ToListAsync(),
             VpnLocalEndpoints = await db.VpnLocalEndpoints.AsNoTracking().ToListAsync(),
             VpnRemoteEndpoints = await db.VpnRemoteEndpoints.AsNoTracking().ToListAsync(),
@@ -421,6 +423,7 @@ public class BackupService(
             await InsertEntities(db, db.KafkaUsers, bundle.KafkaUsers);
             await InsertEntities(db, db.ElasticsearchClusters, bundle.ElasticsearchClusters);
             await InsertEntities(db, db.ElasticsearchIlmPolicies, bundle.ElasticsearchIlmPolicies);
+            await InsertEntities(db, db.ElasticsearchUsers, bundle.ElasticsearchUsers);
             await InsertEntities(db, db.RumSites, bundle.RumSites);
             await InsertEntities(db, db.TelemetryAlertRules, bundle.TelemetryAlertRules);
 
@@ -480,6 +483,7 @@ public class BackupService(
             await InsertEntities(db, db.AppL4Routes, bundle.AppL4Routes);
             await InsertEntities(db, db.AppServicePorts, bundle.AppServicePorts);
             await InsertEntities(db, db.KafkaBindings, bundle.KafkaBindings);
+            await InsertEntities(db, db.ElasticsearchBindings, bundle.ElasticsearchBindings);
 
             // Cache bindings — after AppDeployments and RedisClusters (both non-null FKs).
             await InsertEntities(db, db.CacheBindings, bundle.CacheBindings);

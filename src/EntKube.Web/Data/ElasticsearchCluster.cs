@@ -194,6 +194,7 @@ public class ElasticsearchCluster
     public Tenant Tenant { get; set; } = null!;
     public KubernetesCluster KubernetesCluster { get; set; } = null!;
     public ICollection<ElasticsearchIlmPolicy> IlmPolicies { get; set; } = [];
+    public ICollection<ElasticsearchUser> Users { get; set; } = [];
 
     // ── Derived names (all fixed by ECK's own conventions) ─────────────────────
 

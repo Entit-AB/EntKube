@@ -1194,4 +1194,229 @@ public class ElasticsearchServiceTests : IDisposable
         recorded.ResourceName.Should().Be("search/search");
         recorded.Details.Should().Contain("search-snap-2026.09.28").And.Contain("over the live indices");
     }
+
+    // ──────── Application users and bindings ────────
+
+    private async Task<ElasticsearchCluster> SeedPlainClusterAsync()
+    {
+        await SeedClusterAsync();
+        ElasticsearchCluster c = SampleCluster();
+        c.TenantId = tenantId;
+        c.KubernetesClusterId = k8sClusterId;
+        db.ElasticsearchClusters.Add(c);
+        await db.SaveChangesAsync();
+        return c;
+    }
+
+    [Theory]
+    [InlineData(ElasticsearchAccess.Viewer, "read", "write")]
+    [InlineData(ElasticsearchAccess.Writer, "write", "manage")]
+    [InlineData(ElasticsearchAccess.Manager, "all", "nothing-else")]
+    public void EachAccessLevelGrantsWhatItSays(ElasticsearchAccess access, string granted, string notGranted)
+    {
+        IReadOnlyList<string> privileges = ElasticsearchService.PrivilegesFor(access);
+
+        privileges.Should().Contain(granted);
+        privileges.Should().NotContain(notGranted);
+    }
+
+    [Fact]
+    public void ARoleIsScopedToOneIndexPattern_AndNoClusterPrivilegesUnlessItManages()
+    {
+        ElasticsearchUser writer = new() { Username = "orders", IndexPattern = "logs-orders-*", Access = ElasticsearchAccess.Writer };
+        string script = ElasticsearchService.BuildUserApplyScript(SampleCluster(), writer);
+
+        script.Should().Contain("\"logs-orders-*\"");
+        script.Should().Contain("_security/role/entkube-orders");
+        script.Should().Contain("_security/user/orders");
+        // auto_configure is what lets a writer add a field to a data stream's mapping.
+        script.Should().Contain("auto_configure");
+        script.Should().Contain("\"cluster\": []");
+    }
+
+    [Fact]
+    public void ThePasswordReachesElasticsearchThroughTheEnvironment_NeverTheScript()
+    {
+        ElasticsearchUser user = new() { Username = "orders", IndexPattern = "logs-*", Access = ElasticsearchAccess.Writer };
+        string script = ElasticsearchService.BuildUserApplyScript(SampleCluster(), user);
+
+        // The user document is built with an expanding heredoc so only the password interpolates;
+        // the role document above it stays literal.
+        script.Should().Contain("cat > /tmp/user.json <<ENTKUBE_EOF");
+        script.Should().Contain("\"password\": \"${ES_USER_PASSWORD}\"");
+        script.Should().Contain("cat > /tmp/role.json <<'ENTKUBE_EOF'");
+        // And it is removed rather than left in the container's /tmp.
+        script.Should().Contain("rm -f /tmp/user.json");
+    }
+
+    [Fact]
+    public void TheApplyJobIsGivenTheUserPassword_FromItsOwnSecret()
+    {
+        ElasticsearchCluster c = SampleCluster();
+        string manifest = ElasticsearchService.BuildElasticsearchJobManifest(c, "job-1", "cm-1", "es-user-orders");
+
+        manifest.Should().Contain("ES_USER_PASSWORD");
+        manifest.Should().Contain("name: es-user-orders");
+        // The elastic superuser credential is still how the job authenticates to make the change.
+        manifest.Should().Contain("ELASTIC_PASSWORD");
+    }
+
+    [Theory]
+    [InlineData("Orders_API")]
+    [InlineData("-orders")]
+    [InlineData("orders.api")]
+    public async Task UsernamesThatWouldNotSurviveBeingASecretName_AreRefused(string username)
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+
+        Func<Task> act = () => sut.CreateUserAsync(tenantId, c.Id, username, "logs-*", ElasticsearchAccess.Writer);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task AUserWithNoIndexPattern_IsRefused()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+
+        // A user with access to everything is the superuser this whole thing exists to avoid.
+        Func<Task> act = () => sut.CreateUserAsync(tenantId, c.Id, "orders", "  ", ElasticsearchAccess.Writer);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*index pattern is required*");
+    }
+
+    [Fact]
+    public async Task CreatingAUser_WritesThePasswordToASecretAndNeverToTheDatabase()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchUser user = await sut.CreateUserAsync(
+            tenantId, c.Id, "orders", "logs-orders-*", ElasticsearchAccess.Writer);
+
+        string secret = applied.First(m => m.Contains("kind: Secret"));
+        secret.Should().Contain("name: es-user-orders");
+        secret.Should().Contain("password:");
+
+        ElasticsearchUser stored = await db.ElasticsearchUsers.AsNoTracking().SingleAsync();
+        stored.LastAppliedAt.Should().NotBeNull();
+        stored.LastError.Should().BeNull();
+
+        // Nothing on the entity can hold a password, which is the point of reading it back from the
+        // cluster when a binding needs it.
+        typeof(ElasticsearchUser).GetProperties().Select(pr => pr.Name)
+            .Should().NotContain(n => n.Contains("Password", StringComparison.OrdinalIgnoreCase));
+        user.CredentialsSecretName.Should().Be("es-user-orders");
+    }
+
+    [Fact]
+    public async Task ABindingWritesTheEndpoint_CredentialsAndCa_IntoTheAppsNamespace()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchUser user = await sut.CreateUserAsync(
+            tenantId, c.Id, "orders", "logs-orders-*", ElasticsearchAccess.Writer);
+
+        AppDeployment deployment = await SeedDeploymentAsync();
+
+        k8s.Setup(x => x.GetSecretValueAsync("es-user-orders", "password", "search",
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("the-password");
+        k8s.Setup(x => x.GetSecretValueAsync("search-es-http-certs-public", "ca.crt", "search",
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("-----BEGIN CERTIFICATE-----");
+
+        List<(string Manifest, string Kubeconfig)> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, kc, _) => applied.Add((m, kc)))
+            .Returns(Task.CompletedTask);
+
+        await sut.CreateBindingAsync(tenantId, c.Id, deployment.Id, user.Id, "elasticsearch");
+
+        string secret = applied.Select(a => a.Manifest).Single(m => m.Contains("kind: Secret"));
+        secret.Should().Contain("namespace: orders");
+        secret.Should().Contain($"ELASTICSEARCH_PASSWORD: {Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("the-password"))}");
+        secret.Should().Contain("ELASTICSEARCH_USERNAME:");
+        // Without the CA the app either fails or is told to skip verification.
+        secret.Should().Contain("ELASTICSEARCH_CA_CRT:");
+
+        ElasticsearchBinding stored = await db.ElasticsearchBindings.AsNoTracking().SingleAsync();
+        stored.LastSyncedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task ABindingWhosePasswordSecretIsGone_SaysWhatToDoAboutIt()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchUser user = await sut.CreateUserAsync(
+            tenantId, c.Id, "orders", "logs-*", ElasticsearchAccess.Writer);
+        AppDeployment deployment = await SeedDeploymentAsync();
+
+        k8s.Setup(x => x.GetSecretValueAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync((string?)null);
+
+        Func<Task> act = () => sut.CreateBindingAsync(tenantId, c.Id, deployment.Id, user.Id, "elasticsearch");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Re-apply the user*");
+    }
+
+    [Fact]
+    public async Task AUserAnApplicationStillUses_CannotBeDeleted()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        k8s.Setup(x => x.GetSecretValueAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("pw");
+
+        ElasticsearchUser user = await sut.CreateUserAsync(
+            tenantId, c.Id, "orders", "logs-*", ElasticsearchAccess.Writer);
+        AppDeployment deployment = await SeedDeploymentAsync();
+        await sut.CreateBindingAsync(tenantId, c.Id, deployment.Id, user.Id, "elasticsearch");
+
+        // Deleting it would leave the app holding credentials that quietly stop working.
+        Func<Task> act = () => sut.DeleteUserAsync(tenantId, user.Id);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*binding(s) still use*");
+        (await db.ElasticsearchUsers.CountAsync()).Should().Be(1);
+    }
+
+    private async Task<AppDeployment> SeedDeploymentAsync()
+    {
+        Customer customer = new() { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Acme" };
+        db.Customers.Add(customer);
+
+        Data.App app = new() { Id = Guid.NewGuid(), CustomerId = customer.Id, Name = "orders" };
+        db.Apps.Add(app);
+
+        Guid envId = await db.Set<Data.Environment>().Select(e => e.Id).FirstAsync();
+
+        AppDeployment deployment = new()
+        {
+            Id = Guid.NewGuid(),
+            AppId = app.Id,
+            ClusterId = k8sClusterId,
+            EnvironmentId = envId,
+            Name = "prod",
+            Namespace = "orders"
+        };
+        db.AppDeployments.Add(deployment);
+        await db.SaveChangesAsync();
+        return deployment;
+    }
 }

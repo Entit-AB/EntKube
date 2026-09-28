@@ -13,6 +13,7 @@ managed under **Services › Search**.
 | Kibana | `Kibana` CR, one per Elasticsearch cluster, sharing its name |
 | Lifecycle policies | ILM policies + composable index templates, applied by a Job inside the cluster |
 | Snapshots | S3 repository + SLM policy, registered by a Job; restores run the same way |
+| Application users | Native-realm users + per-user roles, created by a Job; bound into an app's namespace as a Secret |
 
 The operator on its own starts nothing. Installing it and stopping there leaves a working controller
 with no clusters, which is why its catalog entry points at Services › Search.
@@ -132,6 +133,38 @@ Restoring has two modes, because they are different decisions:
 
 Both report Elasticsearch's own response rather than a claim that it worked. A large restore takes
 longer than the page waits; the Job keeps going in the cluster and says so.
+
+## Application users and bindings
+
+Until a user exists, the only account on the cluster is the operator-generated `elastic`
+superuser — the credential that can also delete every index. Application users are native-realm
+users with a role scoped to **one index pattern** and one of three levels:
+
+| Access | Index privileges |
+| --- | --- |
+| Viewer | `read`, `view_index_metadata` |
+| Writer | `read`, `write`, `view_index_metadata`, `create_index`, `auto_configure` |
+| Manager | `all` on the pattern, plus cluster `monitor` |
+
+`auto_configure` is what lets a writer add a field to a data stream's mapping; without it the first
+document carrying a new field is rejected, which reads as a broken client rather than a missing
+privilege.
+
+The password is generated once, written to a Secret beside the cluster, and handed to the Job
+through an environment variable from that Secret — it is never in a command line, never in a
+manifest EntKube keeps, and **never in the management plane's database**. That is also why the user
+document is the only thing in the apply script built with an expanding heredoc.
+
+**Binding an application** writes `ELASTICSEARCH_URL`, `ELASTICSEARCH_USERNAME`,
+`ELASTICSEARCH_PASSWORD` and `ELASTICSEARCH_CA_CRT` into the deployment's own namespace, reading the
+password back out of the Elasticsearch namespace as it goes. The CA matters: the HTTP layer is
+served with the operator's own certificate, so a client that does not trust it either fails or gets
+talked into skipping verification — and the second one is how a search cluster ends up reachable by
+anything on the network. Re-syncing is how a rotated password reaches the application.
+
+A user an application is still bound to cannot be deleted; the binding goes first. Deleting the
+cluster removes the bindings' Secrets from their namespaces too, rather than leaving applications
+holding working-looking credentials for something that is gone.
 
 ## Publishing Kibana
 

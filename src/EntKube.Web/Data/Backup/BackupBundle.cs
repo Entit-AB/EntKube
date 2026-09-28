@@ -114,6 +114,8 @@ public class BackupBundle
     // Search (Elasticsearch + Kibana via ECK)
     public List<ElasticsearchCluster> ElasticsearchClusters { get; set; } = [];
     public List<ElasticsearchIlmPolicy> ElasticsearchIlmPolicies { get; set; } = [];
+    public List<ElasticsearchUser> ElasticsearchUsers { get; set; } = [];
+    public List<ElasticsearchBinding> ElasticsearchBindings { get; set; } = [];
 
     // VPN
     public List<VpnTunnel> VpnTunnels { get; set; } = [];

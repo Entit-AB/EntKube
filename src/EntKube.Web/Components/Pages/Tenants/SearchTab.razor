@@ -739,6 +739,182 @@
                             }
                         </div>
 
+                        @* ── Application users ── *@
+                        @{ List<ElasticsearchUser> users = allUsers.TryGetValue(cluster.Id, out List<ElasticsearchUser>? ul) ? ul : []; }
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-person-badge me-1"></i>Application users</strong>
+                                <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2" @onclick="() => ShowAddUser(cluster)">
+                                    <i class="bi bi-plus-lg me-1"></i>Add
+                                </button>
+                            </div>
+
+                            @if (addUserClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Username</label>
+                                            <input class="form-control form-control-sm" @bind="userName" placeholder="orders-api" />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Indices it may touch</label>
+                                            <input class="form-control form-control-sm" @bind="userIndexPattern" placeholder="logs-orders-*" />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Access</label>
+                                            <select class="form-select form-select-sm" @bind="userAccess">
+                                                <option value="@ElasticsearchAccess.Viewer">Viewer — search and read</option>
+                                                <option value="@ElasticsearchAccess.Writer">Writer — read, write, create</option>
+                                                <option value="@ElasticsearchAccess.Manager">Manager — everything on those indices</option>
+                                            </select>
+                                        </div>
+                                        <div class="col-md-2 d-flex align-items-end gap-1">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => AddUserAsync(cluster)"
+                                                    disabled="@(savingUser || string.IsNullOrWhiteSpace(userName))">
+                                                @if (savingUser) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Add
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => addUserClusterId = null">Cancel</button>
+                                        </div>
+                                    </div>
+                                    <div class="form-text small mt-1">
+                                        The password is generated here, kept in a Secret beside the cluster, and never stored by EntKube.
+                                        Bind an application to the user to get it into that application's namespace.
+                                    </div>
+                                    @if (userError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@userError</div> }
+                                </div></div>
+                            }
+
+                            @if (users.Count == 0)
+                            {
+                                <p class="text-muted small mb-0">
+                                    No application users. Until one exists the only account on this cluster is <code>elastic</code>,
+                                    which can also delete every index.
+                                </p>
+                            }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>User</th><th>Indices</th><th>Access</th><th>Applied</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchUser u in users)
+                                        {
+                                            <tr>
+                                                <td><code>@u.Username</code></td>
+                                                <td><code>@u.IndexPattern</code></td>
+                                                <td><span class="badge bg-secondary">@u.Access</span></td>
+                                                <td class="text-muted">
+                                                    @if (u.LastError is not null)
+                                                    {
+                                                        <span class="text-danger" title="@u.LastError">failed</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        @(u.LastAppliedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                                    }
+                                                </td>
+                                                <td class="text-nowrap">
+                                                    <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Re-apply"
+                                                            aria-label="@($"Re-apply {u.Username}")" @onclick="() => ApplyUserAsync(cluster, u)">
+                                                        <i class="bi bi-arrow-repeat"></i>
+                                                    </button>
+                                                    @RenderDeleteCell($"Delete Elasticsearch user \"{u.Username}\" and its role? Anything still using those credentials stops working.", "Delete user", () => DeleteUserAsync(cluster.Id, u.Id, u.Username))
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        @* ── App bindings ── *@
+                        @{ List<ElasticsearchBinding> bindings = allBindings.TryGetValue(cluster.Id, out List<ElasticsearchBinding>? bl) ? bl : []; }
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-link-45deg me-1"></i>Application bindings</strong>
+                                <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                        @onclick="() => ShowAddBinding(cluster)" disabled="@(users.Count == 0)">
+                                    <i class="bi bi-plus-lg me-1"></i>Bind app
+                                </button>
+                            </div>
+
+                            @if (addBindingClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Deployment</label>
+                                            <select class="form-select form-select-sm" @bind="bindingDeploymentId">
+                                                <option value="@Guid.Empty">Select deployment...</option>
+                                                @foreach (AppDeployment d in BindingDeploymentOptions)
+                                                {
+                                                    <option value="@d.Id">@d.App.Name / @d.Name (@d.Namespace)</option>
+                                                }
+                                            </select>
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Connect as</label>
+                                            <select class="form-select form-select-sm" @bind="bindingUserId">
+                                                <option value="@Guid.Empty">Select user...</option>
+                                                @foreach (ElasticsearchUser u in users)
+                                                {
+                                                    <option value="@u.Id">@u.Username (@u.Access on @u.IndexPattern)</option>
+                                                }
+                                            </select>
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Secret name</label>
+                                            <input class="form-control form-control-sm" @bind="bindingSecretName" placeholder="elasticsearch" />
+                                        </div>
+                                        <div class="col-md-2 d-flex align-items-end gap-1">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => AddBindingAsync(cluster)"
+                                                    disabled="@(savingBinding || bindingDeploymentId == Guid.Empty || bindingUserId == Guid.Empty)">
+                                                @if (savingBinding) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Bind
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => addBindingClusterId = null">Cancel</button>
+                                        </div>
+                                    </div>
+                                    <div class="form-text small mt-1">
+                                        Writes <code>ELASTICSEARCH_URL</code>, <code>_USERNAME</code>, <code>_PASSWORD</code> and
+                                        <code>_CA_CRT</code> into the deployment's namespace.
+                                    </div>
+                                    @if (bindingError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@bindingError</div> }
+                                </div></div>
+                            }
+
+                            @if (bindings.Count == 0)
+                            {
+                                <p class="text-muted small mb-0">No applications bound.</p>
+                            }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>Application</th><th>Namespace</th><th>User</th><th>Secret</th><th>Synced</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchBinding b in bindings)
+                                        {
+                                            <tr>
+                                                <td>@b.AppDeployment.App.Name / @b.AppDeployment.Name</td>
+                                                <td class="text-muted"><code>@b.AppDeployment.Namespace</code></td>
+                                                <td><code>@b.ElasticsearchUser.Username</code></td>
+                                                <td><code>@b.KubernetesSecretName</code></td>
+                                                <td class="text-muted">@(b.LastSyncedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")</td>
+                                                <td class="text-nowrap">
+                                                    <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Re-sync"
+                                                            aria-label="@($"Re-sync {b.AppDeployment.App.Name}")" @onclick="() => SyncBindingAsync(cluster.Id, b.Id)">
+                                                        <i class="bi bi-arrow-repeat"></i>
+                                                    </button>
+                                                    @RenderDeleteCell($"Remove the Elasticsearch binding for \"{b.AppDeployment.App.Name}/{b.AppDeployment.Name}\"? The Secret is deleted from its namespace.", "Remove binding", () => RemoveBindingAsync(cluster.Id, b.Id))
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
                         @* ── Actions ── *@
                         <div class="d-flex gap-2 border-top pt-3">
                             <button class="btn btn-sm btn-outline-warning" @onclick="() => ShowEditForm(cluster)" disabled="@(form is not null)">
@@ -808,6 +984,32 @@
     private int snapshotMaxCount = 50;
     private bool snapshotBusy;
     private string? snapshotError;
+
+    // Users and bindings
+    private readonly Dictionary<Guid, List<ElasticsearchUser>> allUsers = [];
+    private readonly Dictionary<Guid, List<ElasticsearchBinding>> allBindings = [];
+    private List<AppDeployment> allDeployments = [];
+    private Guid? addUserClusterId;
+    private string userName = "";
+    private string userIndexPattern = "";
+    private ElasticsearchAccess userAccess = ElasticsearchAccess.Writer;
+    private bool savingUser;
+    private string? userError;
+    private Guid? addBindingClusterId;
+    private Guid bindingDeploymentId;
+    private Guid bindingUserId;
+    private string bindingSecretName = "elasticsearch";
+    private bool savingBinding;
+    private string? bindingError;
+
+    /// <summary>
+    /// Deployments the binding form offers. Scoped to the environment when the tab is, so a
+    /// production cluster is not offered a staging app by a stray click.
+    /// </summary>
+    private List<AppDeployment> BindingDeploymentOptions =>
+        EnvironmentId is Guid envId
+            ? [.. allDeployments.Where(d => d.EnvironmentId == envId)]
+            : allDeployments;
 
     // Repository listing + restore
     private Guid? repositorySnapshotsFor;
@@ -945,8 +1147,10 @@
         Task<List<KubernetesCluster>> k8sTask = TenantService.GetClustersAsync(TenantId);
         Task<ElasticsearchOperatorStatus> operatorTask = Search.GetOperatorStatusAsync(TenantId);
         Task<List<StorageLink>> storageTask = StorageService.GetStorageLinksAsync(TenantId, EnvironmentId);
+        Task<List<AppDeployment>> deploymentsTask = Search.GetTenantDeploymentsAsync(TenantId);
 
-        await Task.WhenAll(clustersTask, k8sTask, operatorTask, storageTask);
+        await Task.WhenAll(clustersTask, k8sTask, operatorTask, storageTask, deploymentsTask);
+        allDeployments = deploymentsTask.Result;
 
         clusters = clustersTask.Result;
         allK8sClusters = k8sTask.Result;
@@ -970,8 +1174,14 @@
         }
 
         allPolicies.Clear();
+        allUsers.Clear();
+        allBindings.Clear();
         foreach (ElasticsearchCluster c in clusters)
+        {
             allPolicies[c.Id] = await Search.GetPoliciesAsync(TenantId, c.Id);
+            allUsers[c.Id] = await Search.GetUsersAsync(TenantId, c.Id);
+            allBindings[c.Id] = await Search.GetBindingsAsync(TenantId, c.Id);
+        }
 
         loading = false;
     }
@@ -1349,6 +1559,109 @@
         }
         catch (Exception ex) { Toasts.Error(ex.Message); }
         finally { snapshotBusy = false; }
+    }
+
+    // ── Users and bindings ────────────────────────────────────────────────────
+
+    private void ShowAddUser(ElasticsearchCluster cluster)
+    {
+        addUserClusterId = cluster.Id;
+        userName = "";
+        userIndexPattern = "";
+        userAccess = ElasticsearchAccess.Writer;
+        userError = null;
+    }
+
+    private async Task AddUserAsync(ElasticsearchCluster cluster)
+    {
+        savingUser = true;
+        userError = null;
+        try
+        {
+            await Search.CreateUserAsync(TenantId, cluster.Id, userName, userIndexPattern, userAccess);
+            addUserClusterId = null;
+            allUsers[cluster.Id] = await Search.GetUsersAsync(TenantId, cluster.Id);
+            Toasts.Success($"Created \"{userName.Trim().ToLowerInvariant()}\".");
+        }
+        catch (Exception ex)
+        {
+            userError = ex.Message;
+            allUsers[cluster.Id] = await Search.GetUsersAsync(TenantId, cluster.Id);
+        }
+        finally { savingUser = false; }
+    }
+
+    private async Task ApplyUserAsync(ElasticsearchCluster cluster, ElasticsearchUser user)
+    {
+        try
+        {
+            await Search.ApplyUserAsync(TenantId, user.Id);
+            Toasts.Success($"Re-applied \"{user.Username}\".");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { allUsers[cluster.Id] = await Search.GetUsersAsync(TenantId, cluster.Id); }
+    }
+
+    private async Task DeleteUserAsync(Guid clusterId, Guid userId, string username)
+    {
+        try
+        {
+            await Search.DeleteUserAsync(TenantId, userId);
+            allUsers[clusterId] = await Search.GetUsersAsync(TenantId, clusterId);
+            Toasts.Success($"Deleted \"{username}\".");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+    }
+
+    private void ShowAddBinding(ElasticsearchCluster cluster)
+    {
+        addBindingClusterId = cluster.Id;
+        List<AppDeployment> options = BindingDeploymentOptions;
+        bindingDeploymentId = EnvironmentId is not null && options.Count == 1 ? options[0].Id : Guid.Empty;
+        bindingUserId = Guid.Empty;
+        bindingSecretName = "elasticsearch";
+        bindingError = null;
+    }
+
+    private async Task AddBindingAsync(ElasticsearchCluster cluster)
+    {
+        savingBinding = true;
+        bindingError = null;
+        try
+        {
+            await Search.CreateBindingAsync(TenantId, cluster.Id, bindingDeploymentId, bindingUserId, bindingSecretName);
+            addBindingClusterId = null;
+            allBindings[cluster.Id] = await Search.GetBindingsAsync(TenantId, cluster.Id);
+            Toasts.Success("Bound — the credentials are in the application's namespace.");
+        }
+        catch (Exception ex)
+        {
+            bindingError = ex.Message;
+            allBindings[cluster.Id] = await Search.GetBindingsAsync(TenantId, cluster.Id);
+        }
+        finally { savingBinding = false; }
+    }
+
+    private async Task SyncBindingAsync(Guid clusterId, Guid bindingId)
+    {
+        try
+        {
+            await Search.SyncBindingAsync(TenantId, bindingId);
+            allBindings[clusterId] = await Search.GetBindingsAsync(TenantId, clusterId);
+            Toasts.Success("Re-synced.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+    }
+
+    private async Task RemoveBindingAsync(Guid clusterId, Guid bindingId)
+    {
+        try
+        {
+            await Search.DeleteBindingAsync(TenantId, bindingId);
+            allBindings[clusterId] = await Search.GetBindingsAsync(TenantId, clusterId);
+            Toasts.Success("Binding removed.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
     }
 
     // ── Restore ───────────────────────────────────────────────────────────────

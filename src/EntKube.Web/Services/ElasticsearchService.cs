@@ -501,10 +501,35 @@ public class ElasticsearchService(
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
+            .Include(c => c.Users)
             .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
 
         cluster.Status = ElasticsearchClusterStatus.Deleting;
+        await db.SaveChangesAsync(ct);
+
+        // Bindings first, and explicitly: a binding holds the user back with a Restrict FK, and
+        // leaving the Secret behind in an application's namespace would leave it holding working-
+        // looking credentials for a cluster that no longer exists.
+        List<ElasticsearchBinding> bindings = await db.ElasticsearchBindings
+            .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
+            .Where(b => b.ElasticsearchClusterId == clusterId)
+            .ToListAsync(ct);
+
+        foreach (ElasticsearchBinding binding in bindings)
+        {
+            try
+            {
+                await k8s.DeleteManifestAsync("secret", binding.KubernetesSecretName,
+                    binding.AppDeployment.Namespace, binding.AppDeployment.Cluster.Kubeconfig!, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Removing binding Secret {Secret} failed", binding.KubernetesSecretName);
+            }
+        }
+
+        db.ElasticsearchBindings.RemoveRange(bindings);
         await db.SaveChangesAsync(ct);
 
         try
@@ -516,7 +541,7 @@ public class ElasticsearchService(
 
             // The lifecycle ConfigMaps only exist if policies were ever applied, so their absence
             // is normal and must not fail a delete that has already removed the cluster itself.
-            foreach ((string kindLabel, string name) in Leftovers(cluster))
+            foreach ((string kindLabel, string name) in Leftovers(cluster).Concat(UserLeftovers(cluster)))
             {
                 try
                 {
@@ -850,6 +875,323 @@ public class ElasticsearchService(
 
     /// <summary>How a one-shot Job ended, as far as a bounded wait could tell.</summary>
     public enum JobOutcome { Succeeded, Failed, StillRunning }
+
+    // ── Users and app bindings ─────────────────────────────────────────────────
+
+    public async Task<List<ElasticsearchUser>> GetUsersAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.ElasticsearchUsers
+            .Where(u => u.TenantId == tenantId && u.ElasticsearchClusterId == clusterId)
+            .OrderBy(u => u.Username)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Creates a native-realm user with a role scoped to one index pattern.
+    ///
+    /// <para>The password is generated here, written to a Secret in the Elasticsearch namespace, and
+    /// handed to the Job through an environment variable from that Secret. It is never in a command
+    /// line, never in a manifest field EntKube keeps, and never in the management plane's database —
+    /// bindings read it back out of the cluster when they need it.</para>
+    /// </summary>
+    public async Task<ElasticsearchUser> CreateUserAsync(
+        Guid tenantId,
+        Guid clusterId,
+        string username,
+        string indexPattern,
+        ElasticsearchAccess access,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        username = (username ?? "").Trim().ToLowerInvariant();
+        indexPattern = (indexPattern ?? "").Trim();
+
+        ValidateUsername(username);
+
+        if (string.IsNullOrWhiteSpace(indexPattern))
+            throw new InvalidOperationException(
+                "An index pattern is required. A user with access to everything is the superuser this exists to avoid.");
+
+        if (await db.ElasticsearchUsers.AnyAsync(
+                u => u.ElasticsearchClusterId == clusterId && u.Username == username, ct))
+            throw new InvalidOperationException($"A user named '{username}' already exists on this cluster.");
+
+        ElasticsearchUser user = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            ElasticsearchClusterId = clusterId,
+            Username = username,
+            IndexPattern = indexPattern,
+            Access = access
+        };
+
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string password = GeneratePassword();
+
+        await k8s.ApplyManifestAsync(BuildUserCredentialsSecret(cluster, user, password), kubeconfig, ct);
+
+        string configMap = UserConfigMapName(cluster, user);
+        string jobName = JobName(cluster, $"user-{username}");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildUserApplyScript(cluster, user)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap, user.CredentialsSecretName), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+        user.LastError = outcome == JobOutcome.Succeeded ? null : Truncate(log, 2000);
+        if (outcome == JobOutcome.Succeeded) user.LastAppliedAt = DateTime.UtcNow;
+
+        db.ElasticsearchUsers.Add(user);
+        await db.SaveChangesAsync(ct);
+
+        if (outcome == JobOutcome.Failed)
+            throw new InvalidOperationException("Creating the user failed. Elasticsearch said:\n" + Truncate(log, 1200));
+        if (outcome == JobOutcome.StillRunning)
+            throw new InvalidOperationException(
+                $"The job '{jobName}' is still running — the cluster may still be starting. The user is recorded here "
+                + "and can be re-applied once it is up.");
+
+        return user;
+    }
+
+    /// <summary>Re-applies a user and its role, e.g. after the cluster was rebuilt.</summary>
+    public async Task ApplyUserAsync(Guid tenantId, Guid userId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchUser user = await db.ElasticsearchUsers
+            .Include(u => u.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("User not found.");
+
+        ElasticsearchCluster cluster = user.ElasticsearchCluster;
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string configMap = UserConfigMapName(cluster, user);
+        string jobName = JobName(cluster, $"user-{user.Username}");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildUserApplyScript(cluster, user)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap, user.CredentialsSecretName), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+        user.LastError = outcome == JobOutcome.Succeeded ? null : Truncate(log, 2000);
+        if (outcome == JobOutcome.Succeeded) user.LastAppliedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        if (outcome != JobOutcome.Succeeded)
+            throw new InvalidOperationException("Applying the user failed:\n" + Truncate(log, 1200));
+    }
+
+    /// <summary>
+    /// Removes a user, its role and its password Secret. Refuses while an application is still bound
+    /// to it: deleting it out from under a binding leaves the app holding credentials that stop
+    /// working, with nothing anywhere saying why.
+    /// </summary>
+    public async Task DeleteUserAsync(Guid tenantId, Guid userId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchUser user = await db.ElasticsearchUsers
+            .Include(u => u.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("User not found.");
+
+        int bindings = await db.ElasticsearchBindings.CountAsync(b => b.ElasticsearchUserId == userId, ct);
+        if (bindings > 0)
+            throw new InvalidOperationException(
+                $"{bindings} application binding(s) still use '{user.Username}'. Remove those first — deleting the user "
+                + "would leave them with credentials that quietly stop working.");
+
+        ElasticsearchCluster cluster = user.ElasticsearchCluster;
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+
+        try
+        {
+            string configMap = UserConfigMapName(cluster, user, "delete");
+            string jobName = JobName(cluster, $"user-del-{user.Username}");
+
+            await k8s.ApplyManifestAsync(
+                BuildScriptConfigMap(cluster, configMap, BuildUserDeleteScript(cluster, user)), kubeconfig, ct);
+            await k8s.ApplyManifestAsync(
+                BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+            await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+            await k8s.DeleteManifestAsync("secret", user.CredentialsSecretName, cluster.Namespace, kubeconfig, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Removing Elasticsearch user {User} from the cluster failed", user.Username);
+        }
+
+        db.ElasticsearchUsers.Remove(user);
+        await db.SaveChangesAsync(ct);
+    }
+
+    public async Task<List<ElasticsearchBinding>> GetBindingsAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.ElasticsearchBindings
+            .Include(b => b.AppDeployment).ThenInclude(d => d.App).ThenInclude(a => a.Customer)
+            .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
+            .Include(b => b.ElasticsearchUser)
+            .Where(b => b.TenantId == tenantId && b.ElasticsearchClusterId == clusterId)
+            .OrderBy(b => b.AppDeployment.Name)
+            .ToListAsync(ct);
+    }
+
+    public async Task<List<AppDeployment>> GetTenantDeploymentsAsync(
+        Guid tenantId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.AppDeployments
+            .Include(d => d.App).ThenInclude(a => a.Customer)
+            .Include(d => d.Cluster)
+            .Where(d => d.App.Customer.TenantId == tenantId)
+            .OrderBy(d => d.App.Name).ThenBy(d => d.Name)
+            .ToListAsync(ct);
+    }
+
+    public async Task<ElasticsearchBinding> CreateBindingAsync(
+        Guid tenantId, Guid clusterId, Guid appDeploymentId, Guid userId, string secretName,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.ElasticsearchUsers.AnyAsync(
+                u => u.Id == userId && u.ElasticsearchClusterId == clusterId && u.TenantId == tenantId, ct))
+            throw new InvalidOperationException("Pick a user on this cluster for the application to connect as.");
+
+        ElasticsearchBinding binding = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            ElasticsearchClusterId = clusterId,
+            AppDeploymentId = appDeploymentId,
+            ElasticsearchUserId = userId,
+            KubernetesSecretName = string.IsNullOrWhiteSpace(secretName) ? "elasticsearch" : secretName.Trim()
+        };
+
+        db.ElasticsearchBindings.Add(binding);
+        await db.SaveChangesAsync(ct);
+
+        await SyncBindingAsync(tenantId, binding.Id, ct);
+        return binding;
+    }
+
+    /// <summary>
+    /// Writes the endpoint, credentials and CA into the application's namespace.
+    ///
+    /// <para>The password is read back out of the Elasticsearch namespace rather than kept here, so
+    /// this is the only moment it exists in the management plane's memory, and re-syncing is how a
+    /// rotated password reaches the application.</para>
+    /// </summary>
+    public async Task SyncBindingAsync(Guid tenantId, Guid bindingId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchBinding binding = await db.ElasticsearchBindings
+            .Include(b => b.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
+            .Include(b => b.ElasticsearchUser)
+            .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
+            .FirstOrDefaultAsync(b => b.Id == bindingId && b.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Binding not found.");
+
+        ElasticsearchCluster cluster = binding.ElasticsearchCluster;
+        string esKubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+
+        string password = await k8s.GetSecretValueAsync(
+            binding.ElasticsearchUser.CredentialsSecretName, "password", cluster.Namespace, esKubeconfig, ct)
+            ?? throw new InvalidOperationException(
+                $"The password Secret for '{binding.ElasticsearchUser.Username}' is not in the cluster. "
+                + "Re-apply the user to recreate it.");
+
+        Dictionary<string, string> data = new()
+        {
+            ["ELASTICSEARCH_URL"] = cluster.HttpEndpoint,
+            ["ELASTICSEARCH_USERNAME"] = binding.ElasticsearchUser.Username,
+            ["ELASTICSEARCH_PASSWORD"] = password
+        };
+
+        // Without the CA the application either fails to connect or is told to skip verification,
+        // and the second one is how a search cluster becomes reachable by anything on the network.
+        string? caCert = await k8s.GetSecretValueAsync(
+            cluster.HttpCertsSecretName, "ca.crt", cluster.Namespace, esKubeconfig, ct);
+        if (!string.IsNullOrEmpty(caCert)) data["ELASTICSEARCH_CA_CRT"] = caCert;
+
+        string appKubeconfig = binding.AppDeployment.Cluster.Kubeconfig!;
+        string appNs = binding.AppDeployment.Namespace;
+
+        await k8s.EnsureNamespaceAsync(appNs, appKubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildBindingSecretManifest(binding.KubernetesSecretName, appNs, data), appKubeconfig, ct);
+
+        binding.LastSyncedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>Removes a binding and the Secret it put in the application's namespace.</summary>
+    public async Task DeleteBindingAsync(Guid tenantId, Guid bindingId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchBinding binding = await db.ElasticsearchBindings
+            .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
+            .FirstOrDefaultAsync(b => b.Id == bindingId && b.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Binding not found.");
+
+        try
+        {
+            await k8s.DeleteManifestAsync("secret", binding.KubernetesSecretName,
+                binding.AppDeployment.Namespace, binding.AppDeployment.Cluster.Kubeconfig!, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Removing the binding Secret {Secret} failed", binding.KubernetesSecretName);
+        }
+
+        db.ElasticsearchBindings.Remove(binding);
+        await db.SaveChangesAsync(ct);
+    }
+
+    private static void ValidateUsername(string username)
+    {
+        if (string.IsNullOrWhiteSpace(username))
+            throw new InvalidOperationException("The user needs a name.");
+
+        if (username.Length > 63)
+            throw new InvalidOperationException("Usernames are 63 characters or fewer.");
+
+        // The name is also a Kubernetes Secret name and a file name inside the Job, so it is held to
+        // the strictest of the three rather than to Elasticsearch's own rules.
+        if (!username.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-'))
+            throw new InvalidOperationException(
+                "A username may only contain lowercase letters, digits and '-' — it also names a Kubernetes Secret.");
+
+        if (!char.IsAsciiLetterOrDigit(username[0]) || !char.IsAsciiLetterOrDigit(username[^1]))
+            throw new InvalidOperationException("A username must start and end with a letter or digit.");
+    }
+
+    private static string GeneratePassword()
+    {
+        // Base64 with the two characters that would need escaping inside a JSON body swapped out:
+        // the password travels to Elasticsearch as a JSON string built in a shell script.
+        byte[] bytes = System.Security.Cryptography.RandomNumberGenerator.GetBytes(24);
+        return Convert.ToBase64String(bytes).Replace("+", "x").Replace("/", "y")[..32];
+    }
 
     // ── Snapshots ──────────────────────────────────────────────────────────────
 
@@ -1666,7 +2008,13 @@ public class ElasticsearchService(
     /// straight from the Secret, and verifies the HTTP layer against the operator's own CA — so no
     /// credential and no <c>-k</c> ever appears anywhere EntKube can see.
     /// </summary>
-    public static string BuildElasticsearchJobManifest(ElasticsearchCluster c, string jobName, string configMapName)
+    /// <param name="userPasswordSecretName">
+    /// A second Secret whose "password" key is handed to the script as <c>ES_USER_PASSWORD</c>. Used
+    /// when the Job creates a user: the password reaches Elasticsearch without ever being in a
+    /// command line, a manifest field or this process's database.
+    /// </param>
+    public static string BuildElasticsearchJobManifest(
+        ElasticsearchCluster c, string jobName, string configMapName, string? userPasswordSecretName = null)
     {
         StringBuilder sb = new();
         sb.AppendLine("apiVersion: batch/v1");
@@ -1708,6 +2056,14 @@ public class ElasticsearchService(
         sb.AppendLine("                secretKeyRef:");
         sb.AppendLine($"                  name: {c.ElasticUserSecretName}");
         sb.AppendLine("                  key: elastic");
+        if (userPasswordSecretName is not null)
+        {
+            sb.AppendLine("            - name: ES_USER_PASSWORD");
+            sb.AppendLine("              valueFrom:");
+            sb.AppendLine("                secretKeyRef:");
+            sb.AppendLine($"                  name: {userPasswordSecretName}");
+            sb.AppendLine("                  key: password");
+        }
         sb.AppendLine("          resources:");
         sb.AppendLine("            requests:");
         sb.AppendLine("              cpu: 50m");
@@ -1868,6 +2224,119 @@ public class ElasticsearchService(
         sb.AppendLine("if [ \"$code\" -ge 300 ]; then cat /tmp/resp; exit 1; fi");
         sb.AppendLine("echo \"---ENTKUBE-SLM---\"");
         sb.AppendLine("cat /tmp/resp");
+        return sb.ToString();
+    }
+
+    /// <summary>The Secret holding one application user's password, in the Elasticsearch namespace.</summary>
+    public static string BuildUserCredentialsSecret(
+        ElasticsearchCluster c, ElasticsearchUser user, string password)
+    {
+        StringBuilder sb = new();
+        sb.AppendLine("apiVersion: v1");
+        sb.AppendLine("kind: Secret");
+        sb.AppendLine("metadata:");
+        sb.AppendLine($"  name: {user.CredentialsSecretName}");
+        sb.AppendLine($"  namespace: {c.Namespace}");
+        sb.AppendLine("  labels:");
+        sb.AppendLine("    entkube.io/managed: \"true\"");
+        sb.AppendLine($"    entkube.io/elasticsearch: {c.Name}");
+        sb.AppendLine("type: Opaque");
+        sb.AppendLine("data:");
+        sb.AppendLine($"  password: {Base64(password)}");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The privileges each access level grants, on the user's own index pattern and nowhere else.
+    /// </summary>
+    public static IReadOnlyList<string> PrivilegesFor(ElasticsearchAccess access) => access switch
+    {
+        ElasticsearchAccess.Viewer => ["read", "view_index_metadata"],
+        // auto_configure is what lets a writer add a field to a data stream's mapping; without it
+        // the first document with a new field is rejected, which reads as a broken client.
+        ElasticsearchAccess.Writer => ["read", "write", "view_index_metadata", "create_index", "auto_configure"],
+        _ => ["all"]
+    };
+
+    /// <summary>
+    /// Creates (or updates) the role and the user. Written so re-running it is harmless: both are
+    /// PUTs, and the password is re-set to whatever the Secret currently holds — which is also how a
+    /// user survives the cluster being rebuilt under it.
+    /// </summary>
+    public static string BuildUserApplyScript(ElasticsearchCluster c, ElasticsearchUser user)
+    {
+        string roleBody = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            // A "manager" may need to see whether the cluster is healthy; a writer does not.
+            ["cluster"] = user.Access == ElasticsearchAccess.Manager ? new[] { "monitor" } : [],
+            ["indices"] = new[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["names"] = new[] { user.IndexPattern },
+                    ["privileges"] = PrivilegesFor(user.Access),
+                    ["allow_restricted_indices"] = false
+                }
+            }
+        }, JsonOpts);
+
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine("cat > /tmp/role.json <<'ENTKUBE_EOF'");
+        sb.AppendLine(roleBody);
+        sb.AppendLine("ENTKUBE_EOF");
+        sb.AppendLine();
+        sb.AppendLine($"put \"/_security/role/{user.RoleName}\" /tmp/role.json");
+        sb.AppendLine();
+        sb.AppendLine("# Unquoted heredoc so the password expands — it is the only thing in here that does,");
+        sb.AppendLine("# and it never reaches an argument list, a log line or a manifest EntKube keeps.");
+        sb.AppendLine("umask 077");
+        sb.AppendLine("cat > /tmp/user.json <<ENTKUBE_EOF");
+        sb.AppendLine("{");
+        sb.AppendLine("  \"password\": \"${ES_USER_PASSWORD}\",");
+        sb.AppendLine($"  \"roles\": [\"{user.RoleName}\"],");
+        sb.AppendLine($"  \"full_name\": \"EntKube application user ({user.Access})\"");
+        sb.AppendLine("}");
+        sb.AppendLine("ENTKUBE_EOF");
+        sb.AppendLine();
+        sb.AppendLine($"put \"/_security/user/{user.Username}\" /tmp/user.json");
+        sb.AppendLine("rm -f /tmp/user.json");
+        return sb.ToString();
+    }
+
+    /// <summary>Removes the user, then the role it was the only holder of.</summary>
+    public static string BuildUserDeleteScript(ElasticsearchCluster c, ElasticsearchUser user)
+    {
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine("del() {");
+        sb.AppendLine("  path=\"$1\"");
+        sb.AppendLine("  code=$($CURL -o /tmp/resp -w '%{http_code}' -X DELETE \"$ES$path\")");
+        sb.AppendLine("  if [ \"$code\" -ge 300 ] && [ \"$code\" != \"404\" ]; then cat /tmp/resp; exit 1; fi");
+        sb.AppendLine("  echo \"DELETE $path -> HTTP $code\"");
+        sb.AppendLine("}");
+        sb.AppendLine();
+        sb.AppendLine($"del \"/_security/user/{user.Username}\"");
+        sb.AppendLine($"del \"/_security/role/{user.RoleName}\"");
+        return sb.ToString();
+    }
+
+    /// <summary>The Secret written into the application's own namespace.</summary>
+    public static string BuildBindingSecretManifest(
+        string secretName, string ns, IReadOnlyDictionary<string, string> data)
+    {
+        StringBuilder sb = new();
+        sb.AppendLine("apiVersion: v1");
+        sb.AppendLine("kind: Secret");
+        sb.AppendLine("metadata:");
+        sb.AppendLine($"  name: {secretName}");
+        sb.AppendLine($"  namespace: {ns}");
+        sb.AppendLine("  labels:");
+        sb.AppendLine("    entkube.io/managed: \"true\"");
+        sb.AppendLine("type: Opaque");
+        sb.AppendLine("data:");
+        foreach ((string key, string value) in data.OrderBy(kv => kv.Key))
+            sb.AppendLine($"  {key}: {Base64(value)}");
         return sb.ToString();
     }
 
@@ -2347,6 +2816,9 @@ public class ElasticsearchService(
     public static string SnapshotConfigMapName(ElasticsearchCluster c, string kind = "setup") =>
         $"{c.Name}-entkube-snapshot-{kind}";
 
+    public static string UserConfigMapName(ElasticsearchCluster c, ElasticsearchUser user, string kind = "apply") =>
+        $"{c.Name}-entkube-user-{user.Username}-{kind}";
+
     /// <summary>
     /// The objects EntKube created beside the CRs, which ECK does not own and so will not collect.
     /// Every one of them is optional — a cluster that never had policies or snapshots has none —
@@ -2363,6 +2835,17 @@ public class ElasticsearchService(
         yield return ("configmap", SnapshotConfigMapName(c, "list"));
         yield return ("configmap", SnapshotConfigMapName(c, "restore"));
         yield return ("secret", c.SnapshotCredentialsSecretName);
+    }
+
+    /// <summary>The password Secret and scripts of each application user on this cluster.</summary>
+    private static IEnumerable<(string Kind, string Name)> UserLeftovers(ElasticsearchCluster c)
+    {
+        foreach (ElasticsearchUser user in c.Users)
+        {
+            yield return ("secret", user.CredentialsSecretName);
+            yield return ("configmap", UserConfigMapName(c, user));
+            yield return ("configmap", UserConfigMapName(c, user, "delete"));
+        }
     }
 
     private static string JobName(ElasticsearchCluster c, string kind) =>

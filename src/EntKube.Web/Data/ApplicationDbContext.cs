@@ -117,6 +117,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<KafkaBinding> KafkaBindings => Set<KafkaBinding>();
     public DbSet<ElasticsearchCluster> ElasticsearchClusters => Set<ElasticsearchCluster>();
     public DbSet<ElasticsearchIlmPolicy> ElasticsearchIlmPolicies => Set<ElasticsearchIlmPolicy>();
+    public DbSet<ElasticsearchUser> ElasticsearchUsers => Set<ElasticsearchUser>();
+    public DbSet<ElasticsearchBinding> ElasticsearchBindings => Set<ElasticsearchBinding>();
     public DbSet<GitRepository> GitRepositories => Set<GitRepository>();
     public DbSet<GitKnownHost> GitKnownHosts => Set<GitKnownHost>();
     public DbSet<CustomerGitRepoPolicy> CustomerGitRepoPolicies => Set<CustomerGitRepoPolicy>();
@@ -2354,6 +2356,46 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithOne(p => p.ElasticsearchCluster)
                 .HasForeignKey(p => p.ElasticsearchClusterId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasMany(c => c.Users)
+                .WithOne(u => u.ElasticsearchCluster)
+                .HasForeignKey(u => u.ElasticsearchClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ElasticsearchUser>(entity =>
+        {
+            entity.HasKey(u => u.Id);
+            entity.Property(u => u.Username).HasMaxLength(63).IsRequired();
+            entity.Property(u => u.IndexPattern).HasMaxLength(255).IsRequired();
+            entity.Property(u => u.LastError).HasMaxLength(2000);
+            entity.HasIndex(u => new { u.ElasticsearchClusterId, u.Username }).IsUnique();
+        });
+
+        builder.Entity<ElasticsearchBinding>(entity =>
+        {
+            entity.HasKey(b => b.Id);
+            entity.Property(b => b.KubernetesSecretName).HasMaxLength(253).IsRequired();
+
+            entity.HasOne(b => b.ElasticsearchCluster)
+                .WithMany()
+                .HasForeignKey(b => b.ElasticsearchClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Restrict rather than cascade: deleting a user an app is still bound to would leave the
+            // app holding a Secret whose credentials no longer work, and nothing saying why. The
+            // service removes the bindings first, deliberately and visibly.
+            entity.HasOne(b => b.ElasticsearchUser)
+                .WithMany()
+                .HasForeignKey(b => b.ElasticsearchUserId)
+                .OnDelete(DeleteBehavior.Restrict);
+
+            entity.HasOne(b => b.AppDeployment)
+                .WithMany()
+                .HasForeignKey(b => b.AppDeploymentId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasIndex(b => new { b.AppDeploymentId, b.KubernetesSecretName }).IsUnique();
         });
 
         builder.Entity<ElasticsearchIlmPolicy>(entity =>
