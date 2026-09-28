@@ -96,3 +96,14 @@ public static class MailboxConnectionResolver
 /// stay dead after the operator did the very thing the message asked them to do.</para>
 /// </summary>
 public sealed class CredentialPendingApplyException(string message) : Exception(message);
+
+/// <summary>
+/// The mail server could not be reached at all — no TCP connection, no TLS, no greeting.
+///
+/// <para>Separate from a rejected credential because nothing was presented, and separate from the
+/// generic socket failure because the message names the address that was tried. For a mailbox on a
+/// managed server that address is derived rather than typed, so a bare <c>Resource temporarily
+/// unavailable</c> tells an operator neither which name failed nor that a name was involved.</para>
+/// </summary>
+public sealed class MailboxUnreachableException(string message, Exception inner)
+    : Exception(message, inner);

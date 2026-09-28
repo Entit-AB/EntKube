@@ -1955,6 +1955,31 @@ public class StalwartService(
             trustedSenderDomains, accountPasswords);
         List<string> output = [];
 
+        // The misconfiguration with no per-listener escape, caught with addresses already in hand.
+        //
+        // Stalwart demands a PROXY header from every peer matching proxyTrustedNetworks, on every
+        // listener: NetworkListener.overrideProxyTrustedNetworks falls back to the global list when it
+        // is empty, so "trusted, but not on this port" cannot be expressed. A list that also covers
+        // addresses inside the cluster therefore breaks every in-cluster client — the support mailbox
+        // poller, webmail, and the admin UI and JMAP, which arrive through the gateway whose pods these
+        // are. It fails as a connection that never completes, which reads as a network fault rather
+        // than as configuration, so it is worth saying plainly at the moment it is applied.
+        List<string> proxyNetworks = StalwartPlanBuilder.ProxyTrustedNetworks(config);
+        List<string> overreaching = [.. proxyNetworks.Where(n => proxyAddresses
+            .Select(a => System.Net.IPAddress.TryParse(a, out System.Net.IPAddress? ip) ? ip : null)
+            .Any(ip => ip is not null && StalwartPlanBuilder.TrustedNetworkCovers(n, ip)))];
+
+        if (overreaching.Count > 0)
+        {
+            output.Add(
+                "WARNING: the PROXY protocol trusted-networks list covers addresses inside this "
+                + $"cluster ({string.Join(", ", overreaching)} matches the ingress gateway). Stalwart "
+                + "requires a PROXY header from every address it trusts, on every port, and there is no "
+                + "way to exempt one — so in-cluster clients that send no header (the support mailbox, "
+                + "webmail, the admin interface through the gateway) will fail to connect at all. List "
+                + "only the load balancer's own subnet.");
+        }
+
         // Named rather than dropped quietly. An address the server would refuse is left out of the plan
         // on purpose — sending it aborts the apply before the accounts — but an allow-list that is
         // quietly shorter than intended is how the gateway gets banned, so it has to be said.

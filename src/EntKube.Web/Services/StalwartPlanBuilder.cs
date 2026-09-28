@@ -290,6 +290,55 @@ public static class StalwartPlanBuilder
                 .ToList();
 
     /// <summary>
+    /// Whether a trusted-networks entry covers this address.
+    ///
+    /// <para>Used to catch the misconfiguration that has no per-listener escape. Stalwart requires a
+    /// PROXY header from every peer matching <c>proxyTrustedNetworks</c>, on every listener — the
+    /// listener-level override inherits the global list when it is empty, so there is no way to say
+    /// "not on this port". An entry that also matches addresses inside the cluster therefore makes the
+    /// server wait for a header that in-cluster clients never send: the support mailbox poller, webmail,
+    /// and the admin UI and JMAP arriving through the gateway. The list has to name the load balancer's
+    /// own subnet and nothing wider.</para>
+    /// </summary>
+    public static bool TrustedNetworkCovers(string network, System.Net.IPAddress address)
+    {
+        string text = (network ?? "").Trim();
+        int slash = text.LastIndexOf('/');
+
+        if (!System.Net.IPAddress.TryParse(slash < 0 ? text : text[..slash].Trim(),
+                out System.Net.IPAddress? prefixAddress))
+        {
+            return false;
+        }
+
+        if (prefixAddress.AddressFamily != address.AddressFamily)
+        {
+            return false;
+        }
+
+        if (slash < 0)
+        {
+            return prefixAddress.Equals(address);
+        }
+
+        if (!int.TryParse(text[(slash + 1)..].Trim(), out int prefix))
+        {
+            return false;
+        }
+
+        try
+        {
+            return new System.Net.IPNetwork(prefixAddress, prefix).Contains(address);
+        }
+        catch (ArgumentException)
+        {
+            // A prefix length the family cannot carry. Not ours to report here — the plan refuses it
+            // separately — and certainly not a reason to throw out of a diagnostic.
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Hands a tag back to the rule set's own score, undoing a previous override.
     ///
     /// <para>Removing the override object would be the obvious way and is the wrong one: the plan

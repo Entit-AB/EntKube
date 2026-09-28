@@ -7547,6 +7547,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(2000)
                         .HasColumnType("nvarchar(2000)");
 
+                    b.Property<bool>("LastErrorWasRejection")
+                        .HasColumnType("bit");
+
                     b.Property<DateTime?>("LastMessageAt")
                         .HasColumnType("datetime2");
 

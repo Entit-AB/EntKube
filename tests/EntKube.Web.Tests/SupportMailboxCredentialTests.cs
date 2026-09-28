@@ -227,6 +227,35 @@ public class SupportMailboxCredentialTests : IDisposable
     }
 
     [Fact]
+    public async Task A_connection_that_never_completed_is_not_recorded_as_a_rejection()
+    {
+        // What the screen says about giving up has to match what happened. It used to say a password was
+        // being rejected for every kind of failure, including this one — where the connection never got
+        // as far as authenticating and no credential was presented at all — and that wording sent two
+        // debugging sessions after the credential while the error beside it said otherwise.
+        (Guid componentId, Guid accountId, StalwartComponentConfig config) =
+            await GivenAServerAsync(StalwartAuthMode.Internal);
+
+        await ChooseAsync(componentId, accountId);
+
+        config.LastAppliedAt = DateTime.UtcNow.AddMinutes(1);
+        await db.SaveChangesAsync();
+
+        await mailboxes.PollAsync(tenantId);
+
+        SupportMailbox mailbox = await db.SupportMailboxes
+            .AsNoTracking().FirstAsync(m => m.TenantId == tenantId);
+
+        mailbox.ConsecutiveFailures.Should().Be(1, "there is no mail server at that Service name");
+        mailbox.LastErrorWasRejection.Should().BeFalse();
+
+        // And the message points at the thing that actually could not be done, naming the address —
+        // which is derived from the component, never typed, so an operator has no other way to see it.
+        mailbox.LastError.Should().Contain("Nothing was authenticated");
+        mailbox.LastError.Should().Contain("mail.messaging.svc.cluster.local:993");
+    }
+
+    [Fact]
     public async Task A_hand_entered_password_is_removed_when_the_mailbox_moves_to_a_managed_server()
     {
         // It is a credential for a different account on a different server, and no code path can reach

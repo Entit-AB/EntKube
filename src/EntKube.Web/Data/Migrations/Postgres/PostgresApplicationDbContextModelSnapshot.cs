@@ -7543,6 +7543,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(2000)
                         .HasColumnType("character varying(2000)");
 
+                    b.Property<bool>("LastErrorWasRejection")
+                        .HasColumnType("boolean");
+
                     b.Property<DateTime?>("LastMessageAt")
                         .HasColumnType("timestamp with time zone");
 

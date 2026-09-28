@@ -297,6 +297,35 @@ public class StalwartMailTests
         addresses.Should().ContainSingle(a => a == "10.240.3.59");
     }
 
+    /// <summary>
+    /// Which addresses a trusted-networks entry covers — the check behind the warning about a list
+    /// that reaches into the cluster.
+    ///
+    /// <para>Stalwart demands a PROXY header from every peer matching <c>proxyTrustedNetworks</c>, on
+    /// every listener. <c>overrideProxyTrustedNetworks</c> cannot be used to exempt one: it falls back
+    /// to the global list when it is empty, so emptiness means inherit and there is no way to say "not
+    /// here". An entry covering pod or gateway addresses therefore stops the support mailbox, webmail
+    /// and the admin interface connecting at all, and it fails as a connection that never completes —
+    /// which reads as a network fault rather than as configuration.</para>
+    /// </summary>
+    [Theory]
+    // A balancer subnet, which is what the field is for: the gateway pod is not in it.
+    [InlineData("10.240.3.0/24", "10.240.3.59", true)]
+    [InlineData("10.240.3.0/24", "100.64.12.7", false)]
+    // The over-broad entries that cause the outage.
+    [InlineData("10.0.0.0/8", "10.240.3.59", true)]
+    [InlineData("10.0.0.0/8", "10.4.0.9", true)]
+    [InlineData("100.64.0.0/10", "100.64.12.7", true)]
+    // A bare address covers only itself.
+    [InlineData("10.240.3.59", "10.240.3.59", true)]
+    [InlineData("10.240.3.59", "10.240.3.60", false)]
+    // Families do not cross, and nonsense is not a match.
+    [InlineData("fc00::/8", "10.240.3.59", false)]
+    [InlineData("not-a-network", "10.240.3.59", false)]
+    public void Plan_KnowsWhichAddressesATrustedNetworkCovers(string network, string address, bool covers) =>
+        StalwartPlanBuilder.TrustedNetworkCovers(network, System.Net.IPAddress.Parse(address))
+            .Should().Be(covers);
+
     private static List<YamlDocument> Parse(string manifest)
     {
         YamlStream stream = [];

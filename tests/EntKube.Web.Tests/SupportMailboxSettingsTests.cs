@@ -193,6 +193,7 @@ public class SupportMailboxSettingsTests : IDisposable
         nameof(SupportMailbox.LastMessageAt),
         nameof(SupportMailbox.LastError),
         nameof(SupportMailbox.ConsecutiveFailures),
+        nameof(SupportMailbox.LastErrorWasRejection),
         nameof(SupportMailbox.CreatedAt),
         nameof(SupportMailbox.UpdatedAt),
         nameof(SupportMailbox.Tenant),
