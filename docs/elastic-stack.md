@@ -12,6 +12,7 @@ managed under **Services › Search**.
 | Elasticsearch | `Elasticsearch` CR applied by `ElasticsearchService` |
 | Kibana | `Kibana` CR, one per Elasticsearch cluster, sharing its name |
 | Lifecycle policies | ILM policies + composable index templates, applied by a Job inside the cluster |
+| Snapshots | S3 repository + SLM policy, registered by a Job; restores run the same way |
 
 The operator on its own starts nothing. Installing it and stopping there leaves a working controller
 with no clusters, which is why its catalog entry points at Services › Search.
@@ -109,6 +110,28 @@ is read separately.
 left alone: deleting the repository is how you lose the backups you turned this off while still
 having. Deleting the *cluster* removes the keystore Secret and the ConfigMaps EntKube created, but
 never the bucket.
+
+## Restoring
+
+**List snapshots** runs a Job that reads the repository and shows what is in it, with each
+snapshot's state — a `PARTIAL` one restores, but not all of it, and is not a clean backup.
+
+Restoring has two modes, because they are different decisions:
+
+- **Side by side** (the default) restores the matching indices under a prefix. Nothing live is
+  touched, so somebody can look at what came back before trusting it. Aliases are deliberately left
+  behind — restoring them would collide with the live aliases still pointing at the live indices,
+  and Elasticsearch fails the whole restore over it. The global cluster state cannot be restored
+  this way at all: there is only one set of settings, templates and ILM policies, so restoring them
+  always overwrites the live ones.
+- **In place** closes the matching indices, restores over them, and Elasticsearch reopens them when
+  the data is back. The close is not a nicety — Elasticsearch refuses to restore into an open index,
+  and without it the restore fails having done nothing, which reads as a broken backup rather than a
+  busy index. This mode asks for confirmation, and is written to the audit log with the operator's
+  name, the snapshot and the pattern.
+
+Both report Elasticsearch's own response rather than a claim that it worked. A large restore takes
+longer than the page waits; the Job keeps going in the cluster and says so.
 
 ## Publishing Kibana
 

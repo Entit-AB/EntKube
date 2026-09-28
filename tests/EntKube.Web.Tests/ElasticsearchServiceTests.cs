@@ -25,6 +25,7 @@ public class ElasticsearchServiceTests : IDisposable
     private readonly ApplicationDbContext db;
     private readonly Mock<IKubernetesClientFactory> k8s;
     private readonly VaultService vault;
+    private readonly AuditService audit;
     private readonly ElasticsearchService sut;
 
     private readonly Guid tenantId = Guid.NewGuid();
@@ -36,7 +37,9 @@ public class ElasticsearchServiceTests : IDisposable
         db = testDb.CreateContext();
         k8s = new Mock<IKubernetesClientFactory>();
         vault = testDb.CreateVaultService();
-        sut = new ElasticsearchService(testDb.Factory, k8s.Object, vault, NullLogger<ElasticsearchService>.Instance);
+        audit = new AuditService(testDb.Factory);
+        sut = new ElasticsearchService(
+            testDb.Factory, k8s.Object, vault, audit, NullLogger<ElasticsearchService>.Instance);
     }
 
     public void Dispose()
@@ -1065,5 +1068,130 @@ public class ElasticsearchServiceTests : IDisposable
         await sut.UpdateClusterAsync(tenantId, edited);
 
         applied.Single(m => m.Contains("kind: Elasticsearch")).Should().NotContain("secureSettings");
+    }
+    // ──────── Listing and restoring ────────
+
+    private const string RepositoryListing = """
+        waiting for cluster
+        ---ENTKUBE-SNAPSHOTS---
+        {"snapshots":[
+          {"snapshot":"search-snap-2026.09.27","state":"SUCCESS","start_time_in_millis":1790000000000,
+           "end_time_in_millis":1790000060000,"indices":["logs-app-000001","logs-app-000002"],
+           "shards":{"total":4,"failed":0,"successful":4}},
+          {"snapshot":"search-snap-2026.09.28","state":"PARTIAL","start_time_in_millis":1790086400000,
+           "end_time_in_millis":0,"indices":["logs-app-000003"],"shards":{"total":2,"failed":1,"successful":1}}
+        ]}
+        """;
+
+    [Fact]
+    public void TheRepositoryListingIsReadBackFromTheJobLog()
+    {
+        List<ElasticsearchService.ElasticsearchSnapshotInfo> snaps =
+            ElasticsearchService.ParseSnapshotList(RepositoryListing);
+
+        // Newest first: the one somebody is most likely to want is the one they reach for.
+        snaps.Select(x => x.Name).Should().Equal("search-snap-2026.09.28", "search-snap-2026.09.27");
+
+        snaps[1].Complete.Should().BeTrue();
+        snaps[1].IndexCount.Should().Be(2);
+        snaps[1].EndedAt.Should().Be(DateTimeOffset.FromUnixTimeMilliseconds(1790000060000).UtcDateTime);
+
+        // A partial snapshot restores, but not all of it — it must not read as a clean backup.
+        snaps[0].Complete.Should().BeFalse();
+        snaps[0].FailedShards.Should().Be(1);
+        // end_time_in_millis is 0 while a snapshot is still running, which is not "finished in 1970".
+        snaps[0].EndedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ListingSnapshotsOnAClusterWithNoRepository_SaysSo()
+    {
+        (ElasticsearchCluster c, _) = await SeedClusterWithStorageAsync(withCredentials: false);
+
+        Func<Task> act = () => sut.ListSnapshotsAsync(tenantId, c.Id);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*no snapshot repository*");
+    }
+
+    [Fact]
+    public void ASideBySideRestore_RenamesAndLeavesTheLiveIndicesAlone()
+    {
+        string script = ElasticsearchService.BuildRestoreScript(
+            SampleCluster(), "search-snap-2026.09.28", "logs-app-*",
+            ElasticsearchService.RestoreMode.SideBySide, "restored-", includeGlobalState: false);
+
+        script.Should().Contain("\"rename_replacement\": \"restored-$1\"");
+        script.Should().Contain("_snapshot/entkube-s3/search-snap-2026.09.28/_restore?wait_for_completion=true");
+        // Nothing live is closed, and aliases stay with the indices they currently point at.
+        script.Should().NotContain("_close");
+        script.Should().Contain("\"include_aliases\": false");
+    }
+
+    [Fact]
+    public void AnInPlaceRestore_ClosesTheTargetIndicesFirst()
+    {
+        string script = ElasticsearchService.BuildRestoreScript(
+            SampleCluster(), "search-snap-2026.09.28", "logs-app-*",
+            ElasticsearchService.RestoreMode.InPlace, "", includeGlobalState: true);
+
+        // Without the close, Elasticsearch refuses the restore and the backup looks broken.
+        script.Should().Contain("/logs-app-*/_close?ignore_unavailable=true");
+        script.Should().Contain("\"include_global_state\": true");
+        script.Should().NotContain("rename_pattern");
+    }
+
+    [Fact]
+    public async Task ASideBySideRestoreOfTheGlobalState_IsRefused()
+    {
+        (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
+
+        // There is only one set of cluster settings, so "alongside" is not a thing it can be.
+        Func<Task> act = () => sut.RestoreSnapshotAsync(
+            tenantId, c.Id, "snap-1", "*", ElasticsearchService.RestoreMode.SideBySide,
+            "restored-", includeGlobalState: true, performedBy: "nils");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*cannot be restored side by side*");
+    }
+
+    [Fact]
+    public async Task ASideBySideRestoreWithoutAPrefix_IsRefused()
+    {
+        (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
+
+        Func<Task> act = () => sut.RestoreSnapshotAsync(
+            tenantId, c.Id, "snap-1", "*", ElasticsearchService.RestoreMode.SideBySide,
+            "", includeGlobalState: false, performedBy: "nils");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*needs a prefix*");
+    }
+
+    [Fact]
+    public async Task ARestoreIsWrittenToTheAuditLog_WithAName()
+    {
+        (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+        await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
+
+        await sut.RestoreSnapshotAsync(
+            tenantId, c.Id, "search-snap-2026.09.28", "logs-app-*",
+            ElasticsearchService.RestoreMode.InPlace, "", includeGlobalState: false, performedBy: "nils");
+
+        AuditEvent recorded = await db.AuditEvents.AsNoTracking()
+            .SingleAsync(e => e.ResourceKind == "Elasticsearch");
+
+        recorded.Action.Should().Be("elasticsearch.restore.in-place");
+        recorded.PerformedBy.Should().Be("nils");
+        recorded.ResourceName.Should().Be("search/search");
+        recorded.Details.Should().Contain("search-snap-2026.09.28").And.Contain("over the live indices");
     }
 }

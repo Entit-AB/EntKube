@@ -3,6 +3,7 @@
 @inject ElasticsearchService Search
 @inject TenantService TenantService
 @inject StorageService StorageService
+@inject CurrentActor Actor
 @inject ToastService Toasts
 
 @* ===========================================================================
@@ -498,6 +499,123 @@
                             }
                         </div>
 
+                        @* ── Snapshots in the repository, and restoring one ── *@
+                        @if (cluster.SnapshotsEnabled)
+                        {
+                            <div class="mb-3 border-top pt-3">
+                                <div class="d-flex align-items-center mb-2">
+                                    <strong class="small"><i class="bi bi-archive me-1"></i>In the repository</strong>
+                                    <button class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2"
+                                            @onclick="() => LoadSnapshotsAsync(cluster)" disabled="@snapshotBusy">
+                                        @if (snapshotBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                        List snapshots
+                                    </button>
+                                </div>
+
+                                @if (repositorySnapshotsFor == cluster.Id)
+                                {
+                                    @if (repositorySnapshots.Count == 0)
+                                    {
+                                        <p class="text-muted small mb-0">The repository is empty — nothing has been snapshotted yet.</p>
+                                    }
+                                    else
+                                    {
+                                        <table class="table table-sm table-borderless small mb-0">
+                                            <thead class="text-muted"><tr><th>Snapshot</th><th>State</th><th>Taken</th><th>Indices</th><th></th></tr></thead>
+                                            <tbody>
+                                                @foreach (ElasticsearchService.ElasticsearchSnapshotInfo snap in repositorySnapshots)
+                                                {
+                                                    <tr>
+                                                        <td><code>@snap.Name</code></td>
+                                                        <td>
+                                                            @if (snap.Complete)
+                                                            {
+                                                                <span class="badge bg-success-subtle text-success border border-success-subtle">@snap.State</span>
+                                                            }
+                                                            else
+                                                            {
+                                                                <span class="badge bg-warning-subtle text-warning border border-warning-subtle"
+                                                                      title="@($"{snap.FailedShards} shard(s) did not make it in")">@snap.State</span>
+                                                            }
+                                                        </td>
+                                                        <td class="text-muted">@(snap.StartedAt?.ToString("yyyy-MM-dd HH:mm") ?? "—")</td>
+                                                        <td class="text-muted">@snap.IndexCount</td>
+                                                        <td>
+                                                            <button class="btn btn-sm btn-outline-secondary border-0 py-0"
+                                                                    @onclick="() => ShowRestoreForm(cluster, snap)">
+                                                                Restore…
+                                                            </button>
+                                                        </td>
+                                                    </tr>
+                                                }
+                                            </tbody>
+                                        </table>
+                                    }
+                                }
+
+                                @if (restoreSnapshotName is not null && restoreClusterId == cluster.Id)
+                                {
+                                    <div class="card border-warning mt-2"><div class="card-body py-2">
+                                        <h6 class="small fw-semibold mb-2">
+                                            <i class="bi bi-arrow-counterclockwise me-1"></i>Restore <code>@restoreSnapshotName</code>
+                                        </h6>
+                                        <div class="row g-2">
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Indices to restore</label>
+                                                <input class="form-control form-control-sm" @bind="restoreIndexPattern" placeholder="*" />
+                                                <div class="form-text small">A pattern within the snapshot. <code>*</code> is everything in it.</div>
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Mode</label>
+                                                <select class="form-select form-select-sm" @bind="restoreInPlace">
+                                                    <option value="false">Side by side — restore under a prefix</option>
+                                                    <option value="true">In place — replace the live indices</option>
+                                                </select>
+                                            </div>
+                                            @if (!restoreInPlace)
+                                            {
+                                                <div class="col-md-4">
+                                                    <label class="form-label small mb-1">Restore under prefix</label>
+                                                    <input class="form-control form-control-sm" @bind="restorePrefix" placeholder="restored-" />
+                                                </div>
+                                            }
+                                            else
+                                            {
+                                                <div class="col-md-4 d-flex align-items-end">
+                                                    <div class="form-check">
+                                                        <input class="form-check-input" type="checkbox" id="restoreGlobal" @bind="restoreGlobalState" />
+                                                        <label class="form-check-label small" for="restoreGlobal">
+                                                            Also restore the cluster state
+                                                            <span class="text-muted">— templates, ILM policies and roles, overwriting the live ones.</span>
+                                                        </label>
+                                                    </div>
+                                                </div>
+                                            }
+                                        </div>
+
+                                        @if (restoreInPlace)
+                                        {
+                                            <div class="alert alert-warning py-1 px-2 small mt-2 mb-0">
+                                                The matching indices are closed and their contents replaced by the snapshot's. Anything written to them
+                                                since <code>@restoreSnapshotName</code> was taken is gone.
+                                            </div>
+                                        }
+
+                                        @if (restoreError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@restoreError</div> }
+                                        @if (restoreLog is not null) { <pre class="small bg-body-tertiary p-2 mt-2 mb-0" style="max-height:12rem;overflow:auto">@restoreLog</pre> }
+
+                                        <div class="mt-2 d-flex gap-1">
+                                            <button class="btn btn-sm btn-warning" @onclick="() => ConfirmRestore(cluster)" disabled="@restoring">
+                                                @if (restoring) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Restore
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="CancelRestore">Cancel</button>
+                                        </div>
+                                    </div></div>
+                                }
+                            </div>
+                        }
+
                         @* ── Index lifecycle policies ── *@
                         @{ List<ElasticsearchIlmPolicy> policies = allPolicies.TryGetValue(cluster.Id, out List<ElasticsearchIlmPolicy>? pl) ? pl : []; }
                         <div class="mb-3 border-top pt-3">
@@ -690,6 +808,19 @@
     private int snapshotMaxCount = 50;
     private bool snapshotBusy;
     private string? snapshotError;
+
+    // Repository listing + restore
+    private Guid? repositorySnapshotsFor;
+    private List<ElasticsearchService.ElasticsearchSnapshotInfo> repositorySnapshots = [];
+    private Guid? restoreClusterId;
+    private string? restoreSnapshotName;
+    private string restoreIndexPattern = "*";
+    private bool restoreInPlace;
+    private string restorePrefix = "restored-";
+    private bool restoreGlobalState;
+    private bool restoring;
+    private string? restoreError;
+    private string? restoreLog;
 
     // Policy form
     private Guid? addPolicyClusterId;
@@ -1218,6 +1349,80 @@
         }
         catch (Exception ex) { Toasts.Error(ex.Message); }
         finally { snapshotBusy = false; }
+    }
+
+    // ── Restore ───────────────────────────────────────────────────────────────
+
+    private async Task LoadSnapshotsAsync(ElasticsearchCluster cluster)
+    {
+        snapshotBusy = true;
+        try
+        {
+            repositorySnapshots = await Search.ListSnapshotsAsync(TenantId, cluster.Id);
+            repositorySnapshotsFor = cluster.Id;
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { snapshotBusy = false; }
+    }
+
+    private void ShowRestoreForm(ElasticsearchCluster cluster, ElasticsearchService.ElasticsearchSnapshotInfo snap)
+    {
+        restoreClusterId = cluster.Id;
+        restoreSnapshotName = snap.Name;
+        restoreIndexPattern = "*";
+        restoreInPlace = false;
+        restorePrefix = "restored-";
+        restoreGlobalState = false;
+        restoreError = null;
+        restoreLog = null;
+    }
+
+    private void CancelRestore()
+    {
+        restoreClusterId = null;
+        restoreSnapshotName = null;
+        restoreError = null;
+        restoreLog = null;
+    }
+
+    private void ConfirmRestore(ElasticsearchCluster cluster)
+    {
+        // Side by side changes nothing that is live, so it runs on the button. In place replaces
+        // data, and gets the same confirmation as any other destructive action here.
+        if (!restoreInPlace)
+        {
+            _ = RunRestoreAsync(cluster);
+            return;
+        }
+
+        pendingConfirm = new PendingConfirm(
+            $"Restore \"{restoreSnapshotName}\" over the live indices matching \"{restoreIndexPattern}\" on \"{cluster.Name}\"? "
+            + "They are closed and their contents replaced — anything written since the snapshot was taken is gone.",
+            "Restore over live data",
+            () => RunRestoreAsync(cluster));
+    }
+
+    private async Task RunRestoreAsync(ElasticsearchCluster cluster)
+    {
+        restoring = true;
+        restoreError = null;
+        restoreLog = null;
+        try
+        {
+            string log = await Search.RestoreSnapshotAsync(
+                TenantId, cluster.Id, restoreSnapshotName!, restoreIndexPattern,
+                restoreInPlace ? ElasticsearchService.RestoreMode.InPlace : ElasticsearchService.RestoreMode.SideBySide,
+                restorePrefix, restoreInPlace && restoreGlobalState, await Actor.NameAsync());
+
+            // Show what Elasticsearch actually said rather than a claim that it worked.
+            restoreLog = log;
+            Toasts.Success($"Restored \"{restoreSnapshotName}\".");
+        }
+        catch (Exception ex)
+        {
+            restoreError = ex.Message;
+        }
+        finally { restoring = false; StateHasChanged(); }
     }
 
     // ── Presentation helpers ──────────────────────────────────────────────────

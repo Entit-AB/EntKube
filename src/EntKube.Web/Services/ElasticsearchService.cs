@@ -165,6 +165,7 @@ public class ElasticsearchService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     IKubernetesClientFactory k8s,
     VaultService vaultService,
+    AuditService auditService,
     ILogger<ElasticsearchService> logger)
 {
     /// <summary>Above this share of committed memory the cluster is warned about, not refused.</summary>
@@ -1043,6 +1044,202 @@ public class ElasticsearchService(
         await db.SaveChangesAsync(ct);
     }
 
+    /// <summary>One snapshot as the repository lists it.</summary>
+    /// <param name="Name">The snapshot name SLM gave it.</param>
+    /// <param name="State">SUCCESS, PARTIAL, FAILED or IN_PROGRESS.</param>
+    /// <param name="StartedAt">When it started, UTC.</param>
+    /// <param name="EndedAt">When it finished, UTC. Null while it is still running.</param>
+    /// <param name="IndexCount">How many indices it holds.</param>
+    /// <param name="FailedShards">Shards that did not make it in — non-zero means PARTIAL.</param>
+    public sealed record ElasticsearchSnapshotInfo(
+        string Name, string State, DateTime? StartedAt, DateTime? EndedAt, int IndexCount, int FailedShards)
+    {
+        /// <summary>A PARTIAL snapshot restores, but not all of it — say so rather than listing it as a backup.</summary>
+        public bool Complete => string.Equals(State, "SUCCESS", StringComparison.OrdinalIgnoreCase);
+    }
+
+    /// <summary>How a restore treats data that is already in the cluster.</summary>
+    public enum RestoreMode
+    {
+        /// <summary>
+        /// Restore under a new name, leaving everything live untouched. The safe default, and the
+        /// only one that lets somebody look at what they restored before trusting it.
+        /// </summary>
+        SideBySide,
+
+        /// <summary>
+        /// Restore over the existing indices. They are closed first, because Elasticsearch refuses
+        /// to restore into an open index, and it reopens them itself once the data is back.
+        /// </summary>
+        InPlace
+    }
+
+    /// <summary>
+    /// Lists what is actually in the repository. This is a read, but it still goes through a Job —
+    /// the repository lives behind the same authentication as everything else.
+    /// </summary>
+    public async Task<List<ElasticsearchSnapshotInfo>> ListSnapshotsAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        if (!cluster.SnapshotsEnabled)
+            throw new InvalidOperationException("This cluster has no snapshot repository configured.");
+
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string configMap = SnapshotConfigMapName(cluster, "list");
+        string jobName = JobName(cluster, "snapshot-list");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildSnapshotListScript(cluster)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+        if (outcome == JobOutcome.Failed)
+            throw new InvalidOperationException("Listing the snapshots failed:\n" + Truncate(log, 1200));
+        if (outcome == JobOutcome.StillRunning)
+            throw new InvalidOperationException(
+                "The cluster did not answer in time. It may still be starting — try again in a moment.");
+
+        return ParseSnapshotList(log);
+    }
+
+    /// <summary>
+    /// Restores one snapshot.
+    ///
+    /// <para>Side by side is the default and touches nothing: the indices come back under a prefix,
+    /// so somebody can look at what they restored before trusting it. In place closes the matching
+    /// indices first — Elasticsearch will not restore into an open index — and Elasticsearch reopens
+    /// them itself when the data is back. That one replaces live data, which is why it is a separate
+    /// mode rather than a checkbox, and why it is written to the audit log with a name on it.</para>
+    ///
+    /// <para>Returns the job's own output, so the caller can show what Elasticsearch actually did
+    /// rather than a claim that it worked.</para>
+    /// </summary>
+    public async Task<string> RestoreSnapshotAsync(
+        Guid tenantId,
+        Guid clusterId,
+        string snapshotName,
+        string indexPattern,
+        RestoreMode mode,
+        string renamePrefix,
+        bool includeGlobalState,
+        string performedBy,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        if (!cluster.SnapshotsEnabled)
+            throw new InvalidOperationException("This cluster has no snapshot repository configured.");
+
+        if (string.IsNullOrWhiteSpace(snapshotName))
+            throw new InvalidOperationException("Which snapshot?");
+
+        if (string.IsNullOrWhiteSpace(indexPattern))
+            throw new InvalidOperationException("An index pattern is required — \"*\" for everything in the snapshot.");
+
+        if (mode == RestoreMode.SideBySide && string.IsNullOrWhiteSpace(renamePrefix))
+            throw new InvalidOperationException(
+                "A side-by-side restore needs a prefix to restore under, or it would collide with the live indices "
+                + "it is meant to leave alone.");
+
+        if (mode == RestoreMode.SideBySide && includeGlobalState)
+            throw new InvalidOperationException(
+                "The global state cannot be restored side by side — there is only one set of cluster settings, "
+                + "templates and ILM policies, so restoring them always overwrites the live ones.");
+
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string configMap = SnapshotConfigMapName(cluster, "restore");
+        string jobName = JobName(cluster, "snapshot-restore");
+
+        await auditService.RecordAsync(
+            deploymentId: null,
+            action: mode == RestoreMode.InPlace ? "elasticsearch.restore.in-place" : "elasticsearch.restore",
+            resourceKind: "Elasticsearch",
+            resourceName: $"{cluster.Namespace}/{cluster.Name}",
+            details: $"snapshot '{snapshotName}', indices '{indexPattern}'"
+                + (mode == RestoreMode.SideBySide ? $", restored under '{renamePrefix}'" : ", over the live indices")
+                + (includeGlobalState ? ", including the global cluster state" : ""),
+            performedBy: performedBy,
+            ct: ct);
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap,
+                BuildRestoreScript(cluster, snapshotName, indexPattern, mode, renamePrefix, includeGlobalState)),
+            kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+        return outcome switch
+        {
+            JobOutcome.Succeeded => log,
+            JobOutcome.Failed => throw new InvalidOperationException(
+                "The restore failed. Elasticsearch said:\n" + Truncate(log, 1200)),
+            _ => throw new InvalidOperationException(
+                $"The restore job '{jobName}' is still running — a large restore takes longer than this page waits. "
+                + "It continues in the cluster; watch the job's logs or the cluster's health for the result.")
+        };
+    }
+
+    /// <summary>Reads the snapshot list out of the list job's log.</summary>
+    public static List<ElasticsearchSnapshotInfo> ParseSnapshotList(string log)
+    {
+        List<ElasticsearchSnapshotInfo> result = [];
+
+        const string marker = "---ENTKUBE-SNAPSHOTS---";
+        int at = log.IndexOf(marker, StringComparison.Ordinal);
+        if (at < 0) return result;
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(log[(at + marker.Length)..].Trim());
+            if (!doc.RootElement.TryGetProperty("snapshots", out JsonElement snapshots)) return result;
+
+            foreach (JsonElement snap in snapshots.EnumerateArray())
+            {
+                string name = snap.TryGetProperty("snapshot", out JsonElement n) ? n.GetString() ?? "" : "";
+                if (name.Length == 0) continue;
+
+                string state = snap.TryGetProperty("state", out JsonElement st) ? st.GetString() ?? "" : "";
+
+                DateTime? started = snap.TryGetProperty("start_time_in_millis", out JsonElement s1)
+                    && s1.TryGetInt64(out long sms)
+                    ? DateTimeOffset.FromUnixTimeMilliseconds(sms).UtcDateTime : null;
+
+                // A snapshot still running has no end time, which is how it is told apart from one
+                // that finished in the same second it started.
+                DateTime? ended = snap.TryGetProperty("end_time_in_millis", out JsonElement e1)
+                    && e1.TryGetInt64(out long ems) && ems > 0
+                    ? DateTimeOffset.FromUnixTimeMilliseconds(ems).UtcDateTime : null;
+
+                int indices = snap.TryGetProperty("indices", out JsonElement ix) && ix.ValueKind == JsonValueKind.Array
+                    ? ix.GetArrayLength() : 0;
+
+                int failed = snap.TryGetProperty("shards", out JsonElement sh)
+                    && sh.TryGetProperty("failed", out JsonElement f) && f.TryGetInt32(out int fc) ? fc : 0;
+
+                result.Add(new ElasticsearchSnapshotInfo(name, state, started, ended, indices, failed));
+            }
+        }
+        catch { /* an unreadable list reads as no snapshots, which the caller shows as such */ }
+
+        return [.. result.OrderByDescending(r => r.StartedAt ?? DateTime.MinValue)];
+    }
+
     /// <summary>What an SLM policy says about its own last run.</summary>
     public sealed record SnapshotStatus(DateTime? LastSuccessAt, string? LastSuccessName, string? LastFailure);
 
@@ -1674,6 +1871,69 @@ public class ElasticsearchService(
         return sb.ToString();
     }
 
+    /// <summary>Prints what the repository holds, behind a marker the caller looks for.</summary>
+    public static string BuildSnapshotListScript(ElasticsearchCluster c)
+    {
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine($"code=$($CURL -o /tmp/resp -w '%{{http_code}}' \"$ES/_snapshot/{c.SnapshotRepositoryName}/_all\")");
+        sb.AppendLine("if [ \"$code\" -ge 300 ]; then cat /tmp/resp; exit 1; fi");
+        sb.AppendLine("echo \"---ENTKUBE-SNAPSHOTS---\"");
+        sb.AppendLine("cat /tmp/resp");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Restores a snapshot, either alongside the live data or over it.
+    ///
+    /// <para>The in-place path closes the matching indices first. That is not a nicety:
+    /// Elasticsearch refuses to restore into an open index, and without the close the restore fails
+    /// having done nothing — which reads as a broken backup rather than a busy index.</para>
+    /// </summary>
+    public static string BuildRestoreScript(
+        ElasticsearchCluster c, string snapshotName, string indexPattern,
+        RestoreMode mode, string renamePrefix, bool includeGlobalState)
+    {
+        Dictionary<string, object> body = new()
+        {
+            ["indices"] = indexPattern,
+            ["include_global_state"] = includeGlobalState,
+            // Aliases come back only on an in-place restore. Side by side they would collide with
+            // the live aliases still pointing at the live indices, and Elasticsearch fails the whole
+            // restore over it — so the safe mode would be the one that does not work.
+            ["include_aliases"] = mode == RestoreMode.InPlace
+        };
+
+        if (mode == RestoreMode.SideBySide)
+        {
+            body["rename_pattern"] = "(.+)";
+            body["rename_replacement"] = renamePrefix + "$1";
+        }
+
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine("cat > /tmp/restore.json <<'ENTKUBE_EOF'");
+        sb.AppendLine(JsonSerializer.Serialize(body, JsonOpts));
+        sb.AppendLine("ENTKUBE_EOF");
+        sb.AppendLine();
+
+        if (mode == RestoreMode.InPlace)
+        {
+            sb.AppendLine("# Elasticsearch will not restore into an open index. Closing first is what");
+            sb.AppendLine("# makes this a restore rather than a failure; it reopens them itself afterwards.");
+            sb.AppendLine($"code=$($CURL -o /tmp/resp -w '%{{http_code}}' -X POST \"$ES/{indexPattern}/_close?ignore_unavailable=true\")");
+            sb.AppendLine("if [ \"$code\" -ge 300 ]; then echo \"closing the target indices failed (HTTP $code)\"; cat /tmp/resp; echo; exit 1; fi");
+            sb.AppendLine("echo \"target indices closed\"");
+            sb.AppendLine();
+        }
+
+        sb.AppendLine($"code=$($CURL -o /tmp/resp -w '%{{http_code}}' -X POST \"$ES/_snapshot/{c.SnapshotRepositoryName}/{snapshotName}/_restore?wait_for_completion=true\" -d @/tmp/restore.json)");
+        sb.AppendLine("if [ \"$code\" -ge 300 ]; then echo \"restore failed (HTTP $code)\"; cat /tmp/resp; echo; exit 1; fi");
+        sb.AppendLine("cat /tmp/resp; echo");
+        sb.AppendLine("echo \"restore finished\"");
+        return sb.ToString();
+    }
+
     /// <summary>
     /// The opening every admin script shares: where the cluster is, how to authenticate, waiting
     /// for it to answer, and a <c>put</c> that fails the job on an HTTP error — which plain curl
@@ -2100,6 +2360,8 @@ public class ElasticsearchService(
         yield return ("configmap", SnapshotConfigMapName(c, "disable"));
         yield return ("configmap", SnapshotConfigMapName(c, "execute"));
         yield return ("configmap", SnapshotConfigMapName(c, "status"));
+        yield return ("configmap", SnapshotConfigMapName(c, "list"));
+        yield return ("configmap", SnapshotConfigMapName(c, "restore"));
         yield return ("secret", c.SnapshotCredentialsSecretName);
     }
 
