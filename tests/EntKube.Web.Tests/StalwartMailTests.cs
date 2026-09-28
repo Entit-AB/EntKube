@@ -105,6 +105,95 @@ public class StalwartMailTests
         plan.Should().NotContain("minted-secret");
     }
 
+    /// <summary>
+    /// Every internal range is one Stalwart will actually parse.
+    ///
+    /// <para>The invariant that would have caught this before it reached a cluster. Stalwart accepts a
+    /// prefix of 8–32 for IPv4 and 8–128 for IPv6, so <c>fc00::/7</c> — the ordinary way to write the
+    /// unique-local range — is refused. A refused entry is not merely absent: the apply plan stops at
+    /// its first failed operation and the allow-list is emitted before the accounts, so one bad range
+    /// strands the administrator, every mailbox, the spam settings and the milter.</para>
+    ///
+    /// <para>It failed on a live cluster as <c>AllowedIp: create failed for internal-5 ... Failed to
+    /// parse IpAddrOrMask from string</c>, with nothing naming the prefix length as the reason.</para>
+    /// </summary>
+    [Fact]
+    public void Plan_EveryInternalRangeIsOneStalwartAccepts()
+    {
+        StalwartPlanBuilder.InternalRanges.Should().OnlyContain(
+            r => StalwartPlanBuilder.IsAcceptableIpOrMask(r));
+    }
+
+    /// <summary>
+    /// And the unique-local range is still covered, in the two halves that are allowed.
+    ///
+    /// <para>Without this, the fix for the parse failure could be "delete the IPv6 entry", which would
+    /// pass the test above and silently stop protecting a dual-stack cluster from banning itself.</para>
+    /// </summary>
+    [Fact]
+    public void Plan_CoversTheUniqueLocalRangeAsTwoAcceptableHalves()
+    {
+        StalwartComponentConfig config = Config();
+
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+        List<string> addresses = Operation(plan, "AllowedIp")!.Value.GetProperty("value")
+            .EnumerateObject()
+            .Select(p => p.Value.GetProperty("address").GetString()!)
+            .ToList();
+
+        // fc00::/8 and fd00::/8 together are exactly fc00::/7.
+        addresses.Should().Contain("fc00::/8").And.Contain("fd00::/8");
+        addresses.Should().NotContain("fc00::/7");
+    }
+
+    /// <summary>
+    /// What the parse rule is, stated as examples, including the one that caught us.
+    /// </summary>
+    [Theory]
+    [InlineData("10.0.0.0/8", true)]
+    [InlineData("100.64.0.0/10", true)]
+    [InlineData("::1/128", true)]
+    [InlineData("fc00::/8", true)]
+    [InlineData("10.240.3.59", true)]
+    // The whole bug: a prefix shorter than 8 is refused, for either family.
+    [InlineData("fc00::/7", false)]
+    [InlineData("10.0.0.0/7", false)]
+    [InlineData("0.0.0.0/0", false)]
+    // Longer than the family allows.
+    [InlineData("10.0.0.0/33", false)]
+    // .NET reads this as 10.0.0.1 and Rust refuses it, so agreeing with .NET is not enough.
+    [InlineData("10.1", false)]
+    [InlineData("not-an-address", false)]
+    public void Plan_KnowsWhichAddressesStalwartWillTake(string value, bool accepted) =>
+        StalwartPlanBuilder.IsAcceptableIpOrMask(value).Should().Be(accepted);
+
+    /// <summary>
+    /// A gateway address that would be refused is left out instead of aborting the apply.
+    ///
+    /// <para>These are resolved from the live cluster rather than written here, so they are the half of
+    /// the allow-list that could carry something unexpected. Losing one range risks the gateway being
+    /// banned; sending it loses the accounts and everything else after the allow-list — which is not a
+    /// comparable cost, so the doubtful entry is dropped and reported.</para>
+    /// </summary>
+    [Fact]
+    public void Plan_LeavesOutAGatewayAddressStalwartWouldRefuse()
+    {
+        StalwartComponentConfig config = Config();
+
+        string plan = StalwartPlanBuilder.BuildApplyPlan(
+            config, [Domain(config.Id, "example.com")], [],
+            trustedProxyAddresses: ["10.240.3.59", "0.0.0.0/0", "10.240.3.60"]);
+
+        List<string> addresses = Operation(plan, "AllowedIp")!.Value.GetProperty("value")
+            .EnumerateObject()
+            .Select(p => p.Value.GetProperty("address").GetString()!)
+            .ToList();
+
+        addresses.Should().Contain("10.240.3.59").And.Contain("10.240.3.60");
+        addresses.Should().NotContain("0.0.0.0/0");
+    }
+
     private static List<YamlDocument> Parse(string manifest)
     {
         YamlStream stream = [];
