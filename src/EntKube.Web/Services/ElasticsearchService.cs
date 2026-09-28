@@ -142,6 +142,15 @@ public class ElasticsearchService(
     /// <summary>Smallest heap worth starting an Elasticsearch node with.</summary>
     public const int MinHeapMb = 512;
 
+    /// <summary>
+    /// How often the apply Job is polled and how many times, i.e. two minutes by default. Settable
+    /// so a test of the still-running path does not have to wait two real minutes for it.
+    /// </summary>
+    public TimeSpan JobPollInterval { get; set; } = TimeSpan.FromSeconds(3);
+
+    /// <inheritdoc cref="JobPollInterval"/>
+    public int JobPollAttempts { get; set; } = 40;
+
     private const string EsApiVersion = "elasticsearch.k8s.elastic.co/v1";
     private const string KibanaApiVersion = "kibana.k8s.elastic.co/v1";
 
@@ -759,27 +768,14 @@ public class ElasticsearchService(
         string configMap = IlmConfigMapName(cluster);
         string jobName = JobName(cluster, "ilm-apply");
 
+        JobOutcome outcome;
+        string log;
+
         try
         {
             await k8s.ApplyManifestAsync(BuildIlmConfigMapManifest(cluster, policies), kubeconfig, ct);
             await k8s.ApplyManifestAsync(BuildIlmJobManifest(cluster, jobName, configMap), kubeconfig, ct);
-
-            (bool succeeded, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
-
-            foreach (ElasticsearchIlmPolicy p in policies)
-            {
-                p.LastError = succeeded ? null : Truncate(log, 2000);
-                if (succeeded) p.LastAppliedAt = DateTime.UtcNow;
-            }
-            await db.SaveChangesAsync(ct);
-
-            if (!succeeded)
-                throw new InvalidOperationException(
-                    "Applying the index lifecycle policies failed. Elasticsearch said:\n" + Truncate(log, 1200));
-        }
-        catch (InvalidOperationException)
-        {
-            throw;
+            (outcome, log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
         }
         catch (Exception ex)
         {
@@ -787,7 +783,37 @@ public class ElasticsearchService(
             await db.SaveChangesAsync(ct);
             throw;
         }
+
+        switch (outcome)
+        {
+            case JobOutcome.Succeeded:
+                foreach (ElasticsearchIlmPolicy p in policies)
+                {
+                    p.LastError = null;
+                    p.LastAppliedAt = DateTime.UtcNow;
+                }
+                await db.SaveChangesAsync(ct);
+                return;
+
+            case JobOutcome.Failed:
+                foreach (ElasticsearchIlmPolicy p in policies) p.LastError = Truncate(log, 2000);
+                await db.SaveChangesAsync(ct);
+                throw new InvalidOperationException(
+                    "Applying the index lifecycle policies failed. Elasticsearch said:\n" + Truncate(log, 1200));
+
+            default:
+                // Still running is not a failure, and must not be recorded as one. The job waits up
+                // to five minutes for a cluster that is still forming — longer than this method is
+                // willing to hold a page open — so the honest answer is that the answer is not in
+                // yet, and the policies keep their previous state until it is.
+                throw new InvalidOperationException(
+                    $"The apply job '{jobName}' is still running — the cluster is probably still "
+                    + "starting. It will finish on its own; use Re-apply to pick up the result.");
+        }
     }
+
+    /// <summary>How a one-shot Job ended, as far as a bounded wait could tell.</summary>
+    public enum JobOutcome { Succeeded, Failed, StillRunning }
 
     // ── Manifest builders ──────────────────────────────────────────────────────
 
@@ -1571,12 +1597,12 @@ public class ElasticsearchService(
     /// finished in two minutes has found something wrong, and the caller says so rather than
     /// holding a page open.
     /// </summary>
-    private async Task<(bool Succeeded, string Log)> WaitForJobAsync(
+    private async Task<(JobOutcome Outcome, string Log)> WaitForJobAsync(
         ElasticsearchCluster cluster, string jobName, string kubeconfig, CancellationToken ct)
     {
-        for (int attempt = 0; attempt < 40; attempt++)
+        for (int attempt = 0; attempt < JobPollAttempts; attempt++)
         {
-            await Task.Delay(TimeSpan.FromSeconds(3), ct);
+            await Task.Delay(JobPollInterval, ct);
 
             string json;
             try
@@ -1595,11 +1621,10 @@ public class ElasticsearchService(
             }
             catch { /* a Job whose pod is already gone still reported its result above */ }
 
-            return (succeeded, log);
+            return (succeeded ? JobOutcome.Succeeded : JobOutcome.Failed, log);
         }
 
-        return (false, $"The job '{jobName}' had not finished after two minutes. "
-            + "Elasticsearch may still be starting; check the job's logs in the cluster.");
+        return (JobOutcome.StillRunning, "");
     }
 
     public static (bool Finished, bool Succeeded) ParseJobCompletion(string json)

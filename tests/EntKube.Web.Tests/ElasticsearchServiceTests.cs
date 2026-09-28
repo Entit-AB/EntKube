@@ -684,6 +684,94 @@ public class ElasticsearchServiceTests : IDisposable
         data.Children.Should().ContainKey(new YamlScalarNode("app-logs.template.json"));
     }
 
+    private async Task<(ElasticsearchCluster Cluster, ElasticsearchIlmPolicy Policy)> SeedClusterWithPolicyAsync()
+    {
+        await SeedClusterAsync();
+
+        ElasticsearchCluster c = SampleCluster();
+        c.TenantId = tenantId;
+        c.KubernetesClusterId = k8sClusterId;
+        c.WarmCount = 2;
+        c.ColdCount = 2;
+        db.ElasticsearchClusters.Add(c);
+
+        ElasticsearchIlmPolicy p = SamplePolicy();
+        p.Id = Guid.NewGuid();
+        p.TenantId = tenantId;
+        p.ElasticsearchClusterId = c.Id;
+        db.ElasticsearchIlmPolicies.Add(p);
+
+        await db.SaveChangesAsync();
+        return (c, p);
+    }
+
+    [Fact]
+    public async Task AJobStillRunning_IsNotRecordedAsAFailure()
+    {
+        (_, ElasticsearchIlmPolicy policy) = await SeedClusterWithPolicyAsync();
+
+        // The job's own wait for a forming cluster is longer than this method holds a page open, so
+        // "not finished yet" must leave the policies alone rather than marking them broken.
+        k8s.Setup(x => x.GetJsonAsync(It.IsRegex("^job/"), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""{"status":{"active":1}}""");
+
+        sut.JobPollInterval = TimeSpan.Zero;
+        sut.JobPollAttempts = 2;
+
+        Func<Task> act = () => sut.ApplyPoliciesAsync(tenantId, policy.ElasticsearchClusterId);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*still running*");
+
+        ElasticsearchIlmPolicy after = await db.ElasticsearchIlmPolicies.AsNoTracking().SingleAsync();
+        after.LastError.Should().BeNull();
+        after.LastAppliedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task AFailedJob_RecordsWhatElasticsearchSaid()
+    {
+        (_, ElasticsearchIlmPolicy policy) = await SeedClusterWithPolicyAsync();
+
+        k8s.Setup(x => x.GetJsonAsync(It.IsRegex("^job/"), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""{"status":{"failed":1}}""");
+        k8s.Setup(x => x.GetPodLogsAsync(It.IsRegex("^job/"), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("PUT /_ilm/policy/app-logs -> HTTP 400\nillegal_argument_exception");
+
+        sut.JobPollInterval = TimeSpan.Zero;
+
+        Func<Task> act = () => sut.ApplyPoliciesAsync(tenantId, policy.ElasticsearchClusterId);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*illegal_argument_exception*");
+
+        ElasticsearchIlmPolicy after = await db.ElasticsearchIlmPolicies.AsNoTracking().SingleAsync();
+        after.LastError.Should().Contain("HTTP 400");
+        after.LastAppliedAt.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ASucceededJob_StampsEveryPolicyAsApplied()
+    {
+        (_, ElasticsearchIlmPolicy policy) = await SeedClusterWithPolicyAsync();
+
+        k8s.Setup(x => x.GetJsonAsync(It.IsRegex("^job/"), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""{"status":{"succeeded":1}}""");
+        k8s.Setup(x => x.GetPodLogsAsync(It.IsRegex("^job/"), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("all policies and templates applied");
+
+        sut.JobPollInterval = TimeSpan.Zero;
+
+        await sut.ApplyPoliciesAsync(tenantId, policy.ElasticsearchClusterId);
+
+        ElasticsearchIlmPolicy after = await db.ElasticsearchIlmPolicies.AsNoTracking().SingleAsync();
+        after.LastAppliedAt.Should().NotBeNull();
+        after.LastError.Should().BeNull();
+    }
+
     [Theory]
     [InlineData("""{"status":{"succeeded":1}}""", true, true)]
     [InlineData("""{"status":{"failed":1}}""", true, false)]
