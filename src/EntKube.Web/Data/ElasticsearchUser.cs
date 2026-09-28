@@ -71,6 +71,13 @@ public class ElasticsearchUser
     /// </summary>
     public ElasticsearchKibanaAccess KibanaAccess { get; set; } = ElasticsearchKibanaAccess.None;
 
+    /// <summary>
+    /// The Kibana space this account is confined to, by <see cref="ElasticsearchKibanaSpace.SpaceId"/>.
+    /// Null means every space, which is the right answer for the only team on a cluster and the
+    /// wrong one the moment there are two.
+    /// </summary>
+    public string? KibanaSpaceId { get; set; }
+
     /// <summary>When the password was last generated — for the account, and for whoever holds it.</summary>
     public DateTime? PasswordSetAt { get; set; }
 

@@ -915,6 +915,188 @@ public class ElasticsearchService(
     /// <summary>How a one-shot Job ended, as far as a bounded wait could tell.</summary>
     public enum JobOutcome { Succeeded, Failed, StillRunning }
 
+    // ── Kibana spaces ──────────────────────────────────────────────────────────
+
+    public async Task<List<ElasticsearchKibanaSpace>> GetSpacesAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.ElasticsearchKibanaSpaces
+            .Where(s => s.TenantId == tenantId && s.ElasticsearchClusterId == clusterId)
+            .OrderBy(s => s.Name)
+            .ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// Creates a Kibana space, so several teams can share one cluster without sharing a dashboard
+    /// list. Scoping a user to it (see <see cref="ElasticsearchUser.KibanaSpaceId"/>) is what turns
+    /// that from tidiness into isolation.
+    /// </summary>
+    public async Task<ElasticsearchKibanaSpace> CreateSpaceAsync(
+        Guid tenantId, Guid clusterId, string spaceId, string name, string? description,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        if (!cluster.KibanaEnabled)
+            throw new InvalidOperationException("This cluster has no Kibana, so it has nowhere to put a space.");
+
+        spaceId = (spaceId ?? "").Trim().ToLowerInvariant();
+        ValidateSpaceId(spaceId);
+
+        if (string.IsNullOrWhiteSpace(name))
+            throw new InvalidOperationException("The space needs a name for the space menu.");
+
+        if (await db.ElasticsearchKibanaSpaces.AnyAsync(
+                s => s.ElasticsearchClusterId == clusterId && s.SpaceId == spaceId, ct))
+            throw new InvalidOperationException($"A space with the id '{spaceId}' already exists on this cluster.");
+
+        ElasticsearchKibanaSpace space = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            ElasticsearchClusterId = clusterId,
+            SpaceId = spaceId,
+            Name = name.Trim(),
+            Description = string.IsNullOrWhiteSpace(description) ? null : description!.Trim()
+        };
+
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string configMap = SnapshotConfigMapName(cluster, $"space-{spaceId}");
+        string jobName = JobName(cluster, $"space-{spaceId}");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildSpaceApplyScript(cluster, space)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+        space.LastError = outcome == JobOutcome.Succeeded ? null : Truncate(log, 2000);
+        if (outcome == JobOutcome.Succeeded) space.LastAppliedAt = DateTime.UtcNow;
+
+        db.ElasticsearchKibanaSpaces.Add(space);
+        await db.SaveChangesAsync(ct);
+
+        if (outcome == JobOutcome.Failed)
+            throw new InvalidOperationException("Creating the space failed. Kibana said:\n" + Truncate(log, 1200));
+        if (outcome == JobOutcome.StillRunning)
+            throw new InvalidOperationException(
+                "Kibana did not answer in time — it starts well after Elasticsearch does. The space is recorded here "
+                + "and can be re-applied once it is up.");
+
+        return space;
+    }
+
+    /// <summary>Re-applies a space to Kibana, e.g. after the cluster was rebuilt.</summary>
+    public async Task ApplySpaceAsync(Guid tenantId, Guid spaceId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchKibanaSpace space = await db.ElasticsearchKibanaSpaces
+            .Include(s => s.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(s => s.Id == spaceId && s.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Space not found.");
+
+        ElasticsearchCluster cluster = space.ElasticsearchCluster;
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string configMap = SnapshotConfigMapName(cluster, $"space-{space.SpaceId}");
+        string jobName = JobName(cluster, $"space-{space.SpaceId}");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildSpaceApplyScript(cluster, space)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+        space.LastError = outcome == JobOutcome.Succeeded ? null : Truncate(log, 2000);
+        if (outcome == JobOutcome.Succeeded) space.LastAppliedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        if (outcome != JobOutcome.Succeeded)
+            throw new InvalidOperationException("Applying the space failed:\n" + Truncate(log, 1200));
+    }
+
+    /// <summary>
+    /// Deletes a space and everything saved in it. Refused while an account is still confined to it:
+    /// that account would sign in to a space that no longer exists and simply see nothing, with no
+    /// message saying why.
+    /// </summary>
+    public async Task DeleteSpaceAsync(
+        Guid tenantId, Guid spaceId, string performedBy, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchKibanaSpace space = await db.ElasticsearchKibanaSpaces
+            .Include(s => s.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(s => s.Id == spaceId && s.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Space not found.");
+
+        ElasticsearchCluster cluster = space.ElasticsearchCluster;
+
+        List<string> confined = await db.ElasticsearchUsers
+            .Where(u => u.ElasticsearchClusterId == cluster.Id && u.KibanaSpaceId == space.SpaceId)
+            .Select(u => u.Username)
+            .ToListAsync(ct);
+
+        if (confined.Count > 0)
+            throw new InvalidOperationException(
+                $"{string.Join(", ", confined)} can only see this space. Move them to another space, or give them access "
+                + "to all of them, before deleting it — otherwise they sign in to nothing.");
+
+        await auditService.RecordAsync(
+            deploymentId: null,
+            action: "elasticsearch.kibana-space.delete",
+            resourceKind: "Elasticsearch",
+            resourceName: $"{cluster.Namespace}/{cluster.Name}",
+            details: $"space '{space.SpaceId}' and everything saved in it",
+            performedBy: performedBy,
+            ct: ct);
+
+        try
+        {
+            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            string configMap = SnapshotConfigMapName(cluster, $"space-del-{space.SpaceId}");
+            string jobName = JobName(cluster, $"space-del-{space.SpaceId}");
+
+            await k8s.ApplyManifestAsync(
+                BuildScriptConfigMap(cluster, configMap, BuildSpaceDeleteScript(cluster, space)), kubeconfig, ct);
+            await k8s.ApplyManifestAsync(
+                BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+            await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Removing Kibana space {Space} failed", space.SpaceId);
+        }
+
+        db.ElasticsearchKibanaSpaces.Remove(space);
+        await db.SaveChangesAsync(ct);
+    }
+
+    private static void ValidateSpaceId(string spaceId)
+    {
+        if (string.IsNullOrWhiteSpace(spaceId))
+            throw new InvalidOperationException("The space needs an id — it appears in Kibana's URLs.");
+
+        if (spaceId == "default")
+            throw new InvalidOperationException(
+                "'default' is Kibana's own space and already exists. Give this one an id of its own.");
+
+        if (spaceId.Length > 63)
+            throw new InvalidOperationException("A space id is 63 characters or fewer.");
+
+        if (!spaceId.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_'))
+            throw new InvalidOperationException(
+                "A space id may only contain lowercase letters, digits, '-' and '_' — Kibana puts it in a URL.");
+    }
+
     // ── Metrics ────────────────────────────────────────────────────────────────
 
     /// <summary>The exporter image. Pinned, like every other image EntKube puts on a cluster.</summary>
@@ -1672,6 +1854,7 @@ public class ElasticsearchService(
         string indexPattern,
         ElasticsearchAccess access,
         ElasticsearchKibanaAccess kibanaAccess = ElasticsearchKibanaAccess.None,
+        string? kibanaSpaceId = null,
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
@@ -1703,6 +1886,7 @@ public class ElasticsearchService(
             IndexPattern = indexPattern,
             Access = access,
             KibanaAccess = kibanaAccess,
+            KibanaSpaceId = string.IsNullOrWhiteSpace(kibanaSpaceId) ? null : kibanaSpaceId.Trim(),
             PasswordSetAt = DateTime.UtcNow
         };
 
@@ -1773,7 +1957,8 @@ public class ElasticsearchService(
     /// </summary>
     public async Task UpdateUserAccessAsync(
         Guid tenantId, Guid userId, string indexPattern, ElasticsearchAccess access,
-        ElasticsearchKibanaAccess kibanaAccess, CancellationToken ct = default)
+        ElasticsearchKibanaAccess kibanaAccess, string? kibanaSpaceId = null,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -1787,6 +1972,7 @@ public class ElasticsearchService(
         user.IndexPattern = indexPattern.Trim();
         user.Access = access;
         user.KibanaAccess = kibanaAccess;
+        user.KibanaSpaceId = string.IsNullOrWhiteSpace(kibanaSpaceId) ? null : kibanaSpaceId.Trim();
         await db.SaveChangesAsync(ct);
 
         await ApplyUserAsync(tenantId, userId, ct);
@@ -2938,6 +3124,15 @@ public class ElasticsearchService(
         sb.AppendLine("        - name: es-ca");
         sb.AppendLine("          secret:");
         sb.AppendLine($"            secretName: {c.HttpCertsSecretName}");
+        if (c.KibanaEnabled)
+        {
+            // Kibana serves its own certificate, so a script that talks to it needs a second CA.
+            // Optional, because the Secret exists only once ECK has created the Kibana it belongs to.
+            sb.AppendLine("        - name: kb-ca");
+            sb.AppendLine("          secret:");
+            sb.AppendLine($"            secretName: {c.KibanaCertsSecretName}");
+            sb.AppendLine("            optional: true");
+        }
         sb.AppendLine("      containers:");
         sb.AppendLine("        - name: apply");
         sb.AppendLine($"          image: docker.elastic.co/elasticsearch/elasticsearch:{c.Version}");
@@ -2972,6 +3167,12 @@ public class ElasticsearchService(
         sb.AppendLine("            - name: es-ca");
         sb.AppendLine("              mountPath: /es-ca");
         sb.AppendLine("              readOnly: true");
+        if (c.KibanaEnabled)
+        {
+            sb.AppendLine("            - name: kb-ca");
+            sb.AppendLine("              mountPath: /kb-ca");
+            sb.AppendLine("              readOnly: true");
+        }
         return sb.ToString();
     }
 
@@ -3189,7 +3390,12 @@ public class ElasticsearchService(
                 {
                     ["application"] = KibanaApplication,
                     ["privileges"] = new[] { user.KibanaAccess == ElasticsearchKibanaAccess.All ? "all" : "read" },
-                    ["resources"] = new[] { "*" }
+                    // "*" is every space. Naming one confines this account to it: the space menu
+                    // shows nothing else, and neither do the dashboards.
+                    ["resources"] = new[]
+                    {
+                        string.IsNullOrWhiteSpace(user.KibanaSpaceId) ? "*" : $"space:{user.KibanaSpaceId}"
+                    }
                 }
             };
         }
@@ -3255,6 +3461,72 @@ public class ElasticsearchService(
         sb.AppendLine($"del \"/_security/user/{user.Username}\"");
         sb.AppendLine($"del \"/_security/role/{user.RoleName}\"");
         return sb.ToString();
+    }
+
+    /// <summary>
+    /// Creates or updates a Kibana space through Kibana's own API.
+    ///
+    /// <para>Two things are specific to Kibana rather than Elasticsearch: it is a different service
+    /// with a different certificate, and every write needs the <c>kbn-xsrf</c> header — without it
+    /// Kibana answers 400 with a message about cross-site request forgery, which reads as a bug in
+    /// the request body.</para>
+    /// </summary>
+    public static string BuildSpaceApplyScript(ElasticsearchCluster c, ElasticsearchKibanaSpace space)
+    {
+        string body = JsonSerializer.Serialize(new Dictionary<string, object?>
+        {
+            ["id"] = space.SpaceId,
+            ["name"] = space.Name,
+            ["description"] = space.Description
+        }, JsonOpts);
+
+        StringBuilder sb = new();
+        AppendKibanaPreamble(sb, c);
+        sb.AppendLine("cat > /tmp/space.json <<'ENTKUBE_EOF'");
+        sb.AppendLine(body);
+        sb.AppendLine("ENTKUBE_EOF");
+        sb.AppendLine();
+        sb.AppendLine("# Create, or update the one that is already there — re-applying must be harmless.");
+        sb.AppendLine($"code=$($KCURL -o /tmp/resp -w '%{{http_code}}' -X POST \"$KB/api/spaces/space\" -d @/tmp/space.json)");
+        sb.AppendLine("if [ \"$code\" = \"409\" ]; then");
+        sb.AppendLine($"  code=$($KCURL -o /tmp/resp -w '%{{http_code}}' -X PUT \"$KB/api/spaces/space/{space.SpaceId}\" -d @/tmp/space.json)");
+        sb.AppendLine("fi");
+        sb.AppendLine("if [ \"$code\" -ge 300 ]; then echo \"space apply -> HTTP $code\"; cat /tmp/resp; echo; exit 1; fi");
+        sb.AppendLine($"echo \"space {space.SpaceId} applied (HTTP $code)\"");
+        return sb.ToString();
+    }
+
+    /// <summary>Deletes a space, and with it everything saved inside it.</summary>
+    public static string BuildSpaceDeleteScript(ElasticsearchCluster c, ElasticsearchKibanaSpace space)
+    {
+        StringBuilder sb = new();
+        AppendKibanaPreamble(sb, c);
+        sb.AppendLine($"code=$($KCURL -o /tmp/resp -w '%{{http_code}}' -X DELETE \"$KB/api/spaces/space/{space.SpaceId}\")");
+        sb.AppendLine("if [ \"$code\" -ge 300 ] && [ \"$code\" != \"404\" ]; then cat /tmp/resp; echo; exit 1; fi");
+        sb.AppendLine($"echo \"space {space.SpaceId} removed (HTTP $code)\"");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The opening for a script that talks to Kibana rather than Elasticsearch: Kibana's own
+    /// endpoint and CA, the xsrf header every write needs, and a wait — Kibana becomes available
+    /// well after the cluster it connects to does, so a space applied at the wrong moment fails for
+    /// reasons that have nothing to do with the space.
+    /// </summary>
+    private static void AppendKibanaPreamble(StringBuilder sb, ElasticsearchCluster c)
+    {
+        sb.AppendLine("set -eu");
+        sb.AppendLine($"KB=\"{c.KibanaEndpoint}\"");
+        sb.AppendLine("KCURL=\"curl -sS --cacert /kb-ca/ca.crt -u elastic:${ELASTIC_PASSWORD} "
+            + "-H Content-Type:application/json -H kbn-xsrf:true\"");
+        sb.AppendLine();
+        sb.AppendLine("ready=0");
+        sb.AppendLine("for i in $(seq 1 60); do");
+        sb.AppendLine("  if $KCURL -o /dev/null \"$KB/api/status\"; then ready=1; break; fi");
+        sb.AppendLine("  sleep 5");
+        sb.AppendLine("done");
+        sb.AppendLine("if [ \"$ready\" != \"1\" ]; then echo \"Kibana did not become available within 5 minutes\"; exit 1; fi");
+        sb.AppendLine();
     }
 
     /// <summary>The exporter account's password Secret.</summary>

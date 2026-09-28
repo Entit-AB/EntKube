@@ -116,6 +116,7 @@ public class BackupBundle
     public List<ElasticsearchIlmPolicy> ElasticsearchIlmPolicies { get; set; } = [];
     public List<ElasticsearchUser> ElasticsearchUsers { get; set; } = [];
     public List<ElasticsearchBinding> ElasticsearchBindings { get; set; } = [];
+    public List<ElasticsearchKibanaSpace> ElasticsearchKibanaSpaces { get; set; } = [];
 
     // VPN
     public List<VpnTunnel> VpnTunnels { get; set; } = [];

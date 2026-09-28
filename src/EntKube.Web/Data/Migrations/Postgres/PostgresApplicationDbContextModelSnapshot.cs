@@ -3515,6 +3515,50 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("ElasticsearchIlmPolicies");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchKibanaSpace", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid>("ElasticsearchClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime?>("LastAppliedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("SpaceId")
+                        .IsRequired()
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ElasticsearchClusterId", "SpaceId")
+                        .IsUnique();
+
+                    b.ToTable("ElasticsearchKibanaSpaces");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchUser", b =>
                 {
                     b.Property<Guid>("Id")
@@ -3537,6 +3581,10 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<int>("KibanaAccess")
                         .HasColumnType("integer");
+
+                    b.Property<string>("KibanaSpaceId")
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
 
                     b.Property<DateTime?>("LastAppliedAt")
                         .HasColumnType("timestamp with time zone");
@@ -9543,6 +9591,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("ElasticsearchCluster");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchKibanaSpace", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
+                        .WithMany("KibanaSpaces")
+                        .HasForeignKey("ElasticsearchClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ElasticsearchCluster");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchUser", b =>
                 {
                     b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
@@ -11429,6 +11488,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
                 {
                     b.Navigation("IlmPolicies");
+
+                    b.Navigation("KibanaSpaces");
 
                     b.Navigation("Users");
                 });

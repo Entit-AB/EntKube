@@ -15,6 +15,7 @@ managed under **Services › Search**.
 | Snapshots | S3 repository + SLM policy, registered by a Job; restores run the same way |
 | Application users | Native-realm users + per-user roles, created by a Job; bound into an app's namespace as a Secret |
 | Metrics | Community Elasticsearch exporter + Service + ServiceMonitor, labelled to match the live Prometheus |
+| Kibana spaces | Created through Kibana's API by a Job; accounts are scoped to one by privilege |
 
 The operator on its own starts nothing. Installing it and stopping there leaves a working controller
 with no clusters, which is why its catalog entry points at Services › Search.
@@ -178,6 +179,22 @@ that data in Kibana and nothing else.
 
 This needs no licence beyond Basic. Signing in to Kibana with an external identity provider (OIDC,
 SAML, LDAP) is a **Platinum** feature of Elasticsearch, not something ECK or EntKube can grant.
+
+### Kibana spaces
+
+A space is a partition of Kibana with its own dashboards, data views and saved searches. Create one
+per team, scope their accounts to it, and they stop seeing each other's work — and, because the
+scoping is a privilege rather than a filter, stop being able to.
+
+Spaces are created through Kibana's own API rather than Elasticsearch's, which means a different
+service, a different certificate, and the `kbn-xsrf` header on every write — without it Kibana
+answers 400 with a message about cross-site request forgery that reads as a problem with the body.
+The job waits for Kibana too: it becomes available well after the cluster it connects to does.
+
+Applying a space twice is harmless (it creates, or updates the one already there). A space an
+account is confined to cannot be deleted — that account would sign in to a space that no longer
+exists and simply see nothing, with nothing saying why — and deleting one is audited, because every
+dashboard in it goes at the same time.
 
 ### Rotating a password
 

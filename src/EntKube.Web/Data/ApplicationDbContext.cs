@@ -119,6 +119,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<ElasticsearchIlmPolicy> ElasticsearchIlmPolicies => Set<ElasticsearchIlmPolicy>();
     public DbSet<ElasticsearchUser> ElasticsearchUsers => Set<ElasticsearchUser>();
     public DbSet<ElasticsearchBinding> ElasticsearchBindings => Set<ElasticsearchBinding>();
+    public DbSet<ElasticsearchKibanaSpace> ElasticsearchKibanaSpaces => Set<ElasticsearchKibanaSpace>();
     public DbSet<GitRepository> GitRepositories => Set<GitRepository>();
     public DbSet<GitKnownHost> GitKnownHosts => Set<GitKnownHost>();
     public DbSet<CustomerGitRepoPolicy> CustomerGitRepoPolicies => Set<CustomerGitRepoPolicy>();
@@ -2361,6 +2362,21 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithOne(u => u.ElasticsearchCluster)
                 .HasForeignKey(u => u.ElasticsearchClusterId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasMany(c => c.KibanaSpaces)
+                .WithOne(s => s.ElasticsearchCluster)
+                .HasForeignKey(s => s.ElasticsearchClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ElasticsearchKibanaSpace>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.Property(s => s.SpaceId).HasMaxLength(63).IsRequired();
+            entity.Property(s => s.Name).HasMaxLength(128).IsRequired();
+            entity.Property(s => s.Description).HasMaxLength(500);
+            entity.Property(s => s.LastError).HasMaxLength(2000);
+            entity.HasIndex(s => new { s.ElasticsearchClusterId, s.SpaceId }).IsUnique();
         });
 
         builder.Entity<ElasticsearchUser>(entity =>
@@ -2368,6 +2384,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.HasKey(u => u.Id);
             entity.Property(u => u.Username).HasMaxLength(63).IsRequired();
             entity.Property(u => u.IndexPattern).HasMaxLength(255).IsRequired();
+            entity.Property(u => u.KibanaSpaceId).HasMaxLength(63);
             entity.Property(u => u.LastError).HasMaxLength(2000);
             entity.HasIndex(u => new { u.ElasticsearchClusterId, u.Username }).IsUnique();
         });

@@ -845,6 +845,91 @@
                             }
                         </div>
 
+                        @* ── Kibana spaces ── *@
+                        @if (cluster.KibanaEnabled)
+                        {
+                            List<ElasticsearchKibanaSpace> spaces = SpacesFor(cluster);
+                            <div class="mb-3 border-top pt-3">
+                                <div class="d-flex align-items-center mb-2">
+                                    <strong class="small"><i class="bi bi-columns-gap me-1"></i>Kibana spaces</strong>
+                                    <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2" @onclick="() => ShowAddSpace(cluster)">
+                                        <i class="bi bi-plus-lg me-1"></i>Add
+                                    </button>
+                                </div>
+
+                                @if (addSpaceClusterId == cluster.Id)
+                                {
+                                    <div class="card border-primary mb-2"><div class="card-body py-2">
+                                        <div class="row g-2">
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Id</label>
+                                                <input class="form-control form-control-sm" @bind="spaceIdValue" placeholder="orders" />
+                                                <div class="form-text small">Appears in Kibana's URLs. Fixed once created.</div>
+                                            </div>
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Name</label>
+                                                <input class="form-control form-control-sm" @bind="spaceName" placeholder="Orders team" />
+                                            </div>
+                                            <div class="col-md-4">
+                                                <label class="form-label small mb-1">Description (optional)</label>
+                                                <input class="form-control form-control-sm" @bind="spaceDescription" />
+                                            </div>
+                                            <div class="col-md-2 d-flex align-items-end gap-1">
+                                                <button class="btn btn-sm btn-primary" @onclick="() => AddSpaceAsync(cluster)"
+                                                        disabled="@(savingSpace || string.IsNullOrWhiteSpace(spaceIdValue))">
+                                                    @if (savingSpace) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                    Add
+                                                </button>
+                                                <button class="btn btn-sm btn-outline-secondary" @onclick="() => addSpaceClusterId = null">Cancel</button>
+                                            </div>
+                                        </div>
+                                        @if (spaceError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@spaceError</div> }
+                                    </div></div>
+                                }
+
+                                @if (spaces.Count == 0)
+                                {
+                                    <p class="text-muted small mb-0">
+                                        Only Kibana's default space. Add one per team and scope their accounts to it, and they stop
+                                        seeing each other's dashboards.
+                                    </p>
+                                }
+                                else
+                                {
+                                    <table class="table table-sm table-borderless small mb-0">
+                                        <thead class="text-muted"><tr><th>Space</th><th>Id</th><th>Description</th><th>Applied</th><th></th></tr></thead>
+                                        <tbody>
+                                            @foreach (ElasticsearchKibanaSpace space in spaces)
+                                            {
+                                                <tr>
+                                                    <td>@space.Name</td>
+                                                    <td><code>@space.SpaceId</code></td>
+                                                    <td class="text-muted">@(space.Description ?? "—")</td>
+                                                    <td class="text-muted">
+                                                        @if (space.LastError is not null)
+                                                        {
+                                                            <span class="text-danger" title="@space.LastError">failed</span>
+                                                        }
+                                                        else
+                                                        {
+                                                            @(space.LastAppliedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                                        }
+                                                    </td>
+                                                    <td class="text-nowrap">
+                                                        <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Re-apply"
+                                                                aria-label="@($"Re-apply {space.Name}")" @onclick="() => ApplySpaceAsync(cluster, space)">
+                                                            <i class="bi bi-arrow-repeat"></i>
+                                                        </button>
+                                                        @RenderDeleteCell($"Delete the Kibana space \"{space.Name}\"? Every dashboard, data view and saved search in it goes with it.", "Delete space", () => DeleteSpaceAsync(cluster.Id, space.Id, space.Name))
+                                                    </td>
+                                                </tr>
+                                            }
+                                        </tbody>
+                                    </table>
+                                }
+                            </div>
+                        }
+
                         @* ── Application users ── *@
                         @{ List<ElasticsearchUser> users = allUsers.TryGetValue(cluster.Id, out List<ElasticsearchUser>? ul) ? ul : []; }
                         <div class="mb-3 border-top pt-3">
@@ -883,6 +968,19 @@
                                                 <option value="@ElasticsearchKibanaAccess.All">Build — data views and dashboards</option>
                                             </select>
                                         </div>
+                                        @if (userKibanaAccess != ElasticsearchKibanaAccess.None)
+                                        {
+                                            <div class="col-md-3">
+                                                <label class="form-label small mb-1">Space</label>
+                                                <select class="form-select form-select-sm" @bind="userSpaceId">
+                                                    <option value="">Every space</option>
+                                                    @foreach (ElasticsearchKibanaSpace space in SpacesFor(cluster))
+                                                    {
+                                                        <option value="@space.SpaceId">@space.Name</option>
+                                                    }
+                                                </select>
+                                            </div>
+                                        }
                                         <div class="col-md-3 d-flex align-items-end gap-1">
                                             <button class="btn btn-sm btn-primary" @onclick="() => AddUserAsync(cluster)"
                                                     disabled="@(savingUser || string.IsNullOrWhiteSpace(userName))">
@@ -934,7 +1032,9 @@
                                                     }
                                                     else
                                                     {
-                                                        <span class="badge bg-info-subtle text-info border border-info-subtle">@u.KibanaAccess</span>
+                                                        <span class="badge bg-info-subtle text-info border border-info-subtle">
+                                                            @u.KibanaAccess@(u.KibanaSpaceId is null ? "" : $" · {u.KibanaSpaceId}")
+                                                        </span>
                                                     }
                                                 </td>
                                                 <td class="text-muted">
@@ -1267,6 +1367,14 @@
     private string? revealedUserPassword;
     private bool savingUser;
     private string? userError;
+    private readonly Dictionary<Guid, List<ElasticsearchKibanaSpace>> allSpaces = [];
+    private Guid? addSpaceClusterId;
+    private string spaceIdValue = "";
+    private string spaceName = "";
+    private string? spaceDescription;
+    private bool savingSpace;
+    private string? spaceError;
+    private string? userSpaceId;
     private Guid? addBindingClusterId;
     private Guid bindingDeploymentId;
     private Guid bindingUserId;
@@ -1463,11 +1571,13 @@
 
         allPolicies.Clear();
         allUsers.Clear();
+        allSpaces.Clear();
         allBindings.Clear();
         foreach (ElasticsearchCluster c in clusters)
         {
             allPolicies[c.Id] = await Search.GetPoliciesAsync(TenantId, c.Id);
             allUsers[c.Id] = await Search.GetUsersAsync(TenantId, c.Id);
+            allSpaces[c.Id] = await Search.GetSpacesAsync(TenantId, c.Id);
             allBindings[c.Id] = await Search.GetBindingsAsync(TenantId, c.Id);
         }
 
@@ -1851,6 +1961,60 @@
 
     // ── Users and bindings ────────────────────────────────────────────────────
 
+    private List<ElasticsearchKibanaSpace> SpacesFor(ElasticsearchCluster cluster) =>
+        allSpaces.TryGetValue(cluster.Id, out List<ElasticsearchKibanaSpace>? s) ? s : [];
+
+    private void ShowAddSpace(ElasticsearchCluster cluster)
+    {
+        addSpaceClusterId = cluster.Id;
+        spaceIdValue = "";
+        spaceName = "";
+        spaceDescription = null;
+        spaceError = null;
+    }
+
+    private async Task AddSpaceAsync(ElasticsearchCluster cluster)
+    {
+        savingSpace = true;
+        spaceError = null;
+        try
+        {
+            await Search.CreateSpaceAsync(TenantId, cluster.Id, spaceIdValue,
+                string.IsNullOrWhiteSpace(spaceName) ? spaceIdValue : spaceName, spaceDescription);
+            addSpaceClusterId = null;
+            allSpaces[cluster.Id] = await Search.GetSpacesAsync(TenantId, cluster.Id);
+            Toasts.Success($"Created the \"{spaceName}\" space.");
+        }
+        catch (Exception ex)
+        {
+            spaceError = ex.Message;
+            allSpaces[cluster.Id] = await Search.GetSpacesAsync(TenantId, cluster.Id);
+        }
+        finally { savingSpace = false; }
+    }
+
+    private async Task ApplySpaceAsync(ElasticsearchCluster cluster, ElasticsearchKibanaSpace space)
+    {
+        try
+        {
+            await Search.ApplySpaceAsync(TenantId, space.Id);
+            Toasts.Success($"Re-applied \"{space.Name}\".");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { allSpaces[cluster.Id] = await Search.GetSpacesAsync(TenantId, cluster.Id); }
+    }
+
+    private async Task DeleteSpaceAsync(Guid clusterId, Guid spaceRowId, string name)
+    {
+        try
+        {
+            await Search.DeleteSpaceAsync(TenantId, spaceRowId, await Actor.NameAsync());
+            allSpaces[clusterId] = await Search.GetSpacesAsync(TenantId, clusterId);
+            Toasts.Success($"Deleted the \"{name}\" space.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+    }
+
     private void ShowAddUser(ElasticsearchCluster cluster)
     {
         addUserClusterId = cluster.Id;
@@ -1858,6 +2022,7 @@
         userIndexPattern = "";
         userAccess = ElasticsearchAccess.Writer;
         userKibanaAccess = ElasticsearchKibanaAccess.None;
+        userSpaceId = null;
         userError = null;
     }
 
@@ -1867,7 +2032,9 @@
         userError = null;
         try
         {
-            await Search.CreateUserAsync(TenantId, cluster.Id, userName, userIndexPattern, userAccess, userKibanaAccess);
+            await Search.CreateUserAsync(
+                TenantId, cluster.Id, userName, userIndexPattern, userAccess, userKibanaAccess,
+                string.IsNullOrWhiteSpace(userSpaceId) ? null : userSpaceId);
             addUserClusterId = null;
             allUsers[cluster.Id] = await Search.GetUsersAsync(TenantId, cluster.Id);
             Toasts.Success($"Created \"{userName.Trim().ToLowerInvariant()}\".");

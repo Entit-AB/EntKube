@@ -2130,4 +2130,156 @@ public class ElasticsearchServiceTests : IDisposable
             "deployment/search-es-exporter", "secret/search-es-exporter");
         (await db.ElasticsearchClusters.AsNoTracking().SingleAsync()).MonitoringEnabled.Should().BeFalse();
     }
+
+    // ──────── Kibana spaces ────────
+
+    [Fact]
+    public void AUserWithNoSpaceSeesAllOfThem()
+    {
+        ElasticsearchUser person = new()
+        {
+            Username = "nils", IndexPattern = "logs-*",
+            Access = ElasticsearchAccess.Viewer, KibanaAccess = ElasticsearchKibanaAccess.Read
+        };
+
+        ElasticsearchService.BuildUserApplyScript(SampleCluster(), person)
+            .Should().Contain("\"*\"");
+    }
+
+    [Fact]
+    public void AUserScopedToASpaceSeesOnlyThatOne()
+    {
+        ElasticsearchUser person = new()
+        {
+            Username = "nils", IndexPattern = "logs-orders-*",
+            Access = ElasticsearchAccess.Viewer, KibanaAccess = ElasticsearchKibanaAccess.All,
+            KibanaSpaceId = "orders"
+        };
+
+        string script = ElasticsearchService.BuildUserApplyScript(SampleCluster(), person);
+
+        // The space menu shows nothing else, and neither do the dashboards.
+        script.Should().Contain("\"space:orders\"");
+    }
+
+    [Fact]
+    public void ASpaceIsCreatedOrUpdated_SoReapplyingIsHarmless()
+    {
+        ElasticsearchKibanaSpace space = new() { SpaceId = "orders", Name = "Orders team", Description = "Order pipeline" };
+
+        string script = ElasticsearchService.BuildSpaceApplyScript(SampleCluster(), space);
+
+        script.Should().Contain("POST \"$KB/api/spaces/space\"");
+        script.Should().Contain("409");
+        script.Should().Contain("PUT \"$KB/api/spaces/space/orders\"");
+        // Kibana rejects any write without this header, with a message about cross-site request
+        // forgery that reads as a problem with the body.
+        script.Should().Contain("kbn-xsrf:true");
+        // Kibana is a different service with a different certificate from Elasticsearch's.
+        script.Should().Contain("--cacert /kb-ca/ca.crt");
+        script.Should().Contain("$KB/api/status");
+    }
+
+    [Fact]
+    public void TheAdminJobMountsKibanasCaOnlyWhenThereIsAKibana()
+    {
+        ElasticsearchCluster with = SampleCluster();
+        ElasticsearchCluster without = SampleCluster();
+        without.KibanaEnabled = false;
+
+        ElasticsearchService.BuildElasticsearchJobManifest(with, "j", "cm")
+            .Should().Contain("search-kb-http-certs-public").And.Contain("optional: true");
+        ElasticsearchService.BuildElasticsearchJobManifest(without, "j", "cm")
+            .Should().NotContain("kb-ca");
+    }
+
+    [Theory]
+    [InlineData("default")]
+    [InlineData("Orders Team")]
+    [InlineData("orders/team")]
+    [InlineData("")]
+    public async Task SpaceIdsKibanaWouldRejectAreRefusedHere(string spaceId)
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+
+        Func<Task> act = () => sut.CreateSpaceAsync(tenantId, c.Id, spaceId, "Orders", null);
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
+    public async Task ASpaceNeedsAKibanaToLiveIn()
+    {
+        await SeedClusterAsync();
+        ElasticsearchCluster c = SampleCluster();
+        c.TenantId = tenantId;
+        c.KubernetesClusterId = k8sClusterId;
+        c.KibanaEnabled = false;
+        db.ElasticsearchClusters.Add(c);
+        await db.SaveChangesAsync();
+
+        Func<Task> act = () => sut.CreateSpaceAsync(tenantId, c.Id, "orders", "Orders", null);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*nowhere to put a space*");
+    }
+
+    [Fact]
+    public async Task CreatingASpaceAppliesItAndRecordsIt()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        await sut.CreateSpaceAsync(tenantId, c.Id, "orders", "Orders team", "The order pipeline");
+
+        applied.Should().Contain(m => m.Contains("api/spaces/space"));
+
+        ElasticsearchKibanaSpace stored = await db.ElasticsearchKibanaSpaces.AsNoTracking().SingleAsync();
+        stored.SpaceId.Should().Be("orders");
+        stored.LastAppliedAt.Should().NotBeNull();
+        stored.LastError.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task ASpaceSomebodyIsConfinedToCannotBeDeleted()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchKibanaSpace space = await sut.CreateSpaceAsync(tenantId, c.Id, "orders", "Orders team", null);
+        await sut.CreateUserAsync(tenantId, c.Id, "nils", "logs-*", ElasticsearchAccess.Viewer,
+            ElasticsearchKibanaAccess.Read, "orders");
+
+        // That account would sign in to a space that no longer exists and see nothing, with no
+        // message saying why.
+        Func<Task> act = () => sut.DeleteSpaceAsync(tenantId, space.Id, "nils");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*can only see this space*");
+        (await db.ElasticsearchKibanaSpaces.CountAsync()).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task DeletingASpaceIsAudited_BecauseItTakesTheDashboardsWithIt()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchKibanaSpace space = await sut.CreateSpaceAsync(tenantId, c.Id, "orders", "Orders team", null);
+
+        await sut.DeleteSpaceAsync(tenantId, space.Id, "nils");
+
+        (await db.ElasticsearchKibanaSpaces.CountAsync()).Should().Be(0);
+        AuditEvent recorded = await db.AuditEvents.AsNoTracking()
+            .SingleAsync(e => e.Action == "elasticsearch.kibana-space.delete");
+        recorded.PerformedBy.Should().Be("nils");
+        recorded.Details.Should().Contain("orders");
+    }
 }

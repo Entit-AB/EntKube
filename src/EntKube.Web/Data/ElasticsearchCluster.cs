@@ -235,6 +235,7 @@ public class ElasticsearchCluster
     public KubernetesCluster KubernetesCluster { get; set; } = null!;
     public ICollection<ElasticsearchIlmPolicy> IlmPolicies { get; set; } = [];
     public ICollection<ElasticsearchUser> Users { get; set; } = [];
+    public ICollection<ElasticsearchKibanaSpace> KibanaSpaces { get; set; } = [];
 
     // ── Derived names (all fixed by ECK's own conventions) ─────────────────────
 
@@ -264,6 +265,12 @@ public class ElasticsearchCluster
 
     /// <summary>The Kibana CR shares the Elasticsearch name; ECK suffixes its Service itself.</summary>
     public string KibanaServiceName => $"{Name}-kb-http";
+
+    /// <summary>In-cluster HTTPS endpoint for Kibana's own API.</summary>
+    public string KibanaEndpoint => $"https://{KibanaServiceName}.{Namespace}.svc:{KibanaPort}";
+
+    /// <summary>Secret carrying the public CA of Kibana's HTTP layer (key: "ca.crt").</summary>
+    public string KibanaCertsSecretName => $"{Name}-kb-http-certs-public";
 
     /// <summary>True when at least one data tier is enabled — i.e. this is not a single all-roles node.</summary>
     public bool HasDataTiers => HotCount > 0 || WarmCount > 0 || ColdCount > 0;
