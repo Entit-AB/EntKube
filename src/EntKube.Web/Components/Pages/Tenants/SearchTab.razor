@@ -722,6 +722,140 @@
                             }
                         </div>
 
+                        @* ── Ingest pipelines ── *@
+                        @{ List<ElasticsearchIngestPipeline> pipelines = PipelinesFor(cluster); }
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-funnel me-1"></i>Ingest pipelines</strong>
+                                <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2" @onclick="() => ShowPipelineForm(cluster, null)">
+                                    <i class="bi bi-plus-lg me-1"></i>Add
+                                </button>
+                            </div>
+
+                            @if (pipelineClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Name</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineName"
+                                                   disabled="@(editingPipelineId is not null)" placeholder="app-logs" />
+                                        </div>
+                                        <div class="col-md-5">
+                                            <label class="form-label small mb-1">Description</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineDescription" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Timestamp field</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineTimestampField" placeholder="time" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Formats</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineTimestampFormats" placeholder="ISO8601" />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Grok field</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineGrokField" placeholder="message" />
+                                        </div>
+                                        <div class="col-md-9">
+                                            <label class="form-label small mb-1">Grok pattern</label>
+                                            <input class="form-control form-control-sm font-monospace" @bind="pipelineGrokPattern"
+                                                   placeholder="%{LOGLEVEL:level} %{GREEDYDATA:msg}" />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Rename (from:to, …)</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineRename" placeholder="msg:message" />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Remove fields</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineRemove" placeholder="agent,host.raw" />
+                                        </div>
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Set (key=value, …)</label>
+                                            <input class="form-control form-control-sm" @bind="pipelineSet" placeholder="env=production" />
+                                        </div>
+                                        <div class="col-md-12">
+                                            <label class="form-label small mb-1">Anything else (JSON array of processors)</label>
+                                            <textarea class="form-control form-control-sm font-monospace" rows="3"
+                                                      @bind="pipelineCustom" placeholder='[{"lowercase": {"field": "level"}}]'></textarea>
+                                        </div>
+                                    </div>
+                                    <div class="form-text small mt-1">
+                                        Every pipeline gets an on-failure handler that records the error on the document rather than
+                                        rejecting it — a grok pattern that does not match should cost you a field, not the line.
+                                    </div>
+
+                                    <div class="row g-2 mt-1">
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-1">Sample document (JSON)</label>
+                                            <textarea class="form-control form-control-sm font-monospace" rows="3"
+                                                      @bind="pipelineSample" placeholder='{"message": "WARN disk almost full", "time": "2026-09-28T10:00:00Z"}'></textarea>
+                                        </div>
+                                        <div class="col-md-6">
+                                            <label class="form-label small mb-1">What comes out</label>
+                                            <pre class="small bg-body-tertiary p-2 mb-0" style="max-height:8rem;overflow:auto">@(pipelineSimulation ?? "— run it to see")</pre>
+                                        </div>
+                                    </div>
+
+                                    @if (pipelineError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@pipelineError</div> }
+
+                                    <div class="mt-2 d-flex gap-1">
+                                        <button class="btn btn-sm btn-primary" @onclick="() => SavePipelineAsync(cluster)"
+                                                disabled="@(savingPipeline || string.IsNullOrWhiteSpace(pipelineName))">
+                                            @if (savingPipeline) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                            Save &amp; apply
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => SimulatePipelineAsync(cluster)"
+                                                disabled="@(savingPipeline || editingPipelineId is null || string.IsNullOrWhiteSpace(pipelineSample))"
+                                                title="@(editingPipelineId is null ? "Save it once first" : "Run the sample through it")">
+                                            Test it
+                                        </button>
+                                        <button class="btn btn-sm btn-outline-secondary" @onclick="() => pipelineClusterId = null">Cancel</button>
+                                    </div>
+                                </div></div>
+                            }
+
+                            @if (pipelines.Count == 0)
+                            {
+                                <p class="text-muted small mb-0">
+                                    No pipelines. Documents are indexed exactly as they arrive — which for a log line means one
+                                    opaque field that cannot be filtered by level or aged by its own timestamp.
+                                </p>
+                            }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>Pipeline</th><th>Does</th><th>Applied</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchIngestPipeline pipe in pipelines)
+                                        {
+                                            <tr>
+                                                <td><code>@pipe.Name</code></td>
+                                                <td class="text-muted">@PipelineSummary(pipe)</td>
+                                                <td class="text-muted">
+                                                    @if (pipe.LastError is not null)
+                                                    {
+                                                        <span class="text-danger" title="@pipe.LastError">failed</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        @(pipe.LastAppliedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                                    }
+                                                </td>
+                                                <td class="text-nowrap">
+                                                    <button class="btn btn-sm btn-outline-secondary border-0 py-0" title="Edit"
+                                                            aria-label="@($"Edit {pipe.Name}")" @onclick="() => ShowPipelineForm(cluster, pipe)">
+                                                        <i class="bi bi-pencil"></i>
+                                                    </button>
+                                                    @RenderDeleteCell($"Delete the ingest pipeline \"{pipe.Name}\"? Documents stop being processed on their way in.", "Delete pipeline", () => DeletePipelineAsync(cluster.Id, pipe.Id, pipe.Name))
+                                                </td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
                         @* ── Index lifecycle policies ── *@
                         @{ List<ElasticsearchIlmPolicy> policies = allPolicies.TryGetValue(cluster.Id, out List<ElasticsearchIlmPolicy>? pl) ? pl : []; }
                         <div class="mb-3 border-top pt-3">
@@ -784,6 +918,16 @@
                                         <div class="col-md-2">
                                             <label class="form-label small mb-1">Delete after (d)</label>
                                             <input type="number" class="form-control form-control-sm" min="0" @bind="policyDeleteDays" placeholder="keep forever" />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Through pipeline</label>
+                                            <select class="form-select form-select-sm" @bind="policyPipelineName">
+                                                <option value="">None — index as sent</option>
+                                                @foreach (ElasticsearchIngestPipeline pipe in PipelinesFor(cluster))
+                                                {
+                                                    <option value="@pipe.Name">@pipe.Name</option>
+                                                }
+                                            </select>
                                         </div>
                                         <div class="col-md-3 d-flex align-items-end">
                                             <div class="form-check">
@@ -1489,6 +1633,26 @@
             ? [.. allDeployments.Where(d => d.EnvironmentId == envId)]
             : allDeployments;
 
+    // Ingest pipelines
+    private readonly Dictionary<Guid, List<ElasticsearchIngestPipeline>> allPipelines = [];
+    private Guid? pipelineClusterId;
+    private Guid? editingPipelineId;
+    private string pipelineName = "";
+    private string? pipelineDescription;
+    private string? pipelineTimestampField;
+    private string pipelineTimestampFormats = "ISO8601";
+    private string? pipelineGrokField;
+    private string? pipelineGrokPattern;
+    private string? pipelineRename;
+    private string? pipelineRemove;
+    private string? pipelineSet;
+    private string? pipelineCustom;
+    private string? pipelineSample;
+    private string? pipelineSimulation;
+    private bool savingPipeline;
+    private string? pipelineError;
+    private string? policyPipelineName;
+
     // Cross-cluster search
     private readonly Dictionary<Guid, List<ElasticsearchRemoteLink>> allRemotes = [];
     private List<ElasticsearchCluster> remoteCandidates = [];
@@ -1681,6 +1845,7 @@
         allUsers.Clear();
         allSpaces.Clear();
         allRemotes.Clear();
+        allPipelines.Clear();
         allBindings.Clear();
         foreach (ElasticsearchCluster c in clusters)
         {
@@ -1688,6 +1853,7 @@
             allUsers[c.Id] = await Search.GetUsersAsync(TenantId, c.Id);
             allSpaces[c.Id] = await Search.GetSpacesAsync(TenantId, c.Id);
             allRemotes[c.Id] = await Search.GetRemoteLinksAsync(TenantId, c.Id);
+            allPipelines[c.Id] = await Search.GetPipelinesAsync(TenantId, c.Id);
             allBindings[c.Id] = await Search.GetBindingsAsync(TenantId, c.Id);
         }
 
@@ -1924,6 +2090,7 @@
         policyWarmDays = cluster.WarmCount > 0 ? 7 : 0;
         policyColdDays = cluster.ColdCount > 0 ? 30 : 0;
         policyDeleteDays = 90;
+        policyPipelineName = null;
         policyError = null;
     }
 
@@ -1946,7 +2113,8 @@
                 RolloverMaxAgeDays = policyRolloverDays,
                 WarmAfterDays = policyWarmDays > 0 ? policyWarmDays : null,
                 ColdAfterDays = policyColdDays > 0 ? policyColdDays : null,
-                DeleteAfterDays = policyDeleteDays > 0 ? policyDeleteDays : null
+                DeleteAfterDays = policyDeleteDays > 0 ? policyDeleteDays : null,
+                DefaultPipelineName = string.IsNullOrWhiteSpace(policyPipelineName) ? null : policyPipelineName
             });
 
             addPolicyClusterId = null;
@@ -2278,6 +2446,101 @@
         }
         catch (Exception ex) { Toasts.Error(ex.Message); }
         finally { loadingInsight = false; }
+    }
+
+    // ── Ingest pipelines ──────────────────────────────────────────────────────
+
+    private List<ElasticsearchIngestPipeline> PipelinesFor(ElasticsearchCluster cluster) =>
+        allPipelines.TryGetValue(cluster.Id, out List<ElasticsearchIngestPipeline>? p) ? p : [];
+
+    private static string PipelineSummary(ElasticsearchIngestPipeline p)
+    {
+        List<string> parts = [];
+        if (!string.IsNullOrWhiteSpace(p.GrokPattern)) parts.Add($"grok on {p.GrokField}");
+        if (!string.IsNullOrWhiteSpace(p.TimestampField)) parts.Add($"@timestamp from {p.TimestampField}");
+        if (!string.IsNullOrWhiteSpace(p.RenameFields)) parts.Add("renames");
+        if (!string.IsNullOrWhiteSpace(p.RemoveFields)) parts.Add("removals");
+        if (!string.IsNullOrWhiteSpace(p.SetFields)) parts.Add("constants");
+        if (!string.IsNullOrWhiteSpace(p.CustomProcessorsJson)) parts.Add("custom processors");
+        return parts.Count == 0 ? "nothing yet" : string.Join(", ", parts);
+    }
+
+    private void ShowPipelineForm(ElasticsearchCluster cluster, ElasticsearchIngestPipeline? existing)
+    {
+        pipelineClusterId = cluster.Id;
+        editingPipelineId = existing?.Id;
+        pipelineName = existing?.Name ?? "";
+        pipelineDescription = existing?.Description;
+        pipelineTimestampField = existing?.TimestampField;
+        pipelineTimestampFormats = existing?.TimestampFormats ?? "ISO8601";
+        pipelineGrokField = existing?.GrokField;
+        pipelineGrokPattern = existing?.GrokPattern;
+        pipelineRename = existing?.RenameFields;
+        pipelineRemove = existing?.RemoveFields;
+        pipelineSet = existing?.SetFields;
+        pipelineCustom = existing?.CustomProcessorsJson;
+        pipelineSimulation = null;
+        pipelineError = null;
+    }
+
+    private ElasticsearchIngestPipeline PipelineFromForm(ElasticsearchCluster cluster) => new()
+    {
+        Id = editingPipelineId ?? Guid.Empty,
+        TenantId = TenantId,
+        ElasticsearchClusterId = cluster.Id,
+        Name = pipelineName.Trim(),
+        Description = pipelineDescription,
+        TimestampField = pipelineTimestampField,
+        TimestampFormats = string.IsNullOrWhiteSpace(pipelineTimestampFormats) ? "ISO8601" : pipelineTimestampFormats,
+        GrokField = pipelineGrokField,
+        GrokPattern = pipelineGrokPattern,
+        RenameFields = pipelineRename,
+        RemoveFields = pipelineRemove,
+        SetFields = pipelineSet,
+        CustomProcessorsJson = pipelineCustom
+    };
+
+    private async Task SavePipelineAsync(ElasticsearchCluster cluster)
+    {
+        savingPipeline = true;
+        pipelineError = null;
+        try
+        {
+            ElasticsearchIngestPipeline saved = await Search.SavePipelineAsync(PipelineFromForm(cluster));
+            editingPipelineId = saved.Id;
+            allPipelines[cluster.Id] = await Search.GetPipelinesAsync(TenantId, cluster.Id);
+            Toasts.Success($"Applied \"{saved.Name}\".");
+        }
+        catch (Exception ex)
+        {
+            pipelineError = ex.Message;
+            allPipelines[cluster.Id] = await Search.GetPipelinesAsync(TenantId, cluster.Id);
+        }
+        finally { savingPipeline = false; }
+    }
+
+    private async Task SimulatePipelineAsync(ElasticsearchCluster cluster)
+    {
+        savingPipeline = true;
+        pipelineError = null;
+        try
+        {
+            pipelineSimulation = await Search.SimulatePipelineAsync(
+                TenantId, editingPipelineId!.Value, pipelineSample ?? "");
+        }
+        catch (Exception ex) { pipelineError = ex.Message; }
+        finally { savingPipeline = false; }
+    }
+
+    private async Task DeletePipelineAsync(Guid clusterId, Guid pipelineId, string name)
+    {
+        try
+        {
+            await Search.DeletePipelineAsync(TenantId, pipelineId);
+            allPipelines[clusterId] = await Search.GetPipelinesAsync(TenantId, clusterId);
+            Toasts.Success($"Deleted \"{name}\".");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
     }
 
     // ── Cross-cluster search ──────────────────────────────────────────────────

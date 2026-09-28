@@ -921,6 +921,230 @@ public class ElasticsearchService(
     /// <summary>How a one-shot Job ended, as far as a bounded wait could tell.</summary>
     public enum JobOutcome { Succeeded, Failed, StillRunning }
 
+    // ── Ingest pipelines ───────────────────────────────────────────────────────
+
+    public async Task<List<ElasticsearchIngestPipeline>> GetPipelinesAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        return await db.ElasticsearchIngestPipelines
+            .Where(p => p.TenantId == tenantId && p.ElasticsearchClusterId == clusterId)
+            .OrderBy(p => p.Name)
+            .ToListAsync(ct);
+    }
+
+    public async Task<ElasticsearchIngestPipeline> SavePipelineAsync(
+        ElasticsearchIngestPipeline pipeline, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == pipeline.ElasticsearchClusterId && c.TenantId == pipeline.TenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        ValidatePipeline(pipeline);
+
+        ElasticsearchIngestPipeline? existing = pipeline.Id == Guid.Empty
+            ? null
+            : await db.ElasticsearchIngestPipelines.FirstOrDefaultAsync(p => p.Id == pipeline.Id, ct);
+
+        if (existing is null)
+        {
+            if (await db.ElasticsearchIngestPipelines.AnyAsync(
+                    p => p.ElasticsearchClusterId == pipeline.ElasticsearchClusterId && p.Name == pipeline.Name, ct))
+                throw new InvalidOperationException($"A pipeline named '{pipeline.Name}' already exists on this cluster.");
+
+            pipeline.Id = Guid.NewGuid();
+            pipeline.CreatedAt = DateTime.UtcNow;
+            db.ElasticsearchIngestPipelines.Add(pipeline);
+            existing = pipeline;
+        }
+        else
+        {
+            existing.Description = pipeline.Description;
+            existing.TimestampField = pipeline.TimestampField;
+            existing.TimestampFormats = pipeline.TimestampFormats;
+            existing.GrokField = pipeline.GrokField;
+            existing.GrokPattern = pipeline.GrokPattern;
+            existing.RenameFields = pipeline.RenameFields;
+            existing.RemoveFields = pipeline.RemoveFields;
+            existing.SetFields = pipeline.SetFields;
+            existing.CustomProcessorsJson = pipeline.CustomProcessorsJson;
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string configMap = SnapshotConfigMapName(cluster, $"pipeline-{existing.Name}");
+        string jobName = JobName(cluster, $"pipeline-{existing.Name}");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildPipelineApplyScript(cluster, existing)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+        existing.LastError = outcome == JobOutcome.Succeeded ? null : Truncate(log, 2000);
+        if (outcome == JobOutcome.Succeeded) existing.LastAppliedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        if (outcome == JobOutcome.Failed)
+            throw new InvalidOperationException(
+                "Elasticsearch rejected the pipeline:\n" + Truncate(log, 1200));
+
+        return existing;
+    }
+
+    /// <summary>
+    /// Removes a pipeline. Refused while an index template still names it: the template would keep
+    /// pointing at a pipeline that is gone, and every write through it would fail — not quietly, but
+    /// not anywhere near this screen either.
+    /// </summary>
+    public async Task DeletePipelineAsync(Guid tenantId, Guid pipelineId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchIngestPipeline pipeline = await db.ElasticsearchIngestPipelines
+            .Include(p => p.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(p => p.Id == pipelineId && p.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Pipeline not found.");
+
+        List<string> users = await db.ElasticsearchIlmPolicies
+            .Where(p => p.ElasticsearchClusterId == pipeline.ElasticsearchClusterId
+                && p.DefaultPipelineName == pipeline.Name)
+            .Select(p => p.Name)
+            .ToListAsync(ct);
+
+        if (users.Count > 0)
+            throw new InvalidOperationException(
+                $"The index template(s) {string.Join(", ", users)} still send documents through '{pipeline.Name}'. "
+                + "Point them elsewhere first — a template naming a pipeline that does not exist fails every write.");
+
+        ElasticsearchCluster cluster = pipeline.ElasticsearchCluster;
+
+        try
+        {
+            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            string configMap = SnapshotConfigMapName(cluster, $"pipeline-del-{pipeline.Name}");
+            string jobName = JobName(cluster, $"pipeline-del-{pipeline.Name}");
+
+            await k8s.ApplyManifestAsync(
+                BuildScriptConfigMap(cluster, configMap, BuildPipelineDeleteScript(cluster, pipeline)), kubeconfig, ct);
+            await k8s.ApplyManifestAsync(
+                BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+            await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Removing ingest pipeline {Pipeline} failed", pipeline.Name);
+        }
+
+        db.ElasticsearchIngestPipelines.Remove(pipeline);
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Runs one document through a pipeline without indexing it, and returns what came out.
+    ///
+    /// <para>This is the difference between a pipeline somebody believes works and one they have
+    /// seen work. A grok pattern that does not match produces no error at index time — it produces
+    /// documents missing the fields everything downstream was written against.</para>
+    /// </summary>
+    public async Task<string> SimulatePipelineAsync(
+        Guid tenantId, Guid pipelineId, string sampleDocumentJson, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchIngestPipeline pipeline = await db.ElasticsearchIngestPipelines
+            .Include(p => p.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(p => p.Id == pipelineId && p.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Pipeline not found.");
+
+        if (string.IsNullOrWhiteSpace(sampleDocumentJson))
+            throw new InvalidOperationException("Paste a sample document to run through it.");
+
+        try
+        {
+            using JsonDocument _ = JsonDocument.Parse(sampleDocumentJson);
+        }
+        catch (JsonException ex)
+        {
+            throw new InvalidOperationException($"That is not valid JSON: {ex.Message}");
+        }
+
+        ElasticsearchCluster cluster = pipeline.ElasticsearchCluster;
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string configMap = SnapshotConfigMapName(cluster, $"pipeline-sim-{pipeline.Name}");
+        string jobName = JobName(cluster, $"pipeline-sim-{pipeline.Name}");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap,
+                BuildPipelineSimulateScript(cluster, pipeline, sampleDocumentJson)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+        if (outcome != JobOutcome.Succeeded)
+            throw new InvalidOperationException("The simulation failed:\n" + Truncate(log, 1200));
+
+        const string marker = "---ENTKUBE-SIMULATE---";
+        int at = log.IndexOf(marker, StringComparison.Ordinal);
+        return at < 0 ? log : log[(at + marker.Length)..].Trim();
+    }
+
+    private static void ValidatePipeline(ElasticsearchIngestPipeline p)
+    {
+        if (string.IsNullOrWhiteSpace(p.Name))
+            throw new InvalidOperationException("The pipeline needs a name — index templates point at it by name.");
+
+        if (!p.Name.All(ch => char.IsAsciiLetterOrDigit(ch) || ch is '-' or '_' or '.'))
+            throw new InvalidOperationException(
+                "A pipeline name may only contain letters, digits, '-', '_' and '.' — it is also a file name inside the Job.");
+
+        if (!string.IsNullOrWhiteSpace(p.GrokPattern) && string.IsNullOrWhiteSpace(p.GrokField))
+            throw new InvalidOperationException("A grok pattern needs a field to read from, usually 'message'.");
+
+        if (!string.IsNullOrWhiteSpace(p.TimestampField) && string.IsNullOrWhiteSpace(p.TimestampFormats))
+            throw new InvalidOperationException("A timestamp field needs at least one format to parse it with.");
+
+        foreach (string pair in Split(p.RenameFields))
+        {
+            if (pair.Split(':').Length != 2)
+                throw new InvalidOperationException(
+                    $"'{pair}' is not a rename — write them as \"from:to\", separated by commas.");
+        }
+
+        foreach (string pair in Split(p.SetFields))
+        {
+            if (pair.Split('=').Length != 2)
+                throw new InvalidOperationException(
+                    $"'{pair}' is not a field to set — write them as \"key=value\", separated by commas.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(p.CustomProcessorsJson))
+        {
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(p.CustomProcessorsJson!);
+                if (doc.RootElement.ValueKind != JsonValueKind.Array)
+                    throw new InvalidOperationException(
+                        "The custom processors must be a JSON array, e.g. [{\"lowercase\": {\"field\": \"level\"}}].");
+            }
+            catch (JsonException ex)
+            {
+                throw new InvalidOperationException($"The custom processors are not valid JSON: {ex.Message}");
+            }
+        }
+    }
+
+    private static IEnumerable<string> Split(string? csv) =>
+        string.IsNullOrWhiteSpace(csv)
+            ? []
+            : csv.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
     // ── Cross-cluster search ───────────────────────────────────────────────────
 
     /// <summary>Cross-cluster API keys, and therefore this whole path, need at least this version.</summary>
@@ -3252,6 +3476,9 @@ public class ElasticsearchService(
             ["index.number_of_replicas"] = p.Replicas
         };
 
+        if (!string.IsNullOrWhiteSpace(p.DefaultPipelineName))
+            settings["index.default_pipeline"] = p.DefaultPipelineName!;
+
         Dictionary<string, object> template = new()
         {
             ["index_patterns"] = new[] { p.IndexPattern },
@@ -3759,6 +3986,164 @@ public class ElasticsearchService(
         sb.AppendLine("done");
         sb.AppendLine("if [ \"$ready\" != \"1\" ]; then echo \"Kibana did not become available within 5 minutes\"; exit 1; fi");
         sb.AppendLine();
+    }
+
+    /// <summary>
+    /// Renders the pipeline document Elasticsearch takes at <c>_ingest/pipeline/{id}</c>.
+    ///
+    /// <para>Every pipeline gets an <c>on_failure</c> handler that records the error on the document
+    /// instead of letting it fail. Without one, a processor that throws — a grok pattern that does
+    /// not match, a date that will not parse — rejects the whole document, and the line is simply
+    /// gone. With one, it is indexed with <c>ingest.failure</c> set, which is both searchable and
+    /// fixable later.</para>
+    /// </summary>
+    public static string BuildPipelineJson(ElasticsearchIngestPipeline p)
+    {
+        List<object> processors = [];
+
+        if (!string.IsNullOrWhiteSpace(p.GrokField) && !string.IsNullOrWhiteSpace(p.GrokPattern))
+        {
+            processors.Add(new Dictionary<string, object>
+            {
+                ["grok"] = new Dictionary<string, object>
+                {
+                    ["field"] = p.GrokField!,
+                    ["patterns"] = new[] { p.GrokPattern! },
+                    ["ignore_missing"] = true
+                }
+            });
+        }
+
+        if (!string.IsNullOrWhiteSpace(p.TimestampField))
+        {
+            processors.Add(new Dictionary<string, object>
+            {
+                ["date"] = new Dictionary<string, object>
+                {
+                    ["field"] = p.TimestampField!,
+                    ["target_field"] = "@timestamp",
+                    ["formats"] = Split(p.TimestampFormats).ToArray()
+                }
+            });
+        }
+
+        foreach (string pair in Split(p.RenameFields))
+        {
+            string[] parts = pair.Split(':');
+            processors.Add(new Dictionary<string, object>
+            {
+                ["rename"] = new Dictionary<string, object>
+                {
+                    ["field"] = parts[0].Trim(),
+                    ["target_field"] = parts[1].Trim(),
+                    // A rename of a field this particular document does not have is not an error.
+                    ["ignore_missing"] = true
+                }
+            });
+        }
+
+        foreach (string pair in Split(p.SetFields))
+        {
+            string[] parts = pair.Split('=', 2);
+            processors.Add(new Dictionary<string, object>
+            {
+                ["set"] = new Dictionary<string, object>
+                {
+                    ["field"] = parts[0].Trim(),
+                    ["value"] = parts[1].Trim()
+                }
+            });
+        }
+
+        string[] removals = [.. Split(p.RemoveFields)];
+        if (removals.Length > 0)
+        {
+            processors.Add(new Dictionary<string, object>
+            {
+                ["remove"] = new Dictionary<string, object>
+                {
+                    ["field"] = removals,
+                    ["ignore_missing"] = true
+                }
+            });
+        }
+
+        // Custom processors are parsed and appended as elements, not spliced into the rendered text:
+        // string surgery on JSON is the kind of thing that works until somebody's pattern contains a
+        // bracket. The validator has already established this is an array.
+        if (!string.IsNullOrWhiteSpace(p.CustomProcessorsJson))
+        {
+            using JsonDocument custom = JsonDocument.Parse(p.CustomProcessorsJson!);
+            foreach (JsonElement processor in custom.RootElement.EnumerateArray())
+                processors.Add(processor.Clone());
+        }
+
+        Dictionary<string, object> document = new()
+        {
+            ["description"] = string.IsNullOrWhiteSpace(p.Description)
+                ? $"Managed by EntKube ({p.Name})"
+                : p.Description!,
+            ["processors"] = processors,
+            ["on_failure"] = new object[]
+            {
+                new Dictionary<string, object>
+                {
+                    ["set"] = new Dictionary<string, object>
+                    {
+                        ["field"] = "ingest.failure",
+                        ["value"] = "{{ _ingest.on_failure_message }}"
+                    }
+                }
+            }
+        };
+
+        return JsonSerializer.Serialize(document, JsonOpts);
+    }
+
+    public static string BuildPipelineApplyScript(ElasticsearchCluster c, ElasticsearchIngestPipeline p)
+    {
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine("cat > /tmp/pipeline.json <<'ENTKUBE_EOF'");
+        sb.AppendLine(BuildPipelineJson(p));
+        sb.AppendLine("ENTKUBE_EOF");
+        sb.AppendLine();
+        sb.AppendLine($"put \"/_ingest/pipeline/{p.Name}\" /tmp/pipeline.json");
+        return sb.ToString();
+    }
+
+    public static string BuildPipelineDeleteScript(ElasticsearchCluster c, ElasticsearchIngestPipeline p)
+    {
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine($"code=$($CURL -o /tmp/resp -w '%{{http_code}}' -X DELETE \"$ES/_ingest/pipeline/{p.Name}\")");
+        sb.AppendLine("if [ \"$code\" -ge 300 ] && [ \"$code\" != \"404\" ]; then cat /tmp/resp; echo; exit 1; fi");
+        sb.AppendLine($"echo \"pipeline {p.Name} removed (HTTP $code)\"");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Runs one document through the pipeline and prints the result behind a marker. The pipeline is
+    /// sent in the request rather than referenced by name, so an unsaved edit can be tried before it
+    /// is applied to anything.
+    /// </summary>
+    public static string BuildPipelineSimulateScript(
+        ElasticsearchCluster c, ElasticsearchIngestPipeline p, string sampleDocumentJson)
+    {
+        string body = "{\n  \"pipeline\": " + BuildPipelineJson(p) + ",\n"
+            + "  \"docs\": [ { \"_source\": " + sampleDocumentJson.Trim() + " } ]\n}";
+
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine("cat > /tmp/simulate.json <<'ENTKUBE_EOF'");
+        sb.AppendLine(body);
+        sb.AppendLine("ENTKUBE_EOF");
+        sb.AppendLine();
+        sb.AppendLine("code=$($CURL -o /tmp/resp -w '%{http_code}' -X POST \"$ES/_ingest/pipeline/_simulate\" -d @/tmp/simulate.json)");
+        sb.AppendLine("if [ \"$code\" -ge 300 ]; then cat /tmp/resp; echo; exit 1; fi");
+        sb.AppendLine("echo \"---ENTKUBE-SIMULATE---\"");
+        sb.AppendLine("cat /tmp/resp");
+        return sb.ToString();
     }
 
     /// <summary>The exporter account's password Secret.</summary>

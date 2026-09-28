@@ -121,6 +121,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<ElasticsearchBinding> ElasticsearchBindings => Set<ElasticsearchBinding>();
     public DbSet<ElasticsearchKibanaSpace> ElasticsearchKibanaSpaces => Set<ElasticsearchKibanaSpace>();
     public DbSet<ElasticsearchRemoteLink> ElasticsearchRemoteLinks => Set<ElasticsearchRemoteLink>();
+    public DbSet<ElasticsearchIngestPipeline> ElasticsearchIngestPipelines => Set<ElasticsearchIngestPipeline>();
     public DbSet<GitRepository> GitRepositories => Set<GitRepository>();
     public DbSet<GitKnownHost> GitKnownHosts => Set<GitKnownHost>();
     public DbSet<CustomerGitRepoPolicy> CustomerGitRepoPolicies => Set<CustomerGitRepoPolicy>();
@@ -2370,6 +2371,27 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .OnDelete(DeleteBehavior.Cascade);
         });
 
+        builder.Entity<ElasticsearchIngestPipeline>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.Property(p => p.Name).HasMaxLength(128).IsRequired();
+            entity.Property(p => p.Description).HasMaxLength(500);
+            entity.Property(p => p.TimestampField).HasMaxLength(255);
+            entity.Property(p => p.TimestampFormats).HasMaxLength(500).IsRequired();
+            entity.Property(p => p.GrokField).HasMaxLength(255);
+            entity.Property(p => p.GrokPattern).HasMaxLength(2000);
+            entity.Property(p => p.RenameFields).HasMaxLength(1000);
+            entity.Property(p => p.RemoveFields).HasMaxLength(1000);
+            entity.Property(p => p.SetFields).HasMaxLength(1000);
+            entity.Property(p => p.LastError).HasMaxLength(2000);
+            entity.HasIndex(p => new { p.ElasticsearchClusterId, p.Name }).IsUnique();
+
+            entity.HasOne(p => p.ElasticsearchCluster)
+                .WithMany(c => c.IngestPipelines)
+                .HasForeignKey(p => p.ElasticsearchClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
         builder.Entity<ElasticsearchRemoteLink>(entity =>
         {
             entity.HasKey(l => l.Id);
@@ -2447,6 +2469,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             entity.Property(p => p.Name).HasMaxLength(128).IsRequired();
             entity.Property(p => p.IndexPattern).HasMaxLength(255).IsRequired();
             entity.Property(p => p.LastError).HasMaxLength(2000);
+            entity.Property(p => p.DefaultPipelineName).HasMaxLength(128);
             entity.HasIndex(p => new { p.ElasticsearchClusterId, p.Name }).IsUnique();
         });
 

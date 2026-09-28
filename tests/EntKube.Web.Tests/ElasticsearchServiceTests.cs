@@ -2481,4 +2481,233 @@ public class ElasticsearchServiceTests : IDisposable
         // Offering a cluster the link would then refuse is worse than not offering it.
         candidates.Should().BeEmpty();
     }
+
+    // ──────── Ingest pipelines ────────
+
+    private static ElasticsearchIngestPipeline SamplePipeline() => new()
+    {
+        Name = "app-logs",
+        GrokField = "message",
+        GrokPattern = "%{LOGLEVEL:level} %{GREEDYDATA:msg}",
+        TimestampField = "time",
+        TimestampFormats = "ISO8601,UNIX_MS",
+        RenameFields = "msg:message",
+        RemoveFields = "agent,host.raw",
+        SetFields = "env=production"
+    };
+
+    [Fact]
+    public void EveryPipelineRecordsFailuresInsteadOfRejectingTheDocument()
+    {
+        using System.Text.Json.JsonDocument doc =
+            System.Text.Json.JsonDocument.Parse(ElasticsearchService.BuildPipelineJson(SamplePipeline()));
+
+        // Without this, a grok pattern that does not match rejects the whole document and the line
+        // is simply gone. With it, the line arrives with the error recorded and searchable.
+        System.Text.Json.JsonElement onFailure = doc.RootElement.GetProperty("on_failure")[0];
+        onFailure.GetProperty("set").GetProperty("field").GetString().Should().Be("ingest.failure");
+        onFailure.GetProperty("set").GetProperty("value").GetString().Should().Contain("_ingest.on_failure_message");
+    }
+
+    [Fact]
+    public void TheProcessorsComeOutInTheOrderTheyHaveToRunIn()
+    {
+        using System.Text.Json.JsonDocument doc =
+            System.Text.Json.JsonDocument.Parse(ElasticsearchService.BuildPipelineJson(SamplePipeline()));
+
+        string[] kinds = [.. doc.RootElement.GetProperty("processors").EnumerateArray()
+            .Select(p => p.EnumerateObject().First().Name)];
+
+        // grok first (it creates the fields), then the date, then renames, constants, and removals
+        // last — removing a field before something reads it is the classic way to lose it.
+        kinds.Should().Equal("grok", "date", "rename", "set", "remove");
+    }
+
+    [Fact]
+    public void ADateProcessorTargetsAtTimestamp_WithEveryFormatGiven()
+    {
+        using System.Text.Json.JsonDocument doc =
+            System.Text.Json.JsonDocument.Parse(ElasticsearchService.BuildPipelineJson(SamplePipeline()));
+
+        System.Text.Json.JsonElement date = doc.RootElement.GetProperty("processors")[1].GetProperty("date");
+        date.GetProperty("target_field").GetString().Should().Be("@timestamp");
+        date.GetProperty("formats").EnumerateArray().Select(f => f.GetString())
+            .Should().Equal("ISO8601", "UNIX_MS");
+    }
+
+    [Fact]
+    public void RenamesAndRemovalsTolerateADocumentThatLacksTheField()
+    {
+        using System.Text.Json.JsonDocument doc =
+            System.Text.Json.JsonDocument.Parse(ElasticsearchService.BuildPipelineJson(SamplePipeline()));
+
+        System.Text.Json.JsonElement processors = doc.RootElement.GetProperty("processors");
+        processors[2].GetProperty("rename").GetProperty("ignore_missing").GetBoolean().Should().BeTrue();
+        processors[4].GetProperty("remove").GetProperty("ignore_missing").GetBoolean().Should().BeTrue();
+    }
+
+    [Fact]
+    public void CustomProcessorsAreAppendedAsJson_NotSplicedAsText()
+    {
+        ElasticsearchIngestPipeline p = SamplePipeline();
+        p.CustomProcessorsJson = """[{"lowercase": {"field": "level"}}, {"set": {"field": "kept", "value": "[bracketed]"}}]""";
+
+        using System.Text.Json.JsonDocument doc =
+            System.Text.Json.JsonDocument.Parse(ElasticsearchService.BuildPipelineJson(p));
+
+        string[] kinds = [.. doc.RootElement.GetProperty("processors").EnumerateArray()
+            .Select(x => x.EnumerateObject().First().Name)];
+
+        kinds.Should().Equal("grok", "date", "rename", "set", "remove", "lowercase", "set");
+        // A value containing brackets survives, which text splicing would not have guaranteed.
+        doc.RootElement.GetProperty("processors")[6].GetProperty("set").GetProperty("value").GetString()
+            .Should().Be("[bracketed]");
+    }
+
+    [Fact]
+    public void AnEmptyPipelineIsStillValid()
+    {
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(
+            ElasticsearchService.BuildPipelineJson(new ElasticsearchIngestPipeline { Name = "passthrough" }));
+
+        doc.RootElement.GetProperty("processors").GetArrayLength().Should().Be(0);
+        doc.RootElement.GetProperty("description").GetString().Should().Contain("passthrough");
+    }
+
+    [Fact]
+    public async Task AGrokPatternWithNoFieldToReadIsRefused()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ElasticsearchIngestPipeline p = SamplePipeline();
+        p.TenantId = tenantId;
+        p.ElasticsearchClusterId = c.Id;
+        p.GrokField = null;
+
+        Func<Task> act = () => sut.SavePipelineAsync(p);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*needs a field to read from*");
+    }
+
+    [Theory]
+    [InlineData("msg-message", "*not a rename*")]
+    [InlineData("a:b:c", "*not a rename*")]
+    public async Task MalformedRenamePairsAreRefused(string pairs, string message)
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ElasticsearchIngestPipeline p = SamplePipeline();
+        p.TenantId = tenantId;
+        p.ElasticsearchClusterId = c.Id;
+        p.RenameFields = pairs;
+
+        Func<Task> act = () => sut.SavePipelineAsync(p);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage(message);
+    }
+
+    [Fact]
+    public async Task CustomProcessorsThatAreNotAJsonArrayAreRefused()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ElasticsearchIngestPipeline p = SamplePipeline();
+        p.TenantId = tenantId;
+        p.ElasticsearchClusterId = c.Id;
+        p.CustomProcessorsJson = """{"lowercase": {"field": "level"}}""";
+
+        Func<Task> act = () => sut.SavePipelineAsync(p);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*must be a JSON array*");
+    }
+
+    [Fact]
+    public async Task SavingAPipelineAppliesItAndRecordsIt()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchIngestPipeline p = SamplePipeline();
+        p.TenantId = tenantId;
+        p.ElasticsearchClusterId = c.Id;
+
+        await sut.SavePipelineAsync(p);
+
+        applied.Should().Contain(m => m.Contains("_ingest/pipeline/app-logs"));
+        ElasticsearchIngestPipeline stored = await db.ElasticsearchIngestPipelines.AsNoTracking().SingleAsync();
+        stored.LastAppliedAt.Should().NotBeNull();
+    }
+
+    [Fact]
+    public async Task APipelineATemplateStillUsesCannotBeDeleted()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        c.WarmCount = 2;
+        c.ColdCount = 2;
+        await db.SaveChangesAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchIngestPipeline p = SamplePipeline();
+        p.TenantId = tenantId;
+        p.ElasticsearchClusterId = c.Id;
+        ElasticsearchIngestPipeline saved = await sut.SavePipelineAsync(p);
+
+        ElasticsearchIlmPolicy policy = SamplePolicy();
+        policy.TenantId = tenantId;
+        policy.ElasticsearchClusterId = c.Id;
+        policy.DefaultPipelineName = saved.Name;
+        await sut.CreatePolicyAsync(policy);
+
+        // A template naming a pipeline that does not exist fails every write through it.
+        Func<Task> act = () => sut.DeletePipelineAsync(tenantId, saved.Id);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*still send documents through*");
+    }
+
+    [Fact]
+    public void ATemplateCarriesItsDefaultPipeline()
+    {
+        ElasticsearchIlmPolicy p = SamplePolicy();
+        p.DefaultPipelineName = "app-logs";
+
+        using System.Text.Json.JsonDocument doc =
+            System.Text.Json.JsonDocument.Parse(ElasticsearchService.BuildIndexTemplateJson(p));
+
+        doc.RootElement.GetProperty("template").GetProperty("settings")
+            .GetProperty("index.default_pipeline").GetString().Should().Be("app-logs");
+    }
+
+    [Fact]
+    public void TheSimulationSendsThePipelineInline_SoAnUnsavedEditCanBeTried()
+    {
+        string script = ElasticsearchService.BuildPipelineSimulateScript(
+            SampleCluster(), SamplePipeline(), """{"message": "WARN disk almost full"}""");
+
+        script.Should().Contain("_ingest/pipeline/_simulate");
+        script.Should().Contain("\"docs\"");
+        script.Should().Contain("\"pipeline\"");
+        script.Should().Contain("---ENTKUBE-SIMULATE---");
+    }
+
+    [Fact]
+    public async Task ASampleThatIsNotJsonIsRefusedBeforeAJobIsStarted()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        ArrangeSucceedingJob();
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchIngestPipeline p = SamplePipeline();
+        p.TenantId = tenantId;
+        p.ElasticsearchClusterId = c.Id;
+        ElasticsearchIngestPipeline saved = await sut.SavePipelineAsync(p);
+
+        Func<Task> act = () => sut.SimulatePipelineAsync(tenantId, saved.Id, "not json at all");
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not valid JSON*");
+    }
 }

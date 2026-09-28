@@ -3461,6 +3461,10 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
 
+                    b.Property<string>("DefaultPipelineName")
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
                     b.Property<int?>("DeleteAfterDays")
                         .HasColumnType("int");
 
@@ -3514,6 +3518,77 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsUnique();
 
                     b.ToTable("ElasticsearchIlmPolicies");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIngestPipeline", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("CustomProcessorsJson")
+                        .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<Guid>("ElasticsearchClusterId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("GrokField")
+                        .HasMaxLength(255)
+                        .HasColumnType("nvarchar(255)");
+
+                    b.Property<string>("GrokPattern")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<DateTime?>("LastAppliedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("nvarchar(128)");
+
+                    b.Property<string>("RemoveFields")
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
+                    b.Property<string>("RenameFields")
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
+                    b.Property<string>("SetFields")
+                        .HasMaxLength(1000)
+                        .HasColumnType("nvarchar(1000)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("TimestampField")
+                        .HasMaxLength(255)
+                        .HasColumnType("nvarchar(255)");
+
+                    b.Property<string>("TimestampFormats")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ElasticsearchClusterId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("ElasticsearchIngestPipelines");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchKibanaSpace", b =>
@@ -9640,6 +9715,17 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("ElasticsearchCluster");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIngestPipeline", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
+                        .WithMany("IngestPipelines")
+                        .HasForeignKey("ElasticsearchClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ElasticsearchCluster");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchKibanaSpace", b =>
                 {
                     b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
@@ -11556,6 +11642,8 @@ namespace EntKube.Web.Data.Migrations.SqlServer
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
                 {
                     b.Navigation("IlmPolicies");
+
+                    b.Navigation("IngestPipelines");
 
                     b.Navigation("KibanaSpaces");
 

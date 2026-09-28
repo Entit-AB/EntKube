@@ -12,6 +12,7 @@ managed under **Services › Search**.
 | Elasticsearch | `Elasticsearch` CR applied by `ElasticsearchService` |
 | Kibana | `Kibana` CR, one per Elasticsearch cluster, sharing its name |
 | Lifecycle policies | ILM policies + composable index templates, applied by a Job inside the cluster |
+| Ingest pipelines | Processors applied by a Job; attached to a template as `index.default_pipeline` |
 | Snapshots | S3 repository + SLM policy, registered by a Job; restores run the same way |
 | Application users | Native-realm users + per-user roles, created by a Job; bound into an app's namespace as a Secret |
 | Metrics | Community Elasticsearch exporter + Service + ServiceMonitor, labelled to match the live Prometheus |
@@ -79,6 +80,35 @@ short-lived Job that runs inside the cluster:
 
 Deleting a policy removes its index template first, then the policy: Elasticsearch refuses to delete
 a policy an index template still names. Indices already created keep their settings.
+
+## Ingest pipelines
+
+Node roles decide where a document lands and the lifecycle policy decides how long it stays; the
+pipeline decides whether it is worth anything when it gets there. A log line indexed as one opaque
+`message` field cannot be filtered by level, grouped by service, or aged by its own timestamp rather
+than its arrival time.
+
+The common processors are form fields — grok a field, parse a timestamp into `@timestamp`, rename,
+drop and stamp constants — and anything beyond them goes in as a raw JSON array of processors. They
+are ordered so that grok runs first (it creates the fields), removals last (removing a field before
+something reads it is the classic way to lose it), and renames and removals tolerate a document that
+does not have the field.
+
+**Every pipeline gets an `on_failure` handler** that records the error on the document as
+`ingest.failure` instead of letting the processor throw. Without one, a grok pattern that does not
+match rejects the whole document and the line is simply gone; with one it arrives, searchable, and
+can be fixed later. That is not optional here.
+
+**Test it** runs one sample document through the pipeline and shows what comes out. The pipeline is
+sent inline rather than by name, so an edit can be tried before it is applied to anything. This is
+the difference between a pipeline somebody believes works and one they have seen work — a grok
+pattern that does not match produces no error at index time, just documents missing the fields
+everything downstream was written against.
+
+A lifecycle policy can name a pipeline, which puts it in the index template as
+`index.default_pipeline`, so everything written through that template goes through it. A pipeline a
+template still names cannot be deleted — the template would point at something that is gone, and
+every write through it would fail somewhere far from this screen.
 
 ## Snapshots
 

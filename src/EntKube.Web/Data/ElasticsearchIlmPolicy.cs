@@ -53,6 +53,12 @@ public class ElasticsearchIlmPolicy
     /// <summary>Delete after this many days. Null keeps the data forever — say so out loud in the UI.</summary>
     public int? DeleteAfterDays { get; set; }
 
+    /// <summary>
+    /// An ingest pipeline every document written through this template passes through, by name.
+    /// Null leaves the data exactly as the client sent it.
+    /// </summary>
+    public string? DefaultPipelineName { get; set; }
+
     /// <summary>Index template priority. Higher wins when several templates match a pattern.</summary>
     public int TemplatePriority { get; set; } = 200;
 

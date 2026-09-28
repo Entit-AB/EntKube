@@ -3460,6 +3460,10 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<string>("DefaultPipelineName")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
                     b.Property<int?>("DeleteAfterDays")
                         .HasColumnType("integer");
 
@@ -3513,6 +3517,77 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .IsUnique();
 
                     b.ToTable("ElasticsearchIlmPolicies");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIngestPipeline", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CustomProcessorsJson")
+                        .HasColumnType("text");
+
+                    b.Property<string>("Description")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid>("ElasticsearchClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("GrokField")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("GrokPattern")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<DateTime?>("LastAppliedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<string>("RemoveFields")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("RenameFields")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<string>("SetFields")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("TimestampField")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<string>("TimestampFormats")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ElasticsearchClusterId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("ElasticsearchIngestPipelines");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchKibanaSpace", b =>
@@ -9636,6 +9711,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("ElasticsearchCluster");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIngestPipeline", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
+                        .WithMany("IngestPipelines")
+                        .HasForeignKey("ElasticsearchClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ElasticsearchCluster");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchKibanaSpace", b =>
                 {
                     b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
@@ -11552,6 +11638,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
                 {
                     b.Navigation("IlmPolicies");
+
+                    b.Navigation("IngestPipelines");
 
                     b.Navigation("KibanaSpaces");
 

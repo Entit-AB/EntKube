@@ -177,6 +177,7 @@ public class BackupService(
             ElasticsearchBindings = await db.ElasticsearchBindings.AsNoTracking().ToListAsync(),
             ElasticsearchKibanaSpaces = await db.ElasticsearchKibanaSpaces.AsNoTracking().ToListAsync(),
             ElasticsearchRemoteLinks = await db.ElasticsearchRemoteLinks.AsNoTracking().ToListAsync(),
+            ElasticsearchIngestPipelines = await db.ElasticsearchIngestPipelines.AsNoTracking().ToListAsync(),
             VpnTunnels = await db.VpnTunnels.AsNoTracking().ToListAsync(),
             VpnLocalEndpoints = await db.VpnLocalEndpoints.AsNoTracking().ToListAsync(),
             VpnRemoteEndpoints = await db.VpnRemoteEndpoints.AsNoTracking().ToListAsync(),
@@ -428,6 +429,7 @@ public class BackupService(
             await InsertEntities(db, db.ElasticsearchUsers, bundle.ElasticsearchUsers);
             await InsertEntities(db, db.ElasticsearchKibanaSpaces, bundle.ElasticsearchKibanaSpaces);
             await InsertEntities(db, db.ElasticsearchRemoteLinks, bundle.ElasticsearchRemoteLinks);
+            await InsertEntities(db, db.ElasticsearchIngestPipelines, bundle.ElasticsearchIngestPipelines);
             await InsertEntities(db, db.RumSites, bundle.RumSites);
             await InsertEntities(db, db.TelemetryAlertRules, bundle.TelemetryAlertRules);
 
