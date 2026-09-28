@@ -434,6 +434,18 @@ public class StalwartMailAccount
 
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
+    /// <summary>
+    /// When EntKube minted a password for this account, or null when it has none.
+    ///
+    /// <para>Kept so the credential can be told from the server's knowledge of it. The password only
+    /// reaches Stalwart through the apply plan, so between minting it and applying the configuration
+    /// there is a window where EntKube holds a credential the server has never seen. Comparing this
+    /// against <see cref="StalwartComponentConfig.LastAppliedAt"/> is what distinguishes "not applied
+    /// yet" from "rejected" — and those two need opposite handling, since presenting a rejected
+    /// password repeatedly is how an account gets locked out.</para>
+    /// </summary>
+    public DateTime? PasswordSetAt { get; set; }
+
     public StalwartComponentConfig Config { get; set; } = null!;
     public StalwartMailDomain Domain { get; set; } = null!;
 }

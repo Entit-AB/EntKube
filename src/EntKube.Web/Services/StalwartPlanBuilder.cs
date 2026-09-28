@@ -285,7 +285,8 @@ public static class StalwartPlanBuilder
         bool clearBlockedIps = false,
         bool verboseLogging = false,
         StalwartHaBackend? ha = null,
-        IReadOnlyList<string>? trustedSenderDomains = null)
+        IReadOnlyList<string>? trustedSenderDomains = null,
+        IReadOnlyDictionary<Guid, string>? accountPasswords = null)
     {
         List<string> lines = [];
 
@@ -780,6 +781,16 @@ public static class StalwartPlanBuilder
                 {
                     AddAdminCredential(body, config, adminPassword);
                 }
+                else if (accountPasswords is not null
+                         && accountPasswords.TryGetValue(account.Id, out string? accountPassword))
+                {
+                    // A mailbox EntKube minted a password for — the support mailbox is the case that
+                    // needs one, because something has to log in as it unattended. Without this the
+                    // account exists and has no credential at all, so every login attempt is answered
+                    // with a temporary failure and the password stored on our side is never checked
+                    // against anything.
+                    AddPasswordCredential(body, config, accountPassword);
+                }
 
                 if (!string.IsNullOrWhiteSpace(account.DisplayName))
                 {
@@ -860,9 +871,21 @@ public static class StalwartPlanBuilder
     /// carrying the Admin role that the directory has no way to express.</para>
     /// </summary>
     private static void AddAdminCredential(
-        Dictionary<string, object?> account, StalwartComponentConfig config, string? adminPassword)
+        Dictionary<string, object?> account, StalwartComponentConfig config, string? adminPassword) =>
+        AddPasswordCredential(account, config, adminPassword);
+
+    /// <summary>
+    /// Gives an account a password, on the same terms and for the same reason as the administrator's.
+    ///
+    /// <para>Internal mode only, because that is the only mode where Stalwart is the thing checking.
+    /// An LDAP or OIDC directory serves every protocol and both credential types, and a password
+    /// written here would never be consulted — so emitting one would produce an account that looks
+    /// credentialed and cannot log in, which is worse than one that plainly has no password.</para>
+    /// </summary>
+    private static void AddPasswordCredential(
+        Dictionary<string, object?> account, StalwartComponentConfig config, string? password)
     {
-        if (config.AuthMode != StalwartAuthMode.Internal || string.IsNullOrWhiteSpace(adminPassword))
+        if (config.AuthMode != StalwartAuthMode.Internal || string.IsNullOrWhiteSpace(password))
         {
             return;
         }
@@ -870,7 +893,7 @@ public static class StalwartPlanBuilder
         account["credentials"] = List([new Dictionary<string, object?>
         {
             ["@type"] = "Password",
-            ["secret"] = adminPassword,
+            ["secret"] = password,
         }]);
     }
 
