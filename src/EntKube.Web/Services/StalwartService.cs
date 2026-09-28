@@ -1933,9 +1933,26 @@ public class StalwartService(
         StalwartPlanBuilder.StalwartHaBackend? ha =
             await BuildHaBackendAsync(tenantId, clusterComponentId, config, releaseName, ns, ct);
 
+        // Mailbox passwords EntKube minted, so the accounts it has to log in as unattended get a
+        // credential rather than existing with none. Internal mode only: elsewhere the directory is
+        // what checks, and a password written into an account there would never be consulted.
+        Dictionary<Guid, string> accountPasswords = [];
+        if (config.AuthMode == StalwartAuthMode.Internal)
+        {
+            foreach (StalwartMailAccount account in accounts.Where(a => a.PasswordSetAt is not null))
+            {
+                if (await Secret(tenantId, clusterComponentId,
+                        StalwartManifestBuilder.AccountPasswordSecretName(account.Id), ct)
+                    is string accountPassword)
+                {
+                    accountPasswords[account.Id] = accountPassword;
+                }
+            }
+        }
+
         string plan = StalwartPlanBuilder.BuildApplyPlan(
             config, domains, accounts, adminPassword, proxyAddresses, clearBlockedIps, verboseLogging, ha,
-            trustedSenderDomains);
+            trustedSenderDomains, accountPasswords);
         List<string> output = [];
 
         output.Add(proxyAddresses.Count > 0

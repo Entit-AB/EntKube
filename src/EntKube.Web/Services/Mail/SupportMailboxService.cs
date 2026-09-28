@@ -1,4 +1,5 @@
 using System.Collections.Concurrent;
+using System.Security.Cryptography;
 using EntKube.Web.Data;
 using MailKit;
 using MailKit.Net.Imap;
@@ -241,9 +242,28 @@ public class SupportMailboxService(
             StalwartComponentConfig? config = await db.StalwartComponentConfigs
                 .FirstOrDefaultAsync(c => c.ClusterComponentId == componentId, ct);
 
-            if (config is null || config.AuthMode != StalwartAuthMode.Oidc)
+            if (config is null)
             {
-                // Passwords are checkable here, so there is nothing to mint.
+                return;
+            }
+
+            if (config.AuthMode == StalwartAuthMode.Internal)
+            {
+                await EnsureAccountPasswordAsync(db, mailbox, componentId, accountId, ct);
+                return;
+            }
+
+            if (config.AuthMode == StalwartAuthMode.Ldap)
+            {
+                // Nothing to mint and nothing to pretend about. Stalwart routes authentication to the
+                // directory, so the credential has to exist as an LDAP entry's password — which EntKube
+                // does not write. Minting one here would store a password nothing will ever check.
+                mailbox.LastError =
+                    "That mail server authenticates against LDAP, so its mailbox passwords live in the "
+                    + "directory and EntKube cannot create one. Either set this mailbox up by entering "
+                    + "the IMAP details and the directory password by hand, or switch the mail server "
+                    + "to an OIDC directory, where a service account can be created for it.";
+                await db.SaveChangesAsync(ct);
                 return;
             }
 
@@ -326,13 +346,85 @@ public class SupportMailboxService(
     }
 
     /// <summary>
+    /// Gives the chosen mailbox a password on a server that checks passwords itself, creating one if
+    /// it has none.
+    ///
+    /// <para>This is what makes choosing a server and an account the whole of the configuration. A
+    /// Stalwart account is created by the Mailboxes tab with no credential at all — only the
+    /// administrator gets one — so before this existed, a support mailbox pointed at an internal-auth
+    /// server could never authenticate, and the form deliberately does not ask for a password because
+    /// the operator has no way to know one.</para>
+    ///
+    /// <para>Minted once and then left alone. Rotating it on every save would invalidate the password
+    /// the running server is currently checking against, so every save would break fetching until the
+    /// mail server was applied again — a save that changed nothing would be enough to do it.</para>
+    /// </summary>
+    private async Task EnsureAccountPasswordAsync(
+        ApplicationDbContext db, SupportMailbox mailbox, Guid componentId,
+        Guid accountId, CancellationToken ct)
+    {
+        StalwartMailAccount? account = await db.StalwartMailAccounts
+            .FirstOrDefaultAsync(a => a.Id == accountId, ct);
+
+        if (account is null)
+        {
+            return;
+        }
+
+        string secretName = StalwartManifestBuilder.AccountPasswordSecretName(account.Id);
+
+        bool stored = await vault.GetComponentSecretValueAsync(
+            mailbox.TenantId, componentId, secretName, ct) is { Length: > 0 };
+
+        if (!stored || account.PasswordSetAt is null)
+        {
+            // Either half missing is repaired, not just both: a stored secret with no timestamp cannot
+            // be told from one the server already knows, and a timestamp with no secret is a password
+            // the plan will never carry.
+            await vault.SetComponentSecretAsync(
+                mailbox.TenantId, componentId, secretName, GeneratePassword(), ct);
+
+            account.PasswordSetAt = DateTime.UtcNow;
+            await db.SaveChangesAsync(ct);
+        }
+
+        // The password from any earlier hand-entered configuration is for a different account on a
+        // different server, and it is no longer reachable by any code path. Left in the vault it would
+        // still make the settings screen report that a password is stored, and it is a live credential
+        // for something nobody is watching.
+        await vault.DeleteSupportMailboxPasswordAsync(mailbox.TenantId, mailbox.Id, ct);
+    }
+
+    /// <summary>
+    /// A password for a mailbox nobody will ever type. Long and random because it is only ever
+    /// presented by the poller, so there is no reason for it to be memorable or short.
+    /// </summary>
+    private static string GeneratePassword() =>
+        Convert.ToBase64String(RandomNumberGenerator.GetBytes(24))
+            .Replace("+", "x").Replace("/", "y")[..32];
+
+    /// <summary>
     /// How much of "entkube-support-mailbox-&lt;id&gt;" the Keycloak client is named with: the whole
     /// prefix and the first 12 hex digits of the mailbox id.
     /// </summary>
     private const int IdentifierLength = 36;
 
-    /// <summary>A Stalwart server the tenant could read a support mailbox from.</summary>
-    public sealed record StalwartMailServerOption(Guid ComponentId, string Label, bool UsesOidc);
+    /// <summary>
+    /// A Stalwart server the tenant could read a support mailbox from.
+    ///
+    /// <para>Carries the auth mode rather than a single "uses OIDC" flag, because what can be done
+    /// about the credential differs three ways and not two: OIDC mints a service account, internal
+    /// mints a password, and LDAP can do neither — the credential is an entry in a directory EntKube
+    /// does not write.</para>
+    /// </summary>
+    public sealed record StalwartMailServerOption(
+        Guid ComponentId, string Label, StalwartAuthMode AuthMode)
+    {
+        public bool UsesOidc => AuthMode == StalwartAuthMode.Oidc;
+
+        /// <summary>Whether choosing a mailbox here is the whole of the configuration.</summary>
+        public bool CredentialIsAutomatic => AuthMode != StalwartAuthMode.Ldap;
+    }
 
     /// <summary>A mailbox on one of those servers.</summary>
     public sealed record StalwartMailboxOption(Guid AccountId, string Address);
@@ -365,7 +457,7 @@ public class SupportMailboxService(
                 // The hostname is what an operator recognises; the cluster disambiguates two servers
                 // that serve the same domain from different clusters.
                 $"{r.Config.Hostname} ({r.Component.Cluster?.Name ?? r.Component.Name})",
-                r.Config.AuthMode == StalwartAuthMode.Oidc))
+                r.Config.AuthMode))
             .OrderBy(o => o.Label, StringComparer.OrdinalIgnoreCase)];
     }
 
@@ -416,8 +508,33 @@ public class SupportMailboxService(
         }
     }
 
-    public Task<bool> HasPasswordAsync(SupportMailbox mailbox, CancellationToken ct = default) =>
-        vault.HasSupportMailboxPasswordAsync(mailbox.TenantId, mailbox.Id, ct);
+    /// <summary>
+    /// Whether this mailbox has a credential of the kind its server will actually check.
+    ///
+    /// <para>Shape-aware, because "a password is stored" is the wrong question for two of the three
+    /// shapes. A mailbox on an OIDC server has no password by design and a bearer token instead; one on
+    /// an internal-auth server has a password EntKube minted against the account rather than anything
+    /// typed into this screen. Asking only about the typed-in slot reported both as unconfigured, which
+    /// is how a working mailbox comes to be labelled "No password stored".</para>
+    /// </summary>
+    public async Task<bool> HasCredentialAsync(
+        SupportMailbox mailbox, CancellationToken ct = default)
+    {
+        if (mailbox.StalwartComponentId is not Guid componentId
+            || mailbox.StalwartAccountId is not Guid accountId)
+        {
+            return await vault.HasSupportMailboxPasswordAsync(mailbox.TenantId, mailbox.Id, ct);
+        }
+
+        if (!string.IsNullOrWhiteSpace(mailbox.OAuthClientId))
+        {
+            return true;
+        }
+
+        return await vault.GetComponentSecretValueAsync(
+            mailbox.TenantId, componentId,
+            StalwartManifestBuilder.AccountPasswordSecretName(accountId), ct) is { Length: > 0 };
+    }
 
     /// <summary>
     /// Connects, authenticates and opens the folder, then disconnects without reading
@@ -545,7 +662,16 @@ public class SupportMailboxService(
 
             mailbox.LastPolledAt = DateTime.UtcNow;
             mailbox.LastError = explained;
-            mailbox.ConsecutiveFailures++;
+
+            // A credential the server has not been given yet is not a failed attempt: none was made,
+            // so nothing can be locked out by trying again. Counting it would back the mailbox off
+            // permanently within five polls, and it would still be backed off after the operator
+            // applied the mail server — the one action the message asks for.
+            if (ex is not CredentialPendingApplyException)
+            {
+                mailbox.ConsecutiveFailures++;
+            }
+
             await db.SaveChangesAsync(ct);
 
             logger.LogWarning(
@@ -840,14 +966,35 @@ public class SupportMailboxService(
 
         if (!where.UseOAuth)
         {
-            // The server validates passwords, so the account's own credential is what to send.
-            string? password = await vault.GetSupportMailboxPasswordAsync(
-                mailbox.TenantId, mailbox.Id, ct);
+            // The account's own credential, not the mailbox's. The mailbox slot holds whatever was
+            // typed for a hand-entered server, and presenting that to a different account on a
+            // different server is a wrong password offered on every poll — which is how an account
+            // gets locked out and, on a server with auto-ban, how the poller's address gets banned.
+            string? password = await vault.GetComponentSecretValueAsync(
+                mailbox.TenantId, componentId,
+                StalwartManifestBuilder.AccountPasswordSecretName(account.Id), ct);
 
-            return password is null
-                ? throw new InvalidOperationException(
-                    "No password has been stored for this mailbox.")
-                : (where, password);
+            if (string.IsNullOrEmpty(password))
+            {
+                throw new InvalidOperationException(
+                    "No password has been created for this mailbox yet. Save it again on the Support "
+                    + "mailbox tab and one is created for it.");
+            }
+
+            // The password exists here and the server has never been told it. Distinguished on
+            // purpose: it is not a rejected credential, and the remedy is applying the mail server
+            // rather than anything about this mailbox.
+            if (account.PasswordSetAt is DateTime setAt
+                && (config.LastAppliedAt is null || config.LastAppliedAt < setAt))
+            {
+                throw new CredentialPendingApplyException(
+                    $"A password was created for {where.Username}, but the mail server has not been "
+                    + "applied since — so Stalwart does not know it yet and answers every login with a "
+                    + "temporary failure. Apply the mail server's configuration on its Components tab, "
+                    + "and fetching starts on its own.");
+            }
+
+            return (where, password);
         }
 
         if (string.IsNullOrWhiteSpace(mailbox.OAuthClientId)

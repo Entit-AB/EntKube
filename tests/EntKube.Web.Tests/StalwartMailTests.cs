@@ -39,6 +39,72 @@ public class StalwartMailTests
         IsPrimary = primary,
     };
 
+    /// <summary>
+    /// A mailbox EntKube minted a password for gets that password in the plan.
+    ///
+    /// <para>Without this the plan writes the account with no credential of any kind — only the
+    /// administrator ever got one — so the mailbox exists, looks correct in the admin interface, and
+    /// answers every login with a temporary failure. It is the whole reason a support mailbox could not
+    /// read from an internal-auth server.</para>
+    /// </summary>
+    [Fact]
+    public void Plan_GivesAMintedMailboxItsPassword()
+    {
+        StalwartComponentConfig config = Config(c => c.AuthMode = StalwartAuthMode.Internal);
+        StalwartMailDomain domain = Domain(config.Id, "example.com");
+        StalwartMailAccount account = new()
+        {
+            Id = Guid.NewGuid(), ConfigId = config.Id, DomainId = domain.Id, LocalPart = "support",
+            PasswordSetAt = DateTime.UtcNow,
+        };
+
+        string plan = StalwartPlanBuilder.BuildApplyPlan(
+            config, [domain], [account],
+            accountPasswords: new Dictionary<Guid, string> { [account.Id] = "minted-secret" });
+
+        JsonElement accounts = Operation(plan, "Account")!.Value.GetProperty("value");
+
+        JsonElement support = accounts.EnumerateObject()
+            .Select(p => p.Value)
+            .Single(v => v.GetProperty("name").GetString() == "support");
+
+        support.GetProperty("credentials").EnumerateObject()
+            .Select(c => c.Value.GetProperty("secret").GetString())
+            .Should().Contain("minted-secret");
+    }
+
+    /// <summary>
+    /// And does not, where the directory is what checks.
+    ///
+    /// <para>A password written into an account under LDAP or OIDC is never consulted — authentication
+    /// is routed to the directory — so emitting one produces an account that looks credentialed and
+    /// cannot log in. That is worse than one plainly without a password, because it hides the reason.
+    /// </para>
+    /// </summary>
+    [Theory]
+    [InlineData(StalwartAuthMode.Ldap)]
+    [InlineData(StalwartAuthMode.Oidc)]
+    public void Plan_DoesNotWriteAPasswordTheDirectoryWouldNeverCheck(StalwartAuthMode mode)
+    {
+        StalwartComponentConfig config = Config(c =>
+        {
+            c.AuthMode = mode;
+            c.OidcIssuerUrl = "https://sso.example.com/realms/mail";
+        });
+        StalwartMailDomain domain = Domain(config.Id, "example.com");
+        StalwartMailAccount account = new()
+        {
+            Id = Guid.NewGuid(), ConfigId = config.Id, DomainId = domain.Id, LocalPart = "support",
+            PasswordSetAt = DateTime.UtcNow,
+        };
+
+        string plan = StalwartPlanBuilder.BuildApplyPlan(
+            config, [domain], [account],
+            accountPasswords: new Dictionary<Guid, string> { [account.Id] = "minted-secret" });
+
+        plan.Should().NotContain("minted-secret");
+    }
+
     private static List<YamlDocument> Parse(string manifest)
     {
         YamlStream stream = [];

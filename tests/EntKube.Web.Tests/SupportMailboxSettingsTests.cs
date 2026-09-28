@@ -1,5 +1,6 @@
 using System.Reflection;
 using EntKube.Web.Data;
+using EntKube.Web.Services;
 using EntKube.Web.Services.Mail;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
@@ -221,10 +222,18 @@ public class SupportMailboxSettingsTests : IDisposable
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
         db.SaveChanges();
 
-        // The vault, the ingest pipeline, the token provider and Keycloak are only reached by a
-        // poll or by saving a mailbox that names a Stalwart server, none of which happens here.
+        // A real vault. Saving a mailbox that names a Stalwart server does reach it — that is where the
+        // mailbox's password is created — and a null one would be swallowed by the same catch that
+        // reports a Keycloak failure, so these tests would keep passing while the save half-worked.
+        // Which of them touches it depends on the server's auth mode, and that is not this file's
+        // business to depend on.
         mailboxes = new SupportMailboxService(
-            new TestDbContextFactory(connection), null!, null!, null!, null!,
+            new TestDbContextFactory(connection),
+            new VaultService(
+                new TestDbContextFactory(connection),
+                new VaultEncryptionService(Convert.FromBase64String(
+                    "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg="))),
+            null!, null!, null!,
             NullLogger<SupportMailboxService>.Instance);
     }
 

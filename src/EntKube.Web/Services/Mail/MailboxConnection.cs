@@ -85,3 +85,14 @@ public static class MailboxConnectionResolver
         UseOAuth: false,
         ValidateCertificateName: true);
 }
+
+/// <summary>
+/// The credential exists on EntKube's side and the mail server has not been told it yet.
+///
+/// <para>Its own type because it needs the opposite handling to a rejected credential. A wrong
+/// password must count towards backing off — presenting one repeatedly is how an account gets locked
+/// out. This is the reverse: nothing was presented, nothing can be locked, and the remedy is applying
+/// the mail server. Counting it would stop fetching for good after five polls, so a mailbox would
+/// stay dead after the operator did the very thing the message asked them to do.</para>
+/// </summary>
+public sealed class CredentialPendingApplyException(string message) : Exception(message);

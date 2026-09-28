@@ -83,7 +83,7 @@
                 }
                 @if (!hasPassword)
                 {
-                    <div class="mt-1">No password is stored, so nothing can be fetched.</div>
+                    <div class="mt-1">No credential is stored, so nothing can be fetched.</div>
                 }
             </div>
         </div>
@@ -131,7 +131,17 @@
                 </div>
                 <div class="col-md-6 align-self-end">
                     <div class="small text-muted">
-                        @if (selectedServerUsesOidc)
+                        @if (selectedServerNeedsDirectoryPassword)
+                        {
+                            <span class="text-warning">
+                                <i class="bi bi-exclamation-triangle me-1"></i>
+                                That server authenticates against LDAP, so its mailbox passwords live
+                                in the directory and EntKube cannot create one. Leave the server
+                                unselected and enter the IMAP details and directory password by hand
+                                instead.
+                            </span>
+                        }
+                        else if (selectedServerUsesOidc)
                         {
                             <span>
                                 <i class="bi bi-shield-lock me-1"></i>
@@ -144,7 +154,10 @@
                         {
                             <span>
                                 <i class="bi bi-key me-1"></i>
-                                That server validates passwords, so the mailbox's own password is used.
+                                That server validates passwords itself, so saving creates one for this
+                                mailbox and stores it in the vault. Apply the mail server afterwards —
+                                the password only reaches Stalwart with its configuration, and until it
+                                does every login is answered with a temporary failure.
                             </span>
                         }
                     </div>
@@ -388,6 +401,11 @@
     private List<SupportMailboxService.StalwartMailServerOption> stalwartServers = [];
     private List<SupportMailboxService.StalwartMailboxOption> stalwartAccounts = [];
 
+    private bool selectedServerNeedsDirectoryPassword =>
+        form.StalwartComponentId is Guid ldapId
+        && stalwartServers.FirstOrDefault(s => s.ComponentId == ldapId)
+            is { CredentialIsAutomatic: false };
+
     private bool selectedServerUsesOidc =>
         form.StalwartComponentId is Guid id
         && stalwartServers.FirstOrDefault(s => s.ComponentId == id)?.UsesOidc == true;
@@ -416,7 +434,7 @@
         try
         {
             saved = await Mailboxes.GetAsync(TenantId);
-            hasPassword = saved is not null && await Mailboxes.HasPasswordAsync(saved);
+            hasPassword = saved is not null && await Mailboxes.HasCredentialAsync(saved);
 
             stalwartServers = await Mailboxes.GetStalwartServersAsync(TenantId);
             stalwartAccounts = saved?.StalwartComponentId is Guid chosen
@@ -601,7 +619,7 @@
     private string StatusTitle() =>
         saved is null ? "Not configured"
         : !string.IsNullOrWhiteSpace(saved.LastError) ? "The last check failed"
-        : !hasPassword ? "No password stored"
+        : !hasPassword ? "No credential stored"
         : !saved.IsEnabled ? "Fetching is switched off"
         : "Fetching";
 }

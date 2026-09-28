@@ -40,6 +40,16 @@ public static class StalwartManifestBuilder
     /// <summary>Vault secret name for the recovery/administrator password.</summary>
     public const string AdminPasswordSecretName = "STALWART_ADMIN_PASSWORD";
 
+    /// <summary>
+    /// Vault secret name for the password of one mailbox, as opposed to the administrator's.
+    ///
+    /// <para>Per account rather than one shared secret, because these are credentials for distinct
+    /// identities and a single one would mean every mailbox EntKube logs in as shares a password —
+    /// so losing one loses all of them.</para>
+    /// </summary>
+    public static string AccountPasswordSecretName(Guid accountId) =>
+        $"STALWART_ACCOUNT_PASSWORD_{accountId:N}";
+
     /// <summary>Vault secret name for the LDAP bind password.</summary>
     public const string LdapBindPasswordSecretName = StalwartPlanBuilder.LdapBindPasswordEnv;
 

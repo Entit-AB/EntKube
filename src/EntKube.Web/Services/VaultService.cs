@@ -930,6 +930,33 @@ public class VaultService(
             && s.Name == SupportMailboxPasswordName, ct);
     }
 
+    /// <summary>
+    /// Removes a hand-entered password, for when a mailbox stops being one somebody typed.
+    ///
+    /// <para>Switching a mailbox to a managed mail server leaves the old password behind otherwise: a
+    /// live credential for an account nothing polls any more, still making the settings screen report
+    /// that a password is stored.</para>
+    /// </summary>
+    public async Task DeleteSupportMailboxPasswordAsync(
+        Guid tenantId, Guid mailboxId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<VaultSecret> stored = await db.Set<VaultSecret>()
+            .Where(s => s.Vault.TenantId == tenantId
+                && s.SupportMailboxId == mailboxId
+                && s.Name == SupportMailboxPasswordName)
+            .ToListAsync(ct);
+
+        if (stored.Count == 0)
+        {
+            return;
+        }
+
+        db.Set<VaultSecret>().RemoveRange(stored);
+        await db.SaveChangesAsync(ct);
+    }
+
     /// <summary>The one secret name a support mailbox owns.</summary>
     public const string SupportMailboxPasswordName = "PASSWORD";
 
