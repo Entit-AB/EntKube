@@ -115,6 +115,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<KafkaTopic> KafkaTopics => Set<KafkaTopic>();
     public DbSet<KafkaUser> KafkaUsers => Set<KafkaUser>();
     public DbSet<KafkaBinding> KafkaBindings => Set<KafkaBinding>();
+    public DbSet<ElasticsearchCluster> ElasticsearchClusters => Set<ElasticsearchCluster>();
+    public DbSet<ElasticsearchIlmPolicy> ElasticsearchIlmPolicies => Set<ElasticsearchIlmPolicy>();
     public DbSet<GitRepository> GitRepositories => Set<GitRepository>();
     public DbSet<GitKnownHost> GitKnownHosts => Set<GitKnownHost>();
     public DbSet<CustomerGitRepoPolicy> CustomerGitRepoPolicies => Set<CustomerGitRepoPolicy>();
@@ -2298,6 +2300,60 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithMany()
                 .HasForeignKey(b => b.AppDeploymentId)
                 .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ElasticsearchCluster>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            entity.Property(c => c.Name).HasMaxLength(36).IsRequired();
+            entity.Property(c => c.Namespace).HasMaxLength(63).IsRequired();
+            entity.Property(c => c.Version).HasMaxLength(20).IsRequired();
+            entity.Property(c => c.StorageClass).HasMaxLength(63);
+            entity.Property(c => c.Health).HasMaxLength(20);
+
+            foreach (string quantity in new[]
+            {
+                nameof(ElasticsearchCluster.MasterCpuRequest), nameof(ElasticsearchCluster.MasterMemory),
+                nameof(ElasticsearchCluster.MasterStorageSize),
+                nameof(ElasticsearchCluster.HotCpuRequest), nameof(ElasticsearchCluster.HotMemory),
+                nameof(ElasticsearchCluster.HotStorageSize),
+                nameof(ElasticsearchCluster.WarmCpuRequest), nameof(ElasticsearchCluster.WarmMemory),
+                nameof(ElasticsearchCluster.WarmStorageSize),
+                nameof(ElasticsearchCluster.ColdCpuRequest), nameof(ElasticsearchCluster.ColdMemory),
+                nameof(ElasticsearchCluster.ColdStorageSize),
+                nameof(ElasticsearchCluster.IngestCpuRequest), nameof(ElasticsearchCluster.IngestMemory),
+                nameof(ElasticsearchCluster.IngestStorageSize),
+                nameof(ElasticsearchCluster.KibanaCpuRequest), nameof(ElasticsearchCluster.KibanaMemory)
+            })
+            {
+                entity.Property(quantity).HasMaxLength(20).IsRequired();
+            }
+
+            entity.HasIndex(c => new { c.KubernetesClusterId, c.Name, c.Namespace }).IsUnique();
+
+            entity.HasOne(c => c.Tenant)
+                .WithMany()
+                .HasForeignKey(c => c.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasOne(c => c.KubernetesCluster)
+                .WithMany()
+                .HasForeignKey(c => c.KubernetesClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            entity.HasMany(c => c.IlmPolicies)
+                .WithOne(p => p.ElasticsearchCluster)
+                .HasForeignKey(p => p.ElasticsearchClusterId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ElasticsearchIlmPolicy>(entity =>
+        {
+            entity.HasKey(p => p.Id);
+            entity.Property(p => p.Name).HasMaxLength(128).IsRequired();
+            entity.Property(p => p.IndexPattern).HasMaxLength(255).IsRequired();
+            entity.Property(p => p.LastError).HasMaxLength(2000);
+            entity.HasIndex(p => new { p.ElasticsearchClusterId, p.Name }).IsUnique();
         });
 
         builder.Entity<RumSite>(entity =>

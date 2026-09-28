@@ -1,0 +1,1064 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject ElasticsearchService Search
+@inject TenantService TenantService
+@inject ToastService Toasts
+
+@* ===========================================================================
+   Search Tab — Elasticsearch + Kibana via the ECK operator.
+
+   The form is built around two things the quickstart leaves to chance: which
+   roles the nodes carry, and what the whole thing will cost the Kubernetes
+   cluster. Both are shown before anything is applied.
+   =========================================================================== *@
+
+<LoadingPanel Loading="@loading" LoadingText="Loading Elasticsearch clusters…">
+@if (!loading)
+{
+    <ConfirmDialog Visible="@(pendingConfirm is not null)"
+                   Message="@(pendingConfirm?.Message ?? "")"
+                   ConfirmText="@(pendingConfirm?.ConfirmText ?? "Delete")"
+                   IsBusy="confirmBusy"
+                   OnConfirm="RunPendingConfirmAsync"
+                   OnCancel="() => pendingConfirm = null" />
+
+    @* ── Operator availability badge ── *@
+    <div class="d-flex gap-2 mb-4 flex-wrap">
+        @if (operatorStatus?.OperatorAvailable == true)
+        {
+            <span class="badge bg-success-subtle text-success border border-success-subtle px-3 py-2">
+                <i class="bi bi-search me-1"></i>ECK operator
+                @if (operatorStatus.OperatorClusterName is not null)
+                {
+                    <small class="ms-1 opacity-75">on @operatorStatus.OperatorClusterName</small>
+                }
+            </span>
+        }
+        else
+        {
+            <span class="badge bg-secondary-subtle text-secondary border px-3 py-2">
+                <i class="bi bi-search me-1"></i>ECK operator — not installed
+            </span>
+        }
+    </div>
+
+    <div class="mb-4">
+        <h5 class="d-flex align-items-center gap-2 mb-3">
+            <i class="bi bi-search text-primary"></i>Elasticsearch clusters
+            <span class="badge bg-secondary rounded-pill">@clusters.Count</span>
+            <button class="btn btn-sm btn-secondary ms-auto" @onclick="ShowCreateForm"
+                    disabled="@(form is not null || operatorStatus?.OperatorAvailable != true)">
+                <i class="bi bi-plus-lg me-1"></i>Create cluster
+            </button>
+        </h5>
+
+        @if (form is not null)
+        {
+            <div class="card shadow-sm mb-3 border-secondary">
+                <div class="card-header bg-secondary bg-opacity-10 d-flex align-items-center justify-content-between">
+                    <h6 class="mb-0">
+                        <i class="bi @(editingId is null ? "bi-plus-circle" : "bi-pencil") me-2"></i>
+                        @(editingId is null ? "New Elasticsearch cluster" : $"Edit {form.Name}")
+                    </h6>
+                    <button class="btn btn-sm btn-outline-secondary border-0" @onclick="CancelForm"><i class="bi bi-x-lg"></i></button>
+                </div>
+                <div class="card-body">
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label small">Cluster name</label>
+                            <input class="form-control form-control-sm" @bind="form.Name" disabled="@(editingId is not null)" placeholder="search" />
+                            <div class="form-text small">DNS-safe, 36 characters or fewer — ECK appends the tier and ordinal.</div>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small">Kubernetes cluster</label>
+                            <select class="form-select form-select-sm" @bind="form.K8sClusterId" @bind:after="RefreshCapacityAsync"
+                                    disabled="@(editingId is not null)">
+                                <option value="@Guid.Empty">Select cluster...</option>
+                                @foreach (KubernetesCluster k in formK8sClusters)
+                                {
+                                    <option value="@k.Id">@k.Name (@k.Environment.Name)</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Namespace</label>
+                            <input class="form-control form-control-sm" @bind="form.Namespace" disabled="@(editingId is not null)" />
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small">Stack version</label>
+                            <input class="form-control form-control-sm" @bind="form.Version" placeholder="9.5.0" />
+                        </div>
+                    </div>
+
+                    @if (editingId is null)
+                    {
+                        <div class="mb-3">
+                            <label class="form-label small">Topology preset</label>
+                            <div class="btn-group btn-group-sm d-flex flex-wrap" role="group">
+                                @foreach ((string key, string label, string help) in Presets)
+                                {
+                                    <button type="button" class="btn @(selectedPreset == key ? "btn-primary" : "btn-outline-primary")"
+                                            title="@help" @onclick="() => ApplyPreset(key)">@label</button>
+                                }
+                            </div>
+                            <div class="form-text small">@(Presets.FirstOrDefault(p => p.Key == selectedPreset).Help)</div>
+                        </div>
+                    }
+
+                    @* ── Node tiers ── *@
+                    <div class="table-responsive mb-2">
+                        <table class="table table-sm align-middle small mb-0">
+                            <thead class="text-muted">
+                                <tr>
+                                    <th style="min-width:13rem">Tier</th>
+                                    <th style="width:6rem">Nodes</th>
+                                    <th style="width:7rem">CPU</th>
+                                    <th style="width:7rem">Memory</th>
+                                    <th style="width:7rem">Heap</th>
+                                    <th style="width:8rem">Storage / node</th>
+                                </tr>
+                            </thead>
+                            <tbody>
+                                @foreach (TierEdit tier in form.Tiers)
+                                {
+                                    bool off = tier.Count <= 0;
+                                    <tr class="@(off ? "opacity-50" : "")">
+                                        <td>
+                                            <strong>@TierLabel(tier)</strong>
+                                            <div class="text-muted">@tier.Help</div>
+                                        </td>
+                                        <td><input type="number" class="form-control form-control-sm" min="0" max="30" @bind="tier.Count" /></td>
+                                        <td><input class="form-control form-control-sm" @bind="tier.Cpu" placeholder="500m" /></td>
+                                        <td><input class="form-control form-control-sm" @bind="tier.Memory" placeholder="2Gi" /></td>
+                                        <td class="text-muted">@(off ? "—" : $"{ElasticsearchService.HeapMbFor(tier.Memory)}m")</td>
+                                        <td><input class="form-control form-control-sm" @bind="tier.Storage" placeholder="50Gi" /></td>
+                                    </tr>
+                                }
+                                <tr class="@(form.KibanaEnabled ? "" : "opacity-50")">
+                                    <td>
+                                        <div class="form-check">
+                                            <input class="form-check-input" type="checkbox" id="kibanaEnabled" @bind="form.KibanaEnabled" />
+                                            <label class="form-check-label" for="kibanaEnabled"><strong>Kibana</strong></label>
+                                        </div>
+                                        <div class="text-muted">The UI. Published like any other service from Routes &amp; Ingress.</div>
+                                    </td>
+                                    <td><input type="number" class="form-control form-control-sm" min="1" max="5" @bind="form.KibanaCount" disabled="@(!form.KibanaEnabled)" /></td>
+                                    <td><input class="form-control form-control-sm" @bind="form.KibanaCpu" disabled="@(!form.KibanaEnabled)" /></td>
+                                    <td><input class="form-control form-control-sm" @bind="form.KibanaMemory" disabled="@(!form.KibanaEnabled)" /></td>
+                                    <td class="text-muted">—</td>
+                                    <td class="text-muted">—</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                    <div class="form-text small mb-3">
+                        Memory is both the request and the limit, and the JVM heap is half of it — the other half is the file cache
+                        Lucene searches through. Heap is never taken above 31Gi, where the JVM loses compressed object pointers.
+                    </div>
+
+                    <div class="row g-3 mb-3">
+                        <div class="col-md-4">
+                            <label class="form-label small">Storage class (optional)</label>
+                            <input class="form-control form-control-sm" @bind="form.StorageClass" placeholder="cluster default" />
+                        </div>
+                        <div class="col-md-8 d-flex align-items-end gap-4 flex-wrap">
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="allowMmap" @bind="form.AllowMmap" />
+                                <label class="form-check-label small" for="allowMmap">
+                                    Allow memory-mapped storage
+                                    <span class="text-muted">— needs <code>vm.max_map_count=262144</code> on the nodes; turn it off if they cannot be tuned.</span>
+                                </label>
+                            </div>
+                            <div class="form-check">
+                                <input class="form-check-input" type="checkbox" id="zoneAware" @bind="form.ZoneAware" />
+                                <label class="form-check-label small" for="zoneAware">
+                                    Zone-aware placement
+                                    <span class="text-muted">— spreads each tier across <code>topology.kubernetes.io/zone</code>.</span>
+                                </label>
+                            </div>
+                        </div>
+                    </div>
+
+                    @* ── Footprint + capacity ── *@
+                    @{ ElasticsearchFootprint footprint = ElasticsearchService.Footprint(form.ToEntity()); }
+                    <div class="card bg-body-tertiary border-0 mb-3">
+                        <div class="card-body py-2">
+                            <div class="d-flex align-items-center gap-2 mb-1">
+                                <strong class="small"><i class="bi bi-rulers me-1"></i>What this asks the cluster for</strong>
+                                <button class="btn btn-sm btn-link p-0 ms-auto" @onclick="RefreshCapacityAsync" disabled="@checkingCapacity">
+                                    @if (checkingCapacity) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Re-check
+                                </button>
+                            </div>
+                            <div class="small">
+                                <span class="me-3">@footprint.PodCount pods</span>
+                                <span class="me-3">@ElasticsearchService.FormatCpu(footprint.CpuMilliTotal) requested</span>
+                                <span class="me-3">@ElasticsearchService.FormatBytes(footprint.MemoryBytesTotal) memory</span>
+                                <span class="me-3">@ElasticsearchService.FormatBytes(footprint.StorageBytesTotal) storage</span>
+                            </div>
+                            @if (capacity is not null && capacity.CapacityKnown)
+                            {
+                                <div class="small text-muted mt-1">
+                                    Cluster has @ElasticsearchService.FormatBytes(capacity.FreeMemoryBytes) memory and
+                                    @ElasticsearchService.FormatCpu(capacity.FreeCpuMilli) unallocated across @capacity.NodeCount node(s);
+                                    roomiest single node has @ElasticsearchService.FormatBytes(capacity.LargestNodeFreeMemoryBytes) free.
+                                </div>
+                            }
+                            @foreach (string blocker in capacity?.Blocking ?? [])
+                            {
+                                <div class="alert alert-danger py-1 px-2 small mt-2 mb-0">@blocker</div>
+                            }
+                            @foreach (string warning in capacity?.Warnings ?? [])
+                            {
+                                <div class="alert alert-warning py-1 px-2 small mt-2 mb-0">@warning</div>
+                            }
+                            @if (capacity is { Fits: false })
+                            {
+                                <div class="form-check mt-2">
+                                    <input class="form-check-input" type="checkbox" id="ackCapacity" @bind="form.Acknowledge" />
+                                    <label class="form-check-label small" for="ackCapacity">
+                                        Apply it anyway — the cluster is about to grow (an autoscaler that has not added the nodes yet).
+                                    </label>
+                                </div>
+                            }
+                        </div>
+                    </div>
+
+                    @if (formError is not null)
+                    {
+                        <div class="alert alert-danger py-2 small" style="white-space:pre-wrap">@formError</div>
+                    }
+
+                    <div class="d-flex gap-2">
+                        <button class="btn btn-sm btn-primary" @onclick="SaveFormAsync" disabled="@saving">
+                            @if (saving) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                            @(editingId is null ? "Create cluster" : "Save changes")
+                        </button>
+                        <button class="btn btn-sm btn-outline-secondary" @onclick="CancelForm">Cancel</button>
+                    </div>
+                </div>
+            </div>
+        }
+
+        @foreach (ElasticsearchCluster cluster in clusters)
+        {
+            bool expanded = expandedId == cluster.Id;
+            ElasticsearchFootprint fp = ElasticsearchService.Footprint(cluster);
+
+            <div class="card shadow-sm mb-3">
+                <div class="card-header d-flex align-items-center gap-2 py-2"
+                     style="cursor:pointer" @onclick="() => ToggleCluster(cluster.Id)">
+                    <i class="bi bi-search text-primary"></i>
+                    <strong>@cluster.Name</strong>
+                    <small class="text-muted ms-1">@cluster.Namespace · @cluster.KubernetesCluster.Name</small>
+                    <span class="badge @StatusBadgeClass(cluster.Status) ms-1">@cluster.Status</span>
+                    @if (cluster.Health is not null)
+                    {
+                        <span class="badge @HealthBadgeClass(cluster.Health)">@cluster.Health</span>
+                    }
+                    <small class="text-muted ms-auto">
+                        @TopologySummary(cluster) · @ElasticsearchService.FormatBytes(fp.MemoryBytesTotal) · @ElasticsearchService.FormatBytes(fp.StorageBytesTotal) disk
+                    </small>
+                    <i class="bi @(expanded ? "bi-chevron-up" : "bi-chevron-down") ms-2 text-muted"></i>
+                </div>
+
+                @if (cluster.LastError is not null && cluster.Status == ElasticsearchClusterStatus.Failed)
+                {
+                    <div class="alert alert-danger m-2 py-2 small mb-0" style="white-space:pre-wrap">@cluster.LastError</div>
+                }
+
+                @if (expanded)
+                {
+                    <div class="card-body pt-2">
+                        <dl class="row small mb-3">
+                            <dt class="col-sm-3">Endpoint</dt>
+                            <dd class="col-sm-9"><code>@cluster.HttpEndpoint</code></dd>
+                            <dt class="col-sm-3">Kibana</dt>
+                            <dd class="col-sm-9">
+                                @if (cluster.KibanaEnabled)
+                                {
+                                    <code>@cluster.KibanaServiceName</code> <span class="text-muted">· port @ElasticsearchCluster.KibanaPort — publish it from Routes &amp; Ingress</span>
+                                }
+                                else
+                                {
+                                    <span class="text-muted">not deployed</span>
+                                }
+                            </dd>
+                            <dt class="col-sm-3">Credentials</dt>
+                            <dd class="col-sm-9">
+                                user <code>elastic</code>, password in secret <code>@cluster.ElasticUserSecretName</code>
+                                <button class="btn btn-sm btn-link p-0 ms-2" @onclick="() => RevealPasswordAsync(cluster.Id)">
+                                    @(revealedPasswordFor == cluster.Id ? "Hide" : "Show")
+                                </button>
+                                @if (revealedPasswordFor == cluster.Id)
+                                {
+                                    <div><code>@(revealedPassword ?? "could not be read")</code></div>
+                                }
+                            </dd>
+                            <dt class="col-sm-3">Version</dt>
+                            <dd class="col-sm-9">@cluster.Version</dd>
+                            <dt class="col-sm-3">Storage class</dt>
+                            <dd class="col-sm-9">@(cluster.StorageClass ?? "cluster default")@(cluster.AllowMmap ? "" : " · mmap disabled")@(cluster.ZoneAware ? " · zone-aware" : "")</dd>
+                            <dt class="col-sm-3">Created</dt>
+                            <dd class="col-sm-9">@cluster.CreatedAt.ToString("yyyy-MM-dd HH:mm") UTC</dd>
+                        </dl>
+
+                        @* ── Tier footprint ── *@
+                        <table class="table table-sm table-borderless small mb-3">
+                            <thead class="text-muted"><tr><th>Tier</th><th>Nodes</th><th>CPU each</th><th>Memory each</th><th>Heap</th><th>Storage each</th></tr></thead>
+                            <tbody>
+                                @foreach (ElasticsearchTierFootprint t in fp.Tiers)
+                                {
+                                    <tr>
+                                        <td><span class="badge bg-secondary">@t.Tier</span></td>
+                                        <td>@t.Count</td>
+                                        <td>@ElasticsearchService.FormatCpu(t.CpuMilliPerPod)</td>
+                                        <td>@ElasticsearchService.FormatBytes(t.MemoryBytesPerPod)</td>
+                                        <td>@(t.HeapMb > 0 ? $"{t.HeapMb}m" : "—")</td>
+                                        <td>@(t.StorageBytesPerPod > 0 ? ElasticsearchService.FormatBytes(t.StorageBytesPerPod) : "—")</td>
+                                    </tr>
+                                }
+                            </tbody>
+                        </table>
+
+                        @* ── Live pods ── *@
+                        <div class="mb-3">
+                            <div class="d-flex align-items-center gap-2 mb-2">
+                                <small class="text-muted">Phase:</small>
+                                @if (loadingDetail && expandedId == cluster.Id)
+                                {
+                                    <span class="spinner-border spinner-border-sm"></span>
+                                }
+                                else
+                                {
+                                    <small>@(expandedDetail?.Phase ?? "—")</small>
+                                }
+                                @if (expandedDetail?.KibanaHealth is string kbHealth)
+                                {
+                                    <span class="badge @HealthBadgeClass(kbHealth)">kibana @kbHealth</span>
+                                }
+                                <button class="btn btn-sm btn-link p-0 ms-2" @onclick="() => RefreshDetail(cluster.Id)">
+                                    <i class="bi bi-arrow-clockwise"></i> Refresh
+                                </button>
+                            </div>
+                            @if (expandedDetail?.Cluster.Id == cluster.Id && expandedDetail.Pods.Count > 0)
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>Pod</th><th>Tier</th><th>Status</th><th>Ready</th><th>Restarts</th><th>Node</th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchPodInfo pod in expandedDetail.Pods)
+                                        {
+                                            <tr>
+                                                <td><code>@pod.Name</code></td>
+                                                <td><span class="badge bg-secondary">@pod.Tier</span></td>
+                                                <td>@pod.Status</td>
+                                                <td>
+                                                    @if (pod.Ready) { <i class="bi bi-check-circle-fill text-success"></i> }
+                                                    else { <i class="bi bi-clock text-warning"></i> }
+                                                </td>
+                                                <td>@pod.Restarts</td>
+                                                <td class="text-muted">@(pod.Node ?? "—")</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        @* ── Index lifecycle policies ── *@
+                        @{ List<ElasticsearchIlmPolicy> policies = allPolicies.TryGetValue(cluster.Id, out List<ElasticsearchIlmPolicy>? pl) ? pl : []; }
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-hourglass-split me-1"></i>Index lifecycle</strong>
+                                <button class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2"
+                                        @onclick="() => ApplyPoliciesAsync(cluster)" disabled="@(policies.Count == 0 || applyingPolicies)">
+                                    @if (applyingPolicies) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                    Re-apply
+                                </button>
+                                <button class="btn btn-sm btn-outline-primary ms-2 py-0 px-2" @onclick="() => ShowAddPolicy(cluster)">
+                                    <i class="bi bi-plus-lg me-1"></i>Add
+                                </button>
+                            </div>
+
+                            @if (addPolicyClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Policy name</label>
+                                            <input class="form-control form-control-sm" @bind="policyName" placeholder="app-logs" />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Index pattern</label>
+                                            <input class="form-control form-control-sm" @bind="policyPattern" placeholder="logs-app-*" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Roll over at</label>
+                                            <div class="input-group input-group-sm">
+                                                <input type="number" class="form-control" min="1" @bind="policyRolloverGb" />
+                                                <span class="input-group-text">GB</span>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">or after</label>
+                                            <div class="input-group input-group-sm">
+                                                <input type="number" class="form-control" min="1" @bind="policyRolloverDays" />
+                                                <span class="input-group-text">d</span>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-1">
+                                            <label class="form-label small mb-1">Shards</label>
+                                            <input type="number" class="form-control form-control-sm" min="1" @bind="policyShards" />
+                                        </div>
+                                        <div class="col-md-1">
+                                            <label class="form-label small mb-1">Replicas</label>
+                                            <input type="number" class="form-control form-control-sm" min="0" @bind="policyReplicas" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Warm after (d)</label>
+                                            <input type="number" class="form-control form-control-sm" min="0" @bind="policyWarmDays"
+                                                   disabled="@(cluster.WarmCount == 0)" placeholder="@(cluster.WarmCount == 0 ? "no warm tier" : "—")" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Cold after (d)</label>
+                                            <input type="number" class="form-control form-control-sm" min="0" @bind="policyColdDays"
+                                                   disabled="@(cluster.ColdCount == 0)" placeholder="@(cluster.ColdCount == 0 ? "no cold tier" : "—")" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Delete after (d)</label>
+                                            <input type="number" class="form-control form-control-sm" min="0" @bind="policyDeleteDays" placeholder="keep forever" />
+                                        </div>
+                                        <div class="col-md-3 d-flex align-items-end">
+                                            <div class="form-check">
+                                                <input class="form-check-input" type="checkbox" id="policyDataStream" @bind="policyDataStream" />
+                                                <label class="form-check-label small" for="policyDataStream">Data stream (append-only)</label>
+                                            </div>
+                                        </div>
+                                        <div class="col-md-3 d-flex align-items-end gap-1">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => AddPolicyAsync(cluster)"
+                                                    disabled="@(savingPolicy || string.IsNullOrWhiteSpace(policyName))">
+                                                @if (savingPolicy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Add &amp; apply
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => addPolicyClusterId = null">Cancel</button>
+                                        </div>
+                                    </div>
+                                    <div class="form-text small mt-1">
+                                        Zero days means the phase is skipped. The policy and its index template are pushed to Elasticsearch by a
+                                        short-lived Job inside the cluster, so the password never leaves it.
+                                    </div>
+                                    @if (policyError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@policyError</div> }
+                                </div></div>
+                            }
+
+                            @if (policies.Count == 0)
+                            {
+                                <EmptyState Icon="bi-hourglass-split" Title="No lifecycle policies"
+                                            Message="Node tiers give data somewhere to move to; a lifecycle policy is what moves it. Without one the hot tier fills and stays full."
+                                            ActionLabel="Add policy" OnAction="() => ShowAddPolicy(cluster)" />
+                            }
+                            else
+                            {
+                                <table class="table table-sm table-borderless small mb-0">
+                                    <thead class="text-muted"><tr><th>Policy</th><th>Pattern</th><th>Rollover</th><th>Ages</th><th>Shape</th><th>Applied</th><th></th></tr></thead>
+                                    <tbody>
+                                        @foreach (ElasticsearchIlmPolicy p in policies)
+                                        {
+                                            <tr>
+                                                <td><code>@p.Name</code></td>
+                                                <td><code>@p.IndexPattern</code>@(p.UseDataStream ? "" : " (alias)")</td>
+                                                <td>@p.RolloverMaxPrimaryShardGb GB / @p.RolloverMaxAgeDays d</td>
+                                                <td class="text-muted">@AgeSummary(p)</td>
+                                                <td class="text-muted">@p.Shards shard(s), @p.Replicas replica(s)</td>
+                                                <td class="text-muted">
+                                                    @if (p.LastError is not null)
+                                                    {
+                                                        <span class="text-danger" title="@p.LastError">failed</span>
+                                                    }
+                                                    else
+                                                    {
+                                                        @(p.LastAppliedAt?.ToString("yyyy-MM-dd HH:mm") ?? "never")
+                                                    }
+                                                </td>
+                                                <td>@RenderDeleteCell($"Delete lifecycle policy \"{p.Name}\"? Its index template is removed from Elasticsearch too; indices already created keep their settings.", "Delete policy", () => DeletePolicyAsync(cluster.Id, p.Id, p.Name))</td>
+                                            </tr>
+                                        }
+                                    </tbody>
+                                </table>
+                            }
+                        </div>
+
+                        @* ── Actions ── *@
+                        <div class="d-flex gap-2 border-top pt-3">
+                            <button class="btn btn-sm btn-outline-warning" @onclick="() => ShowEditForm(cluster)" disabled="@(form is not null)">
+                                <i class="bi bi-pencil me-1"></i>Edit topology
+                            </button>
+                            <button class="btn btn-sm btn-outline-danger ms-auto"
+                                    @onclick='() => pendingConfirm = new PendingConfirm($"Delete Elasticsearch cluster \"{cluster.Name}\", its Kibana and ALL of its indices? The volumes go with it. This cannot be undone.", "Delete cluster", () => DeleteClusterAsync(cluster))'>
+                                <i class="bi bi-trash me-1"></i>Delete
+                            </button>
+                        </div>
+                    </div>
+                }
+            </div>
+        }
+
+        @if (clusters.Count == 0 && form is null)
+        {
+            <EmptyState Icon="bi-search" Title="No Elasticsearch clusters"
+                        Message="Install the ECK operator from the Components tab, then create a cluster here." />
+        }
+    </div>
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    /// <summary>
+    /// When set, scopes the tab to a single environment: only clusters whose Kubernetes cluster
+    /// belongs to it are listed, and the create form's picker is restricted to (and preselected
+    /// from) that environment.
+    /// </summary>
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
+    private bool loading = true;
+    private List<ElasticsearchCluster> clusters = [];
+    private List<KubernetesCluster> allK8sClusters = [];
+    private List<KubernetesCluster> formK8sClusters = [];
+    private HashSet<Guid>? envClusterIds;
+    private ElasticsearchOperatorStatus? operatorStatus;
+    private readonly Dictionary<Guid, List<ElasticsearchIlmPolicy>> allPolicies = [];
+
+    // Create/edit form (one at a time — the same shape serves both).
+    private EsForm? form;
+    private Guid? editingId;
+    private string selectedPreset = "small-ha";
+    private bool saving;
+    private string? formError;
+    private ElasticsearchCapacityCheck? capacity;
+    private bool checkingCapacity;
+
+    // Expand / detail
+    private Guid? expandedId;
+    private ElasticsearchClusterDetail? expandedDetail;
+    private bool loadingDetail;
+    private Guid? revealedPasswordFor;
+    private string? revealedPassword;
+
+    // Policy form
+    private Guid? addPolicyClusterId;
+    private string policyName = "";
+    private string policyPattern = "";
+    private bool policyDataStream = true;
+    private int policyShards = 1;
+    private int policyReplicas = 1;
+    private int policyRolloverGb = 50;
+    private int policyRolloverDays = 7;
+    private int policyWarmDays;
+    private int policyColdDays;
+    private int policyDeleteDays;
+    private bool savingPolicy;
+    private bool applyingPolicies;
+    private string? policyError;
+
+    private sealed record PendingConfirm(string Message, string ConfirmText, Func<Task> Action);
+    private PendingConfirm? pendingConfirm;
+    private bool confirmBusy;
+
+    private async Task RunPendingConfirmAsync()
+    {
+        if (pendingConfirm is null) return;
+        confirmBusy = true;
+        try { await pendingConfirm.Action(); }
+        finally { confirmBusy = false; pendingConfirm = null; }
+    }
+
+    // ── Form model ────────────────────────────────────────────────────────────
+
+    private sealed class TierEdit
+    {
+        public required string Key { get; init; }
+        public required string Help { get; init; }
+        public int Count { get; set; }
+        public string Cpu { get; set; } = "";
+        public string Memory { get; set; } = "";
+        public string Storage { get; set; } = "";
+    }
+
+    private sealed class EsForm
+    {
+        public string Name { get; set; } = "";
+        public Guid K8sClusterId { get; set; }
+        public string Namespace { get; set; } = "search";
+        public string Version { get; set; } = "9.5.0";
+        public string? StorageClass { get; set; }
+        public bool AllowMmap { get; set; } = true;
+        public bool ZoneAware { get; set; }
+        public bool KibanaEnabled { get; set; } = true;
+        public int KibanaCount { get; set; } = 1;
+        public string KibanaCpu { get; set; } = "500m";
+        public string KibanaMemory { get; set; } = "1Gi";
+        public bool Acknowledge { get; set; }
+        public Guid Id { get; set; }
+
+        public List<TierEdit> Tiers { get; init; } =
+        [
+            new TierEdit { Key = "master", Help = "Holds the cluster state and nothing else — the nodes whose health is the cluster's health.", Count = 3, Cpu = "500m", Memory = "2Gi", Storage = "5Gi" },
+            new TierEdit { Key = "hot",    Help = "Takes every write, and holds the content indices Kibana's own state lives in.",              Count = 2, Cpu = "1",    Memory = "4Gi", Storage = "100Gi" },
+            new TierEdit { Key = "warm",   Help = "Recent data that is still searched but no longer written to. 0 disables the tier.",          Count = 0, Cpu = "500m", Memory = "4Gi", Storage = "200Gi" },
+            new TierEdit { Key = "cold",   Help = "Rarely searched data kept for retention rather than for speed. 0 disables the tier.",        Count = 0, Cpu = "500m", Memory = "2Gi", Storage = "500Gi" },
+            new TierEdit { Key = "ingest", Help = "Dedicated ingest + coordinating nodes. 0 leaves the ingest role on the hot tier.",           Count = 0, Cpu = "1",    Memory = "2Gi", Storage = "1Gi" },
+        ];
+
+        public TierEdit Tier(string key) => Tiers.First(t => t.Key == key);
+
+        public ElasticsearchCluster ToEntity() => new()
+        {
+            Id = Id,
+            Name = (Name ?? "").Trim(),
+            Namespace = (Namespace ?? "").Trim(),
+            Version = (Version ?? "").Trim(),
+            MasterCount = Tier("master").Count,
+            MasterCpuRequest = Tier("master").Cpu,
+            MasterMemory = Tier("master").Memory,
+            MasterStorageSize = Tier("master").Storage,
+            HotCount = Tier("hot").Count,
+            HotCpuRequest = Tier("hot").Cpu,
+            HotMemory = Tier("hot").Memory,
+            HotStorageSize = Tier("hot").Storage,
+            WarmCount = Tier("warm").Count,
+            WarmCpuRequest = Tier("warm").Cpu,
+            WarmMemory = Tier("warm").Memory,
+            WarmStorageSize = Tier("warm").Storage,
+            ColdCount = Tier("cold").Count,
+            ColdCpuRequest = Tier("cold").Cpu,
+            ColdMemory = Tier("cold").Memory,
+            ColdStorageSize = Tier("cold").Storage,
+            IngestCount = Tier("ingest").Count,
+            IngestCpuRequest = Tier("ingest").Cpu,
+            IngestMemory = Tier("ingest").Memory,
+            IngestStorageSize = Tier("ingest").Storage,
+            StorageClass = string.IsNullOrWhiteSpace(StorageClass) ? null : StorageClass!.Trim(),
+            AllowMmap = AllowMmap,
+            ZoneAware = ZoneAware,
+            KibanaEnabled = KibanaEnabled,
+            KibanaCount = KibanaCount,
+            KibanaCpuRequest = KibanaCpu,
+            KibanaMemory = KibanaMemory
+        };
+    }
+
+    // The presets exist because the shape of a search cluster is a decision people get wrong once
+    // and then live with: one node for a laptop-sized cluster, split roles for anything real.
+    private static readonly (string Key, string Label, string Help)[] Presets =
+    [
+        ("single", "Single node (dev)", "One all-roles node. No redundancy, no tiers — fine for a development environment and nothing else."),
+        ("small-ha", "Small HA", "Three dedicated masters and two hot data nodes. The smallest shape that survives losing a node."),
+        ("hot-warm", "Hot / warm", "Masters, a hot tier for writes and a warm tier for data ILM ages into."),
+        ("hot-warm-cold", "Hot / warm / cold", "Full tiering, plus dedicated ingest and coordinating nodes to keep pipelines off the data nodes.")
+    ];
+
+    protected override async Task OnInitializedAsync() => await LoadAsync();
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+
+        Task<List<ElasticsearchCluster>> clustersTask = Search.GetClustersAsync(TenantId);
+        Task<List<KubernetesCluster>> k8sTask = TenantService.GetClustersAsync(TenantId);
+        Task<ElasticsearchOperatorStatus> operatorTask = Search.GetOperatorStatusAsync(TenantId);
+
+        await Task.WhenAll(clustersTask, k8sTask, operatorTask);
+
+        clusters = clustersTask.Result;
+        allK8sClusters = k8sTask.Result;
+        operatorStatus = operatorTask.Result;
+
+        if (EnvironmentId.HasValue)
+        {
+            envClusterIds = allK8sClusters
+                .Where(c => c.EnvironmentId == EnvironmentId.Value)
+                .Select(c => c.Id)
+                .ToHashSet();
+            formK8sClusters = allK8sClusters.Where(c => envClusterIds.Contains(c.Id)).ToList();
+            clusters = clusters.Where(c => envClusterIds.Contains(c.KubernetesClusterId)).ToList();
+        }
+        else
+        {
+            envClusterIds = null;
+            formK8sClusters = allK8sClusters;
+        }
+
+        allPolicies.Clear();
+        foreach (ElasticsearchCluster c in clusters)
+            allPolicies[c.Id] = await Search.GetPoliciesAsync(TenantId, c.Id);
+
+        loading = false;
+    }
+
+    // ── Create / edit ─────────────────────────────────────────────────────────
+
+    private void ShowCreateForm()
+    {
+        editingId = null;
+        formError = null;
+        capacity = null;
+        form = new EsForm
+        {
+            K8sClusterId = EnvironmentId.HasValue && formK8sClusters.Count == 1 ? formK8sClusters[0].Id : Guid.Empty
+        };
+        ApplyPreset(selectedPreset);
+    }
+
+    private void ShowEditForm(ElasticsearchCluster c)
+    {
+        editingId = c.Id;
+        formError = null;
+        capacity = null;
+        form = new EsForm
+        {
+            Id = c.Id,
+            Name = c.Name,
+            Namespace = c.Namespace,
+            Version = c.Version,
+            K8sClusterId = c.KubernetesClusterId,
+            StorageClass = c.StorageClass,
+            AllowMmap = c.AllowMmap,
+            ZoneAware = c.ZoneAware,
+            KibanaEnabled = c.KibanaEnabled,
+            KibanaCount = c.KibanaCount,
+            KibanaCpu = c.KibanaCpuRequest,
+            KibanaMemory = c.KibanaMemory
+        };
+
+        Set("master", c.MasterCount, c.MasterCpuRequest, c.MasterMemory, c.MasterStorageSize);
+        Set("hot", c.HotCount, c.HotCpuRequest, c.HotMemory, c.HotStorageSize);
+        Set("warm", c.WarmCount, c.WarmCpuRequest, c.WarmMemory, c.WarmStorageSize);
+        Set("cold", c.ColdCount, c.ColdCpuRequest, c.ColdMemory, c.ColdStorageSize);
+        Set("ingest", c.IngestCount, c.IngestCpuRequest, c.IngestMemory, c.IngestStorageSize);
+
+        _ = RefreshCapacityAsync();
+
+        void Set(string key, int count, string cpu, string memory, string storage)
+        {
+            TierEdit t = form!.Tier(key);
+            t.Count = count; t.Cpu = cpu; t.Memory = memory; t.Storage = storage;
+        }
+    }
+
+    private void CancelForm() { form = null; editingId = null; formError = null; capacity = null; }
+
+    private void ApplyPreset(string key)
+    {
+        if (form is null) return;
+        selectedPreset = key;
+
+        void Set(string tier, int count, string cpu, string memory, string storage)
+        {
+            TierEdit t = form!.Tier(tier);
+            t.Count = count; t.Cpu = cpu; t.Memory = memory; t.Storage = storage;
+        }
+
+        switch (key)
+        {
+            case "single":
+                Set("master", 1, "1", "2Gi", "50Gi");
+                Set("hot", 0, "1", "4Gi", "100Gi");
+                Set("warm", 0, "500m", "4Gi", "200Gi");
+                Set("cold", 0, "500m", "2Gi", "500Gi");
+                Set("ingest", 0, "1", "2Gi", "1Gi");
+                form.KibanaMemory = "1Gi";
+                break;
+            case "hot-warm":
+                Set("master", 3, "500m", "2Gi", "5Gi");
+                Set("hot", 2, "1", "4Gi", "100Gi");
+                Set("warm", 2, "500m", "4Gi", "200Gi");
+                Set("cold", 0, "500m", "2Gi", "500Gi");
+                Set("ingest", 0, "1", "2Gi", "1Gi");
+                break;
+            case "hot-warm-cold":
+                Set("master", 3, "500m", "2Gi", "5Gi");
+                Set("hot", 3, "2", "8Gi", "200Gi");
+                Set("warm", 2, "1", "4Gi", "500Gi");
+                Set("cold", 2, "500m", "2Gi", "1Ti");
+                Set("ingest", 2, "1", "2Gi", "1Gi");
+                break;
+            default: // small-ha
+                Set("master", 3, "500m", "2Gi", "5Gi");
+                Set("hot", 2, "1", "4Gi", "100Gi");
+                Set("warm", 0, "500m", "4Gi", "200Gi");
+                Set("cold", 0, "500m", "2Gi", "500Gi");
+                Set("ingest", 0, "1", "2Gi", "1Gi");
+                break;
+        }
+
+        _ = RefreshCapacityAsync();
+    }
+
+    private async Task RefreshCapacityAsync()
+    {
+        if (form is null || form.K8sClusterId == Guid.Empty) { capacity = null; return; }
+
+        checkingCapacity = true;
+        StateHasChanged();
+        try
+        {
+            ElasticsearchCluster? existing = editingId is Guid id
+                ? clusters.FirstOrDefault(c => c.Id == id)
+                : null;
+            capacity = await Search.CheckCapacityAsync(form.K8sClusterId, form.ToEntity(), existing);
+        }
+        catch (Exception ex)
+        {
+            formError = ex.Message;
+        }
+        finally
+        {
+            checkingCapacity = false;
+            StateHasChanged();
+        }
+    }
+
+    private async Task SaveFormAsync()
+    {
+        if (form is null) return;
+
+        if (form.K8sClusterId == Guid.Empty)
+        {
+            formError = "Pick the Kubernetes cluster this runs on.";
+            return;
+        }
+
+        saving = true;
+        formError = null;
+        try
+        {
+            ElasticsearchCluster entity = form.ToEntity();
+
+            if (editingId is Guid id)
+            {
+                entity.Id = id;
+                await Search.UpdateClusterAsync(TenantId, entity, form.Acknowledge);
+                Toasts.Success($"Updated \"{entity.Name}\".");
+            }
+            else
+            {
+                entity.TenantId = TenantId;
+                entity.KubernetesClusterId = form.K8sClusterId;
+                await Search.CreateClusterAsync(entity, form.Acknowledge);
+                Toasts.Success($"Creating \"{entity.Name}\" — the operator takes a few minutes to form the cluster.");
+            }
+
+            form = null;
+            editingId = null;
+            await LoadAsync();
+        }
+        catch (Exception ex)
+        {
+            formError = ex.Message;
+            // A refusal is nearly always a capacity one; show the numbers it was based on.
+            await RefreshCapacityAsync();
+        }
+        finally { saving = false; }
+    }
+
+    private async Task DeleteClusterAsync(ElasticsearchCluster cluster)
+    {
+        try
+        {
+            await Search.DeleteClusterAsync(TenantId, cluster.Id);
+            expandedId = null;
+            await LoadAsync();
+            Toasts.Success($"Deleted \"{cluster.Name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete \"{cluster.Name}\": {ex.Message}");
+        }
+    }
+
+    // ── Detail ────────────────────────────────────────────────────────────────
+
+    private async Task ToggleCluster(Guid id)
+    {
+        if (expandedId == id) { expandedId = null; expandedDetail = null; return; }
+        expandedId = id;
+        revealedPasswordFor = null;
+        revealedPassword = null;
+        await RefreshDetail(id);
+    }
+
+    private async Task RefreshDetail(Guid id)
+    {
+        expandedDetail = null;
+        loadingDetail = true;
+        StateHasChanged();
+        expandedDetail = await Search.GetClusterDetailAsync(TenantId, id);
+        loadingDetail = false;
+
+        ElasticsearchCluster? c = clusters.FirstOrDefault(x => x.Id == id);
+        if (c is not null && expandedDetail is not null)
+        {
+            if (expandedDetail.Ready) c.Status = ElasticsearchClusterStatus.Running;
+            if (expandedDetail.Health is not null) c.Health = expandedDetail.Health;
+        }
+    }
+
+    private async Task RevealPasswordAsync(Guid id)
+    {
+        if (revealedPasswordFor == id) { revealedPasswordFor = null; revealedPassword = null; return; }
+        revealedPassword = await Search.GetElasticPasswordAsync(TenantId, id);
+        revealedPasswordFor = id;
+    }
+
+    // ── Lifecycle policies ────────────────────────────────────────────────────
+
+    private void ShowAddPolicy(ElasticsearchCluster cluster)
+    {
+        addPolicyClusterId = cluster.Id;
+        policyName = "";
+        policyPattern = "";
+        policyDataStream = true;
+        policyShards = 1;
+        policyReplicas = cluster.HotCount > 1 ? 1 : 0;
+        policyRolloverGb = 50;
+        policyRolloverDays = 7;
+        policyWarmDays = cluster.WarmCount > 0 ? 7 : 0;
+        policyColdDays = cluster.ColdCount > 0 ? 30 : 0;
+        policyDeleteDays = 90;
+        policyError = null;
+    }
+
+    private async Task AddPolicyAsync(ElasticsearchCluster cluster)
+    {
+        savingPolicy = true;
+        policyError = null;
+        try
+        {
+            await Search.CreatePolicyAsync(new ElasticsearchIlmPolicy
+            {
+                TenantId = TenantId,
+                ElasticsearchClusterId = cluster.Id,
+                Name = policyName.Trim(),
+                IndexPattern = policyPattern.Trim(),
+                UseDataStream = policyDataStream,
+                Shards = policyShards,
+                Replicas = policyReplicas,
+                RolloverMaxPrimaryShardGb = policyRolloverGb,
+                RolloverMaxAgeDays = policyRolloverDays,
+                WarmAfterDays = policyWarmDays > 0 ? policyWarmDays : null,
+                ColdAfterDays = policyColdDays > 0 ? policyColdDays : null,
+                DeleteAfterDays = policyDeleteDays > 0 ? policyDeleteDays : null
+            });
+
+            addPolicyClusterId = null;
+            allPolicies[cluster.Id] = await Search.GetPoliciesAsync(TenantId, cluster.Id);
+            Toasts.Success($"Applied lifecycle policy \"{policyName.Trim()}\".");
+        }
+        catch (Exception ex)
+        {
+            policyError = ex.Message;
+            allPolicies[cluster.Id] = await Search.GetPoliciesAsync(TenantId, cluster.Id);
+        }
+        finally { savingPolicy = false; }
+    }
+
+    private async Task ApplyPoliciesAsync(ElasticsearchCluster cluster)
+    {
+        applyingPolicies = true;
+        try
+        {
+            await Search.ApplyPoliciesAsync(TenantId, cluster.Id);
+            Toasts.Success("Lifecycle policies applied.");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error(ex.Message);
+        }
+        finally
+        {
+            applyingPolicies = false;
+            allPolicies[cluster.Id] = await Search.GetPoliciesAsync(TenantId, cluster.Id);
+        }
+    }
+
+    private async Task DeletePolicyAsync(Guid clusterId, Guid policyId, string name)
+    {
+        try
+        {
+            await Search.DeletePolicyAsync(TenantId, policyId);
+            allPolicies[clusterId] = await Search.GetPoliciesAsync(TenantId, clusterId);
+            Toasts.Success($"Deleted policy \"{name}\".");
+        }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Failed to delete policy \"{name}\": {ex.Message}");
+        }
+    }
+
+    // ── Presentation helpers ──────────────────────────────────────────────────
+
+    private static string TierLabel(TierEdit tier) => tier.Key switch
+    {
+        "master" => "Master-eligible",
+        "hot" => "Hot data",
+        "warm" => "Warm data",
+        "cold" => "Cold data",
+        "ingest" => "Ingest / coordinating",
+        _ => tier.Key
+    };
+
+    private static string TopologySummary(ElasticsearchCluster c)
+    {
+        if (!c.HasDataTiers) return $"{c.MasterCount} all-roles node";
+
+        List<string> parts = [$"{c.MasterCount} master", $"{c.HotCount} hot"];
+        if (c.WarmCount > 0) parts.Add($"{c.WarmCount} warm");
+        if (c.ColdCount > 0) parts.Add($"{c.ColdCount} cold");
+        if (c.IngestCount > 0) parts.Add($"{c.IngestCount} ingest");
+        if (c.KibanaEnabled) parts.Add("kibana");
+        return string.Join(" · ", parts);
+    }
+
+    private static string AgeSummary(ElasticsearchIlmPolicy p)
+    {
+        List<string> parts = [];
+        if (p.WarmAfterDays is int w) parts.Add($"warm {w}d");
+        if (p.ColdAfterDays is int c) parts.Add($"cold {c}d");
+        parts.Add(p.DeleteAfterDays is int d ? $"delete {d}d" : "kept forever");
+        return string.Join(" → ", parts);
+    }
+
+    private RenderFragment RenderDeleteCell(string confirmMessage, string confirmText, Func<Task> onConfirm) => builder =>
+    {
+        builder.OpenElement(0, "button");
+        builder.AddAttribute(1, "class", "btn btn-sm btn-outline-danger border-0 py-0");
+        builder.AddAttribute(2, "title", "Delete");
+        builder.AddAttribute(3, "aria-label", confirmText);
+        builder.AddAttribute(4, "onclick", Microsoft.AspNetCore.Components.EventCallback.Factory.Create(this,
+            () => pendingConfirm = new PendingConfirm(confirmMessage, confirmText, onConfirm)));
+        builder.OpenElement(5, "i");
+        builder.AddAttribute(6, "class", "bi bi-trash");
+        builder.CloseElement();
+        builder.CloseElement();
+    };
+
+    private static string StatusBadgeClass(ElasticsearchClusterStatus status) => status switch
+    {
+        ElasticsearchClusterStatus.Running => "badge bg-success",
+        ElasticsearchClusterStatus.Creating => "badge bg-info text-dark",
+        ElasticsearchClusterStatus.Updating => "badge bg-info text-dark",
+        ElasticsearchClusterStatus.Failed => "badge bg-danger",
+        ElasticsearchClusterStatus.Deleting => "badge bg-secondary",
+        _ => "badge bg-secondary"
+    };
+
+    private static string HealthBadgeClass(string health) => health.ToLowerInvariant() switch
+    {
+        "green" => "badge bg-success-subtle text-success border border-success-subtle",
+        "yellow" => "badge bg-warning-subtle text-warning border border-warning-subtle",
+        "red" => "badge bg-danger-subtle text-danger border border-danger-subtle",
+        _ => "badge bg-secondary-subtle text-secondary border"
+    };
+}

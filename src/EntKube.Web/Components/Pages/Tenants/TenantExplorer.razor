@@ -409,6 +409,7 @@ else
         new("storage", "Storage", "bi-bucket"),
         new("messaging", "RabbitMQ", "bi-collection"),
         new("kafka", "Kafka", "bi-diagram-3"),
+        new("search", "Search", "bi-search"),
         new("registry", "Registry", "bi-box-seam"),
         new("identity", "Identity", "bi-person-badge"),
         new("ldap", "Directory (LDAP)", "bi-person-vcard"),
@@ -919,6 +920,7 @@ else
             case "cache": OpenEnvScoped<CacheTab>(builder, tid); break;
             case "messaging": OpenEnvScoped<MessagingTab>(builder, tid); break;
             case "kafka": OpenEnvScoped<KafkaTab>(builder, tid); break;
+            case "search": OpenEnvScoped<SearchTab>(builder, tid); break;
             case "storage": OpenEnvScoped<StorageTab>(builder, tid); break;
             case "identity": OpenEnvScoped<IdentityTab>(builder, tid); break;
             case "registry": OpenEnvScoped<RegistryTab>(builder, tid); break;

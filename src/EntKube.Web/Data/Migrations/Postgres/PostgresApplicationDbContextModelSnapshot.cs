@@ -3174,6 +3174,239 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("EgressAgents");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("AllowMmap")
+                        .HasColumnType("boolean");
+
+                    b.Property<int>("ColdCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ColdCpuRequest")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("ColdMemory")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("ColdStorageSize")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Health")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<int>("HotCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("HotCpuRequest")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("HotMemory")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("HotStorageSize")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<int>("IngestCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("IngestCpuRequest")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("IngestMemory")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("IngestStorageSize")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<int>("KibanaCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("KibanaCpuRequest")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<bool>("KibanaEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("KibanaMemory")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<Guid>("KubernetesClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("LastError")
+                        .HasColumnType("text");
+
+                    b.Property<int>("MasterCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("MasterCpuRequest")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("MasterMemory")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("MasterStorageSize")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(36)
+                        .HasColumnType("character varying(36)");
+
+                    b.Property<string>("Namespace")
+                        .IsRequired()
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("StorageClass")
+                        .HasMaxLength(63)
+                        .HasColumnType("character varying(63)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Version")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<int>("WarmCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("WarmCpuRequest")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("WarmMemory")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("WarmStorageSize")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<bool>("ZoneAware")
+                        .HasColumnType("boolean");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.HasIndex("KubernetesClusterId", "Name", "Namespace")
+                        .IsUnique();
+
+                    b.ToTable("ElasticsearchClusters");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIlmPolicy", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<int?>("ColdAfterDays")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int?>("DeleteAfterDays")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("ElasticsearchClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("IndexPattern")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<DateTime?>("LastAppliedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("LastError")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)");
+
+                    b.Property<int>("Replicas")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("RolloverMaxAgeDays")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("RolloverMaxPrimaryShardGb")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("Shards")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("TemplatePriority")
+                        .HasColumnType("integer");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("UseDataStream")
+                        .HasColumnType("boolean");
+
+                    b.Property<int?>("WarmAfterDays")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("ElasticsearchClusterId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("ElasticsearchIlmPolicies");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.EndOfLifeNotice", b =>
                 {
                     b.Property<Guid>("Id")
@@ -9096,6 +9329,36 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Tenant");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.KubernetesCluster", "KubernetesCluster")
+                        .WithMany()
+                        .HasForeignKey("KubernetesClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("KubernetesCluster");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIlmPolicy", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ElasticsearchCluster", "ElasticsearchCluster")
+                        .WithMany("IlmPolicies")
+                        .HasForeignKey("ElasticsearchClusterId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("ElasticsearchCluster");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.EndOfLifeNotice", b =>
                 {
                     b.HasOne("EntKube.Web.Data.App", "App")
@@ -10966,6 +11229,11 @@ namespace EntKube.Web.Data.Migrations.Postgres
             modelBuilder.Entity("EntKube.Web.Data.DeploymentResource", b =>
                 {
                     b.Navigation("ChildResources");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
+                {
+                    b.Navigation("IlmPolicies");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>

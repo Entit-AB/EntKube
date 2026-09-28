@@ -27,7 +27,7 @@ public class BackupBundle
     /// literal here and a second literal in the import's guard, which is how a bundle
     /// this very code wrote came to be rejected by it.</para>
     /// </summary>
-    public const int CurrentVersion = 8;
+    public const int CurrentVersion = 9;
 
     public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -110,6 +110,10 @@ public class BackupBundle
     public List<KafkaTopic> KafkaTopics { get; set; } = [];
     public List<KafkaUser> KafkaUsers { get; set; } = [];
     public List<KafkaBinding> KafkaBindings { get; set; } = [];
+
+    // Search (Elasticsearch + Kibana via ECK)
+    public List<ElasticsearchCluster> ElasticsearchClusters { get; set; } = [];
+    public List<ElasticsearchIlmPolicy> ElasticsearchIlmPolicies { get; set; } = [];
 
     // VPN
     public List<VpnTunnel> VpnTunnels { get; set; } = [];
