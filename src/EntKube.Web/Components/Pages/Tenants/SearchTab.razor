@@ -2,6 +2,7 @@
 @using EntKube.Web.Services
 @inject ElasticsearchService Search
 @inject TenantService TenantService
+@inject StorageService StorageService
 @inject ToastService Toasts
 
 @* ===========================================================================
@@ -365,6 +366,138 @@
                             }
                         </div>
 
+                        @* ── Snapshots ── *@
+                        <div class="mb-3 border-top pt-3">
+                            <div class="d-flex align-items-center mb-2">
+                                <strong class="small"><i class="bi bi-shield-check me-1"></i>Snapshots</strong>
+                                @if (cluster.SnapshotsEnabled)
+                                {
+                                    <button class="btn btn-sm btn-outline-secondary ms-auto py-0 px-2"
+                                            @onclick="() => RefreshSnapshotStatusAsync(cluster)" disabled="@snapshotBusy">
+                                        Check now
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-secondary ms-2 py-0 px-2"
+                                            @onclick="() => RunSnapshotNowAsync(cluster)" disabled="@snapshotBusy">
+                                        Snapshot now
+                                    </button>
+                                    <button class="btn btn-sm btn-outline-primary ms-2 py-0 px-2"
+                                            @onclick="() => ShowSnapshotForm(cluster)" disabled="@snapshotBusy">
+                                        Edit
+                                    </button>
+                                }
+                                else
+                                {
+                                    <button class="btn btn-sm btn-outline-primary ms-auto py-0 px-2"
+                                            @onclick="() => ShowSnapshotForm(cluster)">
+                                        <i class="bi bi-plus-lg me-1"></i>Configure
+                                    </button>
+                                }
+                            </div>
+
+                            @if (snapshotFormClusterId == cluster.Id)
+                            {
+                                <div class="card border-primary mb-2"><div class="card-body py-2">
+                                    <div class="row g-2">
+                                        <div class="col-md-4">
+                                            <label class="form-label small mb-1">Storage link (S3 bucket)</label>
+                                            <select class="form-select form-select-sm" @bind="snapshotStorageLinkId">
+                                                <option value="@Guid.Empty">Select storage...</option>
+                                                @foreach (StorageLink link in storageLinks)
+                                                {
+                                                    <option value="@link.Id">@link.Name (@link.Provider · @(link.BucketName ?? "no bucket"))</option>
+                                                }
+                                            </select>
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Path in bucket</label>
+                                            <input class="form-control form-control-sm" @bind="snapshotBasePath" placeholder="@cluster.Name" />
+                                        </div>
+                                        <div class="col-md-3">
+                                            <label class="form-label small mb-1">Schedule (cron)</label>
+                                            <input class="form-control form-control-sm" @bind="snapshotCron" placeholder="0 30 1 * * ?" />
+                                            <div class="form-text small">Elasticsearch cron: second minute hour day month weekday.</div>
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Keep for (d)</label>
+                                            <input type="number" class="form-control form-control-sm" min="1" @bind="snapshotExpireDays" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Keep at least</label>
+                                            <input type="number" class="form-control form-control-sm" min="1" @bind="snapshotMinCount" />
+                                        </div>
+                                        <div class="col-md-2">
+                                            <label class="form-label small mb-1">Keep at most</label>
+                                            <input type="number" class="form-control form-control-sm" min="1" @bind="snapshotMaxCount" />
+                                        </div>
+                                        <div class="col-md-8 d-flex align-items-end gap-1">
+                                            <button class="btn btn-sm btn-primary" @onclick="() => SaveSnapshotsAsync(cluster)"
+                                                    disabled="@(snapshotBusy || snapshotStorageLinkId == Guid.Empty)">
+                                                @if (snapshotBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                Save &amp; register
+                                            </button>
+                                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => snapshotFormClusterId = null">Cancel</button>
+                                            @if (cluster.SnapshotsEnabled)
+                                            {
+                                                <button class="btn btn-sm btn-outline-danger ms-auto"
+                                                        @onclick='() => pendingConfirm = new PendingConfirm("Stop taking snapshots of \"" + cluster.Name + "\"? The repository and everything already in the bucket are left untouched.", "Stop snapshots", () => DisableSnapshotsAsync(cluster))'>
+                                                    Stop snapshots
+                                                </button>
+                                            }
+                                        </div>
+                                    </div>
+                                    <div class="form-text small mt-1">
+                                        The S3 keys go into the Elasticsearch keystore, not into a manifest. Registering the repository can take a
+                                        minute while the keystore reaches every node.
+                                    </div>
+                                    @if (snapshotError is not null) { <div class="alert alert-danger py-1 small mt-2 mb-0" style="white-space:pre-wrap">@snapshotError</div> }
+                                </div></div>
+                            }
+
+                            @if (!cluster.SnapshotsEnabled)
+                            {
+                                <p class="text-muted small mb-0">
+                                    No snapshots. Worth fixing before a lifecycle policy starts deleting anything — ILM's delete phase
+                                    is not a mistake it can take back.
+                                </p>
+                            }
+                            else
+                            {
+                                <dl class="row small mb-0">
+                                    <dt class="col-sm-3">Destination</dt>
+                                    <dd class="col-sm-9">
+                                        @(storageLinks.FirstOrDefault(l => l.Id == cluster.SnapshotStorageLinkId)?.Name ?? "storage link missing")
+                                        <span class="text-muted">· path <code>@(cluster.SnapshotBasePath ?? cluster.Name)</code></span>
+                                    </dd>
+                                    <dt class="col-sm-3">Schedule</dt>
+                                    <dd class="col-sm-9">
+                                        <code>@cluster.SnapshotScheduleCron</code>
+                                        <span class="text-muted">· keep @cluster.SnapshotExpireAfterDays d, at least @cluster.SnapshotMinCount, at most @cluster.SnapshotMaxCount</span>
+                                    </dd>
+                                    <dt class="col-sm-3">Last success</dt>
+                                    <dd class="col-sm-9">
+                                        @if (cluster.SnapshotLastSuccessAt is DateTime at)
+                                        {
+                                            <span>@at.ToString("yyyy-MM-dd HH:mm") UTC</span>
+                                            <code class="ms-1">@cluster.SnapshotLastSuccessName</code>
+                                        }
+                                        else
+                                        {
+                                            <span class="text-warning">none recorded yet</span>
+                                        }
+                                        @if (cluster.SnapshotLastCheckedAt is DateTime checkedAt)
+                                        {
+                                            <span class="text-muted ms-1">(checked @checkedAt.ToString("yyyy-MM-dd HH:mm") UTC)</span>
+                                        }
+                                    </dd>
+                                    @if (cluster.SnapshotLastFailure is not null)
+                                    {
+                                        <dt class="col-sm-3 text-danger">Last failure</dt>
+                                        <dd class="col-sm-9 text-danger" style="white-space:pre-wrap">@cluster.SnapshotLastFailure</dd>
+                                    }
+                                </dl>
+                            }
+                        </div>
+
                         @* ── Index lifecycle policies ── *@
                         @{ List<ElasticsearchIlmPolicy> policies = allPolicies.TryGetValue(cluster.Id, out List<ElasticsearchIlmPolicy>? pl) ? pl : []; }
                         <div class="mb-3 border-top pt-3">
@@ -546,6 +679,18 @@
     private Guid? revealedPasswordFor;
     private string? revealedPassword;
 
+    // Snapshot form
+    private List<StorageLink> storageLinks = [];
+    private Guid? snapshotFormClusterId;
+    private Guid snapshotStorageLinkId;
+    private string? snapshotBasePath;
+    private string snapshotCron = "0 30 1 * * ?";
+    private int snapshotExpireDays = 30;
+    private int snapshotMinCount = 5;
+    private int snapshotMaxCount = 50;
+    private bool snapshotBusy;
+    private string? snapshotError;
+
     // Policy form
     private Guid? addPolicyClusterId;
     private string policyName = "";
@@ -668,12 +813,15 @@
         Task<List<ElasticsearchCluster>> clustersTask = Search.GetClustersAsync(TenantId);
         Task<List<KubernetesCluster>> k8sTask = TenantService.GetClustersAsync(TenantId);
         Task<ElasticsearchOperatorStatus> operatorTask = Search.GetOperatorStatusAsync(TenantId);
+        Task<List<StorageLink>> storageTask = StorageService.GetStorageLinksAsync(TenantId, EnvironmentId);
 
-        await Task.WhenAll(clustersTask, k8sTask, operatorTask);
+        await Task.WhenAll(clustersTask, k8sTask, operatorTask, storageTask);
 
         clusters = clustersTask.Result;
         allK8sClusters = k8sTask.Result;
         operatorStatus = operatorTask.Result;
+        // Only S3-shaped links can hold snapshots; a link with no bucket has nowhere to put them.
+        storageLinks = [.. storageTask.Result.Where(l => !string.IsNullOrWhiteSpace(l.BucketName))];
 
         if (EnvironmentId.HasValue)
         {
@@ -995,6 +1143,81 @@
         {
             Toasts.Error($"Failed to delete policy \"{name}\": {ex.Message}");
         }
+    }
+
+    // ── Snapshots ─────────────────────────────────────────────────────────────
+
+    private void ShowSnapshotForm(ElasticsearchCluster cluster)
+    {
+        snapshotFormClusterId = cluster.Id;
+        snapshotStorageLinkId = cluster.SnapshotStorageLinkId ?? Guid.Empty;
+        snapshotBasePath = cluster.SnapshotBasePath;
+        snapshotCron = cluster.SnapshotScheduleCron;
+        snapshotExpireDays = cluster.SnapshotExpireAfterDays;
+        snapshotMinCount = cluster.SnapshotMinCount;
+        snapshotMaxCount = cluster.SnapshotMaxCount;
+        snapshotError = null;
+    }
+
+    private async Task SaveSnapshotsAsync(ElasticsearchCluster cluster)
+    {
+        snapshotBusy = true;
+        snapshotError = null;
+        try
+        {
+            await Search.ConfigureSnapshotsAsync(
+                TenantId, cluster.Id, snapshotStorageLinkId, snapshotBasePath,
+                snapshotCron, snapshotExpireDays, snapshotMinCount, snapshotMaxCount);
+
+            snapshotFormClusterId = null;
+            await LoadAsync();
+            Toasts.Success($"Snapshots configured for \"{cluster.Name}\".");
+        }
+        catch (Exception ex)
+        {
+            snapshotError = ex.Message;
+            await LoadAsync();
+        }
+        finally { snapshotBusy = false; }
+    }
+
+    private async Task DisableSnapshotsAsync(ElasticsearchCluster cluster)
+    {
+        snapshotBusy = true;
+        try
+        {
+            await Search.DisableSnapshotsAsync(TenantId, cluster.Id);
+            snapshotFormClusterId = null;
+            await LoadAsync();
+            Toasts.Success($"Stopped taking snapshots of \"{cluster.Name}\". Existing ones are untouched.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { snapshotBusy = false; }
+    }
+
+    private async Task RunSnapshotNowAsync(ElasticsearchCluster cluster)
+    {
+        snapshotBusy = true;
+        try
+        {
+            await Search.RunSnapshotNowAsync(TenantId, cluster.Id);
+            await LoadAsync();
+            Toasts.Success("Snapshot started — it runs in the background; use Check now for the result.");
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { snapshotBusy = false; }
+    }
+
+    private async Task RefreshSnapshotStatusAsync(ElasticsearchCluster cluster)
+    {
+        snapshotBusy = true;
+        try
+        {
+            await Search.RefreshSnapshotStatusAsync(TenantId, cluster.Id);
+            await LoadAsync();
+        }
+        catch (Exception ex) { Toasts.Error(ex.Message); }
+        finally { snapshotBusy = false; }
     }
 
     // ── Presentation helpers ──────────────────────────────────────────────────

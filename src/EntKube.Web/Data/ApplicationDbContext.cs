@@ -2329,6 +2329,11 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 entity.Property(quantity).HasMaxLength(20).IsRequired();
             }
 
+            entity.Property(c => c.SnapshotBasePath).HasMaxLength(255);
+            entity.Property(c => c.SnapshotScheduleCron).HasMaxLength(64).IsRequired();
+            entity.Property(c => c.SnapshotLastSuccessName).HasMaxLength(255);
+            entity.Property(c => c.SnapshotLastFailure).HasMaxLength(2000);
+
             entity.HasIndex(c => new { c.KubernetesClusterId, c.Name, c.Namespace }).IsUnique();
 
             entity.HasOne(c => c.Tenant)
@@ -2340,6 +2345,10 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .WithMany()
                 .HasForeignKey(c => c.KubernetesClusterId)
                 .OnDelete(DeleteBehavior.Cascade);
+
+            // SnapshotStorageLinkId is deliberately a soft reference, like RumSite.AppId: a real FK
+            // between two tables that both cascade from Tenant is a second cascade path SQL Server
+            // refuses, and the service already copes with a storage link that has gone away.
 
             entity.HasMany(c => c.IlmPolicies)
                 .WithOne(p => p.ElasticsearchCluster)

@@ -75,6 +75,41 @@ short-lived Job that runs inside the cluster:
 Deleting a policy removes its index template first, then the policy: Elasticsearch refuses to delete
 a policy an index template still names. Indices already created keep their settings.
 
+## Snapshots
+
+Node tiers and lifecycle policies delete data on purpose, so a cluster wants snapshots before its
+first ILM delete phase fires. Configure them per cluster from the same tab: pick a tenant storage
+link (any S3-shaped one with a bucket), a path inside it, a schedule and a retention window.
+
+What happens when you save:
+
+1. The link's `ACCESS_KEY`/`SECRET_KEY` are read from the vault and written to a Secret whose keys
+   are the keystore entry names verbatim (`s3.client.default.access_key`, `…secret_key`). ECK loads
+   it into every node's keystore and reloads it without a restart. **The keys never appear in a
+   manifest** — only the non-secret half (endpoint, protocol, path-style, region) goes into
+   `elasticsearch.yml`, on every nodeSet, because the repository is used by every node.
+2. The cluster is re-applied with `secureSettings` pointing at that Secret.
+3. A Job registers the repository (`PUT _snapshot/entkube-s3?verify=true`) and the SLM policy. The
+   repository PUT is **retried for up to two and a half minutes**: the keystore reaches the nodes
+   shortly after the CR does, and a repository registered one second early fails with an
+   authentication error indistinguishable from wrong credentials.
+
+Path-style addressing is chosen from the provider — MinIO, CubeFS and Cleura get it, AWS does not.
+Snapshots include the global cluster state, so a restore brings the index templates, the ILM
+policies and the roles with the data rather than leaving indices nobody has told Elasticsearch what
+to do with.
+
+**Reading the result back.** A scheduled snapshot happens entirely inside the cluster, so nothing
+outside it would notice a failure. "Check now" runs a Job that reads the SLM policy's own record and
+stores the last success and, if it is newer than that success, the last failure. "Snapshot now" asks
+SLM to run off-schedule — it returns as soon as the snapshot has *started*, which is why the result
+is read separately.
+
+**Stopping** removes the SLM policy only. The repository and everything already in the bucket are
+left alone: deleting the repository is how you lose the backups you turned this off while still
+having. Deleting the *cluster* removes the keystore Secret and the ConfigMaps EntKube created, but
+never the bucket.
+
 ## Publishing Kibana
 
 Kibana's Service is `{cluster}-kb-http` on port 5601. Publish it like any other service from

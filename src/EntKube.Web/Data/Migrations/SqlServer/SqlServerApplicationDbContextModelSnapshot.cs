@@ -3295,6 +3295,44 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(63)
                         .HasColumnType("nvarchar(63)");
 
+                    b.Property<string>("SnapshotBasePath")
+                        .HasMaxLength(255)
+                        .HasColumnType("nvarchar(255)");
+
+                    b.Property<int>("SnapshotExpireAfterDays")
+                        .HasColumnType("int");
+
+                    b.Property<DateTime?>("SnapshotLastCheckedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("SnapshotLastFailure")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<DateTime?>("SnapshotLastSuccessAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("SnapshotLastSuccessName")
+                        .HasMaxLength(255)
+                        .HasColumnType("nvarchar(255)");
+
+                    b.Property<int>("SnapshotMaxCount")
+                        .HasColumnType("int");
+
+                    b.Property<int>("SnapshotMinCount")
+                        .HasColumnType("int");
+
+                    b.Property<string>("SnapshotScheduleCron")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<Guid?>("SnapshotStorageLinkId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<bool>("SnapshotsEnabled")
+                        .HasColumnType("bit");
+
                     b.Property<int>("Status")
                         .HasColumnType("int");
 

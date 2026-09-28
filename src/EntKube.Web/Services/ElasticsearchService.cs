@@ -103,6 +103,39 @@ public sealed class ElasticsearchCapacityCheck
     public bool Fits => Blocking.Count == 0;
 }
 
+/// <summary>
+/// The non-secret half of an S3 snapshot repository: where the bucket is and how to talk to it.
+/// The access key and secret never appear here — they go into the Elasticsearch keystore through a
+/// Secret, and this record is what ends up in elasticsearch.yml beside it.
+/// </summary>
+/// <param name="Endpoint">Host and port, without a scheme — how Elasticsearch wants it.</param>
+/// <param name="Protocol">"http" or "https".</param>
+/// <param name="PathStyleAccess">True for MinIO, CubeFS and most self-hosted gateways.</param>
+/// <param name="Region">Optional; meaningful for AWS.</param>
+/// <param name="Bucket">The bucket snapshots are written to.</param>
+/// <param name="BasePath">Prefix within the bucket, so two clusters can share one.</param>
+public sealed record ElasticsearchS3Settings(
+    string Endpoint, string Protocol, bool PathStyleAccess, string? Region, string Bucket, string BasePath)
+{
+    /// <summary>
+    /// Splits a storage link's endpoint URL into the scheme and host:port Elasticsearch wants them
+    /// as. A link stored without a scheme is assumed to be https, which is the safer guess.
+    /// </summary>
+    public static (string Endpoint, string Protocol) SplitEndpoint(string? url)
+    {
+        string raw = (url ?? "").Trim();
+        if (raw.Length == 0) return ("", "https");
+
+        if (Uri.TryCreate(raw, UriKind.Absolute, out Uri? uri) && uri.Scheme is "http" or "https")
+        {
+            string hostPort = uri.IsDefaultPort ? uri.Host : $"{uri.Host}:{uri.Port}";
+            return (hostPort, uri.Scheme);
+        }
+
+        return (raw.TrimEnd('/'), "https");
+    }
+}
+
 // ── Service ───────────────────────────────────────────────────────────────────
 
 /// <summary>
@@ -131,6 +164,7 @@ public sealed class ElasticsearchCapacityCheck
 public class ElasticsearchService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     IKubernetesClientFactory k8s,
+    VaultService vaultService,
     ILogger<ElasticsearchService> logger)
 {
     /// <summary>Above this share of committed memory the cluster is warned about, not refused.</summary>
@@ -385,7 +419,8 @@ public class ElasticsearchService(
                 ?? throw new InvalidOperationException("The Kubernetes cluster has no kubeconfig.");
 
             await k8s.EnsureNamespaceAsync(cluster.Namespace, kubeconfig, ct);
-            await k8s.ApplyManifestAsync(BuildElasticsearchManifest(cluster), kubeconfig, ct);
+            await k8s.ApplyManifestAsync(
+                BuildElasticsearchManifest(cluster, await ResolveS3Async(db, cluster, ct)), kubeconfig, ct);
             if (cluster.KibanaEnabled)
                 await k8s.ApplyManifestAsync(BuildKibanaManifest(cluster), kubeconfig, ct);
         }
@@ -434,7 +469,8 @@ public class ElasticsearchService(
         try
         {
             string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
-            await k8s.ApplyManifestAsync(BuildElasticsearchManifest(cluster), kubeconfig, ct);
+            await k8s.ApplyManifestAsync(
+                BuildElasticsearchManifest(cluster, await ResolveS3Async(db, cluster, ct)), kubeconfig, ct);
 
             if (cluster.KibanaEnabled)
                 await k8s.ApplyManifestAsync(BuildKibanaManifest(cluster), kubeconfig, ct);
@@ -479,16 +515,15 @@ public class ElasticsearchService(
 
             // The lifecycle ConfigMaps only exist if policies were ever applied, so their absence
             // is normal and must not fail a delete that has already removed the cluster itself.
-            foreach (string kind in new[] { "apply", "delete" })
+            foreach ((string kindLabel, string name) in Leftovers(cluster))
             {
                 try
                 {
-                    await k8s.DeleteManifestAsync(
-                        "configmap", IlmConfigMapName(cluster, kind), cluster.Namespace, kubeconfig, ct);
+                    await k8s.DeleteManifestAsync(kindLabel, name, cluster.Namespace, kubeconfig, ct);
                 }
                 catch (Exception ex)
                 {
-                    logger.LogDebug(ex, "No {Kind} ILM ConfigMap to remove for {Cluster}", kind, cluster.Name);
+                    logger.LogDebug(ex, "No {Name} to remove for {Cluster}", name, cluster.Name);
                 }
             }
         }
@@ -728,7 +763,7 @@ public class ElasticsearchService(
             await k8s.ApplyManifestAsync(
                 BuildScriptConfigMap(cluster, IlmConfigMapName(cluster, "delete"), script), kubeconfig, ct);
             await k8s.ApplyManifestAsync(
-                BuildIlmJobManifest(cluster, jobName, IlmConfigMapName(cluster, "delete")), kubeconfig, ct);
+                BuildElasticsearchJobManifest(cluster, jobName, IlmConfigMapName(cluster, "delete")), kubeconfig, ct);
             await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
         }
         catch (Exception ex)
@@ -774,7 +809,7 @@ public class ElasticsearchService(
         try
         {
             await k8s.ApplyManifestAsync(BuildIlmConfigMapManifest(cluster, policies), kubeconfig, ct);
-            await k8s.ApplyManifestAsync(BuildIlmJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+            await k8s.ApplyManifestAsync(BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
             (outcome, log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
         }
         catch (Exception ex)
@@ -815,13 +850,309 @@ public class ElasticsearchService(
     /// <summary>How a one-shot Job ended, as far as a bounded wait could tell.</summary>
     public enum JobOutcome { Succeeded, Failed, StillRunning }
 
+    // ── Snapshots ──────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// Turns on snapshots: puts the S3 credentials into the Elasticsearch keystore, re-applies the
+    /// cluster so every node knows where the bucket is, then registers the repository and the SLM
+    /// policy that fills it.
+    ///
+    /// <para>The repository registration is retried inside the Job, because the keystore reaches
+    /// the nodes a little after the CR does — and a repository registered one second too early
+    /// fails with an authentication error that looks exactly like wrong credentials.</para>
+    /// </summary>
+    public async Task ConfigureSnapshotsAsync(
+        Guid tenantId,
+        Guid clusterId,
+        Guid storageLinkId,
+        string? basePath,
+        string scheduleCron,
+        int expireAfterDays,
+        int minCount,
+        int maxCount,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        StorageLink link = await db.StorageLinks
+            .FirstOrDefaultAsync(l => l.Id == storageLinkId && l.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Storage link not found.");
+
+        if (string.IsNullOrWhiteSpace(link.BucketName))
+            throw new InvalidOperationException(
+                $"Storage link '{link.Name}' has no bucket, so there is nowhere to write snapshots.");
+
+        if (minCount < 1 || maxCount < minCount)
+            throw new InvalidOperationException("Keep at least one snapshot, and no fewer than the minimum.");
+
+        if (expireAfterDays < 1)
+            throw new InvalidOperationException("Snapshots must be kept for at least a day.");
+
+        if (string.IsNullOrWhiteSpace(scheduleCron))
+            throw new InvalidOperationException("A schedule is required.");
+
+        cluster.SnapshotsEnabled = true;
+        cluster.SnapshotStorageLinkId = storageLinkId;
+        cluster.SnapshotBasePath = string.IsNullOrWhiteSpace(basePath) ? cluster.Name : basePath!.Trim();
+        cluster.SnapshotScheduleCron = scheduleCron.Trim();
+        cluster.SnapshotExpireAfterDays = expireAfterDays;
+        cluster.SnapshotMinCount = minCount;
+        cluster.SnapshotMaxCount = maxCount;
+        await db.SaveChangesAsync(ct);
+
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        ElasticsearchS3Settings s3 = await BuildS3SettingsAsync(tenantId, cluster, link, ct);
+
+        await k8s.ApplyManifestAsync(BuildKeystoreSecretManifest(cluster, await ReadS3CredentialsAsync(tenantId, link, ct)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(BuildElasticsearchManifest(cluster, s3), kubeconfig, ct);
+
+        string configMap = SnapshotConfigMapName(cluster);
+        string jobName = JobName(cluster, "snapshot-setup");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildSnapshotSetupScript(cluster, s3)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+        if (outcome == JobOutcome.Failed)
+        {
+            cluster.SnapshotLastFailure = Truncate(log, 2000);
+            await db.SaveChangesAsync(ct);
+            throw new InvalidOperationException(
+                "Registering the snapshot repository failed. Elasticsearch said:\n" + Truncate(log, 1200));
+        }
+
+        if (outcome == JobOutcome.StillRunning)
+            throw new InvalidOperationException(
+                $"The setup job '{jobName}' is still running — the keystore may not have reached every node yet. "
+                + "It will finish on its own; use Check now to pick up the result.");
+
+        cluster.SnapshotLastFailure = null;
+        cluster.SnapshotLastCheckedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Stops taking snapshots: removes the SLM policy so nothing new is written. The repository and
+    /// everything already in the bucket are left alone — deleting a repository is how you lose the
+    /// backups you turned this off while still having.
+    /// </summary>
+    public async Task DisableSnapshotsAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string configMap = SnapshotConfigMapName(cluster, "disable");
+        string jobName = JobName(cluster, "snapshot-disable");
+
+        try
+        {
+            await k8s.ApplyManifestAsync(
+                BuildScriptConfigMap(cluster, configMap, BuildSnapshotDisableScript(cluster)), kubeconfig, ct);
+            await k8s.ApplyManifestAsync(
+                BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+            await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Removing the SLM policy for {Cluster} failed", cluster.Name);
+        }
+
+        cluster.SnapshotsEnabled = false;
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>Takes a snapshot now, off-schedule, and waits for the policy to accept it.</summary>
+    public async Task RunSnapshotNowAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        if (!cluster.SnapshotsEnabled)
+            throw new InvalidOperationException("Snapshots are not configured for this cluster.");
+
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string configMap = SnapshotConfigMapName(cluster, "execute");
+        string jobName = JobName(cluster, "snapshot-run");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildSnapshotExecuteScript(cluster)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+
+        if (outcome == JobOutcome.Failed)
+            throw new InvalidOperationException(
+                "Starting the snapshot failed. Elasticsearch said:\n" + Truncate(log, 1200));
+
+        // Starting a snapshot is not finishing one — SLM accepts the request and the snapshot runs
+        // in the background, so the result is read back separately.
+        await RefreshSnapshotStatusAsync(tenantId, clusterId, ct);
+    }
+
+    /// <summary>
+    /// Reads the SLM policy's own record of its last run back into EntKube. This is the only place
+    /// a snapshot's success is established: a scheduled snapshot happens entirely inside the
+    /// cluster, so nothing else would ever notice it failing.
+    /// </summary>
+    public async Task RefreshSnapshotStatusAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        ElasticsearchCluster cluster = await db.ElasticsearchClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+
+        if (!cluster.SnapshotsEnabled) return;
+
+        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        string configMap = SnapshotConfigMapName(cluster, "status");
+        string jobName = JobName(cluster, "snapshot-status");
+
+        await k8s.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildSnapshotStatusScript(cluster)), kubeconfig, ct);
+        await k8s.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        if (outcome != JobOutcome.Succeeded) return;
+
+        SnapshotStatus status = ParseSnapshotStatus(log, cluster.SnapshotPolicyName);
+        cluster.SnapshotLastSuccessAt = status.LastSuccessAt;
+        cluster.SnapshotLastSuccessName = status.LastSuccessName;
+        cluster.SnapshotLastFailure = Truncate(status.LastFailure, 2000);
+        cluster.SnapshotLastCheckedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>What an SLM policy says about its own last run.</summary>
+    public sealed record SnapshotStatus(DateTime? LastSuccessAt, string? LastSuccessName, string? LastFailure);
+
+    /// <summary>
+    /// Pulls the SLM record out of the status job's log. The script prints a marker first so the
+    /// JSON can be found whatever else the container said on its way there.
+    /// </summary>
+    public static SnapshotStatus ParseSnapshotStatus(string log, string policyName)
+    {
+        const string marker = "---ENTKUBE-SLM---";
+        int at = log.IndexOf(marker, StringComparison.Ordinal);
+        if (at < 0) return new SnapshotStatus(null, null, null);
+
+        string json = log[(at + marker.Length)..].Trim();
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty(policyName, out JsonElement policy))
+                return new SnapshotStatus(null, null, null);
+
+            DateTime? successAt = null;
+            string? successName = null;
+            if (policy.TryGetProperty("last_success", out JsonElement ok))
+            {
+                if (ok.TryGetProperty("snapshot_name", out JsonElement n)) successName = n.GetString();
+                if (ok.TryGetProperty("time", out JsonElement t) && t.TryGetInt64(out long ms))
+                    successAt = DateTimeOffset.FromUnixTimeMilliseconds(ms).UtcDateTime;
+            }
+
+            string? failure = null;
+            if (policy.TryGetProperty("last_failure", out JsonElement bad))
+            {
+                string? details = bad.TryGetProperty("details", out JsonElement d) ? d.GetString() : null;
+                long? failedMs = bad.TryGetProperty("time", out JsonElement ft) && ft.TryGetInt64(out long fm) ? fm : null;
+
+                // A failure older than the last success is history, not a problem — SLM keeps both
+                // forever, and reporting the stale one would leave a healthy cluster looking broken.
+                bool stale = failedMs is long f && successAt is DateTime sAt
+                    && DateTimeOffset.FromUnixTimeMilliseconds(f).UtcDateTime <= sAt;
+
+                if (!stale) failure = details;
+            }
+
+            return new SnapshotStatus(successAt, successName, failure);
+        }
+        catch
+        {
+            return new SnapshotStatus(null, null, null);
+        }
+    }
+
+    /// <summary>
+    /// Resolves the repository settings for a cluster, or null when it keeps no snapshots. A storage
+    /// link that has been deleted out from under the cluster reads as "no snapshots" rather than
+    /// failing every apply from then on.
+    /// </summary>
+    private async Task<ElasticsearchS3Settings?> ResolveS3Async(
+        ApplicationDbContext db, ElasticsearchCluster cluster, CancellationToken ct)
+    {
+        if (!cluster.SnapshotsEnabled || cluster.SnapshotStorageLinkId is not Guid linkId) return null;
+
+        StorageLink? link = await db.StorageLinks.FirstOrDefaultAsync(l => l.Id == linkId, ct);
+        if (link is null || string.IsNullOrWhiteSpace(link.BucketName))
+        {
+            logger.LogWarning(
+                "Elasticsearch cluster {Cluster} points at storage link {Link}, which no longer exists or has no bucket",
+                cluster.Name, linkId);
+            return null;
+        }
+
+        return await BuildS3SettingsAsync(cluster.TenantId, cluster, link, ct);
+    }
+
+    private Task<ElasticsearchS3Settings> BuildS3SettingsAsync(
+        Guid tenantId, ElasticsearchCluster cluster, StorageLink link, CancellationToken ct)
+    {
+        (string endpoint, string protocol) = ElasticsearchS3Settings.SplitEndpoint(link.Endpoint);
+
+        // MinIO and CubeFS are addressed by path, not by a bucket-named host — virtual-host style
+        // against them resolves to a hostname that does not exist.
+        bool pathStyle = link.Provider is StorageProvider.MinIO or StorageProvider.CubeFS
+            or StorageProvider.CleuraS3;
+
+        return Task.FromResult(new ElasticsearchS3Settings(
+            endpoint, protocol, pathStyle, link.Region, link.BucketName!,
+            string.IsNullOrWhiteSpace(cluster.SnapshotBasePath) ? cluster.Name : cluster.SnapshotBasePath!));
+    }
+
+    private async Task<(string AccessKey, string SecretKey)> ReadS3CredentialsAsync(
+        Guid tenantId, StorageLink link, CancellationToken ct)
+    {
+        string? accessKey = await vaultService.GetStorageLinkSecretValueAsync(tenantId, link.Id, "ACCESS_KEY", ct);
+        string? secretKey = await vaultService.GetStorageLinkSecretValueAsync(tenantId, link.Id, "SECRET_KEY", ct);
+
+        if (string.IsNullOrEmpty(accessKey) || string.IsNullOrEmpty(secretKey))
+            throw new InvalidOperationException(
+                $"Storage link '{link.Name}' has no ACCESS_KEY/SECRET_KEY in the vault. Add them on the Storage tab "
+                + "before turning snapshots on.");
+
+        return (accessKey, secretKey);
+    }
+
     // ── Manifest builders ──────────────────────────────────────────────────────
 
     /// <summary>
     /// Renders the Elasticsearch CR: one nodeSet per enabled tier, each with its roles, its
     /// resources, its heap and its volume claim.
     /// </summary>
-    public static string BuildElasticsearchManifest(ElasticsearchCluster c)
+    public static string BuildElasticsearchManifest(ElasticsearchCluster c, ElasticsearchS3Settings? s3 = null)
     {
         StringBuilder sb = new();
         sb.AppendLine($"apiVersion: {EsApiVersion}");
@@ -837,6 +1168,16 @@ public class ElasticsearchService(
         // Keep the volumes of a node that was scaled away, so scaling back up does not silently
         // start with empty disks, and a mistaken scale-down is recoverable.
         sb.AppendLine("  volumeClaimDeletePolicy: DeleteOnScaledownOnly");
+
+        if (s3 is not null)
+        {
+            // The S3 access key and secret live in the Elasticsearch keystore, which ECK fills from
+            // this Secret and reloads without a restart. Only the non-secret half of the client
+            // settings — where the bucket is and how to talk to it — goes in elasticsearch.yml below.
+            sb.AppendLine("  secureSettings:");
+            sb.AppendLine($"    - secretName: {c.SnapshotCredentialsSecretName}");
+        }
+
         sb.AppendLine("  nodeSets:");
 
         if (!c.HasDataTiers)
@@ -844,30 +1185,30 @@ public class ElasticsearchService(
             // No data tier: this is the single-node (or small all-roles) shape. Leaving node.roles
             // unset gives the node every role, which is what makes one node a working cluster.
             AppendNodeSet(sb, c, "all", c.MasterCount, roles: null,
-                c.MasterCpuRequest, c.MasterMemory, c.MasterStorageSize);
+                c.MasterCpuRequest, c.MasterMemory, c.MasterStorageSize, s3);
         }
         else
         {
             AppendNodeSet(sb, c, "master", c.MasterCount, ["master"],
-                c.MasterCpuRequest, c.MasterMemory, c.MasterStorageSize);
+                c.MasterCpuRequest, c.MasterMemory, c.MasterStorageSize, s3);
 
             // The hot tier holds the write indices and the content indices Kibana's own state lives
             // in. It also runs the ingest pipelines unless a dedicated ingest tier was asked for.
             List<string> hotRoles = ["data_hot", "data_content"];
             if (c.IngestCount <= 0) hotRoles.Add("ingest");
             AppendNodeSet(sb, c, "hot", c.HotCount, hotRoles,
-                c.HotCpuRequest, c.HotMemory, c.HotStorageSize);
+                c.HotCpuRequest, c.HotMemory, c.HotStorageSize, s3);
 
             AppendNodeSet(sb, c, "warm", c.WarmCount, ["data_warm"],
-                c.WarmCpuRequest, c.WarmMemory, c.WarmStorageSize);
+                c.WarmCpuRequest, c.WarmMemory, c.WarmStorageSize, s3);
 
             AppendNodeSet(sb, c, "cold", c.ColdCount, ["data_cold"],
-                c.ColdCpuRequest, c.ColdMemory, c.ColdStorageSize);
+                c.ColdCpuRequest, c.ColdMemory, c.ColdStorageSize, s3);
 
             // A node holding only the ingest role is also the cluster's coordinating node: it takes
             // the client connections and fans out the search, without any shard of its own to lose.
             AppendNodeSet(sb, c, "ingest", c.IngestCount, ["ingest"],
-                c.IngestCpuRequest, c.IngestMemory, c.IngestStorageSize);
+                c.IngestCpuRequest, c.IngestMemory, c.IngestStorageSize, s3);
         }
 
         return sb.ToString();
@@ -875,7 +1216,7 @@ public class ElasticsearchService(
 
     private static void AppendNodeSet(
         StringBuilder sb, ElasticsearchCluster c, string name, int count, IReadOnlyList<string>? roles,
-        string cpu, string memory, string storage)
+        string cpu, string memory, string storage, ElasticsearchS3Settings? s3 = null)
     {
         if (count <= 0) return;
 
@@ -883,8 +1224,9 @@ public class ElasticsearchService(
         sb.AppendLine($"      count: {count}");
 
         // Only emit config: when there is something under it. An all-roles node with mmap left on
-        // has nothing to say here, and "config:" with an empty body is a null the operator rejects.
-        if (roles is not null || !c.AllowMmap)
+        // and no snapshot repository has nothing to say here, and "config:" with an empty body is a
+        // null the operator rejects.
+        if (roles is not null || !c.AllowMmap || s3 is not null)
         {
             sb.AppendLine("      config:");
             if (roles is not null)
@@ -895,6 +1237,17 @@ public class ElasticsearchService(
                 // with a bootstrap check. Turning mmap off trades some search performance for
                 // starting at all.
                 sb.AppendLine("        node.store.allow_mmap: false");
+            }
+            if (s3 is not null)
+            {
+                // These are client settings, so every node needs them — a repository registered on
+                // one node is used by all of them.
+                sb.AppendLine($"        s3.client.default.endpoint: \"{s3.Endpoint}\"");
+                sb.AppendLine($"        s3.client.default.protocol: {s3.Protocol}");
+                if (s3.PathStyleAccess)
+                    sb.AppendLine("        s3.client.default.path_style_access: true");
+                if (!string.IsNullOrWhiteSpace(s3.Region))
+                    sb.AppendLine($"        s3.client.default.region: \"{s3.Region}\"");
             }
         }
 
@@ -1116,7 +1469,7 @@ public class ElasticsearchService(
     /// straight from the Secret, and verifies the HTTP layer against the operator's own CA — so no
     /// credential and no <c>-k</c> ever appears anywhere EntKube can see.
     /// </summary>
-    public static string BuildIlmJobManifest(ElasticsearchCluster c, string jobName, string configMapName)
+    public static string BuildElasticsearchJobManifest(ElasticsearchCluster c, string jobName, string configMapName)
     {
         StringBuilder sb = new();
         sb.AppendLine("apiVersion: batch/v1");
@@ -1181,12 +1534,158 @@ public class ElasticsearchService(
         ElasticsearchCluster c, IReadOnlyList<ElasticsearchIlmPolicy> policies)
     {
         StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        foreach (ElasticsearchIlmPolicy p in policies)
+        {
+            sb.AppendLine($"put \"/_ilm/policy/{p.Name}\" \"/scripts/{p.Name}.policy.json\"");
+            sb.AppendLine($"put \"/_index_template/{p.Name}\" \"/scripts/{p.Name}.template.json\"");
+        }
+        sb.AppendLine();
+        sb.AppendLine("echo \"all policies and templates applied\"");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The Secret ECK loads into every node's keystore. Its keys are the keystore entry names
+    /// verbatim — Elasticsearch looks up <c>s3.client.default.access_key</c>, so that is what the
+    /// key has to be called.
+    /// </summary>
+    public static string BuildKeystoreSecretManifest(
+        ElasticsearchCluster c, (string AccessKey, string SecretKey) credentials)
+    {
+        StringBuilder sb = new();
+        sb.AppendLine("apiVersion: v1");
+        sb.AppendLine("kind: Secret");
+        sb.AppendLine("metadata:");
+        sb.AppendLine($"  name: {c.SnapshotCredentialsSecretName}");
+        sb.AppendLine($"  namespace: {c.Namespace}");
+        sb.AppendLine("  labels:");
+        sb.AppendLine("    entkube.io/managed: \"true\"");
+        sb.AppendLine($"    entkube.io/elasticsearch: {c.Name}");
+        sb.AppendLine("type: Opaque");
+        sb.AppendLine("data:");
+        sb.AppendLine($"  s3.client.default.access_key: {Base64(credentials.AccessKey)}");
+        sb.AppendLine($"  s3.client.default.secret_key: {Base64(credentials.SecretKey)}");
+        return sb.ToString();
+    }
+
+    private static string Base64(string value) =>
+        Convert.ToBase64String(Encoding.UTF8.GetBytes(value));
+
+    /// <summary>
+    /// Registers the repository and the SLM policy that writes into it.
+    ///
+    /// <para>The repository PUT is retried: ECK propagates the keystore to the nodes shortly after
+    /// the CR is applied, and a repository registered before it lands fails with an authentication
+    /// error indistinguishable from wrong credentials.</para>
+    /// </summary>
+    public static string BuildSnapshotSetupScript(ElasticsearchCluster c, ElasticsearchS3Settings s3)
+    {
+        string repoBody = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["type"] = "s3",
+            ["settings"] = new Dictionary<string, object>
+            {
+                ["bucket"] = s3.Bucket,
+                ["base_path"] = s3.BasePath,
+                ["client"] = "default"
+            }
+        }, JsonOpts);
+
+        string policyBody = JsonSerializer.Serialize(new Dictionary<string, object>
+        {
+            ["schedule"] = c.SnapshotScheduleCron,
+            ["name"] = $"<{c.Name}-snap-{{now/d}}>",
+            ["repository"] = c.SnapshotRepositoryName,
+            ["config"] = new Dictionary<string, object>
+            {
+                ["indices"] = new[] { "*" },
+                // The cluster state carries the index templates, the ILM policies and the roles.
+                // A snapshot without it restores data nobody has told Elasticsearch what to do with.
+                ["include_global_state"] = true
+            },
+            ["retention"] = new Dictionary<string, object>
+            {
+                ["expire_after"] = $"{c.SnapshotExpireAfterDays}d",
+                ["min_count"] = c.SnapshotMinCount,
+                ["max_count"] = c.SnapshotMaxCount
+            }
+        }, JsonOpts);
+
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine("cat > /tmp/repo.json <<'ENTKUBE_EOF'");
+        sb.AppendLine(repoBody);
+        sb.AppendLine("ENTKUBE_EOF");
+        sb.AppendLine("cat > /tmp/policy.json <<'ENTKUBE_EOF'");
+        sb.AppendLine(policyBody);
+        sb.AppendLine("ENTKUBE_EOF");
+        sb.AppendLine();
+        sb.AppendLine("# The keystore reaches the nodes a moment after the CR does, and a repository");
+        sb.AppendLine("# registered one second early fails as if the credentials were wrong.");
+        sb.AppendLine("registered=0");
+        sb.AppendLine("for i in $(seq 1 10); do");
+        sb.AppendLine($"  code=$($CURL -o /tmp/resp -w '%{{http_code}}' -X PUT \"$ES/_snapshot/{c.SnapshotRepositoryName}?verify=true\" -d @/tmp/repo.json)");
+        sb.AppendLine("  if [ \"$code\" -lt 300 ]; then registered=1; break; fi");
+        sb.AppendLine("  echo \"repository not accepted yet (HTTP $code), retrying\"; cat /tmp/resp; echo");
+        sb.AppendLine("  sleep 15");
+        sb.AppendLine("done");
+        sb.AppendLine("if [ \"$registered\" != \"1\" ]; then echo \"repository registration failed\"; cat /tmp/resp; exit 1; fi");
+        sb.AppendLine("echo \"repository registered and verified\"");
+        sb.AppendLine();
+        sb.AppendLine($"put \"/_slm/policy/{c.SnapshotPolicyName}\" /tmp/policy.json");
+        return sb.ToString();
+    }
+
+    /// <summary>Removes the SLM policy. The repository and its contents are deliberately left.</summary>
+    public static string BuildSnapshotDisableScript(ElasticsearchCluster c)
+    {
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine($"code=$($CURL -o /tmp/resp -w '%{{http_code}}' -X DELETE \"$ES/_slm/policy/{c.SnapshotPolicyName}\")");
+        sb.AppendLine("if [ \"$code\" -ge 300 ] && [ \"$code\" != \"404\" ]; then cat /tmp/resp; exit 1; fi");
+        sb.AppendLine("echo \"snapshot policy removed (HTTP $code); the repository and its snapshots are untouched\"");
+        return sb.ToString();
+    }
+
+    /// <summary>Asks SLM to run the policy now, off-schedule.</summary>
+    public static string BuildSnapshotExecuteScript(ElasticsearchCluster c)
+    {
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine($"code=$($CURL -o /tmp/resp -w '%{{http_code}}' -X POST \"$ES/_slm/policy/{c.SnapshotPolicyName}/_execute\")");
+        sb.AppendLine("if [ \"$code\" -ge 300 ]; then cat /tmp/resp; exit 1; fi");
+        sb.AppendLine("cat /tmp/resp; echo");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// Prints the policy's own record of its last run, behind a marker so it can be found in the
+    /// job's log whatever else the container said.
+    /// </summary>
+    public static string BuildSnapshotStatusScript(ElasticsearchCluster c)
+    {
+        StringBuilder sb = new();
+        AppendScriptPreamble(sb, c);
+        sb.AppendLine($"code=$($CURL -o /tmp/resp -w '%{{http_code}}' \"$ES/_slm/policy/{c.SnapshotPolicyName}\")");
+        sb.AppendLine("if [ \"$code\" -ge 300 ]; then cat /tmp/resp; exit 1; fi");
+        sb.AppendLine("echo \"---ENTKUBE-SLM---\"");
+        sb.AppendLine("cat /tmp/resp");
+        return sb.ToString();
+    }
+
+    /// <summary>
+    /// The opening every admin script shares: where the cluster is, how to authenticate, waiting
+    /// for it to answer, and a <c>put</c> that fails the job on an HTTP error — which plain curl
+    /// does not, since a 400 with a body is a perfectly successful request as far as it is
+    /// concerned.
+    /// </summary>
+    private static void AppendScriptPreamble(StringBuilder sb, ElasticsearchCluster c)
+    {
         sb.AppendLine("set -eu");
         sb.AppendLine($"ES=\"{c.HttpEndpoint}\"");
         sb.AppendLine("CURL=\"curl -sS --cacert /es-ca/ca.crt -u elastic:${ELASTIC_PASSWORD} -H Content-Type:application/json\"");
         sb.AppendLine();
-        sb.AppendLine("# Wait for the cluster to answer before pushing anything at it: a policy applied");
-        sb.AppendLine("# against a cluster still electing a master fails for reasons that are not ours.");
         sb.AppendLine("ready=0");
         sb.AppendLine("for i in $(seq 1 60); do");
         sb.AppendLine("  if $CURL -o /dev/null \"$ES/_cluster/health?wait_for_status=yellow&timeout=10s\"; then ready=1; break; fi");
@@ -1201,23 +1700,12 @@ public class ElasticsearchService(
         sb.AppendLine("  echo \"PUT $path -> HTTP $code\"");
         sb.AppendLine("}");
         sb.AppendLine();
-        foreach (ElasticsearchIlmPolicy p in policies)
-        {
-            sb.AppendLine($"put \"/_ilm/policy/{p.Name}\" \"/scripts/{p.Name}.policy.json\"");
-            sb.AppendLine($"put \"/_index_template/{p.Name}\" \"/scripts/{p.Name}.template.json\"");
-        }
-        sb.AppendLine();
-        sb.AppendLine("echo \"all policies and templates applied\"");
-        return sb.ToString();
     }
 
     private static string BuildIlmDeleteScript(ElasticsearchCluster c, ElasticsearchIlmPolicy p)
     {
         StringBuilder sb = new();
-        sb.AppendLine("set -eu");
-        sb.AppendLine($"ES=\"{c.HttpEndpoint}\"");
-        sb.AppendLine("CURL=\"curl -sS --cacert /es-ca/ca.crt -u elastic:${ELASTIC_PASSWORD} -H Content-Type:application/json\"");
-        sb.AppendLine();
+        AppendScriptPreamble(sb, c);
         sb.AppendLine("del() {");
         sb.AppendLine("  path=\"$1\"");
         sb.AppendLine("  code=$($CURL -o /tmp/resp -w '%{http_code}' -X DELETE \"$ES$path\")");
@@ -1584,10 +2072,36 @@ public class ElasticsearchService(
 
     // ── Helpers ────────────────────────────────────────────────────────────────
 
-    private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = true };
+    // Relaxed escaping so the snapshot name template reads as "<name-{now/d}>" in the file the Job
+    // sends, rather than as \u003C escapes. Elasticsearch parses both; only one is debuggable, and
+    // these documents are written into a quoted heredoc, never into HTML.
+    private static readonly JsonSerializerOptions JsonOpts = new()
+    {
+        WriteIndented = true,
+        Encoder = System.Text.Encodings.Web.JavaScriptEncoder.UnsafeRelaxedJsonEscaping
+    };
 
     public static string IlmConfigMapName(ElasticsearchCluster c, string kind = "apply") =>
         $"{c.Name}-entkube-ilm-{kind}";
+
+    public static string SnapshotConfigMapName(ElasticsearchCluster c, string kind = "setup") =>
+        $"{c.Name}-entkube-snapshot-{kind}";
+
+    /// <summary>
+    /// The objects EntKube created beside the CRs, which ECK does not own and so will not collect.
+    /// Every one of them is optional — a cluster that never had policies or snapshots has none —
+    /// so deleting them is best-effort.
+    /// </summary>
+    private static IEnumerable<(string Kind, string Name)> Leftovers(ElasticsearchCluster c)
+    {
+        yield return ("configmap", IlmConfigMapName(c));
+        yield return ("configmap", IlmConfigMapName(c, "delete"));
+        yield return ("configmap", SnapshotConfigMapName(c));
+        yield return ("configmap", SnapshotConfigMapName(c, "disable"));
+        yield return ("configmap", SnapshotConfigMapName(c, "execute"));
+        yield return ("configmap", SnapshotConfigMapName(c, "status"));
+        yield return ("secret", c.SnapshotCredentialsSecretName);
+    }
 
     private static string JobName(ElasticsearchCluster c, string kind) =>
         $"{c.Name}-{kind}-{DateTime.UtcNow:yyyyMMdd-HHmmss}";

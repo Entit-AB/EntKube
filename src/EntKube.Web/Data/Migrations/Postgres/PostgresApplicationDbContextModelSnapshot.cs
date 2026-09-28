@@ -3294,6 +3294,44 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .HasMaxLength(63)
                         .HasColumnType("character varying(63)");
 
+                    b.Property<string>("SnapshotBasePath")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<int>("SnapshotExpireAfterDays")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("SnapshotLastCheckedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("SnapshotLastFailure")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<DateTime?>("SnapshotLastSuccessAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("SnapshotLastSuccessName")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)");
+
+                    b.Property<int>("SnapshotMaxCount")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("SnapshotMinCount")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("SnapshotScheduleCron")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid?>("SnapshotStorageLinkId")
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("SnapshotsEnabled")
+                        .HasColumnType("boolean");
+
                     b.Property<int>("Status")
                         .HasColumnType("integer");
 

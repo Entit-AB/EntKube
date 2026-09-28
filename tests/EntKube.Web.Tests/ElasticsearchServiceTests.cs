@@ -24,6 +24,7 @@ public class ElasticsearchServiceTests : IDisposable
     private readonly InterceptingTestDb testDb;
     private readonly ApplicationDbContext db;
     private readonly Mock<IKubernetesClientFactory> k8s;
+    private readonly VaultService vault;
     private readonly ElasticsearchService sut;
 
     private readonly Guid tenantId = Guid.NewGuid();
@@ -34,7 +35,8 @@ public class ElasticsearchServiceTests : IDisposable
         testDb = new InterceptingTestDb(TestRootKey);
         db = testDb.CreateContext();
         k8s = new Mock<IKubernetesClientFactory>();
-        sut = new ElasticsearchService(testDb.Factory, k8s.Object, NullLogger<ElasticsearchService>.Instance);
+        vault = testDb.CreateVaultService();
+        sut = new ElasticsearchService(testDb.Factory, k8s.Object, vault, NullLogger<ElasticsearchService>.Instance);
     }
 
     public void Dispose()
@@ -649,7 +651,7 @@ public class ElasticsearchServiceTests : IDisposable
     public void ApplyJob_ReadsThePasswordFromTheSecret_AndNeverCarriesIt()
     {
         ElasticsearchCluster c = SampleCluster();
-        string manifest = ElasticsearchService.BuildIlmJobManifest(c, "search-ilm-apply-1", "search-entkube-ilm-apply");
+        string manifest = ElasticsearchService.BuildElasticsearchJobManifest(c, "search-ilm-apply-1", "search-entkube-ilm-apply");
 
         YamlMappingNode container = (YamlMappingNode)((YamlSequenceNode)
             ((YamlMappingNode)((YamlMappingNode)((YamlMappingNode)Parse(manifest)["spec"])["template"])["spec"])["containers"])[0];
@@ -810,5 +812,258 @@ public class ElasticsearchServiceTests : IDisposable
         pods[0].Ready.Should().BeTrue();
         pods[0].Restarts.Should().Be(2);
         pods[0].Node.Should().Be("node-a");
+    }
+
+    // ──────── Snapshots ────────
+
+    private async Task<(ElasticsearchCluster Cluster, StorageLink Link)> SeedClusterWithStorageAsync(
+        StorageProvider provider = StorageProvider.MinIO,
+        string endpoint = "http://minio.minio.svc.cluster.local:9000",
+        bool withCredentials = true)
+    {
+        await SeedClusterAsync();
+
+        Guid envId = await db.Set<Data.Environment>().Select(e => e.Id).FirstAsync();
+
+        StorageLink link = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            EnvironmentId = envId,
+            Provider = provider,
+            Name = "Backups",
+            Endpoint = endpoint,
+            BucketName = "es-snapshots"
+        };
+        db.StorageLinks.Add(link);
+
+        ElasticsearchCluster c = SampleCluster();
+        c.TenantId = tenantId;
+        c.KubernetesClusterId = k8sClusterId;
+        db.ElasticsearchClusters.Add(c);
+        await db.SaveChangesAsync();
+
+        if (withCredentials)
+        {
+            await vault.SetStorageLinkSecretAsync(tenantId, link.Id, "ACCESS_KEY", "AKIAEXAMPLE");
+            await vault.SetStorageLinkSecretAsync(tenantId, link.Id, "SECRET_KEY", "s3cr3t");
+        }
+
+        return (c, link);
+    }
+
+    private void ArrangeSucceedingJob()
+    {
+        k8s.Setup(x => x.GetJsonAsync(It.IsRegex("^job/"), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""{"status":{"succeeded":1}}""");
+        k8s.Setup(x => x.GetPodLogsAsync(It.IsRegex("^job/"), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<int>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("repository registered and verified");
+        sut.JobPollInterval = TimeSpan.Zero;
+    }
+
+    [Theory]
+    [InlineData("http://minio.minio.svc.cluster.local:9000", "minio.minio.svc.cluster.local:9000", "http")]
+    [InlineData("https://s3.eu-west-1.amazonaws.com", "s3.eu-west-1.amazonaws.com", "https")]
+    [InlineData("s3.example.com", "s3.example.com", "https")]
+    public void AnEndpointUrlIsSplitTheWayElasticsearchWantsIt(string url, string endpoint, string protocol)
+    {
+        // Elasticsearch takes host[:port] and the scheme as two separate client settings.
+        ElasticsearchS3Settings.SplitEndpoint(url).Should().Be((endpoint, protocol));
+    }
+
+    [Fact]
+    public async Task ConfiguringSnapshots_PutsTheKeysInTheKeystoreSecret_NotInAManifest()
+    {
+        (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync();
+        ArrangeSucceedingJob();
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
+
+        string secret = applied.Single(m => m.Contains("kind: Secret"));
+        secret.Should().Contain("s3.client.default.access_key");
+        secret.Should().Contain(Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("AKIAEXAMPLE")));
+
+        // The key must not appear in plaintext anywhere, least of all in the Elasticsearch CR.
+        applied.Should().NotContain(m => m.Contains("AKIAEXAMPLE"));
+
+        ElasticsearchCluster stored = await db.ElasticsearchClusters.AsNoTracking().SingleAsync();
+        stored.SnapshotsEnabled.Should().BeTrue();
+        stored.SnapshotBasePath.Should().Be("search");   // defaults to the cluster name
+    }
+
+    [Fact]
+    public async Task TheClusterLearnsWhereTheBucketIs_OnEveryTier()
+    {
+        (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync();
+        ArrangeSucceedingJob();
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, "prod", "0 30 1 * * ?", 30, 5, 50);
+
+        string manifest = applied.Single(m => m.Contains("kind: Elasticsearch"));
+        YamlMappingNode root = Parse(manifest);
+
+        // The keystore Secret is referenced once, for the whole cluster.
+        ((YamlScalarNode)((YamlMappingNode)((YamlSequenceNode)((YamlMappingNode)root["spec"])["secureSettings"])[0])["secretName"])
+            .Value.Should().Be("search-es-snapshot-s3");
+
+        // The client settings are per-node: a repository registered on one node is used by all.
+        foreach (string tier in new[] { "master", "hot" })
+        {
+            YamlMappingNode config = (YamlMappingNode)NodeSet(manifest, tier)["config"];
+            ((YamlScalarNode)config["s3.client.default.endpoint"]).Value.Should().Be("minio.minio.svc.cluster.local:9000");
+            ((YamlScalarNode)config["s3.client.default.protocol"]).Value.Should().Be("http");
+            ((YamlScalarNode)config["s3.client.default.path_style_access"]).Value.Should().Be("true");
+        }
+    }
+
+    [Fact]
+    public async Task AwsGetsVirtualHostAddressing_MinioGetsPathStyle()
+    {
+        (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync(
+            StorageProvider.AwsS3, "https://s3.eu-west-1.amazonaws.com");
+        ArrangeSucceedingJob();
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
+
+        // Path-style against AWS is deprecated; virtual-host style against MinIO resolves to a
+        // hostname that does not exist. The provider is what decides.
+        applied.Single(m => m.Contains("kind: Elasticsearch")).Should().NotContain("path_style_access");
+    }
+
+    [Fact]
+    public async Task SnapshotsWithoutCredentialsInTheVault_AreRefusedWithWhereToPutThem()
+    {
+        (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync(withCredentials: false);
+        ArrangeSucceedingJob();
+
+        Func<Task> act = () => sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
+
+        await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*ACCESS_KEY/SECRET_KEY*");
+    }
+
+    [Fact]
+    public void TheSetupScript_RetriesTheRepository_BecauseTheKeystoreArrivesLate()
+    {
+        ElasticsearchCluster c = SampleCluster();
+        c.SnapshotExpireAfterDays = 14;
+        c.SnapshotMinCount = 3;
+        c.SnapshotMaxCount = 20;
+
+        string script = ElasticsearchService.BuildSnapshotSetupScript(c, new ElasticsearchS3Settings(
+            "minio:9000", "http", true, null, "es-snapshots", "search"));
+
+        script.Should().Contain("_snapshot/entkube-s3?verify=true");
+        script.Should().Contain("for i in $(seq 1 10)");
+        script.Should().Contain("_slm/policy/search-entkube-snapshots");
+        script.Should().Contain("\"expire_after\": \"14d\"");
+        script.Should().Contain("\"min_count\": 3");
+        // The cluster state carries the templates and ILM policies the data needs to be usable.
+        script.Should().Contain("\"include_global_state\": true");
+    }
+
+    [Fact]
+    public void StoppingSnapshots_LeavesTheRepositoryAlone()
+    {
+        string script = ElasticsearchService.BuildSnapshotDisableScript(SampleCluster());
+
+        script.Should().Contain("-X DELETE");
+        script.Should().Contain("_slm/policy/search-entkube-snapshots");
+        // Deleting the repository is how you lose the backups you turned this off while still having.
+        script.Should().NotContain("-X DELETE \"$ES/_snapshot");
+    }
+
+    [Fact]
+    public void SlmStatusIsReadBackFromTheJobLog()
+    {
+        string log = """
+            waiting for cluster
+            ---ENTKUBE-SLM---
+            {"search-entkube-snapshots":{"version":1,"policy":{},"last_success":{"snapshot_name":"search-snap-2026.09.28","time":1790000000000}}}
+            """;
+
+        ElasticsearchService.SnapshotStatus status =
+            ElasticsearchService.ParseSnapshotStatus(log, "search-entkube-snapshots");
+
+        status.LastSuccessName.Should().Be("search-snap-2026.09.28");
+        status.LastSuccessAt.Should().Be(DateTimeOffset.FromUnixTimeMilliseconds(1790000000000).UtcDateTime);
+        status.LastFailure.Should().BeNull();
+    }
+
+    [Fact]
+    public void AFailureOlderThanTheLastSuccess_IsNotReported()
+    {
+        string log = """
+            ---ENTKUBE-SLM---
+            {"p":{"last_success":{"snapshot_name":"snap-2","time":1790000000000},
+                  "last_failure":{"snapshot_name":"snap-1","time":1780000000000,"details":"old news"}}}
+            """;
+
+        // SLM keeps both forever; reporting the stale one leaves a healthy cluster looking broken.
+        ElasticsearchService.ParseSnapshotStatus(log, "p").LastFailure.Should().BeNull();
+    }
+
+    [Fact]
+    public void AFailureNewerThanTheLastSuccess_IsReported()
+    {
+        string log = """
+            ---ENTKUBE-SLM---
+            {"p":{"last_success":{"snapshot_name":"snap-1","time":1780000000000},
+                  "last_failure":{"snapshot_name":"snap-2","time":1790000000000,"details":"repository_missing_exception"}}}
+            """;
+
+        ElasticsearchService.ParseSnapshotStatus(log, "p").LastFailure.Should().Be("repository_missing_exception");
+    }
+
+    [Fact]
+    public void ALogWithoutTheMarker_ReadsAsNoStatusRatherThanThrowing()
+    {
+        ElasticsearchService.ParseSnapshotStatus("connection refused", "p")
+            .Should().Be(new ElasticsearchService.SnapshotStatus(null, null, null));
+    }
+
+    [Fact]
+    public async Task AClusterWhoseStorageLinkWentAway_StillApplies()
+    {
+        // No vaulted credentials here: they hold an FK to the link, and this test is about the link
+        // itself going away.
+        (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync(withCredentials: false);
+        ArrangeCluster(TwoNodes, NoPods);
+        ArrangeSucceedingJob();
+
+        c.SnapshotsEnabled = true;
+        c.SnapshotStorageLinkId = link.Id;
+        db.StorageLinks.Remove(link);
+        await db.SaveChangesAsync();
+
+        List<string> applied = [];
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .Returns(Task.CompletedTask);
+
+        ElasticsearchCluster edited = SampleCluster();
+        edited.Id = c.Id;
+        edited.HotCount = 3;
+
+        // A storage link deleted out from under a cluster must not make every later apply fail.
+        await sut.UpdateClusterAsync(tenantId, edited);
+
+        applied.Single(m => m.Contains("kind: Elasticsearch")).Should().NotContain("secureSettings");
     }
 }

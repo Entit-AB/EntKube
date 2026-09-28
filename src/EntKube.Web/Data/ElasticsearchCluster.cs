@@ -137,6 +137,48 @@ public class ElasticsearchCluster
 
     public string KibanaMemory { get; set; } = "1Gi";
 
+    // ── Snapshots (S3 repository + SLM policy) ─────────────────────────────────
+
+    /// <summary>
+    /// Whether this cluster keeps snapshots in object storage. Off by default, and worth turning on
+    /// before the lifecycle policies start deleting anything: ILM's delete phase is not a mistake it
+    /// can take back.
+    /// </summary>
+    public bool SnapshotsEnabled { get; set; }
+
+    /// <summary>The tenant storage link (S3 bucket + credentials) snapshots are written to.</summary>
+    public Guid? SnapshotStorageLinkId { get; set; }
+
+    /// <summary>Prefix inside the bucket. Defaults to the cluster name, so two clusters can share one.</summary>
+    public string? SnapshotBasePath { get; set; }
+
+    /// <summary>
+    /// When snapshots are taken, as an Elasticsearch (Quartz-style, six field) cron expression.
+    /// The default is 01:30 daily.
+    /// </summary>
+    public string SnapshotScheduleCron { get; set; } = "0 30 1 * * ?";
+
+    /// <summary>Delete snapshots older than this many days, subject to the counts below.</summary>
+    public int SnapshotExpireAfterDays { get; set; } = 30;
+
+    /// <summary>Keep at least this many snapshots even once they are older than the expiry.</summary>
+    public int SnapshotMinCount { get; set; } = 5;
+
+    /// <summary>Never keep more than this many.</summary>
+    public int SnapshotMaxCount { get; set; } = 50;
+
+    /// <summary>When the last successful snapshot completed, as Elasticsearch last reported it.</summary>
+    public DateTime? SnapshotLastSuccessAt { get; set; }
+
+    /// <summary>The name of that snapshot.</summary>
+    public string? SnapshotLastSuccessName { get; set; }
+
+    /// <summary>What the last failed snapshot said, when the last attempt failed.</summary>
+    public string? SnapshotLastFailure { get; set; }
+
+    /// <summary>When EntKube last read the snapshot state out of the cluster.</summary>
+    public DateTime? SnapshotLastCheckedAt { get; set; }
+
     // ── State ──────────────────────────────────────────────────────────────────
 
     public ElasticsearchClusterStatus Status { get; set; } = ElasticsearchClusterStatus.Creating;
@@ -175,4 +217,13 @@ public class ElasticsearchCluster
 
     /// <summary>True when at least one data tier is enabled — i.e. this is not a single all-roles node.</summary>
     public bool HasDataTiers => HotCount > 0 || WarmCount > 0 || ColdCount > 0;
+
+    /// <summary>Secret holding the S3 keystore entries ECK loads into every node.</summary>
+    public string SnapshotCredentialsSecretName => $"{Name}-es-snapshot-s3";
+
+    /// <summary>The snapshot repository registered in Elasticsearch.</summary>
+    public string SnapshotRepositoryName => "entkube-s3";
+
+    /// <summary>The SLM policy that fills that repository.</summary>
+    public string SnapshotPolicyName => $"{Name}-entkube-snapshots";
 }
