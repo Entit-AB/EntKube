@@ -69,6 +69,76 @@ public class MailboxConnectionTests
         where.Username.Should().Be("support@example.com");
     }
 
+    /// <summary>
+    /// A server whose directory is OIDC is reached on its public hostname, not on its Service name.
+    ///
+    /// <para>The in-cluster Service is the better address when it works — no public DNS, no load
+    /// balancer, no certificate chain for a connection that never leaves the cluster — and it is not an
+    /// address an OIDC server can be reached on, even from inside its own cluster. That is a fact about
+    /// how these deployments authenticate rather than something derivable here, and the comment that
+    /// used to justify the Service name argued from the poller's location, which was never the
+    /// question.</para>
+    /// </summary>
+    [Fact]
+    public void AnOidcServerIsReachedOnItsPublicHostname()
+    {
+        StalwartComponentConfig config = Config(c => c.AuthMode = StalwartAuthMode.Oidc);
+        (StalwartMailAccount account, StalwartMailDomain domain) = Mailbox(config.Id);
+
+        MailboxConnection where =
+            MailboxConnectionResolver.Resolve(config, Component(), account, domain)!;
+
+        where.Host.Should().Be("mail.example.com");
+        where.Port.Should().Be(MailPorts.Imaps);
+        where.UseSsl.Should().BeTrue();
+        where.UseOAuth.Should().BeTrue();
+
+        // And the certificate is issued for that name, so the check applies rather than being waived.
+        // Waiving it was right for the Service name and is not something to carry over: on the public
+        // hostname a name mismatch would mean something is actually wrong.
+        where.ValidateCertificateName.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A server that checks passwords itself keeps the in-cluster Service.
+    ///
+    /// <para>The other half, without which the test above would pass equally well if every mailbox were
+    /// sent out through the load balancer — losing the reason the Service name was chosen, and taking a
+    /// working configuration with it.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(StalwartAuthMode.Internal)]
+    [InlineData(StalwartAuthMode.Ldap)]
+    public void AServerThatChecksPasswordsKeepsTheInClusterService(StalwartAuthMode mode)
+    {
+        StalwartComponentConfig config = Config(c => c.AuthMode = mode);
+        (StalwartMailAccount account, StalwartMailDomain domain) = Mailbox(config.Id);
+
+        MailboxConnection where =
+            MailboxConnectionResolver.Resolve(config, Component(), account, domain)!;
+
+        where.Host.Should().Be("mail.messaging.svc.cluster.local");
+        where.ValidateCertificateName.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// With no hostname set there is nothing public to reach, so the Service name is used rather than
+    /// an empty host — which would fail as an unparseable address instead of as a missing setting.
+    /// </summary>
+    [Fact]
+    public void AnOidcServerWithNoHostnameFallsBackRatherThanBuildingAnEmptyAddress()
+    {
+        StalwartComponentConfig config = Config(c =>
+        {
+            c.AuthMode = StalwartAuthMode.Oidc;
+            c.Hostname = "   ";
+        });
+        (StalwartMailAccount account, StalwartMailDomain domain) = Mailbox(config.Id);
+
+        MailboxConnectionResolver.Resolve(config, Component(), account, domain)!
+            .Host.Should().Be("mail.messaging.svc.cluster.local");
+    }
+
     [Fact]
     public void TheCertificateNameIsNotCheckedForAServerReachedByItsServiceName()
     {

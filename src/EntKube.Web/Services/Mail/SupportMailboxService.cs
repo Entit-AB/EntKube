@@ -1063,8 +1063,21 @@ public class SupportMailboxService(
             // reading "Resource temporarily unavailable" has no way to know which name was tried, or
             // that a name was involved at all. That address is also the assumption most likely to be
             // wrong: it is only resolvable from inside the cluster the mail server runs in.
+            // The guidance belongs here, where which address was used is known. Named for the same
+            // reason either way: none of this was typed in, so an operator reading a socket error has no
+            // way to see which name was tried — but what to check differs, and a message explaining the
+            // in-cluster Service to somebody whose connection went out through the load balancer would
+            // send them to the wrong place.
             throw new MailboxUnreachableException(
-                $"Could not reach {where.Host}:{where.Port} — {ex.Message}", ex);
+                $"Could not reach {where.Host}:{where.Port} — {ex.Message}. "
+                + (where.ValidateCertificateName
+                    ? "That is the mail server's public hostname, which is the address a server "
+                      + "authenticating against OIDC has to be reached on. It has to resolve from here "
+                      + "and lead back to the mail server's load balancer."
+                    : "That is the mail server's in-cluster Service, built from the component's release "
+                      + "name and namespace, and it only resolves from inside the cluster that "
+                      + "component runs in."),
+                ex);
         }
 
         if (where.UseOAuth)
@@ -1097,12 +1110,9 @@ public class SupportMailboxService(
         // with the PROXY protocol enabled that is the expected outcome of connecting from an address
         // in its trusted-networks list, because Stalwart requires the header from every peer that
         // matches — there is no per-listener exemption — and an IMAP client sends none.
-        MailboxUnreachableException => $"{ex.Message}. Nothing was authenticated, so this is not the "
-            + "credential. The address is derived from the mail server component's release name and "
-            + "namespace, and only resolves from inside the cluster that component runs in. If the mail "
-            + "server has the PROXY protocol turned on, also check that its trusted-networks list "
-            + "covers only the load balancer's own subnet — an entry matching addresses inside the "
-            + "cluster makes the server wait for a PROXY header on every connection from them.",
+        // The message already names the address and what it is, decided where that was known.
+        MailboxUnreachableException => $"{ex.Message} Nothing was authenticated, so this is not the "
+            + "credential.",
 
         ImapProtocolException or System.Net.Sockets.SocketException or IOException =>
             $"Could not complete the connection: {ex.Message}. Nothing was authenticated, so this is "
