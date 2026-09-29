@@ -485,8 +485,17 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
         {
             entity.HasKey(t => t.Id);
 
-            // The human reference people quote. Unique per tenant, not globally: two tenants
-            // each having a ticket 1042 is normal and neither should have to care.
+            // The human reference people quote, and the only identifying part of the
+            // Message-Id we stamp on our own mail — so it is what a reply threads on and
+            // what the receipt tells the customer to keep in the subject.
+            //
+            // The index is per tenant; the numbers are handed out across the installation
+            // (TicketService.NextNumberAsync). Those are not in conflict — the wider
+            // allocation satisfies the narrower index — and the reason for it is that a
+            // ticket can be moved to another tenant. A number that meant a different ticket
+            // on the other side could not be kept, and renumbering would strand every reply
+            // already quoting the old one. Tenants therefore see gaps in their sequence,
+            // which costs nothing.
             entity.HasIndex(t => new { t.TenantId, t.Number }).IsUnique();
 
             // The queue: open tickets for a customer, worst first. Also the shape the

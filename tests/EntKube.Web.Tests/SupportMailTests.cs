@@ -637,9 +637,19 @@ public class SupportMailTests : IDisposable
             .Should().BeTrue();
     }
 
-    /// <summary>A message can only be placed with a customer of its own tenant.</summary>
+    /// <summary>
+    /// <b>A message can be placed with a customer in another tenant.</b> A support address
+    /// takes what it is sent: a report about an application run for somebody else's customer
+    /// arrives at whichever mailbox the sender happened to know, and the operator reading it
+    /// has to be able to say where it belongs. Retyping it there instead would lose the
+    /// arrival time §14.3 counts from.
+    ///
+    /// <para>What may be placed where is settled by the screen, which only offers the
+    /// tenants that person can already reach. What is enforced here is that the customer is
+    /// real — see <see cref="A_message_cannot_be_placed_with_a_customer_that_does_not_exist"/>.</para>
+    /// </summary>
     [Fact]
-    public async Task A_message_cannot_be_assigned_to_another_tenants_customer()
+    public async Task A_message_can_be_placed_with_another_tenants_customer()
     {
         Guid elsewhere = Guid.NewGuid();
         db.Tenants.Add(new Tenant { Id = elsewhere, Name = "Other", Slug = "other" });
@@ -650,7 +660,51 @@ public class SupportMailTests : IDisposable
         InboundMailMessage? message = await Receive(
             "Fel", "Beskrivning.", from: "stranger@elsewhere.example");
 
-        Func<Task> assign = () => mail.AssignCustomerAsync(message!.Id, theirCustomer, "nils");
+        InboundMailMessage? placed =
+            await mail.AssignCustomerAsync(message!.Id, theirCustomer, "nils");
+
+        placed!.CustomerId.Should().Be(theirCustomer);
+    }
+
+    /// <summary>
+    /// <b>And the ticket opens where the customer is.</b> The mailbox's tenant says where
+    /// the message physically arrived; the customer's says whose agreement it is measured
+    /// against and whose queue somebody is watching. A ticket filed under the first would be
+    /// invisible to the people who have to answer it.
+    /// </summary>
+    [Fact]
+    public async Task A_ticket_opens_in_the_tenant_the_customer_belongs_to()
+    {
+        Guid elsewhere = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = elsewhere, Name = "Other", Slug = "other" });
+        Guid theirCustomer = Guid.NewGuid();
+        db.Customers.Add(new Customer { Id = theirCustomer, TenantId = elsewhere, Name = "Theirs" });
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await Receive(
+            "Fel", "Beskrivning.", from: "stranger@elsewhere.example");
+
+        InboundMailMessage? placed =
+            await mail.AssignCustomerAsync(message!.Id, theirCustomer, "nils");
+
+        MailSuggestion open = placed!.Suggestions
+            .First(s => s.Kind == MailSuggestionKind.OpenTicket
+                        && s.State == MailSuggestionState.Pending);
+
+        Ticket? ticket = await mail.AcceptAsync(open.Id, "nils", Tue(11));
+
+        ticket!.TenantId.Should().Be(elsewhere);
+        ticket.CustomerId.Should().Be(theirCustomer);
+    }
+
+    /// <summary>The one thing still refused: a customer that is not there at all.</summary>
+    [Fact]
+    public async Task A_message_cannot_be_placed_with_a_customer_that_does_not_exist()
+    {
+        InboundMailMessage? message = await Receive(
+            "Fel", "Beskrivning.", from: "stranger@elsewhere.example");
+
+        Func<Task> assign = () => mail.AssignCustomerAsync(message!.Id, Guid.NewGuid(), "nils");
 
         await assign.Should().ThrowAsync<InvalidOperationException>();
     }

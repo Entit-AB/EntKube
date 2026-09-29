@@ -103,30 +103,8 @@ public class TicketService(
         Guid? alertIncidentId = null,
         CancellationToken ct = default)
     {
-        SupportWindow window = SupportWindow.S1;
-        bool windowKnown = false;
-
-        // §4.1 and §8: until the start protocol is signed, tickets are handled on a
-        // best-effort basis with no guaranteed response. Assumed true for a ticket with no
-        // application, which is where the agreement's terms cannot be looked up at all —
-        // holding ourselves to them is the safe direction to be wrong in.
-        bool slaApplied = true;
-
-        if (appId is not null)
-        {
-            ResolvedServiceLevel? level = await contracts.ResolveServiceLevelAsync(appId.Value, reportedAt, ct);
-
-            if (level is not null)
-            {
-                slaApplied = level.Value.SlaApplies;
-            }
-
-            if (level?.Window is not null)
-            {
-                window = level.Value.Window.Value;
-                windowKnown = true;
-            }
-        }
+        (SupportWindow window, bool windowKnown, bool slaApplied) =
+            await ResolveCoverAsync(appId, reportedAt, ct);
 
         // §14.3: the customer proposes, we confirm at the first assessment. Until then their
         // view stands for P1 and P2, so the proposal is simply adopted and the confirmation
@@ -166,7 +144,7 @@ public class TicketService(
 
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        ticket.Number = await NextNumberAsync(db, tenantId, ct);
+        ticket.Number = await NextNumberAsync(db, ct);
 
         ticket.Events.Add(Event(ticket.Id, TicketEventKind.Created, reportedAt, requestedBy,
             channel == TicketChannel.Monitoring
@@ -210,6 +188,210 @@ public class TicketService(
             ct);
 
         return ticket;
+    }
+
+    /// <summary>
+    /// Where a ticket ended up, and what changed about it on the way.
+    /// </summary>
+    /// <param name="Ticket">The ticket as it now stands.</param>
+    /// <param name="WindowChanged">
+    /// Whether the destination application is covered by different support hours. The one
+    /// consequence a person has to be told about, because every §14.4 clock is measured
+    /// inside it and the customer was quoted a deadline computed in the old one.
+    /// </param>
+    public readonly record struct TicketMove(Ticket Ticket, bool WindowChanged);
+
+    /// <summary>
+    /// Moves a ticket to another customer's application — including one belonging to
+    /// another tenant.
+    ///
+    /// <para><b>Why across tenants at all.</b> A support address takes what it is sent. An
+    /// operator reads a report and finds it is about an application run for somebody else's
+    /// customer entirely, and the choice is to move it or to retype it — and retyping loses
+    /// the arrival time §14.3 counts from, the history §14.6 makes evidence, and the number
+    /// the customer was already told to quote.</para>
+    ///
+    /// <para><b>The number never changes.</b> It has been sent to the reporter with an
+    /// instruction to keep it in the subject for as long as the ticket is open, and it is
+    /// the only identifying part of the Message-Id their client will thread on. That is why
+    /// <see cref="NextNumberAsync"/> allocates across the installation: so a number is free
+    /// wherever a ticket is moved to. A move that would collide with an older, per-tenant
+    /// number is refused rather than renumbered — the reference is worth more than the
+    /// move.</para>
+    ///
+    /// <para><b>The cover is re-derived, the record is not.</b> The support window, whether
+    /// §4.1's guarantee applies and whether a P1 is a §13 call-out all come from the
+    /// destination application's agreement, because holding one customer to another's terms
+    /// is the whole error a move is fixing. What already happened is left alone: the
+    /// reporting time, the history, the priority and its effective date all stand, and the
+    /// clock start is only re-derived while nothing has been measured against it yet.</para>
+    /// </summary>
+    /// <param name="ticketId">The ticket to move.</param>
+    /// <param name="toCustomerId">The customer it belongs to, in any tenant.</param>
+    /// <param name="toAppId">
+    /// Their application, or null for none. Null is a real answer — a report can arrive
+    /// before anybody knows which application it is about.
+    /// </param>
+    /// <param name="actor">Who moved it. Lands on the history.</param>
+    /// <param name="reason">Why, in their words. Recorded, because the move changes terms.</param>
+    /// <param name="at">When the move was made.</param>
+    public async Task<TicketMove?> MoveAsync(
+        Guid ticketId,
+        Guid toCustomerId,
+        Guid? toAppId,
+        string? actor,
+        string? reason,
+        DateTime at,
+        CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+
+        if (ticket is null)
+        {
+            return null;
+        }
+
+        Customer? destination = await db.Customers
+            .Include(c => c.Tenant)
+            .FirstOrDefaultAsync(c => c.Id == toCustomerId, ct);
+
+        if (destination is null)
+        {
+            throw new InvalidOperationException("There is no such customer.");
+        }
+
+        App? app = null;
+
+        if (toAppId is Guid appId)
+        {
+            app = await db.Apps.FirstOrDefaultAsync(a => a.Id == appId, ct);
+
+            // The one combination that would be silently wrong rather than obviously wrong:
+            // a real application belonging to somebody else, on a ticket that now reads as
+            // this customer's.
+            if (app is null || app.CustomerId != toCustomerId)
+            {
+                throw new InvalidOperationException(
+                    $"That application does not belong to {destination.Name}.");
+            }
+        }
+
+        if (ticket.CustomerId == toCustomerId && ticket.AppId == toAppId)
+        {
+            return new TicketMove(ticket, WindowChanged: false);
+        }
+
+        // Numbers are allocated across the installation, so this can only bite on one
+        // issued before that was true. Refusing is the honest answer: the alternative is
+        // renumbering a ticket whose number is already in the customer's inbox.
+        bool numberTaken = await db.Tickets.AnyAsync(
+            t => t.TenantId == destination.TenantId
+                 && t.Number == ticket.Number
+                 && t.Id != ticket.Id,
+            ct);
+
+        if (numberTaken)
+        {
+            throw new InvalidOperationException(
+                $"{destination.Tenant.Name} already has a ticket #{ticket.Number}, and this "
+                + "one's number cannot change — the customer has been told to quote it. Move "
+                + "the other ticket, or handle this one where it is.");
+        }
+
+        string from = await DescribeWhereAsync(db, ticket, ct);
+
+        (SupportWindow window, bool windowKnown, bool slaApplied) =
+            await ResolveCoverAsync(toAppId, ticket.ReportedAt, ct);
+
+        bool windowChanged = window != ticket.SupportWindow;
+
+        ticket.TenantId = destination.TenantId;
+        ticket.CustomerId = toCustomerId;
+        ticket.AppId = toAppId;
+        ticket.SupportWindow = window;
+        ticket.SlaApplied = slaApplied;
+
+        // Only while nothing has been measured against it. §14.6 makes these timestamps the
+        // record between the parties, and a clock start moved under a response already given
+        // would rewrite whether that response was late.
+        if (ticket.FirstResponseAt is null)
+        {
+            bool open = BusinessCalendar.IsOpen(ticket.ReportedAt, window);
+
+            ticket.ClockStartsAt =
+                open ? ticket.ReportedAt : BusinessCalendar.NextOpening(ticket.ReportedAt, window);
+
+            // §13 follows the window it is measured against, for the same reason.
+            ticket.IsCallout = ticket.Priority == TicketPriority.P1 && !open;
+        }
+
+        string to = await DescribeWhereAsync(db, ticket, ct);
+
+        // Not customer-visible. The portal shows this history to whoever the ticket now
+        // belongs to, and where it came from names another customer of ours.
+        db.TicketEvents.Add(Event(
+            ticket.Id, TicketEventKind.Moved, at, actor,
+            string.IsNullOrWhiteSpace(reason)
+                ? $"Moved from {from} to {to}."
+                : $"Moved from {from} to {to}: {reason}",
+            customerVisible: false));
+
+        if (windowChanged)
+        {
+            db.TicketEvents.Add(Event(
+                ticket.Id, TicketEventKind.Note, at, actor,
+                $"Support hours are now {TicketAcknowledgement.Describe(window)} under the "
+                + "destination agreement; every §14.4 clock on this ticket is counted inside "
+                + "them from here.",
+                customerVisible: false));
+        }
+
+        if (!windowKnown && toAppId is not null)
+        {
+            db.TicketEvents.Add(Event(
+                ticket.Id, TicketEventKind.Note, at, null,
+                "No support window in force for the destination application; assumed S1 for "
+                + "SLA purposes.",
+                customerVisible: false));
+        }
+
+        // The mail this came in on follows the ticket, so that a reply is analysed against
+        // the customer who owns it now — their applications, their hour bank, their open
+        // tickets. The tenant on the message is left alone: it says which mailbox the
+        // message physically arrived in, which the move does not change.
+        foreach (InboundMailMessage message in
+            await db.InboundMailMessages.Where(m => m.TicketId == ticket.Id).ToListAsync(ct))
+        {
+            message.CustomerId = toCustomerId;
+        }
+
+        await db.SaveChangesAsync(ct);
+
+        return new TicketMove(ticket, windowChanged);
+    }
+
+    /// <summary>Where a ticket sits, in the words the history should use.</summary>
+    private static async Task<string> DescribeWhereAsync(
+        ApplicationDbContext db, Ticket ticket, CancellationToken ct)
+    {
+        string tenant = await db.Tenants.AsNoTracking()
+            .Where(t => t.Id == ticket.TenantId).Select(t => t.Name).FirstOrDefaultAsync(ct)
+            ?? "an unknown tenant";
+
+        string customer = await db.Customers.AsNoTracking()
+            .Where(c => c.Id == ticket.CustomerId).Select(c => c.Name).FirstOrDefaultAsync(ct)
+            ?? "an unknown customer";
+
+        string? app = ticket.AppId is Guid appId
+            ? await db.Apps.AsNoTracking()
+                .Where(a => a.Id == appId).Select(a => a.Name).FirstOrDefaultAsync(ct)
+            : null;
+
+        return app is null
+            ? $"{tenant} / {customer} (no application)"
+            : $"{tenant} / {customer} / {app}";
     }
 
     /// <summary>
@@ -721,15 +903,65 @@ public class TicketService(
     }
 
     /// <summary>
-    /// The next ticket number for a tenant. A gap-free sequence read from the table rather
-    /// than a database sequence, because all three providers spell those differently; the
-    /// unique index is what actually guarantees no two tickets share a number.
+    /// What an application is covered by: the §9 support window, whether that was actually
+    /// found, and whether §4.1's guaranteed response applies yet.
+    ///
+    /// <para>Shared by opening a ticket and moving one, because a move to another
+    /// application changes every one of them. Two copies of this would mean a moved ticket
+    /// measured against the window of the agreement it left.</para>
+    /// </summary>
+    /// <param name="appId">The application, or null where none is known.</param>
+    /// <param name="at">The moment the cover is asked about — a ticket's reporting time.</param>
+    private async Task<(SupportWindow Window, bool WindowKnown, bool SlaApplied)>
+        ResolveCoverAsync(Guid? appId, DateTime at, CancellationToken ct)
+    {
+        SupportWindow window = SupportWindow.S1;
+        bool windowKnown = false;
+
+        // §4.1 and §8: until the start protocol is signed, tickets are handled on a
+        // best-effort basis with no guaranteed response. Assumed true for a ticket with no
+        // application, which is where the agreement's terms cannot be looked up at all —
+        // holding ourselves to them is the safe direction to be wrong in.
+        bool slaApplied = true;
+
+        if (appId is not null)
+        {
+            ResolvedServiceLevel? level = await contracts.ResolveServiceLevelAsync(appId.Value, at, ct);
+
+            if (level is not null)
+            {
+                slaApplied = level.Value.SlaApplies;
+            }
+
+            if (level?.Window is not null)
+            {
+                window = level.Value.Window.Value;
+                windowKnown = true;
+            }
+        }
+
+        return (window, windowKnown, slaApplied);
+    }
+
+    /// <summary>
+    /// The next ticket number. Read from the table rather than from a database sequence,
+    /// because all three providers spell those differently; the unique index on
+    /// (tenant, number) is what actually guarantees no two tickets share one.
+    ///
+    /// <para><b>Allocated across the whole installation, not per tenant</b>, although the
+    /// index is per tenant. The number is the only thing in the Message-Id we stamp on our
+    /// own mail — <c>ticket-1042.…@entkube</c> — so it is what a reply is threaded by, and
+    /// it is what the receipt instructs the customer to keep in the subject for as long as
+    /// the ticket is open. A ticket can now be moved to another tenant, and both of those
+    /// promises have to survive the move: a number that meant a different ticket on the
+    /// other side could not be kept, and renumbering would strand every reply quoting the
+    /// old one. Tenants therefore see gaps in their sequence, which costs nothing, rather
+    /// than sharing numbers, which would cost the reference its meaning.</para>
     /// </summary>
     private static async Task<int> NextNumberAsync(
-        ApplicationDbContext db, Guid tenantId, CancellationToken ct)
+        ApplicationDbContext db, CancellationToken ct)
     {
         int highest = await db.Tickets
-            .Where(t => t.TenantId == tenantId)
             .Select(t => (int?)t.Number)
             .MaxAsync(ct) ?? 0;
 

@@ -43,6 +43,13 @@ public enum TicketEventKind
 
     /// <summary>The §14.6 written incident report for a P1 was delivered.</summary>
     IncidentReportDelivered = 14,
+
+    /// <summary>
+    /// Moved to another customer's application — possibly another tenant's. Recorded
+    /// because the move changes which agreement the ticket is measured against, and §14.6
+    /// makes that history the record between the parties.
+    /// </summary>
+    Moved = 15,
 }
 
 /// <summary>

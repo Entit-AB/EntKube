@@ -1,9 +1,14 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Tickets
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.EntityFrameworkCore
 @inject TicketService Tickets
 @inject ToastService Toasts
 @inject CurrentActor ActorService
+@inject UserAccessService Access
+@inject AuthenticationStateProvider AuthState
+@inject IDbContextFactory<ApplicationDbContext> DbFactory
 
 @* ═══════════════════════════════════════════════════════════════════
    One ticket, with the actions §14 actually defines and the history
@@ -186,6 +191,12 @@
                 <button class="btn btn-sm btn-outline-secondary" @onclick="() => showNote = !showNote">
                     <i class="bi bi-chat-left-text me-1"></i>Add a note
                 </button>
+                @if (moveTargets.Count > 0)
+                {
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="ToggleMove">
+                        <i class="bi bi-signpost-split me-1"></i>Move it
+                    </button>
+                }
 
                 @* Claim, hand over, or put it back. Nobody is assigned work by the system. *@
                 @if (ticket.Assignee is null)
@@ -301,6 +312,65 @@
                 </div>
             }
 
+            @* Moving is the one action that can take a ticket out of the tenant the person
+               is looking at. The pickers only offer tenants they can already reach, so the
+               control cannot express a move they would not be allowed to make. *@
+            @if (showMove)
+            {
+                <div class="border rounded p-3 mb-2">
+                    <div class="row g-2">
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Tenant</label>
+                            <select class="form-select form-select-sm" value="@moveTenantId"
+                                    @onchange="OnMoveTenantChanged">
+                                @foreach (Tenant t in moveTargets)
+                                {
+                                    <option value="@t.Id">@t.Name</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Customer</label>
+                            <select class="form-select form-select-sm" value="@moveCustomerId"
+                                    @onchange="OnMoveCustomerChanged">
+                                <option value="">&#8212; choose &#8212;</option>
+                                @foreach (Customer c in moveCustomers)
+                                {
+                                    <option value="@c.Id">@c.Name</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted">Application</label>
+                            <select class="form-select form-select-sm" value="@moveAppId"
+                                    @onchange="e => moveAppId = e.Value?.ToString() ?? string.Empty">
+                                <option value="">&#8212; none of them &#8212;</option>
+                                @foreach (Data.App a in moveApps)
+                                {
+                                    <option value="@a.Id">@a.Name</option>
+                                }
+                            </select>
+                        </div>
+                        <div class="col-12">
+                            <label class="form-label small text-muted">Why it is being moved</label>
+                            <textarea class="form-control form-control-sm" rows="2" @bind="moveReason"
+                                      placeholder="What made it clear this belongs elsewhere"></textarea>
+                        </div>
+                    </div>
+                    <div class="form-text small mt-2">
+                        <strong>#@ticket.Number stays.</strong> The reporter has been told to quote it
+                        for as long as the ticket is open, and their replies thread on it, so it
+                        follows the ticket wherever it goes. What changes is the agreement it is
+                        measured against: the support hours, whether §4.1's guaranteed response
+                        applies, and whether a P1 is a §13 call-out all come from the destination
+                        application. The reporting time, the history and the priority stand.
+                    </div>
+                    <div class="text-end mt-2">
+                        <AsyncButton CssClass="btn-sm btn-primary" OnClick="MoveAsync">Move it</AsyncButton>
+                    </div>
+                </div>
+            }
+
             @if (showNote)
             {
                 <div class="border rounded p-3 mb-2">
@@ -369,7 +439,19 @@
     private TicketSlaStatus status;
     private DateTime now = DateTime.UtcNow;
 
-    private bool showPriority, showPause, showResolve, showReject, showNote;
+    private bool showPriority, showPause, showResolve, showReject, showNote, showMove;
+
+    // ---- Moving it somewhere else ----
+    //
+    // The tenants this person can already reach, loaded once. Only they are offered, so
+    // the control cannot express a move its operator would not be allowed to make.
+    private List<Tenant> moveTargets = [];
+    private List<Customer> moveCustomers = [];
+    private List<Data.App> moveApps = [];
+    private string moveTenantId = "";
+    private string moveCustomerId = "";
+    private string moveAppId = "";
+    private string moveReason = "";
 
     private TicketPriority formPriority = TicketPriority.P3;
     private string formReason = "";
@@ -381,8 +463,150 @@
 
     private bool IsPaused => ticket?.Pauses.Any(p => p.EndedAt is null) == true;
 
-    protected override async Task OnInitializedAsync() =>
+    protected override async Task OnInitializedAsync()
+    {
         resolvedActor = await ActorService.NameAsync();
+        moveTargets = await ReachableTenantsAsync();
+    }
+
+    /// <summary>
+    /// The tenants this person may move a ticket into: the ones they can already reach.
+    ///
+    /// <para>A global admin gets all of them. Anyone else gets what their memberships give
+    /// them, which for most people is one — and one tenant with the ticket already in it
+    /// means the button does not appear at all.</para>
+    /// </summary>
+    private async Task<List<Tenant>> ReachableTenantsAsync()
+    {
+        try
+        {
+            AuthenticationState state = await AuthState.GetAuthenticationStateAsync();
+
+            string? userId = state.User.FindFirst(
+                System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+            return userId is null ? [] : await Access.GetAccessibleTenantsAsync(userId);
+        }
+        catch
+        {
+            // Never fails the page. Not being able to read the memberships means no move is
+            // offered, which is the safe end of being wrong.
+            return [];
+        }
+    }
+
+    /// <summary>
+    /// Opens the panel with the pickers already filled.
+    ///
+    /// <para>Filled <em>before</em> it renders, deliberately: a <c>select</c> takes its
+    /// selection from the options present in the same render, so showing the panel first
+    /// and loading afterwards leaves both boxes sitting on their placeholder with a value
+    /// underneath that nobody chose.</para>
+    /// </summary>
+    private async Task ToggleMove()
+    {
+        if (showMove)
+        {
+            showMove = false;
+            return;
+        }
+
+        moveTenantId = ticket!.TenantId.ToString();
+        moveCustomerId = ticket.CustomerId.ToString();
+        moveAppId = ticket.AppId?.ToString() ?? "";
+        moveReason = "";
+
+        await LoadMoveCustomersAsync(ticket.TenantId);
+        await LoadMoveAppsAsync(ticket.CustomerId);
+
+        showMove = true;
+    }
+
+    private async Task OnMoveTenantChanged(ChangeEventArgs e)
+    {
+        moveTenantId = e.Value?.ToString() ?? "";
+        moveCustomerId = "";
+        moveAppId = "";
+        moveApps = [];
+
+        if (Guid.TryParse(moveTenantId, out Guid tenantId))
+        {
+            await LoadMoveCustomersAsync(tenantId);
+        }
+    }
+
+    private async Task OnMoveCustomerChanged(ChangeEventArgs e)
+    {
+        moveCustomerId = e.Value?.ToString() ?? "";
+        moveAppId = "";
+
+        if (Guid.TryParse(moveCustomerId, out Guid customerId))
+        {
+            await LoadMoveAppsAsync(customerId);
+        }
+        else
+        {
+            moveApps = [];
+        }
+    }
+
+    private async Task LoadMoveCustomersAsync(Guid tenantId)
+    {
+        using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+
+        moveCustomers = await db.Customers.AsNoTracking()
+            .Where(c => c.TenantId == tenantId)
+            .OrderBy(c => c.Name)
+            .ToListAsync();
+    }
+
+    private async Task LoadMoveAppsAsync(Guid customerId)
+    {
+        using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+
+        moveApps = await db.Apps.AsNoTracking()
+            .Where(a => a.CustomerId == customerId)
+            .OrderBy(a => a.Name)
+            .ToListAsync();
+    }
+
+    private async Task MoveAsync()
+    {
+        if (!Guid.TryParse(moveCustomerId, out Guid customerId))
+        {
+            Toasts.Error("Choose the customer it belongs to.");
+            return;
+        }
+
+        Guid? appId = Guid.TryParse(moveAppId, out Guid chosen) ? chosen : null;
+
+        try
+        {
+            TicketService.TicketMove? moved = await Tickets.MoveAsync(
+                TicketId, customerId, appId, Actor, moveReason, DateTime.UtcNow);
+
+            if (moved is not TicketService.TicketMove result)
+            {
+                Toasts.Error("That ticket no longer exists.");
+                return;
+            }
+
+            Toasts.Success(result.WindowChanged
+                ? $"Moved. It is now measured against {result.Ticket.SupportWindow} support hours."
+                : "Moved.");
+
+            showMove = false;
+            await LoadAsync();
+            await OnChanged.InvokeAsync();
+        }
+        catch (Exception ex)
+        {
+            // The refusals here are things a person can act on — a number already taken on
+            // the other side, an application belonging to somebody else — so they are shown
+            // as they are written rather than as "something went wrong".
+            Toasts.Error(ex.Message);
+        }
+    }
 
     protected override async Task OnParametersSetAsync() => await LoadAsync();
 
