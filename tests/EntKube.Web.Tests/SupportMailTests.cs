@@ -962,6 +962,11 @@ public class SupportMailTests : IDisposable
     /// <summary>
     /// Ingesting a message creates no ticket, starts no clock and sends nothing. Every
     /// suggestion sits pending until somebody accepts it.
+    ///
+    /// <para>This is the state of a tenant whose mailbox is not set to answer on arrival —
+    /// which is every tenant in this class, because none of them has a mailbox row at all.
+    /// A message handed in by some other route was not sent to an address whose owner agreed
+    /// to answer from it. <see cref="ArrivalPolicy"/> holds the other half.</para>
     /// </summary>
     [Fact]
     public async Task Ingesting_a_message_changes_nothing_by_itself()
@@ -970,6 +975,180 @@ public class SupportMailTests : IDisposable
 
         db.Tickets.Should().BeEmpty();
         db.MailSuggestions.Should().OnlyContain(s => s.State == MailSuggestionState.Pending);
+    }
+
+    // ---- Answering on arrival ---------------------------------------------------------------
+
+    /// <summary>
+    /// A mailbox set to answer a new report with its number as it arrives.
+    /// </summary>
+    private void MailboxAnswersOnArrival(bool answers = true)
+    {
+        db.SupportMailboxes.Add(new SupportMailbox
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            Host = "mail.entit.se",
+            Username = "support@entit.se",
+            Address = "support@entit.se",
+            IsEnabled = true,
+            AcknowledgeOnArrival = answers,
+        });
+
+        db.SaveChanges();
+    }
+
+    /// <summary>
+    /// <b>The point of the whole arrangement.</b> A fault report from a recorded contact has
+    /// its number before anybody has read it — which is what the reporter is answered with,
+    /// since opening a ticket is what sends the receipt.
+    ///
+    /// <para>The clock still runs from when they wrote, not from when the machine got to
+    /// it, and the priority is still the one they proposed, unconfirmed.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_report_from_a_known_contact_gets_its_number_on_arrival()
+    {
+        MailboxAnswersOnArrival();
+
+        InboundMailMessage? message = await Receive(
+            "Journalen svarar inte", "Ingen på avdelning 4 kommer in.");
+
+        Ticket ticket = db.Tickets.Should().ContainSingle().Subject;
+
+        ticket.Number.Should().BeGreaterThan(0);
+        ticket.CustomerId.Should().Be(customerId);
+        ticket.Channel.Should().Be(TicketChannel.Email);
+        ticket.ReportedAt.Should().Be(Tue(10));
+        ticket.RequestedByEmail.Should().Be(KnownSender);
+
+        message!.TicketId.Should().Be(ticket.Id);
+        message.State.Should().Be(MailTriageState.Handled);
+    }
+
+    /// <summary>
+    /// §14.6 makes the record between the parties a matter of who did what and when, so a
+    /// ticket nobody opened says so in the same field a person's name would have gone in.
+    /// </summary>
+    [Fact]
+    public async Task A_ticket_opened_on_arrival_says_that_nobody_opened_it()
+    {
+        MailboxAnswersOnArrival();
+
+        InboundMailMessage? message = await Receive("Fel", "Det fungerar inte.");
+
+        message!.HandledBy.Should().Be(ArrivalPolicy.Actor);
+
+        db.MailSuggestions.Single(s => s.Kind == MailSuggestionKind.OpenTicket)
+            .DecidedBy.Should().Be(ArrivalPolicy.Actor);
+    }
+
+    /// <summary>
+    /// The priority is still the customer's proposal and still unconfirmed — §14.3 makes
+    /// confirming it a written act with reasons, and answering on arrival does not touch it.
+    /// </summary>
+    [Fact]
+    public async Task Answering_on_arrival_confirms_no_priority()
+    {
+        MailboxAnswersOnArrival();
+
+        await Receive("Helt nere", "Ingen kan logga in, det är helt nere.");
+
+        Ticket ticket = db.Tickets.Should().ContainSingle().Subject;
+
+        ticket.Priority.Should().Be(TicketPriority.P1);
+        ticket.PriorityConfirmedAt.Should().BeNull();
+    }
+
+    /// <summary>
+    /// The switch is the tenant's. Off, the mailbox behaves exactly as it always did.
+    /// </summary>
+    [Fact]
+    public async Task A_mailbox_told_not_to_answer_leaves_the_message_in_the_queue()
+    {
+        MailboxAnswersOnArrival(answers: false);
+
+        await Receive("Journalen svarar inte", "Ingen kommer in.");
+
+        db.Tickets.Should().BeEmpty();
+        db.MailSuggestions.Should().OnlyContain(s => s.State == MailSuggestionState.Pending);
+    }
+
+    /// <summary>
+    /// <b>The loop.</b> Answering an out-of-office reply or a bounce with a receipt is two
+    /// programs writing to each other, and the account it happens to is ours.
+    /// </summary>
+    [Fact]
+    public async Task A_message_from_a_program_is_not_answered()
+    {
+        MailboxAnswersOnArrival();
+
+        await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = KnownSender,
+            Subject = "Automatiskt svar: Journalen svarar inte",
+            Body = "Jag är tillbaka på måndag.",
+            SentAt = Tue(10),
+            IsMachineGenerated = true,
+        });
+
+        db.Tickets.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// A sender nobody has placed gets no ticket in anybody's name and no reply quoting a
+    /// number. It goes to the queue, where the flag says who needs deciding.
+    /// </summary>
+    [Fact]
+    public async Task An_unplaced_message_is_not_answered()
+    {
+        MailboxAnswersOnArrival();
+
+        await Receive("Fel", "Det fungerar inte.", from: "stranger@nowhere.example");
+
+        db.Tickets.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// Our own server said the From is not who it claims to be. The receipt would go to
+    /// whoever wrote that header, quoting a real ticket number in the customer's matter.
+    /// </summary>
+    [Fact]
+    public async Task A_sender_our_server_could_not_verify_is_not_answered()
+    {
+        MailboxAnswersOnArrival();
+
+        await ReceiveFailingAuthentication(from: KnownSender);
+
+        db.Tickets.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// A reply already has a number. Answering it with a second one would teach the customer
+    /// to quote the newer of two tickets about the same fault.
+    /// </summary>
+    [Fact]
+    public async Task A_reply_to_an_open_ticket_opens_nothing_new()
+    {
+        MailboxAnswersOnArrival();
+
+        Ticket ticket = await tickets.CreateAsync(
+            tenantId, customerId, appId, "Journalen svarar inte", "Ingen kommer in.",
+            TicketChannel.Email, TicketPriority.P3, Tue(9), "Karin", KnownSender);
+
+        await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = KnownSender,
+            Subject = $"Re: [#{ticket.Number}] Journalen svarar inte",
+            Body = "Fortfarande nere.",
+            SentAt = Tue(11),
+        });
+
+        db.Tickets.Should().ContainSingle();
     }
 
     /// <summary>

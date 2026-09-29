@@ -51,8 +51,99 @@ public static class MailMessageReader
             SentAt = SentAtOf(message, receivedAt),
             ReceivedAt = receivedAt,
             SenderAuthenticity = SenderAuthentication.Of(message, trustedServer),
+            IsMachineGenerated = LooksAutomated(message),
             State = MailTriageState.Received,
         };
+    }
+
+    /// <summary>
+    /// Whether the message was composed by a program rather than a person.
+    ///
+    /// <para><b>What this is for.</b> An arriving fault report is answered by itself now,
+    /// with its number — and a receipt sent to an out-of-office reply, a bounce or a
+    /// mailing list is a message no person asked for, sometimes one that answers back.
+    /// Two automatic responders introduced to each other will keep going until somebody
+    /// notices, and the account it happens to is ours.</para>
+    ///
+    /// <para><b>Only what the sender said about itself is read.</b> Every one of these
+    /// headers is a statement by the sending program that it is a program: RFC 3834's
+    /// <c>Auto-Submitted</c>, the <c>Precedence</c> convention that predates it, the list
+    /// headers, Microsoft's <c>X-Auto-Response-Suppress</c> — which is a request not to be
+    /// answered automatically and is honoured as one — and a null return path, which is how
+    /// a bounce says it must not be bounced to. Nothing is guessed from the subject or the
+    /// body, because "Automatic reply" is also what a person writes when reporting that
+    /// they got one.</para>
+    ///
+    /// <para>The well-known unattended senders are included by address. A machine that
+    /// stamps none of the headers still does not read replies, and <c>noreply@</c> says so
+    /// in the only place it was ever going to.</para>
+    /// </summary>
+    public static bool LooksAutomated(MimeMessage message)
+    {
+        // RFC 3834: anything but "no" means it was generated automatically. The values are
+        // "auto-replied", "auto-generated" and whatever a vendor invented, so the test is
+        // against the one value that means a person sent it rather than for a list of the
+        // ones that mean they did not.
+        string? submitted = Header(message, "Auto-Submitted");
+
+        if (submitted is not null
+            && !submitted.StartsWith("no", StringComparison.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // A request not to be auto-replied to, and the plainest one there is.
+        foreach (string header in (string[])
+                 ["X-Auto-Response-Suppress", "X-Autoreply", "X-Autorespond",
+                  "List-Id", "List-Unsubscribe", "List-Help"])
+        {
+            if (Header(message, header) is not null)
+            {
+                return true;
+            }
+        }
+
+        if (Header(message, "Precedence") is string precedence
+            && BulkPrecedences.Contains(precedence, StringComparer.OrdinalIgnoreCase))
+        {
+            return true;
+        }
+
+        // <> is the null return path a bounce carries, so that a failure to deliver the
+        // bounce cannot produce another one. Replying to it would address nobody.
+        if (Header(message, "Return-Path") is string returnPath
+            && returnPath.Trim().Trim('<', '>').Length == 0)
+        {
+            return true;
+        }
+
+        string local = message.From.Mailboxes.FirstOrDefault()?.Address is string address
+            && address.Contains('@', StringComparison.Ordinal)
+                ? address[..address.IndexOf('@', StringComparison.Ordinal)].Trim().ToLowerInvariant()
+                : "";
+
+        return UnattendedSenders.Contains(local);
+    }
+
+    /// <summary>The <c>Precedence</c> values that mean the message was not typed by a person.</summary>
+    private static readonly string[] BulkPrecedences = ["bulk", "junk", "list", "auto_reply"];
+
+    /// <summary>
+    /// Local parts that nobody reads. Answering one of these is writing to a wall at best
+    /// and to a loop at worst.
+    /// </summary>
+    private static readonly HashSet<string> UnattendedSenders = new(StringComparer.Ordinal)
+    {
+        "mailer-daemon", "postmaster", "noreply", "no-reply", "no_reply",
+        "donotreply", "do-not-reply", "bounce", "bounces", "notifications",
+    };
+
+    /// <summary>The first value of a header, trimmed, or null when it is absent or empty.</summary>
+    private static string? Header(MimeMessage message, string field)
+    {
+        string? value = message.Headers[field];
+
+        return string.IsNullOrWhiteSpace(value) ? null : value.Trim();
     }
 
     /// <summary>

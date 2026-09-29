@@ -4403,6 +4403,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<string>("InReplyTo")
                         .HasColumnType("text");
 
+                    b.Property<bool>("IsMachineGenerated")
+                        .HasColumnType("boolean");
+
                     b.Property<string>("MessageId")
                         .IsRequired()
                         .HasColumnType("text");
@@ -7512,6 +7515,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("uuid");
+
+                    b.Property<bool>("AcknowledgeOnArrival")
+                        .HasColumnType("boolean");
 
                     b.Property<string>("Address")
                         .HasMaxLength(256)

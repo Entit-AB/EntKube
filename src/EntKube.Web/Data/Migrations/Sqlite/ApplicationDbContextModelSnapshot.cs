@@ -4398,6 +4398,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<string>("InReplyTo")
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("IsMachineGenerated")
+                        .HasColumnType("INTEGER");
+
                     b.Property<string>("MessageId")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -7507,6 +7510,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("TEXT");
+
+                    b.Property<bool>("AcknowledgeOnArrival")
+                        .HasColumnType("INTEGER");
 
                     b.Property<string>("Address")
                         .HasMaxLength(256)

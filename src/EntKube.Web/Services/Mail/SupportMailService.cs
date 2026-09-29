@@ -24,12 +24,14 @@ public readonly record struct AppChoice(Guid? AppId)
 /// The support mailbox: takes messages in, has the analyst propose what to do, and applies
 /// what a person accepts.
 ///
-/// <para><b>Nothing here acts on its own.</b> The analyst reads and drafts; every state
-/// change goes through a person accepting a suggestion, and their name lands on the
-/// resulting ticket event. §14.3 makes confirming a priority a written act, §14.6 makes the
-/// timestamps evidence between the parties, and §14.4 makes resolution something the
-/// customer agrees to. The value here is that the paperwork is ready, not that the decision
-/// is made.</para>
+/// <para><b>One thing here acts on its own, and only one.</b> A fault report from a known
+/// contact opens its ticket the moment it lands, which is what gives the customer a number
+/// to quote — <see cref="ArrivalPolicy"/> holds the rule and says why a receipt is the one
+/// message that may go out unread. Everything after that still goes through a person
+/// accepting a suggestion, with their name on the resulting ticket event: §14.3 makes
+/// confirming a priority a written act, §14.6 makes the timestamps evidence between the
+/// parties, and §14.4 makes resolution something the customer agrees to. The value here is
+/// that the paperwork is ready, not that the decision is made.</para>
 ///
 /// <para><b>Where the messages come from is somebody else's problem.</b> This takes in
 /// whatever it is handed and is testable without a mail server;
@@ -41,7 +43,11 @@ public class SupportMailService(
     ISupportMailAnalyst analyst,
     MailTriageRuleService rules,
     TicketService tickets,
-    TimeService time)
+    TimeService time,
+    // Optional so that the tests, which build this by hand, are not made to care. What it
+    // records is why a message was or was not answered on arrival, which is the only
+    // account there is of a decision that leaves no mark when it goes the quiet way.
+    ILogger<SupportMailService>? logger = null)
 {
     /// <summary>
     /// Takes a message in, matches the sender to a customer, and records what the analyst
@@ -83,7 +89,75 @@ public class SupportMailService(
         db.InboundMailMessages.Add(message);
         await db.SaveChangesAsync(ct);
 
-        return message;
+        return await AcknowledgeOnArrivalAsync(db, message, ct);
+    }
+
+    /// <summary>
+    /// Opens the ticket straight away where <see cref="ArrivalPolicy"/> allows it, so that
+    /// the person who reported the fault has its number within a poll of writing in rather
+    /// than whenever the queue is next read.
+    ///
+    /// <para><b>The receipt is not sent from here.</b> Opening the ticket is what sends it:
+    /// <c>TicketService.CreateAsync</c> announces every ticket it creates, whatever opened
+    /// it, from the support address and with the reference in the subject. Adding a second
+    /// path that sends mail would be a second wording to keep in step with the first.</para>
+    ///
+    /// <para><b>It re-reads the message afterwards.</b> Accepting runs in its own context
+    /// and moves the row to handled; returning the copy this method was given would hand
+    /// the caller a message that still says nobody has touched it.</para>
+    ///
+    /// <para>Never throws. A mail server that will not take the receipt, or a ticket that
+    /// cannot be opened, must leave the message in the queue where a person will find it —
+    /// not lose the report.</para>
+    /// </summary>
+    private async Task<InboundMailMessage> AcknowledgeOnArrivalAsync(
+        ApplicationDbContext db, InboundMailMessage message, CancellationToken ct)
+    {
+        try
+        {
+            bool acknowledges = await db.SupportMailboxes.AsNoTracking()
+                .Where(m => m.TenantId == message.TenantId)
+                .Select(m => m.AcknowledgeOnArrival)
+                .FirstOrDefaultAsync(ct);
+
+            ArrivalDecision decision =
+                ArrivalPolicy.Decide(message, message.Suggestions, acknowledges);
+
+            if (!decision.OpenNow)
+            {
+                logger?.LogInformation(
+                    "Support mail from {From} was left for a person: {Reason}",
+                    message.FromAddress, decision.Reason);
+
+                return message;
+            }
+
+            MailSuggestion open =
+                message.Suggestions.First(s => s.Kind == MailSuggestionKind.OpenTicket);
+
+            Ticket? ticket = await AcceptAsync(
+                open.Id, ArrivalPolicy.Actor, DateTime.UtcNow, ct: ct);
+
+            logger?.LogInformation(
+                "Support mail from {From} opened ticket #{Number} on arrival: {Reason}",
+                message.FromAddress, ticket?.Number, decision.Reason);
+
+            using ApplicationDbContext fresh = await dbFactory.CreateDbContextAsync(ct);
+
+            return await fresh.InboundMailMessages
+                .Include(m => m.Suggestions)
+                .FirstOrDefaultAsync(m => m.Id == message.Id, ct) ?? message;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(
+                ex,
+                "Could not open a ticket on arrival for support mail from {From}; it stays in "
+                + "the queue.",
+                message.FromAddress);
+
+            return message;
+        }
     }
 
     /// <summary>

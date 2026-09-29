@@ -388,4 +388,94 @@ public class MailMessageReaderTests
     [Fact]
     public void A_message_with_no_body_at_all_reads_as_empty() =>
         MailMessageReader.Read(Message(text: null), Tenant, Fetched).Body.Should().Be("");
+
+    // ---- Machines writing to machines ---------------------------------------------------
+
+    /// <summary>
+    /// A message arriving is answered by itself now, so the door has to be able to tell a
+    /// person from a program. Every one of these headers is the sending program saying so
+    /// about itself, which is the only trustworthy source there is for the question.
+    /// </summary>
+    [Theory]
+    [InlineData("Auto-Submitted", "auto-replied")]
+    [InlineData("Auto-Submitted", "auto-generated")]
+    [InlineData("X-Auto-Response-Suppress", "All")]
+    [InlineData("Precedence", "bulk")]
+    [InlineData("Precedence", "list")]
+    [InlineData("List-Id", "<announce.entit.example>")]
+    [InlineData("List-Unsubscribe", "<mailto:leave@entit.example>")]
+    public void A_message_that_says_it_came_from_a_program_is_marked_as_one(
+        string field, string value)
+    {
+        MimeMessage message = Message();
+        message.Headers.Add(field, value);
+
+        MailMessageReader.Read(message, Tenant, Fetched).IsMachineGenerated.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// RFC 3834 says "no" for a message a person sent, and anything else for one a program
+    /// did. Some clients stamp the header on ordinary mail, so the test is against the one
+    /// value that means a person rather than for a list of the ones that do not.
+    /// </summary>
+    [Fact]
+    public void Auto_submitted_no_is_what_a_person_sends()
+    {
+        MimeMessage message = Message();
+        message.Headers.Add("Auto-Submitted", "no");
+
+        MailMessageReader.Read(message, Tenant, Fetched).IsMachineGenerated.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// The null return path a bounce carries, so that failing to deliver a bounce cannot
+    /// produce another one. Answering it would address nobody.
+    /// </summary>
+    [Fact]
+    public void A_bounce_is_recognised_by_its_empty_return_path()
+    {
+        MimeMessage message = Message();
+        message.Headers.Add("Return-Path", "<>");
+
+        MailMessageReader.Read(message, Tenant, Fetched).IsMachineGenerated.Should().BeTrue();
+    }
+
+    /// <summary>
+    /// A machine that stamps none of the headers still does not read what it is sent, and
+    /// the address is where it said so.
+    /// </summary>
+    [Theory]
+    [InlineData("noreply@leverantor.example")]
+    [InlineData("no-reply@leverantor.example")]
+    [InlineData("MAILER-DAEMON@leverantor.example")]
+    [InlineData("postmaster@leverantor.example")]
+    public void An_address_nobody_reads_is_not_answered(string from) =>
+        MailMessageReader.Read(Message(from: from), Tenant, Fetched)
+            .IsMachineGenerated.Should().BeTrue();
+
+    /// <summary>
+    /// The ordinary case, and the one that must not be caught: a person typed it. Being
+    /// wrong here means a genuine fault report sits in the queue unanswered, which is the
+    /// state this whole feature exists to end.
+    /// </summary>
+    [Fact]
+    public void An_ordinary_message_from_a_person_is_not_marked() =>
+        MailMessageReader.Read(Message(), Tenant, Fetched).IsMachineGenerated.Should().BeFalse();
+
+    /// <summary>
+    /// Being machine-generated never keeps a message out. A ticketing system that stamps
+    /// its mail this way does forward genuine reports, and those belong in the queue for a
+    /// person to open — they are only not answered by another machine.
+    /// </summary>
+    [Fact]
+    public void A_machine_message_is_still_taken_in()
+    {
+        MimeMessage message = Message(subject: "Ärende 5512 vidarebefordrat");
+        message.Headers.Add("Auto-Submitted", "auto-generated");
+
+        InboundMailMessage row = MailMessageReader.Read(message, Tenant, Fetched);
+
+        row.Subject.Should().Be("Ärende 5512 vidarebefordrat");
+        row.State.Should().Be(MailTriageState.Received);
+    }
 }

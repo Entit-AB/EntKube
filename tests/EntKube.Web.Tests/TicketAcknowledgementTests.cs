@@ -173,9 +173,31 @@ public class TicketAcknowledgementTests
     }
 
     /// <summary>
-    /// The instruction that keeps a conversation on one ticket instead of opening a second.
+    /// <b>The instruction the receipt exists to give.</b> It is a standing rule and not
+    /// advice about this one message: the message it has to survive is the one written three
+    /// weeks later from a phone, to the same address, about the same fault, with no thread
+    /// behind it and nothing but a subject line to place it by. Without the reference there,
+    /// that message opens a second ticket about a fault already being worked — which is the
+    /// failure the number was introduced to prevent.
     /// </summary>
     [Fact]
-    public void The_reader_is_told_that_replying_adds_to_the_same_ticket() =>
-        Receipt().Body.Should().Contain("Replying to this message adds your reply to the same ticket");
+    public void The_reader_is_told_to_keep_the_number_in_the_subject_from_now_on()
+    {
+        string body = Receipt().Body;
+
+        body.Should().Contain("Please keep [#1042] in the subject line of everything you write");
+        body.Should().Contain("for as long as it is open");
+
+        // And what happens if they do not, because an instruction with no consequence
+        // attached reads as a formality.
+        body.Should().Contain("will be opened as a new ticket");
+    }
+
+    /// <summary>
+    /// Replying is still the easy path, and the receipt says that it already carries the
+    /// number — otherwise the instruction reads as work to do on every reply.
+    /// </summary>
+    [Fact]
+    public void Replying_is_said_to_carry_the_number_already() =>
+        Receipt().Body.Should().Contain("Replying to this message already does that");
 }
