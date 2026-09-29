@@ -120,8 +120,23 @@ public class SupportMailService(
                 .Select(m => m.AcknowledgeOnArrival)
                 .FirstOrDefaultAsync(ct);
 
-            ArrivalDecision decision =
-                ArrivalPolicy.Decide(message, message.Suggestions, acknowledges);
+            // How often we have already answered this address by ourselves. Counted from
+            // the messages rather than from the tickets, because the question is how much
+            // mail we have sent this correspondent — a ticket opened by a person is not
+            // something we did to them.
+            DateTime since = DateTime.UtcNow - ArrivalPolicy.RepeatWindow;
+            string sender = message.FromAddress.Trim().ToLowerInvariant();
+
+            int answeredRecently = await db.InboundMailMessages.AsNoTracking()
+                .CountAsync(
+                    m => m.TenantId == message.TenantId
+                         && m.HandledBy == ArrivalPolicy.Actor
+                         && m.HandledAt >= since
+                         && m.FromAddress.ToLower() == sender,
+                    ct);
+
+            ArrivalDecision decision = ArrivalPolicy.Decide(
+                message, message.Suggestions, acknowledges, answeredRecently);
 
             if (!decision.OpenNow)
             {
@@ -197,6 +212,8 @@ public class SupportMailService(
                             && t.Status != TicketStatus.Rejected)
                 .ToListAsync(ct);
 
+        await AddTicketsThisMessageNamesAsync(db, message, openTickets, ct);
+
         bool bankSpent = false;
 
         if (customer is not null)
@@ -212,6 +229,70 @@ public class SupportMailService(
                 message, customer, apps, openTickets, bankSpent, ruleSet,
                 placedOnTheSendersWord, placedOnTheFromAddress),
             ct);
+    }
+
+    /// <summary>
+    /// Adds the ticket a message names, when that ticket is not among the sender's
+    /// customer's own.
+    ///
+    /// <para><b>Why this is needed at all.</b> A ticket can be moved to another customer —
+    /// in another tenant — and the reporter goes on replying to the address they always
+    /// wrote to, quoting the number we told them to quote. Their mail is still placed with
+    /// <em>their</em> customer, whose open tickets no longer include the one they are
+    /// writing about. Without this, every reply after a move opens a fresh ticket about a
+    /// fault already being worked, which is the exact failure the reference exists to
+    /// prevent — and the reporter has done nothing wrong.</para>
+    ///
+    /// <para><b>Why it is not simply "look the number up".</b> Doing that for any number in
+    /// any subject would let anybody attach their message to a stranger's ticket by typing
+    /// a number. So there are two ways in, and each is evidence about this particular
+    /// sender:</para>
+    /// <list type="bullet">
+    /// <item><b>A thread on one of our own Message-Ids.</b> We minted it, it carries a
+    /// random half nobody can guess, and it was sent to the people this ticket concerns.
+    /// That is a capability, and it is honoured wherever the ticket now lives.</item>
+    /// <item><b>A number in the subject, from the person who reported it.</b> Weaker — a
+    /// subject is typed — so it only reaches a ticket whose own reporter is this sender.
+    /// That covers the case the instruction in the receipt creates: a new message, weeks
+    /// later, with the reference and no thread behind it.</item>
+    /// </list>
+    ///
+    /// <para>A closed ticket is never added, so a reference to one still opens a new ticket
+    /// rather than reopening it by the back door.</para>
+    /// </summary>
+    private static async Task AddTicketsThisMessageNamesAsync(
+        ApplicationDbContext db, InboundMailMessage message, List<Ticket> candidates,
+        CancellationToken ct)
+    {
+        int? threaded = SupportMessageId.TicketNumberIn(message.InReplyTo);
+        int? quoted = RuleBasedMailAnalyst.ReferencedNumber(message.Subject);
+
+        if (threaded is null && quoted is null)
+        {
+            return;
+        }
+
+        string sender = message.FromAddress.Trim().ToLowerInvariant();
+
+        List<Ticket> named = await db.Tickets.AsNoTracking()
+            .Where(t => (t.Number == threaded || t.Number == quoted)
+                        && t.Status != TicketStatus.Closed
+                        && t.Status != TicketStatus.Rejected)
+            .ToListAsync(ct);
+
+        foreach (Ticket ticket in named)
+        {
+            bool alreadyThere = candidates.Any(t => t.Id == ticket.Id);
+
+            bool mayReach = ticket.Number == threaded
+                || (ticket.RequestedByEmail != null
+                    && ticket.RequestedByEmail.Trim().ToLowerInvariant() == sender);
+
+            if (!alreadyThere && mayReach)
+            {
+                candidates.Add(ticket);
+            }
+        }
     }
 
     /// <summary>
@@ -239,13 +320,19 @@ public class SupportMailService(
         }
 
         Customer? customer = await db.Customers
-            .FirstOrDefaultAsync(c => c.Id == customerId && c.TenantId == message.TenantId, ct);
+            .FirstOrDefaultAsync(c => c.Id == customerId, ct);
 
         if (customer is null)
         {
-            throw new InvalidOperationException("That customer is not in this tenant.");
+            throw new InvalidOperationException("There is no such customer.");
         }
 
+        // Deliberately not confined to the mailbox's own tenant. A support address takes
+        // what it is sent, and an operator reading a report that turns out to be about an
+        // application run for another tenant's customer should be able to say so — the
+        // alternative is retyping it there and losing the arrival time §14.3 counts from.
+        // Who may say it is settled by the screen, which only offers the tenants that
+        // person can already reach; what is enforced here is that the customer is real.
         message.CustomerId = customerId;
 
         // Only the proposals nobody has acted on. A suggestion already accepted or
@@ -394,8 +481,17 @@ public class SupportMailService(
                 // go on claiming an application nobody accepted.
                 suggestion.AppId = appId;
 
+                // The customer's tenant, not the mailbox's. They are the same for almost
+                // every message, and where they are not, the ticket belongs with the
+                // customer: their agreement is what it is measured against, and their
+                // tenant's queue is where somebody is looking for it.
+                Guid owningTenantId = await db.Customers.AsNoTracking()
+                    .Where(c => c.Id == customerId)
+                    .Select(c => c.TenantId)
+                    .FirstOrDefaultAsync(ct);
+
                 ticket = await tickets.CreateAsync(
-                    message.TenantId,
+                    owningTenantId == Guid.Empty ? message.TenantId : owningTenantId,
                     customerId,
                     appId,
                     message.Subject,

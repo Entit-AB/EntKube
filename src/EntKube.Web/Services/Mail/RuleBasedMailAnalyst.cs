@@ -175,9 +175,7 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
             }
         }
 
-        Match reference = TicketReference().Match(message.Subject);
-
-        if (reference.Success && int.TryParse(reference.Groups[1].Value, out int number))
+        if (ReferencedNumber(message.Subject) is int number)
         {
             Ticket? byNumber = open.FirstOrDefault(t => t.Number == number);
             if (byNumber is not null)
@@ -187,6 +185,29 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
         }
 
         return null;
+    }
+
+    /// <summary>
+    /// The ticket number quoted in a subject line, or null when there is none.
+    ///
+    /// <para>Public because the mailbox has to ask the same question before it knows which
+    /// tickets to consider: a ticket that has been moved to another customer is not in the
+    /// set the sender's own customer owns, and the number in the subject is what says to go
+    /// looking for it. One reader, so the queue and the matcher cannot come to different
+    /// conclusions about what a subject says.</para>
+    /// </summary>
+    public static int? ReferencedNumber(string? subject)
+    {
+        if (string.IsNullOrWhiteSpace(subject))
+        {
+            return null;
+        }
+
+        Match reference = TicketReference().Match(subject);
+
+        return reference.Success && int.TryParse(reference.Groups[1].Value, out int number)
+            ? number
+            : null;
     }
 
     /// <summary>

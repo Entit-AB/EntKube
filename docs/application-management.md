@@ -282,6 +282,59 @@ error. `SupportMailbox.AcknowledgeOnArrival` turns the whole thing off per tenan
 the only thing here that sends mail with nobody's name on it, so whoever answers for what
 leaves the building can stop it without stopping the mailbox.
 
+There is a fifth condition, and it is about the sender rather than the message: **six
+automatic replies to one address per hour**. The four above each judge a message on its own,
+which leaves a correspondent writing in a loop — a broken integration, a forwarding rule
+pointed at us, a responder somebody wrote by hand — passing all four, every time, for as
+long as it goes on. The person who used to absorb that by not pressing Accept forty times is
+no longer in the path. Six sits above a real person having a bad morning and is passed by a
+loop in seconds, and being wrong about the number costs little: over the cap, the message is
+still taken in, analysed and queued, and a person opens it in one click. Only the automatic
+reply is withheld.
+
+### Moving a ticket somewhere else
+
+A support address takes what it is sent. A report arrives at whichever mailbox the sender
+happened to know, and turns out to be about an application run for a different customer —
+sometimes a different **tenant's** customer. `TicketService.MoveAsync` retargets the ticket
+rather than making somebody retype it there, which would lose the arrival time §14.3 counts
+from, the history §14.6 makes evidence, and the number the reporter has already been told to
+quote.
+
+**The number never changes.** That is the constraint everything else bends around. The
+receipt instructs the customer to keep `[#1042]` in the subject for as long as the ticket is
+open, and it is the only identifying part of the Message-Id their client threads on — so
+renumbering would strand every reply in flight and make a liar of the receipt. Ticket
+numbers are therefore allocated **across the installation** rather than per tenant, so a
+number is free wherever a ticket is moved to. The unique index stays per tenant, which the
+wider allocation satisfies; tenants see gaps in their sequence, which costs nothing. A move
+that would collide with a number issued under the old per-tenant scheme is refused rather
+than renumbered.
+
+**The agreement follows the application, the record does not.** The support window, whether
+§4.1's guarantee applies and whether a P1 is a §13 call-out are all re-derived from the
+destination application — holding one customer to terms bought by another is the error a
+move exists to fix. What already happened stands: the reporting time, the history, the
+priority and its effective date. The clock start is only re-derived while nothing has been
+measured against it; once a response has been recorded, moving the start would rewrite
+whether that response was late, and §14.6 makes that a matter between the parties.
+
+**Replies still arrive.** The reporter goes on writing to the address they always used,
+quoting the number they were given — and their mail is still placed with *their* customer,
+whose open tickets no longer include the one they are writing about. Two routes are
+therefore honoured to a ticket outside the sender's own customer, and each is evidence about
+this particular sender: a thread on one of our own Message-Ids, which we minted and which
+carries a random half nobody can guess; or the number in a subject, but only to a ticket
+whose own reporter is this sender. A number typed into a subject is not evidence about who
+is typing it, so the second route is narrow on purpose — without that, anybody could attach
+their message to a stranger's ticket by guessing.
+
+**Who may.** The screens only offer the tenants the signed-in person can already reach, so
+the control cannot express a move they would not be allowed to make. The same applies to the
+inbox: an unplaced message can be placed with any customer in those tenants, and the ticket
+then opens in the **customer's** tenant, not the mailbox's — their agreement is what it is
+measured against and their queue is where somebody is watching.
+
 ### Two machines writing to each other
 
 Answering mail automatically introduces a failure the human gate used to prevent: an

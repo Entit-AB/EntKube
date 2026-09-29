@@ -1,11 +1,14 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Mail
+@using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.EntityFrameworkCore
 @inject SupportMailService Mail
 @inject ToastService Toasts
 @inject IDbContextFactory<ApplicationDbContext> DbFactory
 @inject CurrentActor Actor
+@inject UserAccessService Access
+@inject AuthenticationStateProvider AuthState
 
 @* ═══════════════════════════════════════════════════════════════════
    The support mailbox, with what the analyst suggests doing about each
@@ -141,7 +144,11 @@
                                         <option value="">Choose a customer…</option>
                                         @foreach (Customer customer in customers)
                                         {
-                                            <option value="@customer.Id">@customer.Name</option>
+                                            <option value="@customer.Id">
+                                                @customer.Name@(customer.TenantId == TenantId
+                                                    ? ""
+                                                    : $" — {customer.Tenant?.Name}")
+                                            </option>
                                         }
                                     </select>
                                 </div>
@@ -297,6 +304,28 @@
     /// <summary>Each customer's applications, for the picker.</summary>
     private readonly Dictionary<Guid, List<Data.App>> appsByCustomer = [];
 
+    /// <summary>
+    /// The tenants this person can already reach. A move into one they cannot is not
+    /// offered, so the control cannot express a placement they would not be allowed to
+    /// make; failing to read the memberships offers nothing, which is the safe end of it.
+    /// </summary>
+    private async Task<List<Tenant>> ReachableTenantsAsync()
+    {
+        try
+        {
+            AuthenticationState state = await AuthState.GetAuthenticationStateAsync();
+
+            string? userId = state.User.FindFirst(
+                System.Security.Claims.ClaimTypes.NameIdentifier)?.Value;
+
+            return userId is null ? [] : await Access.GetAccessibleTenantsAsync(userId);
+        }
+        catch
+        {
+            return [];
+        }
+    }
+
     private void Remember(Guid messageId, bool on)
     {
         if (on) { remembering.Add(messageId); } else { remembering.Remove(messageId); }
@@ -339,10 +368,25 @@
 
             // Only needed to place a message nobody recognised, but loading it with the
             // queue keeps the picker from being empty the moment somebody reaches for it.
+            //
+            // Every customer this person can reach, not only this tenant's. A support
+            // address takes what it is sent, and a report about an application run for
+            // another tenant's customer has to be placeable with them — the alternative is
+            // retyping it there, which loses the arrival time §14.3 counts from. The tenant
+            // is shown beside the name so nobody picks one by accident.
             using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+
+            List<Guid> reachable = [.. (await ReachableTenantsAsync()).Select(t => t.Id)];
+
+            if (!reachable.Contains(TenantId))
+            {
+                reachable.Add(TenantId);
+            }
+
             customers = await db.Customers.AsNoTracking()
-                .Where(c => c.TenantId == TenantId)
-                .OrderBy(c => c.Name)
+                .Include(c => c.Tenant)
+                .Where(c => reachable.Contains(c.TenantId))
+                .OrderBy(c => c.Tenant.Name).ThenBy(c => c.Name)
                 .ToListAsync();
 
             // Only the customers with something in the queue, so a tenant with hundreds of

@@ -637,9 +637,19 @@ public class SupportMailTests : IDisposable
             .Should().BeTrue();
     }
 
-    /// <summary>A message can only be placed with a customer of its own tenant.</summary>
+    /// <summary>
+    /// <b>A message can be placed with a customer in another tenant.</b> A support address
+    /// takes what it is sent: a report about an application run for somebody else's customer
+    /// arrives at whichever mailbox the sender happened to know, and the operator reading it
+    /// has to be able to say where it belongs. Retyping it there instead would lose the
+    /// arrival time §14.3 counts from.
+    ///
+    /// <para>What may be placed where is settled by the screen, which only offers the
+    /// tenants that person can already reach. What is enforced here is that the customer is
+    /// real — see <see cref="A_message_cannot_be_placed_with_a_customer_that_does_not_exist"/>.</para>
+    /// </summary>
     [Fact]
-    public async Task A_message_cannot_be_assigned_to_another_tenants_customer()
+    public async Task A_message_can_be_placed_with_another_tenants_customer()
     {
         Guid elsewhere = Guid.NewGuid();
         db.Tenants.Add(new Tenant { Id = elsewhere, Name = "Other", Slug = "other" });
@@ -650,7 +660,51 @@ public class SupportMailTests : IDisposable
         InboundMailMessage? message = await Receive(
             "Fel", "Beskrivning.", from: "stranger@elsewhere.example");
 
-        Func<Task> assign = () => mail.AssignCustomerAsync(message!.Id, theirCustomer, "nils");
+        InboundMailMessage? placed =
+            await mail.AssignCustomerAsync(message!.Id, theirCustomer, "nils");
+
+        placed!.CustomerId.Should().Be(theirCustomer);
+    }
+
+    /// <summary>
+    /// <b>And the ticket opens where the customer is.</b> The mailbox's tenant says where
+    /// the message physically arrived; the customer's says whose agreement it is measured
+    /// against and whose queue somebody is watching. A ticket filed under the first would be
+    /// invisible to the people who have to answer it.
+    /// </summary>
+    [Fact]
+    public async Task A_ticket_opens_in_the_tenant_the_customer_belongs_to()
+    {
+        Guid elsewhere = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = elsewhere, Name = "Other", Slug = "other" });
+        Guid theirCustomer = Guid.NewGuid();
+        db.Customers.Add(new Customer { Id = theirCustomer, TenantId = elsewhere, Name = "Theirs" });
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? message = await Receive(
+            "Fel", "Beskrivning.", from: "stranger@elsewhere.example");
+
+        InboundMailMessage? placed =
+            await mail.AssignCustomerAsync(message!.Id, theirCustomer, "nils");
+
+        MailSuggestion open = placed!.Suggestions
+            .First(s => s.Kind == MailSuggestionKind.OpenTicket
+                        && s.State == MailSuggestionState.Pending);
+
+        Ticket? ticket = await mail.AcceptAsync(open.Id, "nils", Tue(11));
+
+        ticket!.TenantId.Should().Be(elsewhere);
+        ticket.CustomerId.Should().Be(theirCustomer);
+    }
+
+    /// <summary>The one thing still refused: a customer that is not there at all.</summary>
+    [Fact]
+    public async Task A_message_cannot_be_placed_with_a_customer_that_does_not_exist()
+    {
+        InboundMailMessage? message = await Receive(
+            "Fel", "Beskrivning.", from: "stranger@elsewhere.example");
+
+        Func<Task> assign = () => mail.AssignCustomerAsync(message!.Id, Guid.NewGuid(), "nils");
 
         await assign.Should().ThrowAsync<InvalidOperationException>();
     }
@@ -1123,6 +1177,67 @@ public class SupportMailTests : IDisposable
         await ReceiveFailingAuthentication(from: KnownSender);
 
         db.Tickets.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// <b>The bound on a correspondent that loops without saying it is one.</b> A broken
+    /// integration or a forwarding rule pointed at us passes every test the policy applies to
+    /// a message, every time — and nobody is pressing Accept any more. After the cap its mail
+    /// goes to the queue, which is exactly where all of it went before any of this existed.
+    /// </summary>
+    [Fact]
+    public async Task One_address_cannot_be_answered_without_end()
+    {
+        MailboxAnswersOnArrival();
+
+        for (int i = 0; i < ArrivalPolicy.AutomaticRepliesPerSender + 3; i++)
+        {
+            await Receive($"Fel {i}", "Det fungerar inte.");
+        }
+
+        db.ChangeTracker.Clear();
+
+        db.Tickets.Should().HaveCount(ArrivalPolicy.AutomaticRepliesPerSender);
+
+        // Nothing was lost: every message is in the queue, and the ones over the cap are
+        // waiting for a person exactly as they used to.
+        db.InboundMailMessages.Should()
+            .HaveCount(ArrivalPolicy.AutomaticRepliesPerSender + 3).And
+            .Contain(m => m.State == MailTriageState.Proposed);
+    }
+
+    /// <summary>
+    /// The cap is per address, so one runaway correspondent does not silence the answer to
+    /// everybody else at the same customer.
+    /// </summary>
+    [Fact]
+    public async Task The_cap_does_not_follow_the_customer()
+    {
+        MailboxAnswersOnArrival();
+
+        db.ContractContacts.Add(new ContractContact
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customerId,
+            Party = ContractParty.Customer,
+            Role = ContractContactRole.Deputy,
+            Name = "Erik Eriksson",
+            Email = "erik@entit.example",
+        });
+        await db.SaveChangesAsync();
+
+        for (int i = 0; i < ArrivalPolicy.AutomaticRepliesPerSender + 2; i++)
+        {
+            await Receive($"Fel {i}", "Det fungerar inte.");
+        }
+
+        await Receive("Ett annat fel", "Går inte att exportera.", from: "erik@entit.example");
+
+        db.ChangeTracker.Clear();
+
+        db.Tickets.Should().HaveCount(ArrivalPolicy.AutomaticRepliesPerSender + 1);
+        db.Tickets.Should().Contain(t => t.RequestedByEmail == "erik@entit.example");
     }
 
     /// <summary>
