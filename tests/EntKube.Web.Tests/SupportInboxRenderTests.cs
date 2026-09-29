@@ -68,6 +68,11 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
         Services.AddSingleton(new ToastService());
         Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils"));
         Services.AddScoped<CurrentActor>();
+
+        // Both screens now offer somewhere else to put the work — the inbox can place a
+        // message with another tenant's customer, the detail can move a ticket there — and
+        // both ask this who the person is allowed to reach before offering anything.
+        Services.AddSingleton(new UserAccessService(factory));
     }
 
     public new void Dispose()
