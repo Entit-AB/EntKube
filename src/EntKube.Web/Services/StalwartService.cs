@@ -1955,6 +1955,19 @@ public class StalwartService(
             trustedSenderDomains, accountPasswords);
         List<string> output = [];
 
+        // Named rather than dropped quietly. An address the server would refuse is left out of the plan
+        // on purpose — sending it aborts the apply before the accounts — but an allow-list that is
+        // quietly shorter than intended is how the gateway gets banned, so it has to be said.
+        List<string> unusableProxies = [.. proxyAddresses
+            .Where(a => !StalwartPlanBuilder.IsAcceptableIpOrMask(a))];
+        if (unusableProxies.Count > 0)
+        {
+            output.Add(
+                "WARNING: these gateway addresses are not in a form Stalwart accepts and were left out "
+                + $"of the allow-list: {string.Join(", ", unusableProxies)}. Repeated failed logins "
+                + "arriving from them could ban the gateway.");
+        }
+
         output.Add(proxyAddresses.Count > 0
             ? $"Allow-listing ingress gateway addresses so they can never be banned: {string.Join(", ", proxyAddresses)}"
             : "WARNING: no ingress gateway pods were found to allow-list. The gateway can still be banned "

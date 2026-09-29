@@ -122,6 +122,18 @@ public static class StalwartPlanBuilder
     /// IPv6 unique-local. None of these can be a real remote client, so exempting them costs nothing
     /// that was protecting anything.</para>
     /// </summary>
+    /// <summary>
+    /// The address ranges that are inside the cluster, and so can never be banned.
+    ///
+    /// <para>Every prefix here is /8 or longer, and that is a constraint rather than a preference.
+    /// Stalwart parses an address or mask with <c>(8..=32)</c> for IPv4 and <c>(8..=128)</c> for IPv6,
+    /// so anything shorter is rejected outright — and a rejected entry does not merely go missing. The
+    /// apply plan stops at its first failed operation, and this one is emitted before the accounts, so
+    /// a single unparseable range strands the administrator, every mailbox, the spam settings and the
+    /// milter. The IPv6 unique-local range is therefore written as the two /8s it is made of rather
+    /// than as <c>fc00::/7</c>, which is what it is normally called and which Stalwart will not take.
+    /// </para>
+    /// </summary>
     public static readonly string[] InternalRanges =
     [
         "10.0.0.0/8",
@@ -129,9 +141,100 @@ public static class StalwartPlanBuilder
         "192.168.0.0/16",
         "100.64.0.0/10",
         "127.0.0.0/8",
-        "fc00::/7",
-        "::1/128",
+        // fc00::/7 in the two halves Stalwart will accept: together these are exactly that range.
+        "fc00::/8",
+        "fd00::/8",
+        // Not ::1/128. A full-length prefix is dropped when Stalwart stores the value, so writing it
+        // here would mean matching on a string the server never holds — see CanonicalIpOrMask.
+        "::1",
     ];
+
+    /// <summary>
+    /// Whether Stalwart will accept this as an address or mask, decided the same way it decides.
+    ///
+    /// <para>Mirrors <c>IpAddrOrMask::from_str</c>: a bare address, or an address and a prefix length
+    /// of 8–32 for IPv4 and 8–128 for IPv6. Checked here because the consequence of sending one it
+    /// refuses is out of all proportion to the mistake — the plan aborts at that operation and
+    /// everything after it, the accounts included, is never applied. Skipping the entry loses one
+    /// allow-list range; sending it loses the rest of the configuration.</para>
+    ///
+    /// <para>The address half must also be in its canonical form. Stalwart parses with Rust's
+    /// <c>IpAddr</c>, which takes only full dotted-quad and standard IPv6 notation, while .NET accepts
+    /// abbreviations such as <c>10.1</c> and silently reads them as something else — so agreeing with
+    /// .NET is not enough to know Stalwart will agree.</para>
+    /// </summary>
+    public static bool IsAcceptableIpOrMask(string value)
+    {
+        string text = (value ?? "").Trim();
+        int slash = text.LastIndexOf('/');
+
+        string addressPart = slash < 0 ? text : text[..slash].Trim();
+
+        if (!System.Net.IPAddress.TryParse(addressPart, out System.Net.IPAddress? address)
+            || !string.Equals(address.ToString(), addressPart, StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        // Stalwart's own is_valid() refuses the unspecified address, so an allow-list entry built on it
+        // is rejected however the mask is written.
+        if (address.Equals(System.Net.IPAddress.Any) || address.Equals(System.Net.IPAddress.IPv6Any))
+        {
+            return false;
+        }
+
+        if (slash < 0)
+        {
+            return true;
+        }
+
+        if (!int.TryParse(text[(slash + 1)..].Trim(), out int prefix))
+        {
+            return false;
+        }
+
+        int longest = address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128;
+
+        return prefix >= 8 && prefix <= longest;
+    }
+
+    /// <summary>
+    /// An address or mask written the way Stalwart itself writes it back.
+    ///
+    /// <para>Mirrors <c>Display for IpAddrOrMask</c>, whose one surprise is that a full-length prefix
+    /// is not printed: <c>::1/128</c> is stored and serialised as <c>::1</c>, and <c>10.0.0.5/32</c> as
+    /// <c>10.0.0.5</c>. Shorter prefixes are kept, recovered from the mask's bit count, so
+    /// <c>10.0.0.0/8</c> stays as it is.</para>
+    ///
+    /// <para>This matters because the allow-list is upserted with <c>address</c> as the match key. Send
+    /// <c>::1/128</c> and the match finds nothing — the stored object's address is <c>::1</c> — so the
+    /// operation becomes a create, and the create collides with the row that was already there:
+    /// <c>primaryKeyViolation</c> on an entry that exists and was asked for by a name it is not kept
+    /// under. Since the plan stops at its first failure, that again strands every operation after the
+    /// allow-list, the accounts included.</para>
+    /// </summary>
+    public static string CanonicalIpOrMask(string value)
+    {
+        string text = (value ?? "").Trim();
+        int slash = text.LastIndexOf('/');
+
+        if (!System.Net.IPAddress.TryParse(slash < 0 ? text : text[..slash].Trim(),
+                out System.Net.IPAddress? address))
+        {
+            return text;
+        }
+
+        string canonical = address.ToString();
+
+        if (slash < 0 || !int.TryParse(text[(slash + 1)..].Trim(), out int prefix))
+        {
+            return canonical;
+        }
+
+        int longest = address.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork ? 32 : 128;
+
+        return prefix >= longest ? canonical : $"{canonical}/{prefix}";
+    }
 
     /// <summary>
     /// The single cluster role EntKube gives every node: run every task and every listener. Real
@@ -497,68 +600,6 @@ public static class StalwartPlanBuilder
         // ── Listeners ──
         lines.Add(Op("reconcile", "NetworkListener", MatchOn("name"), BuildListeners(config)));
 
-        // ── Auto-ban: make a mistake recoverable, and the gateway un-bannable ──
-        //
-        // The default ban never expires. An hour is long enough to stop an attacker and short
-        // enough that a misconfiguration corrects itself instead of waiting for someone to find
-        // the Blocked IPs page in recovery mode.
-        lines.Add(Update("Security", new()
-        {
-            ["authBanPeriod"] = 3_600_000,
-        }));
-
-        // is_ip_blocked() is "blocked AND NOT allowed", so an AllowedIp entry is a hard guarantee
-        // that an address cannot be banned even when a connection arrives with no usable forwarding
-        // header and falls back to the TCP peer.
-        //
-        // Every internal range, not merely the gateway pods that could be enumerated. Two reasons,
-        // and the second is the one that cost a delivery outage.
-        //
-        // The enumerable half does not stay enumerated: pods move between nodes, and a cluster that
-        // autoscales invents node addresses that did not exist when the plan was written. An
-        // allow-list built by listing what was running is correct only until the next scale event.
-        //
-        // And where the load balancer cannot preserve the client address — an OpenStack Octavia
-        // amphora proxies and SNATs, whatever externalTrafficPolicy says — every sender on the
-        // internet arrives as one internal address. Auto-ban then counts the whole world's failures
-        // against a single peer and blocks it, which is not one sender banned but all mail refused
-        // at TCP accept, before the filter, with nothing in the inbox and nothing in the spam folder.
-        // That happened.
-        //
-        // The cost is stated rather than hidden: on such a deployment this leaves auto-ban with
-        // nothing it can act on for inbound mail. That protection was never real there — the only
-        // address it could ever have banned was the operator's own load balancer — so what this
-        // removes is a hazard, not a defence. SPF and DMARC are equally meaningless against a
-        // SNAT'd peer, and no allow-list can fix that; DKIM still works, because it signs the
-        // message rather than trusting the connection.
-        Dictionary<string, object?> allowed = [];
-        int allowIndex = 0;
-        foreach (string range in InternalRanges)
-        {
-            allowed[$"internal-{allowIndex++}"] = new Dictionary<string, object?>
-            {
-                ["address"] = range,
-                ["reason"] = "Inside the cluster — mail and web traffic reach this server through it",
-            };
-        }
-        foreach (string address in (trustedProxyAddresses ?? []).Distinct(StringComparer.Ordinal))
-        {
-            allowed[$"proxy-{allowIndex++}"] = new Dictionary<string, object?>
-            {
-                ["address"] = address,
-                ["reason"] = "EntKube ingress gateway — banning this address bans every user",
-            };
-        }
-        lines.Add(Op("upsert", "AllowedIp", MatchOn("address"), allowed));
-
-        // reconcile with an empty value set removes every object in scope — the same idiom the
-        // milter uses to express "none". Deliberately gated: applying must never quietly lift a
-        // ban that is doing its job.
-        if (clearBlockedIps)
-        {
-            lines.Add(Op("reconcile", "BlockedIp", MatchAll, []));
-        }
-
         // ── Logging ──
         //
         // Without a tracer the server logs nothing at all — not even startup — and the last
@@ -834,6 +875,92 @@ public static class StalwartPlanBuilder
             {
                 lines.Add(Op("upsert", "Account", MatchOn("name", "domainId"), values));
             }
+        }
+
+        // Emitted here, after the accounts, and that position is load-bearing. apply stops at its
+        // first failed operation, so anything that can fail must come after everything a mail server
+        // cannot work without. This section failed twice on a live cluster — once on a prefix Stalwart
+        // will not parse, once on an address spelling that turned a match into a colliding create —
+        // and both times it took the administrator account and every mailbox down with it, because it
+        // used to run at operation #12 while the accounts ran at #19. A server that cannot ban an
+        // address is worse off than before; a server with no account to sign in as is unusable.
+        // ── Auto-ban: make a mistake recoverable, and the gateway un-bannable ──
+        //
+        // The default ban never expires. An hour is long enough to stop an attacker and short
+        // enough that a misconfiguration corrects itself instead of waiting for someone to find
+        // the Blocked IPs page in recovery mode.
+        lines.Add(Update("Security", new()
+        {
+            ["authBanPeriod"] = 3_600_000,
+        }));
+
+        // is_ip_blocked() is "blocked AND NOT allowed", so an AllowedIp entry is a hard guarantee
+        // that an address cannot be banned even when a connection arrives with no usable forwarding
+        // header and falls back to the TCP peer.
+        //
+        // Every internal range, not merely the gateway pods that could be enumerated. Two reasons,
+        // and the second is the one that cost a delivery outage.
+        //
+        // The enumerable half does not stay enumerated: pods move between nodes, and a cluster that
+        // autoscales invents node addresses that did not exist when the plan was written. An
+        // allow-list built by listing what was running is correct only until the next scale event.
+        //
+        // And where the load balancer cannot preserve the client address — an OpenStack Octavia
+        // amphora proxies and SNATs, whatever externalTrafficPolicy says — every sender on the
+        // internet arrives as one internal address. Auto-ban then counts the whole world's failures
+        // against a single peer and blocks it, which is not one sender banned but all mail refused
+        // at TCP accept, before the filter, with nothing in the inbox and nothing in the spam folder.
+        // That happened.
+        //
+        // The cost is stated rather than hidden: on such a deployment this leaves auto-ban with
+        // nothing it can act on for inbound mail. That protection was never real there — the only
+        // address it could ever have banned was the operator's own load balancer — so what this
+        // removes is a hazard, not a defence. SPF and DMARC are equally meaningless against a
+        // SNAT'd peer, and no allow-list can fix that; DKIM still works, because it signs the
+        // message rather than trusting the connection.
+        //
+        // Filtered by what Stalwart will parse, because this operation is emitted before the accounts
+        // and the plan stops at its first failure: one address it refuses costs the administrator,
+        // every mailbox, the spam settings and the milter, all of which come after. Dropping an entry
+        // costs one range. Those are not comparable, so anything doubtful is left out rather than sent.
+        Dictionary<string, object?> allowed = [];
+        int allowIndex = 0;
+        // One entry per canonical address across both sources. Two entries sharing the upsert's match
+        // key is ambiguous — the same shape the account loop avoids by promoting the administrator in
+        // place rather than emitting it twice — and a gateway address inside a range named here would
+        // otherwise produce exactly that.
+        HashSet<string> seen = new(StringComparer.OrdinalIgnoreCase);
+
+        foreach (string range in InternalRanges.Where(IsAcceptableIpOrMask))
+        {
+            if (seen.Add(CanonicalIpOrMask(range)))
+            {
+                allowed[$"internal-{allowIndex++}"] = new Dictionary<string, object?>
+                {
+                    ["address"] = CanonicalIpOrMask(range),
+                    ["reason"] = "Inside the cluster — mail and web traffic reach this server through it",
+                };
+            }
+        }
+        foreach (string address in (trustedProxyAddresses ?? []).Where(IsAcceptableIpOrMask))
+        {
+            if (seen.Add(CanonicalIpOrMask(address)))
+            {
+                allowed[$"proxy-{allowIndex++}"] = new Dictionary<string, object?>
+                {
+                    ["address"] = CanonicalIpOrMask(address),
+                    ["reason"] = "EntKube ingress gateway — banning this address bans every user",
+                };
+            }
+        }
+        lines.Add(Op("upsert", "AllowedIp", MatchOn("address"), allowed));
+
+        // reconcile with an empty value set removes every object in scope — the same idiom the
+        // milter uses to express "none". Deliberately gated: applying must never quietly lift a
+        // ban that is doing its job.
+        if (clearBlockedIps)
+        {
+            lines.Add(Op("reconcile", "BlockedIp", MatchAll, []));
         }
 
         // ── What the HTTP listeners are allowed to serve, and whose address a request carries ──
