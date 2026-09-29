@@ -238,7 +238,13 @@ IMAP  →  SupportMailPoller  →  MailMessageReader  →  SupportMailService.In
                                                               ↓
                                             ISupportMailAnalyst proposes
                                                               ↓
-                                          a person accepts, by name  →  ticket
+                                                     ArrivalPolicy decides
+                                                      ↙                ↘
+                          a report from a known contact        everything else
+                                      ↓                              ↓
+                          ticket opened as it arrives        the triage queue,
+                          (which sends the receipt)          where a person accepts
+                                                             it by name  →  ticket
 ```
 
 A reply is threaded onto its ticket by the Message-Id we sent, which carries the ticket
@@ -250,6 +256,50 @@ also matched on `[#1042]`, but subjects get edited, translated by clients and lo
 forwards, and the thread headers survive all three. Only our own identifiers are read — a
 reply pointing at a colleague's message must not be mined for a number that merely looks
 like one.
+
+### Answering at the door
+
+A report that landed at 02:00 used to wait for somebody to open the queue, because nothing
+became a ticket until a person accepted the suggestion. The customer had no number, so they
+had nothing to put in the subject of the next message about the same fault — and that
+message opened a second ticket.
+
+[`ArrivalPolicy`](../src/EntKube.Web/Services/Mail/ArrivalPolicy.cs) now opens the ticket at
+the door, which is what sends the receipt: `TicketService.CreateAsync` announces every
+ticket it creates, whatever opened it. There is deliberately no second path that sends mail.
+
+It opens one only where **all four** hold, and each is something visible on the message:
+
+- it was written by a person, not by a program;
+- it is not already a reply to a ticket that has a number;
+- it is placed with a customer, and not on an address the sender merely typed;
+- our own server did not say the From is forged.
+
+Anything else goes to the queue exactly as before. Every decision carries a reason in plain
+words and is logged, because *nothing happened* is the hardest state of this subsystem to
+debug: the mailbox is healthy, the message is in the queue, and nothing anywhere is an
+error. `SupportMailbox.AcknowledgeOnArrival` turns the whole thing off per tenant — it is
+the only thing here that sends mail with nobody's name on it, so whoever answers for what
+leaves the building can stop it without stopping the mailbox.
+
+### Two machines writing to each other
+
+Answering mail automatically introduces a failure the human gate used to prevent: an
+out-of-office reply gets a receipt, which the responder answers, which gets a receipt. The
+protection only works as a pair, and each half is useless alone.
+
+**What we read.** `MailMessageReader.LooksAutomated` records whether the sender said it is a
+program — RFC 3834's `Auto-Submitted` (anything but `no`), `Precedence: bulk|junk|list`, the
+list headers, `X-Auto-Response-Suppress`, a null `Return-Path` (a bounce, which must not be
+bounced to), and the local parts nobody reads: `noreply`, `mailer-daemon`, `postmaster`.
+Only what the sender says about itself is read — nothing is guessed from the subject,
+because "Automatic reply" is also what a person writes when reporting that they got one.
+The flag never keeps a message out of the queue; a ticketing system that stamps its mail
+this way does forward genuine reports, and those want a person, not a machine.
+
+**What we stamp.** `TicketNotifier` puts `Auto-Submitted: auto-replied` and
+`X-Auto-Response-Suppress: All` on everything it sends, so the responder at the other end
+leaves our receipt alone.
 
 [`MailMessageReader`](../src/EntKube.Web/Services/Mail/MailMessageReader.cs) is
 separate because it needs no mail server and is where the mistakes are: a missing
@@ -367,12 +417,19 @@ that paperwork — **not so a model can be quietly dropped in behind it.**
 
 ## Machine proposes, human decides
 
-Nothing in this subsystem changes state on its own.
+Nothing in this subsystem makes a *judgement* on its own.
 
 The analyst reads and drafts. The monitoring bridge opens a ticket but does not
-set its priority. Short-notice maintenance is flagged, never blocked. Every state
-change goes through a person accepting it, and their name lands on the resulting
-event.
+set its priority. The mailbox opens one for a report from a known contact, and
+does not set its priority either. Short-notice maintenance is flagged, never
+blocked. Every state change beyond a ticket's bare existence goes through a person
+accepting it, and their name lands on the resulting event.
+
+The two automatic openings are the same argument: a ticket existing is a fact about
+the past — a message arrived, at a time — and the judgements the agreement cares
+about are all downstream of it. A ticket nobody opened says so where a person's
+name would have been, so the §14.6 record never claims somebody decided something
+they did not.
 
 This is not caution for its own sake: §14.3 makes confirming a priority a written
 and reasoned act, §14.4 makes a resolution something the customer agrees to, and
@@ -408,6 +465,9 @@ a mail server is refusing connections is an outage made out of bookkeeping.
 
 ### The one thing sent without a person
 
+It goes out when the ticket is created, which — since the mailbox started opening tickets
+as they arrive — is usually within one poll of the customer pressing send.
+
 Everything else the machine could say to a customer is a judgement — what priority this
 is, whether it is resolved — and §14.3 and §14.4 make those written acts by a person. A
 receipt is not a judgement. It is a fact about the past: a message arrived, at this time,
@@ -424,6 +484,13 @@ precedence nobody knows they have is worth nothing.
 
 The response target is the useful sentence: a deadline computed inside the support window
 is the one thing the customer cannot work out for themselves.
+
+The closing instruction is the other one, and it is a standing rule rather than advice about
+the message it arrives in: **keep `[#1042]` in the subject of everything you write about
+this, for as long as it is open** — with what happens if they do not, because an instruction
+with no consequence attached reads as a formality. The message it has to survive is the one
+written three weeks later from a phone, to the same address, about the same fault, with no
+thread behind it and nothing but a subject line to place it by.
 
 ## Who is working on it
 
