@@ -120,6 +120,25 @@ public class SupportMailbox
     /// </summary>
     public bool IsEnabled { get; set; }
 
+    /// <summary>
+    /// Whether an arriving fault report is answered straight away with its ticket number,
+    /// without waiting for somebody to read it.
+    ///
+    /// <para><b>Why this is a switch and not simply the behaviour.</b> It is the only thing
+    /// in this subsystem that sends mail to a customer with no person's name on it, so the
+    /// tenant who answers for what goes out has to be able to stop it — during a migration,
+    /// while a mailbox is being trialled, or on the morning it turns out to be answering a
+    /// loop. Every other consequence of an arriving message stays where it was: a person
+    /// still confirms the priority in writing under §14.3 and still decides what is
+    /// resolved under §14.4.</para>
+    ///
+    /// <para>On by default, because a number the customer can quote is worth more the
+    /// sooner they have it — and an arrival receipt is a fact about the past rather than a
+    /// judgement. Which messages qualify is <see cref="Services.Mail.ArrivalPolicy"/>'s to
+    /// decide, and it is deliberately narrow.</para>
+    /// </summary>
+    public bool AcknowledgeOnArrival { get; set; } = true;
+
     public int PollIntervalSeconds { get; set; } = 120;
 
     public MailboxDisposition Disposition { get; set; } = MailboxDisposition.MarkSeen;

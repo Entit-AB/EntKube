@@ -106,8 +106,17 @@ public static class TicketAcknowledgement
                 + "If you disagree with it, say so on this ticket and we will take it up.")
             .AppendLine();
 
-        body.AppendLine("Replying to this message adds your reply to the same ticket — please "
-            + "keep the reference in the subject.");
+        // The one instruction the receipt exists to give. Stated as a standing rule rather
+        // than as advice about this message, because the message it needs to survive is the
+        // one written three weeks later from a phone, to the same address, about the same
+        // fault — with no thread behind it and nothing but the subject line to go on.
+        body.Append("Please keep ")
+            .Append(Reference(ticket.Number))
+            .AppendLine(" in the subject line of everything you write to us about this,")
+            .AppendLine("for as long as it is open. Replying to this message already does that.")
+            .AppendLine(
+                "A message that does not carry it cannot be recognised as belonging here, and "
+                + "will be opened as a new ticket.");
 
         if (!string.IsNullOrWhiteSpace(portalUrl))
         {

@@ -39,9 +39,10 @@ public readonly record struct MailPollResult(
 /// The tenant's support mailbox: its settings, and the fetch that fills the triage queue.
 ///
 /// <para><b>Fetching is all this does.</b> What arrives goes to
-/// <see cref="SupportMailService.IngestAsync"/>, which records it and has the analyst
-/// propose; no ticket is opened and no priority is set without a person. A mail server
-/// being reachable does not change who decides anything.</para>
+/// <see cref="SupportMailService.IngestAsync"/>, which records it, has the analyst propose,
+/// and — where <see cref="ArrivalPolicy"/> allows it — opens the ticket so the sender has a
+/// number to quote. No priority is confirmed and nothing is resolved without a person. A
+/// mail server being reachable does not change who decides anything.</para>
 ///
 /// <para><b>A failed poll is a reported state, not an exception into a log.</b> The useful
 /// question about a quiet support mailbox is whether it is quiet or broken, and those look
@@ -140,6 +141,7 @@ public class SupportMailboxService(
             existing.Address = settings.Address;
             existing.Folder = settings.Folder;
             existing.IsEnabled = settings.IsEnabled;
+            existing.AcknowledgeOnArrival = settings.AcknowledgeOnArrival;
             existing.PollIntervalSeconds = settings.PollIntervalSeconds;
             existing.Disposition = settings.Disposition;
             existing.MoveToFolder = settings.MoveToFolder;

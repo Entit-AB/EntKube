@@ -195,6 +195,15 @@ public class TicketNotifier(
             // that reads it.
             mail.MessageId = SupportMessageId.For(ticket.Number);
 
+            // We say what we are, in the two places a mail system looks. RFC 3834's header
+            // is what stops the recipient's out-of-office answering this, and Exchange reads
+            // the second one. It matters more now that a ticket can be opened by an arriving
+            // message: without these, our receipt and somebody's holiday responder can keep
+            // each other company all week, and our own door reads the same headers before
+            // answering anything (see MailMessageReader.LooksAutomated).
+            mail.Headers.Add("Auto-Submitted", "auto-replied");
+            mail.Headers.Add("X-Auto-Response-Suppress", "All");
+
             using SmtpClient client = new();
             await client.ConnectAsync(
                 settings.Host, settings.Port,

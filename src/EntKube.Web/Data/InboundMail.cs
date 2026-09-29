@@ -108,6 +108,25 @@ public class InboundMailMessage
 
     public DateTime ReceivedAt { get; set; } = DateTime.UtcNow;
 
+    /// <summary>
+    /// Whether the message was sent by a machine rather than typed by a person — an
+    /// out-of-office reply, a bounce, a mailing list, a monitoring digest.
+    ///
+    /// <para><b>Kept because we answer arriving mail by ourselves now.</b> A receipt sent
+    /// to something that answers automatically is two programs writing to each other, and
+    /// the only thing that stops it is noticing what the sender already said about itself:
+    /// RFC 3834's <c>Auto-Submitted</c>, a <c>Precedence</c> of bulk, a list header, a null
+    /// return path. Read once at the door by <see cref="Services.Mail.MailMessageReader"/>
+    /// and stored, because the headers are not kept and the question is asked again every
+    /// time somebody wonders why a message was left alone.</para>
+    ///
+    /// <para>It never stops a message being taken in or shown. A genuine fault report does
+    /// occasionally arrive from a ticketing system that stamps its mail this way, and that
+    /// belongs in the queue for a person to open — it just does not get answered by a
+    /// machine.</para>
+    /// </summary>
+    public bool IsMachineGenerated { get; set; }
+
     public MailTriageState State { get; set; } = MailTriageState.Received;
 
     /// <summary>The customer the sender was matched to, when the address was recognised.</summary>

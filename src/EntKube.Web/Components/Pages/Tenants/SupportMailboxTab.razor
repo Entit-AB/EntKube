@@ -27,7 +27,8 @@
             <h6 class="mb-0">Support mailbox</h6>
             <div class="text-muted small">
                 Fetched into the triage queue, where a person decides what each message
-                becomes. Nothing here opens a ticket on its own.
+                becomes. A fault report from a recorded contact is the one exception: it
+                opens its ticket as it arrives, so the sender gets a number to quote.
             </div>
         </div>
         @if (saved is not null)
@@ -304,6 +305,19 @@
                         Test the connection before switching this on.
                     </label>
                 </div>
+                <div class="form-check mt-2">
+                    <InputCheckbox class="form-check-input" id="mailbox-acknowledge"
+                                   @bind-Value="form.AcknowledgeOnArrival" />
+                    <label class="form-check-label small" for="mailbox-acknowledge">
+                        <strong>Answer a new report straight away with its ticket number.</strong>
+                        A fault report from a recorded contact opens its ticket as it arrives, and
+                        the sender is sent the number with the instruction to keep it in the
+                        subject. Only that: the priority still reaches them as theirs and
+                        unconfirmed, and a person still confirms it in writing. Mail we cannot
+                        place, a sender our own server could not verify, and anything that says it
+                        came from a program are all left in the queue as before.
+                    </label>
+                </div>
             </div>
         </div>
 
@@ -364,6 +378,8 @@
         public string Folder { get; set; } = "INBOX";
 
         public bool IsEnabled { get; set; }
+
+        public bool AcknowledgeOnArrival { get; set; } = true;
 
         public int PollIntervalSeconds { get; set; } = 120;
 
@@ -473,6 +489,7 @@
                     Address = saved.Address,
                     Folder = saved.Folder,
                     IsEnabled = saved.IsEnabled,
+                    AcknowledgeOnArrival = saved.AcknowledgeOnArrival,
                     PollIntervalSeconds = saved.PollIntervalSeconds,
                     Disposition = saved.Disposition,
                     MoveToFolder = saved.MoveToFolder,
@@ -520,6 +537,7 @@
                     Address = string.IsNullOrWhiteSpace(form.Address) ? null : form.Address.Trim(),
                     Folder = form.Folder.Trim(),
                     IsEnabled = form.IsEnabled,
+                    AcknowledgeOnArrival = form.AcknowledgeOnArrival,
                     PollIntervalSeconds = form.PollIntervalSeconds,
                     Disposition = form.Disposition,
                     TrustedAuthenticationServer =
