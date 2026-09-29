@@ -142,6 +142,53 @@ public class ArrivalPolicyTests
         decision.OpenNow.Should().BeFalse();
     }
 
+    // ---- The one thing the four conditions cannot bound ---------------------------------
+
+    /// <summary>
+    /// <b>A loop that carries none of the headers.</b> A broken integration, a forwarding
+    /// rule pointed at us, a responder somebody wrote by hand — each passes every test above,
+    /// every time, for as long as it goes on, and the person who used to absorb that by not
+    /// pressing Accept is no longer in the path.
+    /// </summary>
+    [Fact]
+    public void An_address_answered_too_often_stops_being_answered()
+    {
+        ArrivalDecision decision = ArrivalPolicy.Decide(
+            Message(), ProposesATicket(), mailboxAcknowledges: true,
+            answeredRecently: ArrivalPolicy.AutomaticRepliesPerSender);
+
+        decision.OpenNow.Should().BeFalse();
+        decision.Reason.Should().Contain("karin@kund.example");
+    }
+
+    /// <summary>
+    /// The cap has to sit above a real person having a bad morning. One short of it is still
+    /// answered — being wrong in the other direction means a genuine report goes unanswered
+    /// because the same person wrote earlier.
+    /// </summary>
+    [Fact]
+    public void One_short_of_the_cap_is_still_answered() =>
+        ArrivalPolicy.Decide(
+            Message(), ProposesATicket(), mailboxAcknowledges: true,
+            answeredRecently: ArrivalPolicy.AutomaticRepliesPerSender - 1)
+            .OpenNow.Should().BeTrue();
+
+    /// <summary>
+    /// The cap is asked last. A message declined for what it is should say so, rather than
+    /// blaming the address it came from — the operator reading the reason is trying to work
+    /// out what to fix.
+    /// </summary>
+    [Fact]
+    public void A_message_that_fails_on_its_own_terms_is_not_blamed_on_its_sender()
+    {
+        ArrivalDecision decision = ArrivalPolicy.Decide(
+            Message(machine: true), ProposesATicket(), mailboxAcknowledges: true,
+            answeredRecently: ArrivalPolicy.AutomaticRepliesPerSender * 10);
+
+        decision.Reason.Should().Contain("program");
+        decision.Reason.Should().NotContain("times in the last hour");
+    }
+
     /// <summary>
     /// Every answer says why, in words an operator can act on. A message that was left
     /// alone leaves no other trace — the mailbox is healthy, the queue has the message, and

@@ -282,6 +282,16 @@ error. `SupportMailbox.AcknowledgeOnArrival` turns the whole thing off per tenan
 the only thing here that sends mail with nobody's name on it, so whoever answers for what
 leaves the building can stop it without stopping the mailbox.
 
+There is a fifth condition, and it is about the sender rather than the message: **six
+automatic replies to one address per hour**. The four above each judge a message on its own,
+which leaves a correspondent writing in a loop — a broken integration, a forwarding rule
+pointed at us, a responder somebody wrote by hand — passing all four, every time, for as
+long as it goes on. The person who used to absorb that by not pressing Accept forty times is
+no longer in the path. Six sits above a real person having a bad morning and is passed by a
+loop in seconds, and being wrong about the number costs little: over the cap, the message is
+still taken in, analysed and queued, and a person opens it in one click. Only the automatic
+reply is withheld.
+
 ### Two machines writing to each other
 
 Answering mail automatically introduces a failure the human gate used to prevent: an

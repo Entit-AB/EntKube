@@ -40,12 +40,43 @@ public readonly record struct ArrivalDecision(bool OpenNow, string Reason);
 /// pending and a person to read them. The test is deliberately one a person can apply by
 /// eye: every reason it can give names something visible on the message.</para>
 ///
+/// <para><b>And why it counts.</b> The four conditions all judge a message on its own, which
+/// leaves one thing unbounded: a correspondent writing in a loop while carrying none of the
+/// headers that would have marked it a program passes all four, every time, for as long as
+/// it goes on. <see cref="AutomaticRepliesPerSender"/> is the ceiling on that, and going
+/// over it costs nothing but the automatic reply.</para>
+///
 /// <para>Pure, so the rule can be argued over in a test rather than in a mailbox.</para>
 /// </summary>
 public static class ArrivalPolicy
 {
     /// <summary>The name that goes on a ticket opened this way, and on its events.</summary>
     public const string Actor = "EntKube support mailbox";
+
+    /// <summary>
+    /// How many times one address may be answered automatically within
+    /// <see cref="RepeatWindow"/> before the rest of its mail is left for a person.
+    ///
+    /// <para><b>What this is for, and what it is not.</b> It is not spam control — an
+    /// unplaced sender never gets this far. It is the bound on a correspondent that writes
+    /// in a loop while carrying none of the headers that would have given it away: a broken
+    /// integration, a forwarding rule pointed at us, a responder somebody wrote by hand.
+    /// Each of those produces a ticket and a receipt per message, and the person who used to
+    /// absorb that by not pressing Accept forty times is no longer in the path.</para>
+    ///
+    /// <para><b>Why six.</b> It has to sit above a real person having a bad morning and well
+    /// below anything automatic. Six distinct reports from one address inside an hour is
+    /// already unusual enough to be worth a person's eye; a loop passes six in seconds.</para>
+    ///
+    /// <para><b>Why being wrong about it is cheap.</b> Going over the cap is not a refusal
+    /// and loses nothing: the message is taken in, analysed and queued exactly as every
+    /// message was before any of this existed. The only thing withheld is the automatic
+    /// reply, and a person can still open the ticket from the queue in one click.</para>
+    /// </summary>
+    public const int AutomaticRepliesPerSender = 6;
+
+    /// <summary>The window <see cref="AutomaticRepliesPerSender"/> is counted over.</summary>
+    public static readonly TimeSpan RepeatWindow = TimeSpan.FromHours(1);
 
     /// <summary>
     /// Decides, from the message and what the analyst made of it.
@@ -58,10 +89,17 @@ public static class ArrivalPolicy
     /// configured at all: a message handed in by some other route was not sent to an
     /// address whose owner agreed to answer from it.
     /// </param>
+    /// <param name="answeredRecently">
+    /// How many messages from this same address have already been answered automatically
+    /// inside <see cref="RepeatWindow"/>. Counted by the caller, which is the only party
+    /// with a database; defaulted so that a caller with nothing to count — a test, a message
+    /// handed in by hand — is not made to say zero.
+    /// </param>
     public static ArrivalDecision Decide(
         InboundMailMessage message,
         IReadOnlyList<MailSuggestion> suggestions,
-        bool mailboxAcknowledges)
+        bool mailboxAcknowledges,
+        int answeredRecently = 0)
     {
         if (!mailboxAcknowledges)
         {
@@ -109,6 +147,18 @@ public static class ArrivalPolicy
         {
             return new(
                 false, "our own mail server could not verify that the sender is who they say.");
+        }
+
+        // Last, deliberately. Everything above describes the message itself, and a message
+        // that would have been declined for what it is should say so rather than blaming
+        // the address it came from.
+        if (answeredRecently >= AutomaticRepliesPerSender)
+        {
+            return new(
+                false,
+                $"{message.FromAddress} has already been answered automatically "
+                + $"{answeredRecently} times in the last hour, which is more than a person "
+                + "reports. The rest of its mail is being left for one.");
         }
 
         return new(true, "a person at a known contact reported something we have no ticket for.");

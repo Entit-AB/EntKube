@@ -120,8 +120,23 @@ public class SupportMailService(
                 .Select(m => m.AcknowledgeOnArrival)
                 .FirstOrDefaultAsync(ct);
 
-            ArrivalDecision decision =
-                ArrivalPolicy.Decide(message, message.Suggestions, acknowledges);
+            // How often we have already answered this address by ourselves. Counted from
+            // the messages rather than from the tickets, because the question is how much
+            // mail we have sent this correspondent — a ticket opened by a person is not
+            // something we did to them.
+            DateTime since = DateTime.UtcNow - ArrivalPolicy.RepeatWindow;
+            string sender = message.FromAddress.Trim().ToLowerInvariant();
+
+            int answeredRecently = await db.InboundMailMessages.AsNoTracking()
+                .CountAsync(
+                    m => m.TenantId == message.TenantId
+                         && m.HandledBy == ArrivalPolicy.Actor
+                         && m.HandledAt >= since
+                         && m.FromAddress.ToLower() == sender,
+                    ct);
+
+            ArrivalDecision decision = ArrivalPolicy.Decide(
+                message, message.Suggestions, acknowledges, answeredRecently);
 
             if (!decision.OpenNow)
             {

@@ -1126,6 +1126,67 @@ public class SupportMailTests : IDisposable
     }
 
     /// <summary>
+    /// <b>The bound on a correspondent that loops without saying it is one.</b> A broken
+    /// integration or a forwarding rule pointed at us passes every test the policy applies to
+    /// a message, every time — and nobody is pressing Accept any more. After the cap its mail
+    /// goes to the queue, which is exactly where all of it went before any of this existed.
+    /// </summary>
+    [Fact]
+    public async Task One_address_cannot_be_answered_without_end()
+    {
+        MailboxAnswersOnArrival();
+
+        for (int i = 0; i < ArrivalPolicy.AutomaticRepliesPerSender + 3; i++)
+        {
+            await Receive($"Fel {i}", "Det fungerar inte.");
+        }
+
+        db.ChangeTracker.Clear();
+
+        db.Tickets.Should().HaveCount(ArrivalPolicy.AutomaticRepliesPerSender);
+
+        // Nothing was lost: every message is in the queue, and the ones over the cap are
+        // waiting for a person exactly as they used to.
+        db.InboundMailMessages.Should()
+            .HaveCount(ArrivalPolicy.AutomaticRepliesPerSender + 3).And
+            .Contain(m => m.State == MailTriageState.Proposed);
+    }
+
+    /// <summary>
+    /// The cap is per address, so one runaway correspondent does not silence the answer to
+    /// everybody else at the same customer.
+    /// </summary>
+    [Fact]
+    public async Task The_cap_does_not_follow_the_customer()
+    {
+        MailboxAnswersOnArrival();
+
+        db.ContractContacts.Add(new ContractContact
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customerId,
+            Party = ContractParty.Customer,
+            Role = ContractContactRole.Deputy,
+            Name = "Erik Eriksson",
+            Email = "erik@entit.example",
+        });
+        await db.SaveChangesAsync();
+
+        for (int i = 0; i < ArrivalPolicy.AutomaticRepliesPerSender + 2; i++)
+        {
+            await Receive($"Fel {i}", "Det fungerar inte.");
+        }
+
+        await Receive("Ett annat fel", "Går inte att exportera.", from: "erik@entit.example");
+
+        db.ChangeTracker.Clear();
+
+        db.Tickets.Should().HaveCount(ArrivalPolicy.AutomaticRepliesPerSender + 1);
+        db.Tickets.Should().Contain(t => t.RequestedByEmail == "erik@entit.example");
+    }
+
+    /// <summary>
     /// A reply already has a number. Answering it with a second one would teach the customer
     /// to quote the newer of two tickets about the same fault.
     /// </summary>
