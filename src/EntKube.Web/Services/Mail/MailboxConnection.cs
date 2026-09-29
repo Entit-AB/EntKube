@@ -78,6 +78,51 @@ public static class MailboxConnectionResolver
     }
 
     /// <summary>
+    /// The connection for <em>sending</em> as that mailbox, on the same server.
+    ///
+    /// <para><b>Why sending is derived from the mailbox at all.</b> Everything about fetching is —
+    /// the address, the port, TLS, the login, the credential — and sending was not, so an operator
+    /// who chose a mail server and a mailbox had configured receiving completely and sending not at
+    /// all. Nothing said so. The symptom is the worst shape there is: support mail arrives, a ticket
+    /// is opened, the customer is told nothing, and every screen looks healthy.</para>
+    ///
+    /// <para><b>And why it has to be this server rather than any relay.</b> The receipt goes out
+    /// <em>from the support address</em>, which belongs to a domain this server publishes SPF and
+    /// DKIM for. Handing that message to an unrelated relay produces mail that fails both, which is
+    /// mail that is silently discarded by exactly the corporate mailboxes a customer reports faults
+    /// from.</para>
+    ///
+    /// <para>Implicit TLS on 465 rather than STARTTLS on 587, for the same reason the fetching side
+    /// picks 993: both listeners exist, and the one that cannot be stripped on the path is the one
+    /// worth having. Null when submission is switched off, because then there is nothing to send
+    /// through.</para>
+    /// </summary>
+    public static MailboxConnection? ResolveSubmission(
+        StalwartComponentConfig config, ClusterComponent component, StalwartMailAccount account,
+        StalwartMailDomain domain)
+    {
+        if (!config.SubmissionEnabled)
+        {
+            return null;
+        }
+
+        bool publicHostname = ReachedByPublicHostname(config);
+
+        string releaseName = component.ReleaseName ?? component.Name;
+        string ns = component.Namespace ?? StalwartService.DefaultNamespace;
+
+        return new MailboxConnection(
+            Host: publicHostname
+                ? config.Hostname.Trim()
+                : $"{releaseName}.{ns}.svc.cluster.local",
+            Port: MailPorts.Submissions,
+            UseSsl: true,
+            Username: $"{account.LocalPart.Trim().ToLowerInvariant()}@{domain.Name.Trim().ToLowerInvariant()}",
+            UseOAuth: config.AuthMode == StalwartAuthMode.Oidc,
+            ValidateCertificateName: publicHostname);
+    }
+
+    /// <summary>
     /// Whether to reach this server on its public hostname rather than its in-cluster Service.
     ///
     /// <para>The in-cluster Service is the better address when it works: no dependency on public DNS,
