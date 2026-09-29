@@ -2239,6 +2239,42 @@ public class StalwartMailTests
     public void SpfWithoutRecordedAddressesIsUnchanged() =>
         StalwartPlanBuilder.Spf(Config()).Should().Be("v=spf1 mx -all");
 
+    // ── PROXY protocol reach ──────────────────────────────────────────────────
+
+    /// <summary>
+    /// <b>The setting that makes a mail server unconfigurable by the thing that configures it.</b>
+    /// Stalwart requires a PROXY header from every address it trusts, on every port, with no way to
+    /// exempt one. A broad private or CGNAT range therefore covers the pod network, and the client
+    /// that can no longer connect is EntKube's own apply Job — the connection is closed before any
+    /// reply, which reads as a network fault rather than as configuration.
+    ///
+    /// <para>Overlap, not containment: a /24 inside 10/8 reaches in just as surely as 10/8 does.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("10.0.0.0/8")]
+    [InlineData("10.240.3.0/24")]
+    [InlineData("100.64.0.0/10")]
+    [InlineData("100.96.0.0/11")]
+    [InlineData("192.168.1.0/24")]
+    [InlineData("172.16.5.5")]
+    [InlineData("127.0.0.1")]
+    [InlineData("fd00::/8")]
+    public void AnEntryReachingInsideTheClusterIsRecognised(string network) =>
+        StalwartPlanBuilder.CoversClusterAddresses(network).Should().BeTrue();
+
+    /// <summary>
+    /// A public address is what the list is for — the load balancer's own subnet, and nothing
+    /// wider. Flagging one of these would make the warning noise and teach people to ignore it.
+    /// </summary>
+    [Theory]
+    [InlineData("46.254.9.137")]
+    [InlineData("86.107.49.192/28")]
+    [InlineData("2a01:4f9::/48")]
+    [InlineData("not-an-address")]
+    [InlineData("")]
+    public void APublicAddressDoesNotReachInside(string network) =>
+        StalwartPlanBuilder.CoversClusterAddresses(network).Should().BeFalse();
+
     // ── DKIM ──────────────────────────────────────────────────────────────────
 
     /// <summary>

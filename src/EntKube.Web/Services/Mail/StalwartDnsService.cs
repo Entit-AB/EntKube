@@ -1,4 +1,6 @@
+using System.Net;
 using System.Net.Http.Headers;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
@@ -45,7 +47,6 @@ public readonly record struct StalwartDnsFetch(string Domain, string? Records, s
 public class StalwartDnsService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vault,
-    IHttpClientFactory httpFactory,
     ILogger<StalwartDnsService> logger)
 {
     /// <summary>
@@ -94,7 +95,12 @@ public class StalwartDnsService(
             + $"{component.Namespace ?? StalwartService.DefaultNamespace}"
             + $".svc.cluster.local:{StalwartPlanBuilder.HttpPort}";
 
-        using HttpClient http = httpFactory.CreateClient();
+        // Not from the factory: this connection may have to announce itself with a PROXY header
+        // before it says anything else, which is a property of the socket rather than of the
+        // request. See ProxyingHandler.
+        using HttpClient http = new(
+            ProxyingHandler(StalwartPlanBuilder.ProxyTrustedNetworks(config)));
+
         http.Timeout = Timeout;
         http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue(
             "Basic",
@@ -119,6 +125,75 @@ public class StalwartDnsService(
 
         return results;
     }
+
+    /// <summary>
+    /// A handler that announces the connection with a PROXY v1 header when the server expects
+    /// one from us, and otherwise connects normally.
+    ///
+    /// <para><b>Why this is needed at all.</b> Stalwart demands a PROXY header from every peer
+    /// matching <c>proxyTrustedNetworks</c>, on every listener, and there is no way to exempt a
+    /// port. Where that list covers addresses inside the cluster — which is easy to do and hard to
+    /// notice — a client that sends no header does not get an error: the connection is closed
+    /// before a byte of HTTP is read, which reads as a network fault. That is verified behaviour on
+    /// a running server, not a reading of the documentation: the same request fails with no header
+    /// and returns 401 with one.</para>
+    ///
+    /// <para><b>Why it is decided per connection rather than configured.</b> Sending the header to
+    /// a server that does not trust this address is itself refused, so "always send it" is as wrong
+    /// as "never". The only thing that settles it is whether the address this socket actually got
+    /// is one the server trusts, and that is not known until the socket is open — so it is checked
+    /// there, against the list the server was configured with.</para>
+    /// </summary>
+    private static SocketsHttpHandler ProxyingHandler(IReadOnlyList<string> trustedNetworks) =>
+        new()
+        {
+            ConnectCallback = async (context, ct) =>
+            {
+                Socket socket = new(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+
+                try
+                {
+                    await socket.ConnectAsync(context.DnsEndPoint, ct);
+
+                    NetworkStream stream = new(socket, ownsSocket: true);
+
+                    if (ProxyHeaderFor(socket) is string header)
+                    {
+                        await stream.WriteAsync(Encoding.ASCII.GetBytes(header), ct);
+                        await stream.FlushAsync(ct);
+                    }
+
+                    return stream;
+                }
+                catch
+                {
+                    socket.Dispose();
+                    throw;
+                }
+
+                string? ProxyHeaderFor(Socket connected) =>
+                    connected.LocalEndPoint is IPEndPoint local
+                    && connected.RemoteEndPoint is IPEndPoint remote
+                    && trustedNetworks.Any(n =>
+                        StalwartPlanBuilder.TrustedNetworkCovers(n, local.Address))
+                        ? ProxyV1Line(local, remote)
+                        : null;
+            },
+        };
+
+    /// <summary>
+    /// The PROXY protocol v1 greeting for a connection, as HAProxy defines it and as every client
+    /// that speaks it sends: the family, the source and destination addresses, and their ports.
+    ///
+    /// <para>The real addresses rather than <c>UNKNOWN</c>. Stalwart reads this to decide whose
+    /// address to count authentication failures against, and a client that declares itself unknown
+    /// hands that decision back to the peer address it was trying to replace.</para>
+    /// </summary>
+    public static string ProxyV1Line(IPEndPoint source, IPEndPoint destination) =>
+        string.Create(
+            System.Globalization.CultureInfo.InvariantCulture,
+            $"PROXY {(source.AddressFamily == AddressFamily.InterNetworkV6 ? "TCP6" : "TCP4")} "
+            + $"{source.Address} {destination.Address} {source.Port} {destination.Port}\r\n");
 
     private async Task<StalwartDnsFetch> FetchAsync(
         HttpClient http, string baseUrl, string domain, CancellationToken ct)

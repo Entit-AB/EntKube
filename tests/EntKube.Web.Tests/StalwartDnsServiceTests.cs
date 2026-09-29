@@ -77,6 +77,29 @@ public class StalwartDnsServiceTests
             "entit.eu")
             .Should().Be("sel v=DKIM1; p=A");
 
+    // ---- Announcing the connection ----------------------------------------------------------
+
+    /// <summary>
+    /// <b>Verified against the running server, not reasoned about.</b> Where the trusted-networks
+    /// list reaches inside the cluster, Stalwart closes a plain connection before a byte of HTTP is
+    /// read — it looks like a network fault — and answers the identical request that opens with a
+    /// PROXY v1 greeting. The line has to be the one every client that speaks the protocol sends.
+    /// </summary>
+    [Fact]
+    public void The_proxy_greeting_is_the_v1_line_haproxy_defines() =>
+        StalwartDnsService.ProxyV1Line(
+            new System.Net.IPEndPoint(System.Net.IPAddress.Parse("100.96.5.249"), 44321),
+            new System.Net.IPEndPoint(System.Net.IPAddress.Parse("100.64.76.161"), 8080))
+            .Should().Be("PROXY TCP4 100.96.5.249 100.64.76.161 44321 8080\r\n");
+
+    /// <summary>The family is part of the line, and a v6 socket must say TCP6.</summary>
+    [Fact]
+    public void A_v6_connection_announces_itself_as_tcp6() =>
+        StalwartDnsService.ProxyV1Line(
+            new System.Net.IPEndPoint(System.Net.IPAddress.Parse("fd00::5"), 1234),
+            new System.Net.IPEndPoint(System.Net.IPAddress.Parse("fd00::1"), 8080))
+            .Should().StartWith("PROXY TCP6 fd00::5 fd00::1 1234 8080");
+
     /// <summary>
     /// Nothing usable is null, not an empty string: the caller leaves whatever was fetched
     /// before standing rather than wiping a domain's records because one request came back odd.

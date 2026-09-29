@@ -1965,19 +1965,28 @@ public class StalwartService(
         // are. It fails as a connection that never completes, which reads as a network fault rather
         // than as configuration, so it is worth saying plainly at the moment it is applied.
         List<string> proxyNetworks = StalwartPlanBuilder.ProxyTrustedNetworks(config);
-        List<string> overreaching = [.. proxyNetworks.Where(n => proxyAddresses
-            .Select(a => System.Net.IPAddress.TryParse(a, out System.Net.IPAddress? ip) ? ip : null)
-            .Any(ip => ip is not null && StalwartPlanBuilder.TrustedNetworkCovers(n, ip)))];
+
+        // Two ways an entry reaches inside, and the second was the one that bit. Covering the
+        // ingress gateway was checked for, because those addresses were in hand; covering the pod
+        // network was not, and the client it locks out is this apply itself. A server that its own
+        // configurator cannot connect to stays as it is for good, and the failure looks like a
+        // network fault.
+        List<string> overreaching = [.. proxyNetworks.Where(n =>
+            StalwartPlanBuilder.CoversClusterAddresses(n)
+            || proxyAddresses
+                .Select(a => System.Net.IPAddress.TryParse(a, out System.Net.IPAddress? ip) ? ip : null)
+                .Any(ip => ip is not null && StalwartPlanBuilder.TrustedNetworkCovers(n, ip)))];
 
         if (overreaching.Count > 0)
         {
             output.Add(
-                "WARNING: the PROXY protocol trusted-networks list covers addresses inside this "
-                + $"cluster ({string.Join(", ", overreaching)} matches the ingress gateway). Stalwart "
-                + "requires a PROXY header from every address it trusts, on every port, and there is no "
-                + "way to exempt one — so in-cluster clients that send no header (the support mailbox, "
-                + "webmail, the admin interface through the gateway) will fail to connect at all. List "
-                + "only the load balancer's own subnet.");
+                "WARNING: the PROXY protocol trusted-networks list reaches inside this cluster "
+                + $"({string.Join(", ", overreaching)}). Stalwart requires a PROXY header from every "
+                + "address it trusts, on every port, and there is no way to exempt one — so every "
+                + "in-cluster client that sends no header fails to connect at all, with the "
+                + "connection closed before any reply: the support mailbox, webmail, the admin "
+                + "interface through the gateway, and this apply the next time it runs. List only "
+                + "the load balancer's own subnet.");
         }
 
         // Named rather than dropped quietly. An address the server would refuse is left out of the plan

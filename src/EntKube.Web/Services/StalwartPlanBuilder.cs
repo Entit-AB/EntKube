@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
@@ -288,6 +290,70 @@ public static class StalwartPlanBuilder
                 .Where(n => !n.StartsWith('#'))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
+
+    /// <summary>
+    /// Whether a trusted-networks entry reaches inside the cluster.
+    ///
+    /// <para><b>The check that matters, and the one that was missing.</b> Covering the ingress
+    /// gateway was tested for, because those addresses were in hand. But the entry that does the
+    /// most damage is a broad private or CGNAT range, because it also covers the pod network — and
+    /// the client that then cannot connect is <em>EntKube's own apply Job</em>. The server becomes
+    /// unconfigurable by the thing that configures it, and the failure is a connection that never
+    /// completes, which reads as a network fault rather than as the setting that caused it.</para>
+    ///
+    /// <para>Verified on a running server rather than reasoned about: with such a list in force, a
+    /// request from a pod is closed before any HTTP is read, and the identical request sending a
+    /// PROXY v1 greeting is answered.</para>
+    ///
+    /// <para>Overlap, not containment: <c>10.0.0.0/8</c> and <c>10.240.3.0/24</c> both reach inside,
+    /// and either breaks every in-cluster client.</para>
+    /// </summary>
+    public static bool CoversClusterAddresses(string network) =>
+        InternalRanges.Any(internalRange => RangesOverlap(internalRange, network));
+
+    /// <summary>Whether two CIDR entries have any address in common.</summary>
+    private static bool RangesOverlap(string left, string right)
+    {
+        (IPAddress? leftAddress, int leftPrefix) = ParseCidr(left);
+        (IPAddress? rightAddress, int rightPrefix) = ParseCidr(right);
+
+        if (leftAddress is null
+            || rightAddress is null
+            || leftAddress.AddressFamily != rightAddress.AddressFamily)
+        {
+            return false;
+        }
+
+        // Either the wider one contains the narrower one's base address, or they are disjoint.
+        try
+        {
+            return leftPrefix <= rightPrefix
+                ? new IPNetwork(leftAddress, leftPrefix).Contains(rightAddress)
+                : new IPNetwork(rightAddress, rightPrefix).Contains(leftAddress);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>An entry as an address and a prefix length, defaulting to a full-length prefix.</summary>
+    private static (IPAddress? Address, int Prefix) ParseCidr(string entry)
+    {
+        string text = (entry ?? "").Trim();
+        int slash = text.LastIndexOf('/');
+
+        if (!IPAddress.TryParse(slash < 0 ? text : text[..slash].Trim(), out IPAddress? address))
+        {
+            return (null, 0);
+        }
+
+        int full = address.AddressFamily == AddressFamily.InterNetworkV6 ? 128 : 32;
+
+        return slash < 0 || !int.TryParse(text[(slash + 1)..].Trim(), out int prefix)
+            ? (address, full)
+            : (address, prefix);
+    }
 
     /// <summary>
     /// Whether a trusted-networks entry covers this address.
