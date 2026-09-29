@@ -7225,6 +7225,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<bool>("RspamdTempFailOnError")
                         .HasColumnType("bit");
 
+                    b.Property<string>("SendingIpAddresses")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<bool>("SmtpEnabled")
                         .HasColumnType("bit");
 
@@ -7334,6 +7337,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<string>("Description")
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
+
+                    b.Property<string>("DkimDnsRecords")
+                        .HasColumnType("nvarchar(max)");
 
                     b.Property<bool>("IsPrimary")
                         .HasColumnType("bit");

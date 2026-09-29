@@ -1450,9 +1450,13 @@ public static class StalwartPlanBuilder
     /// almost never lives anywhere EntKube can reach, and mail that half-works because one record is
     /// missing is the most expensive kind of mail misconfiguration.
     ///
-    /// <para>DKIM is absent by design — Stalwart generates those keys itself, and the selector and
-    /// public key only exist once the domain has been applied, so they are read back from the
-    /// running server rather than predicted here.</para>
+    /// <para><b>DKIM is here now, and it is the record most likely to be missing.</b> It used to be
+    /// left out with a note saying to read it from the mail server's admin UI, which is true and is
+    /// also how a domain ends up signing every message with a key nobody published. That failure is
+    /// silent and total — the receiver looks the key up, finds nothing, and
+    /// <c>dkim=fail reason="key not found in DNS"</c> takes DMARC down with it. Stalwart still owns
+    /// the keys; what the domain carries is a copy of the records to publish, pasted once, so that
+    /// the list handed to whoever runs the zone is the whole list.</para>
     /// </summary>
     public static IReadOnlyList<DnsRecord> DnsRecordsFor(StalwartComponentConfig config, StalwartMailDomain domain)
     {
@@ -1462,11 +1466,17 @@ public static class StalwartPlanBuilder
         List<DnsRecord> records =
         [
             new(name, "MX", $"10 {host}.", "Where other servers deliver mail for this domain."),
-            new(name, "TXT", $"v=spf1 mx -all",
-                "SPF — authorises this server to send for the domain and refuses everything else."),
-            new($"_dmarc.{name}", "TXT", $"v=DMARC1; p=reject; rua=mailto:postmaster@{name}",
-                "DMARC — tells receivers what to do with mail that fails SPF and DKIM."),
+            new(name, "TXT", Spf(config),
+                "SPF — authorises this server to send for the domain and refuses everything else. "
+                + "`mx` covers the address mail is delivered TO; outbound usually leaves from "
+                + "another one, which has to be listed or every message fails SPF."),
+            new($"_dmarc.{name}", "TXT", $"v=DMARC1; p=none; rua=mailto:postmaster@{name}",
+                "DMARC — tells receivers what to do with mail that fails SPF and DKIM. Start at "
+                + "p=none and move to p=reject once a report shows both passing: p=reject while "
+                + "either is unpublished junks every message the domain sends."),
         ];
+
+        records.AddRange(DkimRecords(domain));
 
         // Client autodiscovery (autoconfig / autodiscover / MTA-STS / PACC) always points at the
         // mail host, in every TLS mode. These are names of the MAIL service: Stalwart answers them
@@ -1484,6 +1494,74 @@ public static class StalwartPlanBuilder
             records.Add(new($"{prefix}.{name}", "CNAME", $"{host}.",
                 note + " Answered by the mail server on its own address, over HTTPS — so this must "
                 + "resolve to the mail host, whose certificate covers the name."));
+        }
+
+        return records;
+    }
+
+    /// <summary>
+    /// The SPF value: the MX hosts, plus every address the server actually sends from.
+    ///
+    /// <para><c>mx</c> alone is the common recommendation and it is wrong for a mail server in a
+    /// cluster. It authorises what the MX records resolve to — the address other servers deliver
+    /// <em>to</em> — while outbound connections leave translated to a node's or a gateway's address.
+    /// The receiver evaluates SPF against an address no term matches and <c>-all</c> makes that a
+    /// hard fail.</para>
+    /// </summary>
+    public static string Spf(StalwartComponentConfig config)
+    {
+        IEnumerable<string> terms = SendingAddressesOf(config)
+            .Select(a => a.Contains(':', StringComparison.Ordinal) ? $"ip6:{a}" : $"ip4:{a}");
+
+        return string.Join(' ', ["v=spf1", "mx", .. terms, "-all"]);
+    }
+
+    /// <summary>The addresses an operator recorded as this server's outbound ones.</summary>
+    public static IReadOnlyList<string> SendingAddressesOf(StalwartComponentConfig config) =>
+        [.. (config.SendingIpAddresses ?? "")
+            .Split(['\n', '\r', ',', ' '], StringSplitOptions.RemoveEmptyEntries
+                                                  | StringSplitOptions.TrimEntries)];
+
+    /// <summary>
+    /// The DKIM records the operator copied off the mail server, one per line as
+    /// <c>selector value</c> or <c>selector: value</c>.
+    ///
+    /// <para>A line already naming <c>_domainkey</c> is taken as a complete record name and left
+    /// alone — that is what the server's own DNS page prints, and retyping it is where a selector
+    /// gets mangled.</para>
+    /// </summary>
+    public static IReadOnlyList<DnsRecord> DkimRecords(StalwartMailDomain domain)
+    {
+        string name = domain.Name.Trim().TrimEnd('.');
+
+        List<DnsRecord> records = [];
+
+        foreach (string line in (domain.DkimDnsRecords ?? "")
+                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int split = line.IndexOfAny([' ', '\t', ':']);
+
+            if (split <= 0)
+            {
+                continue;
+            }
+
+            string selector = line[..split].Trim().TrimEnd(':');
+            string value = line[(split + 1)..].Trim().TrimStart(':').Trim();
+
+            if (selector.Length == 0 || value.Length == 0)
+            {
+                continue;
+            }
+
+            records.Add(new(
+                selector.Contains("_domainkey", StringComparison.OrdinalIgnoreCase)
+                    ? selector
+                    : $"{selector}._domainkey.{name}",
+                "TXT",
+                value,
+                "DKIM — the public half of a key this server signs with. Unpublished, every "
+                + "signature fails as \"key not found in DNS\" and takes DMARC with it."));
         }
 
         return records;
