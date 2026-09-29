@@ -156,6 +156,7 @@ public class SupportMailboxService(
             // five failures could never be repaired by fixing the password.
             existing.ConsecutiveFailures = 0;
             existing.LastError = null;
+            existing.LastErrorWasRejection = false;
         }
 
         await db.SaveChangesAsync(ct);
@@ -636,6 +637,7 @@ public class SupportMailboxService(
             mailbox.LastPolledAt = DateTime.UtcNow;
             mailbox.LastError = null;
             mailbox.ConsecutiveFailures = 0;
+            mailbox.LastErrorWasRejection = false;
 
             if (taken > 0)
             {
@@ -662,6 +664,7 @@ public class SupportMailboxService(
 
             mailbox.LastPolledAt = DateTime.UtcNow;
             mailbox.LastError = explained;
+            mailbox.LastErrorWasRejection = ex is AuthenticationException;
 
             // A credential the server has not been given yet is not a failed attempt: none was made,
             // so nothing can be locked out by trying again. Counting it would back the mailbox off
@@ -1049,7 +1052,33 @@ public class SupportMailboxService(
                     or System.Net.Security.SslPolicyErrors.RemoteCertificateNameMismatch;
         }
 
-        await client.ConnectAsync(where.Host, where.Port, tls, ct);
+        try
+        {
+            await client.ConnectAsync(where.Host, where.Port, tls, ct);
+        }
+        catch (Exception ex) when (ex is System.Net.Sockets.SocketException or IOException)
+        {
+            // Name what could not be reached. For a mailbox on a managed server none of this was typed
+            // in — the host is derived from the component's release name and namespace — so an operator
+            // reading "Resource temporarily unavailable" has no way to know which name was tried, or
+            // that a name was involved at all. That address is also the assumption most likely to be
+            // wrong: it is only resolvable from inside the cluster the mail server runs in.
+            // The guidance belongs here, where which address was used is known. Named for the same
+            // reason either way: none of this was typed in, so an operator reading a socket error has no
+            // way to see which name was tried — but what to check differs, and a message explaining the
+            // in-cluster Service to somebody whose connection went out through the load balancer would
+            // send them to the wrong place.
+            throw new MailboxUnreachableException(
+                $"Could not reach {where.Host}:{where.Port} — {ex.Message}. "
+                + (where.ValidateCertificateName
+                    ? "That is the mail server's public hostname, which is the address a server "
+                      + "authenticating against OIDC has to be reached on. It has to resolve from here "
+                      + "and lead back to the mail server's load balancer."
+                    : "That is the mail server's in-cluster Service, built from the component's release "
+                      + "name and namespace, and it only resolves from inside the cluster that "
+                      + "component runs in."),
+                ex);
+        }
 
         if (where.UseOAuth)
         {
@@ -1075,7 +1104,23 @@ public class SupportMailboxService(
         AuthenticationException => $"The server rejected the username or password: {ex.Message}",
         SslHandshakeException => $"TLS failed — check the port and whether SSL should be on: {ex.Message}",
         FolderNotFoundException => $"No such folder: {ex.Message}",
-        ImapProtocolException => $"The server answered unexpectedly: {ex.Message}",
+
+        // A server that is waiting for something the client will never send looks exactly like this:
+        // the greeting never arrives, or arrives as bytes that are not a greeting. On a mail server
+        // with the PROXY protocol enabled that is the expected outcome of connecting from an address
+        // in its trusted-networks list, because Stalwart requires the header from every peer that
+        // matches — there is no per-listener exemption — and an IMAP client sends none.
+        // The message already names the address and what it is, decided where that was known.
+        MailboxUnreachableException => $"{ex.Message} Nothing was authenticated, so this is not the "
+            + "credential.",
+
+        ImapProtocolException or System.Net.Sockets.SocketException or IOException =>
+            $"Could not complete the connection: {ex.Message}. Nothing was authenticated, so this is "
+            + "not the credential. If the mail server has the PROXY protocol turned on, check that its "
+            + "trusted-networks list covers only the load balancer's own subnet — an entry that also "
+            + "matches addresses inside the cluster makes the server wait for a PROXY header on every "
+            + "connection from them, including this one.",
+
         OperationCanceledException => "The connection timed out.",
         _ => ex.Message,
     };

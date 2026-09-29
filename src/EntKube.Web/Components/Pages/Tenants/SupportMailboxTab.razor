@@ -76,9 +76,28 @@
                 @if (saved.ConsecutiveFailures >= SupportMailboxService.FailuresBeforeBackingOff)
                 {
                     <div class="mt-1">
-                        @saved.ConsecutiveFailures failures in a row, so fetching has stopped —
-                        repeatedly presenting a password a server is rejecting is how an account
-                        gets locked. Saving these settings again starts it.
+                        @saved.ConsecutiveFailures failures in a row, so fetching has stopped.
+                        @* Why it stopped depends on what failed, and the old wording said "a server is
+                           rejecting the password" for every failure — including ones where no password
+                           was ever presented, such as a connection that never completed. Asserting a
+                           cause it does not know sent two debugging sessions after the credential while
+                           the error above said the connection had failed. *@
+                        @if (saved.LastErrorWasRejection)
+                        {
+                            <text>
+                                The credential was rejected, and presenting one a server refuses is how
+                                an account gets locked.
+                            </text>
+                        }
+                        else
+                        {
+                            <text>
+                                Nothing was rejected — the attempt above did not get as far as
+                                authenticating, so the fault is in reaching the server rather than in the
+                                credential.
+                            </text>
+                        }
+                        Saving these settings again starts it.
                     </div>
                 }
                 @if (!hasPassword)

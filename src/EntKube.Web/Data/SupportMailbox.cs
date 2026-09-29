@@ -155,6 +155,18 @@ public class SupportMailbox
 
     public int ConsecutiveFailures { get; set; }
 
+    /// <summary>
+    /// Whether the last failure was the server refusing the credential, as opposed to the attempt not
+    /// reaching that point.
+    ///
+    /// <para>Stored rather than inferred from <see cref="LastError"/>, because the screen has to say why
+    /// fetching stopped and the two reasons need opposite advice. It used to say a password was being
+    /// rejected whatever had happened — including a connection that never completed and presented no
+    /// password at all — which sent two debugging sessions after the credential while the error text
+    /// beside it said the connection had failed.</para>
+    /// </summary>
+    public bool LastErrorWasRejection { get; set; }
+
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
 
     public DateTime UpdatedAt { get; set; } = DateTime.UtcNow;

@@ -290,6 +290,55 @@ public static class StalwartPlanBuilder
                 .ToList();
 
     /// <summary>
+    /// Whether a trusted-networks entry covers this address.
+    ///
+    /// <para>Used to catch the misconfiguration that has no per-listener escape. Stalwart requires a
+    /// PROXY header from every peer matching <c>proxyTrustedNetworks</c>, on every listener — the
+    /// listener-level override inherits the global list when it is empty, so there is no way to say
+    /// "not on this port". An entry that also matches addresses inside the cluster therefore makes the
+    /// server wait for a header that in-cluster clients never send: the support mailbox poller, webmail,
+    /// and the admin UI and JMAP arriving through the gateway. The list has to name the load balancer's
+    /// own subnet and nothing wider.</para>
+    /// </summary>
+    public static bool TrustedNetworkCovers(string network, System.Net.IPAddress address)
+    {
+        string text = (network ?? "").Trim();
+        int slash = text.LastIndexOf('/');
+
+        if (!System.Net.IPAddress.TryParse(slash < 0 ? text : text[..slash].Trim(),
+                out System.Net.IPAddress? prefixAddress))
+        {
+            return false;
+        }
+
+        if (prefixAddress.AddressFamily != address.AddressFamily)
+        {
+            return false;
+        }
+
+        if (slash < 0)
+        {
+            return prefixAddress.Equals(address);
+        }
+
+        if (!int.TryParse(text[(slash + 1)..].Trim(), out int prefix))
+        {
+            return false;
+        }
+
+        try
+        {
+            return new System.Net.IPNetwork(prefixAddress, prefix).Contains(address);
+        }
+        catch (ArgumentException)
+        {
+            // A prefix length the family cannot carry. Not ours to report here — the plan refuses it
+            // separately — and certainly not a reason to throw out of a diagnostic.
+            return false;
+        }
+    }
+
+    /// <summary>
     /// Hands a tag back to the rule set's own score, undoing a previous override.
     ///
     /// <para>Removing the override object would be the obvious way and is the wrong one: the plan
@@ -429,7 +478,20 @@ public static class StalwartPlanBuilder
         bool fileCert = config.TlsMode is StalwartTlsMode.ClusterIssuer or StalwartTlsMode.Manual;
         if (fileCert)
         {
-            lines.Add(Op("upsert", "Certificate", MatchAll, new()
+            // reconcile, not upsert: the certificate set becomes exactly this one.
+            //
+            // An upsert only ever adds. Nothing removed the certificates left behind by earlier
+            // configurations — a different TLS mode, an earlier install against the same datastore, a
+            // hostname that has since changed — so they accumulated, and a live server reached five of
+            // them and said so on every handshake: "Multiple TLS certificates available, total = 5".
+            // Stalwart then has to choose, and a wrong choice is served as a name mismatch on a server
+            // whose configuration looks right. The support mailbox now connects on the public hostname
+            // and checks the name, so that choice stopped being cosmetic.
+            //
+            // Only in the modes where EntKube owns the certificate. Under ACME Stalwart obtains and
+            // renews its own, and replacing the set would delete them — which is why this is inside the
+            // file-backed branch rather than emitted unconditionally with an empty set for ACME.
+            lines.Add(Op("reconcile", "Certificate", MatchAll, new()
             {
                 ["cert"] = new Dictionary<string, object?>
                 {

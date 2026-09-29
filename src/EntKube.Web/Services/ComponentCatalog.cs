@@ -3216,7 +3216,7 @@ public static class ComponentCatalog
                     YamlPath = "stalwart:proxy-trusted-networks", Type = FormFieldType.Text,
                     Placeholder = "10.240.3.0/24, 10.240.4.0/24",
                     DependsOnKey = "proxy-protocol", DependsOnValue = "true",
-                    HelpText = "Addresses or CIDRs, comma separated — the balancer's own subnet, never every private range: anything listed here can claim to be any sender. Leave it blank and the protocol is not configured on either side, because this list is what enables it."
+                    HelpText = "Addresses or CIDRs, comma separated — the balancer's own subnet, never every private range and never the pod network. Two reasons: anything listed here can claim to be any sender, and Stalwart demands a PROXY header from every address it trusts on every port with no way to exempt one — so an entry reaching into the cluster stops the support mailbox, webmail and the admin interface connecting at all. Leave it blank and the protocol is not configured on either side, because this list is what enables it."
                 },
                 new ComponentFormField
                 {
