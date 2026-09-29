@@ -464,6 +464,12 @@ else
     /// </summary>
     private static readonly TreeGroup[] SupportGroups =
     [
+        // First, because it is the section's own subject: a queue of people waiting for an answer.
+        // It used to be reachable only by opening Manage, picking a customer and finding a button
+        // among five others — which crowded a page about applications and gave no way to ask the
+        // question an operator actually has, which is whose ticket runs out first across all of them.
+        new("Tickets", "bi-life-preserver",
+        [ new("tickets", "Ticket queue", "bi-life-preserver") ]),
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
@@ -945,6 +951,7 @@ else
             case "support-inbox": builder.OpenComponent<SupportInbox>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-mailbox": builder.OpenComponent<SupportMailboxTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "mail-triage": builder.OpenComponent<MailTriageRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "tickets": builder.OpenComponent<TicketQueue>(0); builder.AddComponentParameter(1, "TenantId", (Guid?)tid); builder.CloseComponent(); break;
             case "ticket-bridge": builder.OpenComponent<TicketBridgeTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "incidents":
                 builder.OpenComponent<IncidentManagement>(0);

@@ -667,6 +667,38 @@ public class TicketService(
     }
 
     /// <summary>
+    /// Every open ticket for a tenant, worst first, whichever customer reported it.
+    ///
+    /// <para>The queue an operator actually works from. Per customer, the same question needed one
+    /// drill-in per customer and gave no way to see which ticket across all of them runs out first —
+    /// which is the only ordering that matters when one person is answering all of them.</para>
+    ///
+    /// <para>The customer comes back with each row, because a queue spanning customers has to say whose
+    /// ticket each one is, and asking per row would be a query per ticket.</para>
+    /// </summary>
+    public async Task<List<TicketSlaStatus>> GetTenantQueueAsync(
+        Guid tenantId, DateTime now, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        List<Ticket> open = await db.Tickets
+            .Include(t => t.Pauses)
+            // §14.4's update clock reads the customer-visible events; without them
+            // every ticket looks as though nobody has said anything since it arrived.
+            .Include(t => t.Events)
+            .Include(t => t.Customer)
+            .AsNoTracking()
+            .Where(t => t.TenantId == tenantId
+                        && t.Status != TicketStatus.Closed
+                        && t.Status != TicketStatus.Rejected)
+            .OrderBy(t => t.Priority)
+            .ThenBy(t => t.ReportedAt)
+            .ToListAsync(ct);
+
+        return [.. open.Select(t => StatusOf(t, now))];
+    }
+
+    /// <summary>
     /// Tickets reported in a period, for the monthly report of §16.1 and the SLA figures of
     /// §14.6.
     /// </summary>

@@ -5,9 +5,14 @@
 @inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
-   The open queue for one customer, worst first, with every §14.4 clock
-   shown as time remaining rather than as a timestamp — what an operator
-   needs to know is which one runs out first.
+   The open queue, worst first, with every §14.4 clock shown as time
+   remaining rather than as a timestamp — what an operator needs to know
+   is which one runs out first.
+
+   Either one customer's tickets or a whole tenant's. The tenant-wide
+   shape is the one an operator works from: one person answers every
+   customer, and "which ticket runs out first" is a question that only has
+   an answer across all of them.
    ═══════════════════════════════════════════════════════════════════ *@
 
 @if (selectedTicketId is not null)
@@ -28,14 +33,31 @@ else
                 Response and resolution times run inside each application's support window (§14.4).
             </div>
         </div>
-        <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync">
-            <i class="bi bi-arrow-clockwise me-1"></i>Refresh
-        </button>
+        <div class="d-flex gap-2 align-items-center">
+            @* Only when there is something to narrow. A queue that is already one customer's has
+               nothing to choose between, and a filter offering one option is furniture. *@
+            @if (spansCustomers && customers.Count > 1)
+            {
+                <select class="form-select form-select-sm" style="width: auto"
+                        value="@(customerFilter?.ToString() ?? "")"
+                        @onchange="OnCustomerFilterChanged">
+                    <option value="">All customers (@queue.Count)</option>
+                    @foreach ((Guid id, string name, int count) in customers)
+                    {
+                        <option value="@id">@name (@count)</option>
+                    }
+                </select>
+            }
+            <button class="btn btn-sm btn-outline-secondary" @onclick="LoadAsync">
+                <i class="bi bi-arrow-clockwise me-1"></i>Refresh
+            </button>
+        </div>
     </div>
 
-    @if (queue.Count == 0)
+    @if (visible.Count == 0)
     {
-        <EmptyState Icon="bi-check2-circle" Title="Nothing open" Message="No tickets are waiting." />
+        <EmptyState Icon="bi-check2-circle" Title="Nothing open"
+                    Message="@(queue.Count == 0 ? "No tickets are waiting." : "No tickets are waiting for this customer.")" />
     }
     else
     {
@@ -56,6 +78,10 @@ else
                         <th>#</th>
                         <th>Prio</th>
                         <th>Ticket</th>
+                        @if (spansCustomers)
+                        {
+                            <th>Customer</th>
+                        }
                         <th>Status</th>
                         <th>Response</th>
                         <th>Resolution</th>
@@ -64,7 +90,7 @@ else
                     </tr>
                 </thead>
                 <tbody>
-                    @foreach (TicketSlaStatus row in queue)
+                    @foreach (TicketSlaStatus row in visible)
                     {
                         <tr class="@RowClass(row)" style="cursor: pointer"
                             @onclick="() => selectedTicketId = row.Ticket.Id">
@@ -96,6 +122,10 @@ else
                                     }
                                 </div>
                             </td>
+                            @if (spansCustomers)
+                            {
+                                <td class="small">@(row.Ticket.Customer?.Name ?? "—")</td>
+                            }
                             <td>
                                 <span class="badge @StatusClass(row.Ticket.Status)">@row.Ticket.Status</span>
                                 @if (row.Ticket.Assignee is string holder)
@@ -153,7 +183,13 @@ else
 }
 
 @code {
-    [Parameter, EditorRequired] public Guid CustomerId { get; set; }
+    /// <summary>One customer's queue. Leave unset and <see cref="TenantId"/> is used instead.</summary>
+    [Parameter] public Guid? CustomerId { get; set; }
+
+    /// <summary>
+    /// Every customer's queue, for the tenant. Ignored when <see cref="CustomerId"/> is set.
+    /// </summary>
+    [Parameter] public Guid? TenantId { get; set; }
 
     private bool loading = true;
     private string? error;
@@ -161,7 +197,27 @@ else
     private List<TicketSlaStatus> queue = [];
     private Guid? selectedTicketId;
 
-    private List<TicketSlaStatus> breaching => [.. queue.Where(q => q.IsPenaltyDeviation)];
+    /// <summary>Which customer's rows to show, when the queue spans several. Null is all of them.</summary>
+    private Guid? customerFilter;
+
+    /// <summary>Whose ticket each row is only needs saying when the rows are not all one customer's.</summary>
+    private bool spansCustomers => CustomerId is null && TenantId is not null;
+
+    private List<TicketSlaStatus> visible => customerFilter is Guid only
+        ? [.. queue.Where(q => q.Ticket.CustomerId == only)]
+        : queue;
+
+    private List<(Guid Id, string Name, int Count)> customers => [.. queue
+        .GroupBy(q => q.Ticket.CustomerId)
+        .Select(g => (g.Key, g.First().Ticket.Customer?.Name ?? "Unknown", g.Count()))
+        .OrderBy(c => c.Item2, StringComparer.OrdinalIgnoreCase)];
+
+    // Counted over what is shown: a filtered view claiming a breach that is not in it would send an
+    // operator looking for a row that is not there.
+    private List<TicketSlaStatus> breaching => [.. visible.Where(q => q.IsPenaltyDeviation)];
+
+    private void OnCustomerFilterChanged(ChangeEventArgs e) =>
+        customerFilter = Guid.TryParse(e.Value?.ToString(), out Guid id) ? id : null;
 
     protected override async Task OnParametersSetAsync() => await LoadAsync();
 
@@ -173,7 +229,11 @@ else
         try
         {
             now = DateTime.UtcNow;
-            queue = await Tickets.GetOpenQueueAsync(CustomerId, now);
+            queue = CustomerId is Guid customer
+                ? await Tickets.GetOpenQueueAsync(customer, now)
+                : TenantId is Guid tenant
+                    ? await Tickets.GetTenantQueueAsync(tenant, now)
+                    : [];
         }
         catch (Exception ex)
         {

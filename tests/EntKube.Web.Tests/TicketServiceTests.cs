@@ -472,6 +472,92 @@ public class TicketServiceTests : IDisposable
         queue[0].Ticket.Id.Should().Be(urgent.Id);
     }
 
+    /// <summary>
+    /// The tenant's queue spans customers and is still worst first.
+    ///
+    /// <para>The ordering is the whole reason it exists. One person answers every customer, so "which
+    /// clock runs out first" has no answer inside a single customer's queue — which is all there was
+    /// before, reachable by opening Manage, picking a customer, and finding a button among five others
+    /// on a page about their applications.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_tenant_queue_spans_customers_worst_first()
+    {
+        // A second customer with its own application and contract, so the queue has something to span.
+        Guid otherCustomerId = Guid.NewGuid();
+        Guid otherAppId = Guid.NewGuid();
+
+        db.Customers.Add(new Customer { Id = otherCustomerId, TenantId = tenantId, Name = "Anna AB" });
+        db.Apps.Add(new App { Id = otherAppId, CustomerId = otherCustomerId, Name = "Journal" });
+        AddContract(otherAppId, SupportWindow.S1);
+        await db.SaveChangesAsync();
+
+        await Raise(s1AppId, TicketPriority.P3, Tue(9));
+
+        Ticket urgent = await tickets.CreateAsync(
+            tenantId, otherCustomerId, otherAppId, "Down", "Nobody can get in.",
+            TicketChannel.Portal, TicketPriority.P1, Tue(10),
+            "Customer technical contact", "tech@anna.example");
+
+        Ticket done = await Raise(s1AppId, TicketPriority.P2, Tue(11));
+        await tickets.CloseAsync(done.Id, "nils", Tue(12));
+
+        List<TicketSlaStatus> queue = await tickets.GetTenantQueueAsync(tenantId, Tue(13));
+
+        queue.Should().HaveCount(2, "the closed one is finished and is not waiting for anybody");
+
+        // The other customer's P1 outranks this customer's P3, which is the ordering a per-customer
+        // queue cannot express.
+        queue[0].Ticket.Id.Should().Be(urgent.Id);
+        queue[0].Ticket.CustomerId.Should().Be(otherCustomerId);
+
+        // The customer comes back with the row: a queue spanning customers has to say whose ticket each
+        // one is, and asking per row would be a query per ticket.
+        queue.Should().OnlyContain(q => q.Ticket.Customer != null);
+        queue[0].Ticket.Customer.Name.Should().Be("Anna AB");
+    }
+
+    /// <summary>
+    /// Another tenant's tickets are not in it. Obvious, and the one mistake here that would show one
+    /// customer's support traffic to a different tenant's operator.
+    /// </summary>
+    [Fact]
+    public async Task The_tenant_queue_holds_nothing_from_another_tenant()
+    {
+        Guid otherTenantId = Guid.NewGuid();
+        Guid otherCustomerId = Guid.NewGuid();
+        Guid otherAppId = Guid.NewGuid();
+
+        db.Tenants.Add(new Tenant { Id = otherTenantId, Name = "Other", Slug = "other" });
+        db.Customers.Add(new Customer { Id = otherCustomerId, TenantId = otherTenantId, Name = "Other AB" });
+        db.Apps.Add(new App { Id = otherAppId, CustomerId = otherCustomerId, Name = "Theirs" });
+
+        ApplicationContract contract = new()
+        {
+            Id = Guid.NewGuid(), TenantId = otherTenantId, AppId = otherAppId,
+            Origin = ContractOrigin.ExternallyDeveloped, OnboardedAt = Swedish(2026, 1, 1),
+        };
+        contract.ServiceLevels.Add(new ApplicationServiceLevel
+        {
+            Id = Guid.NewGuid(), ApplicationContractId = contract.Id,
+            Level = ManagementLevel.Standard, SupportWindow = SupportWindow.S1,
+            EffectiveFrom = Swedish(2026, 1, 1), Reason = "On-boarding",
+        });
+        db.ApplicationContracts.Add(contract);
+        await db.SaveChangesAsync();
+
+        await tickets.CreateAsync(
+            otherTenantId, otherCustomerId, otherAppId, "Theirs", "Not ours.",
+            TicketChannel.Portal, TicketPriority.P1, Tue(10), "Their contact", "them@example.org");
+
+        await Raise(s1AppId, TicketPriority.P3, Tue(9));
+
+        List<TicketSlaStatus> queue = await tickets.GetTenantQueueAsync(tenantId, Tue(13));
+
+        queue.Should().ContainSingle();
+        queue[0].Ticket.CustomerId.Should().Be(customerId);
+    }
+
     [Fact]
     public async Task A_period_report_covers_what_was_reported_in_it()
     {

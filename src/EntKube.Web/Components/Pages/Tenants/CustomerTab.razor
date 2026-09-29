@@ -38,10 +38,6 @@ else if (selectedCustomer is not null)
             </div>
         </div>
         <div class="d-flex gap-2">
-            <button class="btn btn-sm @(customerView == "tickets" ? "btn-primary" : "btn-outline-secondary")"
-                    @onclick="OpenCustomerTickets">
-                <i class="bi bi-life-preserver me-1"></i>Tickets
-            </button>
             <button class="btn btn-sm @(customerView == "hours" ? "btn-primary" : "btn-outline-secondary")"
                     @onclick="OpenCustomerHours">
                 <i class="bi bi-stopwatch me-1"></i>Hours
@@ -74,14 +70,6 @@ else if (selectedCustomer is not null)
         <div class="card shadow-sm mb-4">
             <div class="card-body">
                 <TimebankPanel CustomerId="selectedCustomer.Id" />
-            </div>
-        </div>
-    }
-    else if (customerView == "tickets")
-    {
-        <div class="card shadow-sm mb-4">
-            <div class="card-body">
-                <TicketQueue CustomerId="selectedCustomer.Id" />
             </div>
         </div>
     }
@@ -521,9 +509,10 @@ else
     private void OpenCustomerHours() =>
         customerView = customerView == "hours" ? "apps" : "hours";
 
-    /// <summary>The §14 queue for this customer — what is open and which clock runs out first.</summary>
-    private void OpenCustomerTickets() =>
-        customerView = customerView == "tickets" ? "apps" : "tickets";
+    // The §14 queue used to be one of the buttons above. It lives under Support › Tickets now, across
+    // every customer: this page is about a customer's applications, a queue of people waiting is not,
+    // and "which clock runs out first" has no answer inside one customer when one person answers all of
+    // them. The queue there filters by customer, so nothing that was reachable here has been lost.
 
     /// <summary>Annex B and C for this customer's portfolio, plus the people the agreement names.</summary>
     private void OpenCustomerContract() =>
