@@ -86,6 +86,40 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
                 new ClaimsIdentity([new Claim(ClaimTypes.Name, name)], "test"))));
     }
 
+    /// <summary>The tenant's mailbox, set to answer a new report as it arrives.</summary>
+    private void AnswerOnArrival()
+    {
+        db.SupportMailboxes.Add(new SupportMailbox
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            Host = "mail.entit.se",
+            Username = "support@entit.se",
+            Address = "support@entit.se",
+            IsEnabled = true,
+            AcknowledgeOnArrival = true,
+        });
+
+        db.SaveChanges();
+    }
+
+    /// <summary>Somebody named in the agreement, so their mail is placed without a caveat.</summary>
+    private async Task KnownContact()
+    {
+        db.ContractContacts.Add(new ContractContact
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customerId,
+            Party = ContractParty.Customer,
+            Role = ContractContactRole.TechnicalContact,
+            Name = "Karin",
+            Email = "karin@entit.example",
+        });
+
+        await db.SaveChangesAsync();
+    }
+
     private Task<InboundMailMessage?> Receive(string subject, string body, string from) =>
         mail.IngestAsync(new InboundMailMessage
         {
@@ -149,6 +183,86 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
     }
 
     // ---- The way out of a dead end ------------------------------------------------------------
+
+    // ---- What the mailbox did before anyone looked --------------------------------------------
+
+    /// <summary>
+    /// A message the mailbox answered by itself has to say so on the card. The operator
+    /// picking the thread up is otherwise reading an ordinary queue entry with no sign that
+    /// the customer has already been written to — and the one thing on this screen they
+    /// could send twice is a receipt.
+    /// </summary>
+    [Fact]
+    public async Task A_message_answered_on_arrival_says_so_and_shows_the_number()
+    {
+        AnswerOnArrival();
+        await KnownContact();
+
+        await Receive("Journalportalen svarar inte", "Ingen kommer in.", "karin@entit.example");
+
+        // Handled messages are out of the default view, which is itself the point — this is
+        // the queue with "show handled" on.
+        IRenderedComponent<SupportInbox> inbox = RenderInbox();
+        await inbox.InvokeAsync(() => inbox.Find("#handled").Change(true));
+
+        db.ChangeTracker.Clear();
+        Ticket ticket = db.Tickets.Single();
+
+        inbox.Markup.Should().Contain("Answered as it arrived");
+        inbox.Markup.Should().Contain($"[#{ticket.Number}]");
+
+        // And that the priority is still nobody's decision.
+        inbox.Markup.Should().Contain("unconfirmed");
+    }
+
+    /// <summary>
+    /// The drafted acknowledgement was written before the mailbox sent one of its own.
+    /// Offering it as something to send would acknowledge the same person twice, with two
+    /// different wordings.
+    /// </summary>
+    [Fact]
+    public async Task The_draft_receipt_is_not_offered_once_one_has_been_sent()
+    {
+        AnswerOnArrival();
+        await KnownContact();
+
+        await Receive("Fel", "Det fungerar inte.", "karin@entit.example");
+
+        IRenderedComponent<SupportInbox> inbox = RenderInbox();
+        await inbox.InvokeAsync(() => inbox.Find("#handled").Change(true));
+
+        // Fragments that survive the line breaks Razor keeps from the template.
+        inbox.Markup.Should().Contain("already been acknowledged");
+        inbox.Markup.Should().Contain("kept as what would have been said");
+        inbox.Markup.Should().NotContain("Nothing is sent from here");
+    }
+
+    /// <summary>
+    /// A report the mailbox declined to answer because it came from a program looks, on the
+    /// card, exactly like one it simply has not got to. The badge is the difference.
+    /// </summary>
+    [Fact]
+    public async Task Mail_from_a_program_is_marked_as_such_in_the_queue()
+    {
+        AnswerOnArrival();
+        await KnownContact();
+
+        await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = "karin@entit.example",
+            Subject = "Automatiskt svar: Journalportalen svarar inte",
+            Body = "Jag är tillbaka på måndag.",
+            SentAt = new DateTime(2026, 9, 22, 8, 0, 0, DateTimeKind.Utc),
+            IsMachineGenerated = true,
+        });
+
+        IRenderedComponent<SupportInbox> inbox = RenderInbox();
+
+        inbox.Markup.Should().Contain("sent by a program");
+        db.Tickets.Should().BeEmpty("a receipt to a program can be answered by the program");
+    }
 
     /// <summary>
     /// An unrecognised sender has to be placeable from the queue. The suggestion has always

@@ -329,6 +329,10 @@ public class SupportMailService(
         IQueryable<InboundMailMessage> query = db.InboundMailMessages
             .Include(m => m.Suggestions)
             .Include(m => m.Customer)
+            // The ticket, so a message answered on arrival can show the number the sender
+            // was given. Without it the queue can say a receipt went out but not what it
+            // said, which is the one thing an operator picking the thread up needs.
+            .Include(m => m.Ticket)
             .AsNoTracking()
             .Where(m => m.TenantId == tenantId);
 

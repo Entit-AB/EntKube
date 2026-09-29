@@ -11,6 +11,12 @@
    The support mailbox, with what the analyst suggests doing about each
    message. Everything here is a proposal: accepting one is what makes
    it happen, and your name goes on it.
+
+   The exception is a fault report from a recorded contact, which
+   ArrivalPolicy opens as it arrives so the sender has a number to
+   quote. Those are already handled when this screen first sees them,
+   and say so on the card — because a receipt the operator did not send
+   is the one thing here they could otherwise send twice.
    ═══════════════════════════════════════════════════════════════════ *@
 
 <LoadingPanel Loading="@loading" Error="@error">
@@ -21,7 +27,9 @@
             <h6 class="mb-0">Support inbox</h6>
             <div class="text-muted small">
                 Suggestions, not decisions. §14.3 makes confirming a priority a written act — the
-                reasoning is shown so you can disagree with it.
+                reasoning is shown so you can disagree with it. A report from a recorded contact
+                has already been given its number; the priority on it is still theirs and still
+                unconfirmed.
             </div>
         </div>
         <div class="d-flex gap-2 align-items-center">
@@ -61,6 +69,16 @@
                                         @message.Customer.Name
                                     </span>
                                 }
+                                @if (message.IsMachineGenerated)
+                                {
+                                    @* Why this one was not answered by itself. Without it the
+                                       operator is looking at an ordinary-looking report that the
+                                       mailbox silently declined to acknowledge. *@
+                                    <span class="badge bg-light text-dark border ms-1"
+                                          title="Auto-Submitted, Precedence, a list header or a null return path — so a receipt could be answered by another machine.">
+                                        sent by a program
+                                    </span>
+                                }
                             </div>
                         </div>
                         <div class="text-end">
@@ -76,6 +94,32 @@
                     </div>
                 </div>
                 <div class="card-body py-2">
+                    @* ── Answered on arrival, before anyone read it ── *@
+                    @if (message.HandledBy == ArrivalPolicy.Actor)
+                    {
+                        <div class="alert alert-success py-2 small">
+                            <span class="bi bi-send-check me-1"></span>
+                            <strong>Answered as it arrived.</strong>
+                            @if (message.Ticket is not null)
+                            {
+                                <span>
+                                    Ticket [#@message.Ticket.Number] was opened and the receipt went
+                                    out from the support address, with the reference in the subject
+                                    and the instruction to keep it there.
+                                </span>
+                            }
+                            else
+                            {
+                                <span>
+                                    A ticket was opened and the receipt went out from the support
+                                    address.
+                                </span>
+                            }
+                            The priority on it is the one they reported, unconfirmed — §14.3 still
+                            wants that in writing, with the reason.
+                        </div>
+                    }
+
                     @* ── Nobody recognised the sender ── *@
                     @if (message.CustomerId is null
                          && message.State is MailTriageState.Received or MailTriageState.Proposed)
@@ -182,8 +226,23 @@
                                              style="white-space: pre-wrap; font-size: .8rem">@suggestion.DraftText</pre>
                                         <div class="text-muted mt-1" style="font-size: .75rem">
                                             <i class="bi bi-info-circle me-1"></i>
-                                            A draft. Nothing is sent from here — copy it, or send it from
-                                            the ticket once you are happy with it.
+                                            @if (suggestion.Kind == MailSuggestionKind.DraftReply
+                                                 && message.HandledBy == ArrivalPolicy.Actor)
+                                            {
+                                                <text>
+                                                    The sender has already been acknowledged, with the
+                                                    ticket number — this draft was written before that
+                                                    happened and sending it would acknowledge them
+                                                    twice. It is kept as what would have been said.
+                                                </text>
+                                            }
+                                            else
+                                            {
+                                                <text>
+                                                    A draft. Nothing is sent from here — copy it, or send
+                                                    it from the ticket once you are happy with it.
+                                                </text>
+                                            }
                                         </div>
                                     }
                                 </div>
