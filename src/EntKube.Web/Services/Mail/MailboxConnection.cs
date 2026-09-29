@@ -42,35 +42,60 @@ public static class MailboxConnectionResolver
     /// implicit is the one worth making: a support mailbox carries a customer's own account of their
     /// own systems, and STARTTLS can be stripped by anything on the path. Null when IMAP is off
     /// altogether, because then there is nothing to connect to.</para>
+    ///
+    /// <para><b>Which address depends on how the server authenticates.</b> See
+    /// <see cref="ReachedByPublicHostname"/>: a server whose directory is OIDC has to be reached on its
+    /// public hostname even from inside its own cluster, and the in-cluster Service name is right for
+    /// one that checks passwords itself.</para>
     /// </summary>
     public static MailboxConnection? Resolve(
         StalwartComponentConfig config, ClusterComponent component, StalwartMailAccount account,
         StalwartMailDomain domain)
     {
-        string releaseName = component.ReleaseName ?? component.Name;
-        string ns = component.Namespace ?? StalwartService.DefaultNamespace;
-
-        // The internal Service, not the public hostname: the poller is in the same cluster, and going
-        // out through the gateway and back would depend on DNS, the load balancer and a certificate
-        // chain for a connection that needs none of them.
-        string host = $"{releaseName}.{ns}.svc.cluster.local";
-
         if (!config.ImapEnabled)
         {
             return null;
         }
 
+        bool publicHostname = ReachedByPublicHostname(config);
+
+        string releaseName = component.ReleaseName ?? component.Name;
+        string ns = component.Namespace ?? StalwartService.DefaultNamespace;
+
         return new MailboxConnection(
-            Host: host,
+            Host: publicHostname
+                ? config.Hostname.Trim()
+                : $"{releaseName}.{ns}.svc.cluster.local",
             Port: MailPorts.Imaps,
             UseSsl: true,
             Username: $"{account.LocalPart.Trim().ToLowerInvariant()}@{domain.Name.Trim().ToLowerInvariant()}",
             // A password is unverifiable against an OIDC directory, whatever is stored on the account,
             // so the credential type follows the server's auth mode rather than being configured.
             UseOAuth: config.AuthMode == StalwartAuthMode.Oidc,
-            // Reached by a Service name, presented a certificate for the mail hostname.
-            ValidateCertificateName: false);
+            // On the public hostname the certificate is for the name being used, so the ordinary check
+            // applies. By Service name it cannot match, and insisting would fail a healthy handshake.
+            ValidateCertificateName: publicHostname);
     }
+
+    /// <summary>
+    /// Whether to reach this server on its public hostname rather than its in-cluster Service.
+    ///
+    /// <para>The in-cluster Service is the better address when it works: no dependency on public DNS,
+    /// the load balancer, or a certificate chain, for a connection that never leaves the cluster. But
+    /// it does not work for a server whose directory is OIDC — that has to be reached on the public
+    /// hostname even from inside its own cluster, which is an operational fact about how these
+    /// deployments authenticate rather than something derivable from the component.</para>
+    ///
+    /// <para>The public hostname has two properties worth having in its own right, and both of them
+    /// stop being coincidences once it is the address in use. The certificate is issued for that name,
+    /// so the name check can be applied instead of waived. And it is the only path a PROXY header
+    /// exists on: Stalwart demands one from every peer inside <c>proxyTrustedNetworks</c>, on every
+    /// listener, with no way to exempt one — so a connection made to the Service name from a pod the
+    /// server trusts as a proxy stalls waiting for a header an IMAP client never sends.</para>
+    /// </summary>
+    public static bool ReachedByPublicHostname(StalwartComponentConfig config) =>
+        config.AuthMode == StalwartAuthMode.Oidc
+        && !string.IsNullOrWhiteSpace(config.Hostname);
 
     /// <summary>
     /// The connection for a mailbox somebody typed in — a customer's own server, or one EntKube did
