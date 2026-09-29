@@ -17,6 +17,53 @@ public class SupportMessageIdTests
     public void An_identifier_we_wrote_gives_its_ticket_number_back() =>
         SupportMessageId.TicketNumberIn(SupportMessageId.For(1042)).Should().Be(1042);
 
+    // ---- The right-hand side ----------------------------------------------------------------
+
+    /// <summary>
+    /// <b>It has to be a domain that exists.</b> It used to be the bare word "entkube",
+    /// which resolves to nothing and matches no From address — one of the oldest and
+    /// cheapest signals a filter has that a message came from something which does not send
+    /// much mail. Spent at exactly the moment a receipt is being judged by a mailbox that
+    /// has never heard of us, which is every first receipt.
+    /// </summary>
+    [Fact]
+    public void The_identifier_is_built_from_the_sending_domain() =>
+        SupportMessageId.For(1042, "support@entit.se").Should().EndWith("@entit.se");
+
+    /// <summary>The domain is taken as it is written, not as it was typed.</summary>
+    [Fact]
+    public void The_domain_is_lower_cased() =>
+        SupportMessageId.For(7, "Support@ENTIT.se").Should().EndWith("@entit.se");
+
+    /// <summary>
+    /// Nothing usable falls back to the old word rather than inventing a domain. A receipt
+    /// that threads is worth more than one that scores well.
+    /// </summary>
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("not-an-address")]
+    [InlineData("trailing@")]
+    [InlineData("no-dot@localhost")]
+    public void Without_a_usable_domain_the_old_word_stands(string? from) =>
+        SupportMessageId.For(7, from).Should().EndWith($"@{SupportMessageId.LegacyDomain}");
+
+    /// <summary>
+    /// <b>Every identifier already sent keeps the domain it went out with</b> — including
+    /// the bare word, which is in the inbox of everyone who has ever reported a fault here.
+    /// Their replies thread on it, so it is read for as long as those tickets live.
+    /// </summary>
+    [Fact]
+    public void An_identifier_sent_under_the_old_word_still_threads() =>
+        SupportMessageId.TicketNumberIn("ticket-1042.abcdef01234567890123456789abcdef@entkube")
+            .Should().Be(1042);
+
+    /// <summary>And one sent from an address the tenant has since changed away from.</summary>
+    [Fact]
+    public void An_identifier_sent_from_a_former_address_still_threads() =>
+        SupportMessageId.TicketNumberIn("ticket-9.abcdef01234567890123456789abcdef@old.entit.se")
+            .Should().Be(9);
+
     /// <summary>
     /// The same ticket sends several messages, and two sharing an identifier would confuse
     /// any client that threads properly.
@@ -38,6 +85,9 @@ public class SupportMessageIdTests
     [Theory]
     [InlineData("CAB1234@mail.entit.example")]
     [InlineData("ticket-1042@some-other-helpdesk.example")]
+    [InlineData("ticket-1042.notahexguid@entit.se")]
+    [InlineData("ticket-1042.abcdef01234567890123456789abcdef@entit se")]
+    [InlineData("ticket-1042.abcdef01234567890123456789abcdef")]
     [InlineData("ticket-1042.notahexguid@entkube")]
     [InlineData("ticket-.abcdef01234567890123456789abcdef@entkube")]
     [InlineData("prefix-ticket-1042.abcdef01234567890123456789abcdef@entkube")]
