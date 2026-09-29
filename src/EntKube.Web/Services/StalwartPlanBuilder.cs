@@ -478,7 +478,20 @@ public static class StalwartPlanBuilder
         bool fileCert = config.TlsMode is StalwartTlsMode.ClusterIssuer or StalwartTlsMode.Manual;
         if (fileCert)
         {
-            lines.Add(Op("upsert", "Certificate", MatchAll, new()
+            // reconcile, not upsert: the certificate set becomes exactly this one.
+            //
+            // An upsert only ever adds. Nothing removed the certificates left behind by earlier
+            // configurations — a different TLS mode, an earlier install against the same datastore, a
+            // hostname that has since changed — so they accumulated, and a live server reached five of
+            // them and said so on every handshake: "Multiple TLS certificates available, total = 5".
+            // Stalwart then has to choose, and a wrong choice is served as a name mismatch on a server
+            // whose configuration looks right. The support mailbox now connects on the public hostname
+            // and checks the name, so that choice stopped being cosmetic.
+            //
+            // Only in the modes where EntKube owns the certificate. Under ACME Stalwart obtains and
+            // renews its own, and replacing the set would delete them — which is why this is inside the
+            // file-backed branch rather than emitted unconditionally with an empty set for ACME.
+            lines.Add(Op("reconcile", "Certificate", MatchAll, new()
             {
                 ["cert"] = new Dictionary<string, object?>
                 {

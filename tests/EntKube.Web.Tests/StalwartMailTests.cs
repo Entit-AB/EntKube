@@ -326,6 +326,52 @@ public class StalwartMailTests
         StalwartPlanBuilder.TrustedNetworkCovers(network, System.Net.IPAddress.Parse(address))
             .Should().Be(covers);
 
+    /// <summary>
+    /// The certificate set is replaced, not added to.
+    ///
+    /// <para>An upsert only ever adds, and nothing removed the certificates left by earlier
+    /// configurations — a different TLS mode, an earlier install against the same datastore, a hostname
+    /// since changed. A live server reached five and said so on every handshake: <c>Multiple TLS
+    /// certificates available, total = 5</c>. Stalwart then chooses, and a wrong choice is served as a
+    /// name mismatch on a server whose configuration looks correct. The support mailbox now connects on
+    /// the public hostname and checks the name, so that choice stopped being cosmetic.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(StalwartTlsMode.ClusterIssuer)]
+    [InlineData(StalwartTlsMode.Manual)]
+    public void Plan_ReplacesTheCertificateSetRatherThanAddingToIt(StalwartTlsMode mode)
+    {
+        StalwartComponentConfig config = Config(c => c.TlsMode = mode);
+
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+        ParsePlan(plan)
+            .Single(op => op.GetProperty("object").GetString() == "Certificate")
+            .GetProperty("@type").GetString().Should().Be("reconcile");
+    }
+
+    /// <summary>
+    /// Under ACME the certificate set is left alone entirely.
+    ///
+    /// <para>Stalwart obtains and renews its own there, so replacing the set would delete them — which
+    /// is why the reconcile lives inside the file-backed branch instead of being emitted unconditionally
+    /// with an empty set. Getting this wrong would take out TLS on a working server.</para>
+    /// </summary>
+    [Fact]
+    public void Plan_DoesNotTouchCertificatesStalwartObtainsItself()
+    {
+        StalwartComponentConfig config = Config(c =>
+        {
+            c.TlsMode = StalwartTlsMode.Acme;
+            c.AcmeChallenge = StalwartAcmeChallenge.Http01;
+            c.AcmeContact = "hostmaster@example.com";
+        });
+
+        string plan = StalwartPlanBuilder.BuildApplyPlan(config, [Domain(config.Id, "example.com")], []);
+
+        Operation(plan, "Certificate").Should().BeNull();
+    }
+
     private static List<YamlDocument> Parse(string manifest)
     {
         YamlStream stream = [];
