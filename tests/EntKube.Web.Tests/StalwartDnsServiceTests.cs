@@ -135,27 +135,56 @@ public class StalwartDnsServiceTests
     /// nothing in it. The rule is the same either way: the server names its own objects, and
     /// whichever says "dkim" is the one to snapshot. Guessing that name is what went wrong twice.
     /// </summary>
-    [Theory]
-    [InlineData("Objects:\n  Account\n  Domain\n  DkimSignature\n  NetworkListener", "DkimSignature")]
-    // The prefix is dropped: describe accepts a name "with or without x:", and snapshot wants
-    // the bare one, so the bare one is what this hands on.
-    [InlineData("x:DkimKey (DKIM key)", "DkimKey")]
-    public void The_object_name_is_found_in_the_cli_listing(string described, string expected) =>
-        StalwartDnsService.DkimObjectInText(described).Should().Be(expected);
+    /// <summary>
+    /// <b>Verbatim from the server, and the reason the first rule was wrong.</b> Alphabetical
+    /// order puts the failure-report singleton first, so "the first name containing dkim" picked
+    /// a settings object with no key in it — and the snapshot that followed was of DKIM report
+    /// settings. The name alone cannot tell them apart; what each one says about itself can.
+    /// </summary>
+    private const string Listing = """
+        Directory               Defines an external directory for account authentication and lookups.
+        DkimReportSettings      Configures DKIM authentication failure report generation. [singleton]
+        DkimSignature           Defines a DKIM signature used to sign outgoing email messages.
+        DmarcReportSettings     Configures DMARC aggregate and failure report generation. [singleton]
+        Domain                  Defines an email domain and its DNS, DKIM, and TLS certificate settings.
+        """;
+
+    [Fact]
+    public void The_signing_object_is_preferred_over_the_report_settings() =>
+        StalwartDnsService.DkimObjectInText(Listing).Should().Be("DkimSignature");
+
+    /// <summary>A server that words it differently still yields something rather than nothing.</summary>
+    [Fact]
+    public void A_listing_with_only_a_settings_object_still_names_it() =>
+        StalwartDnsService.DkimObjectInText(
+            "DkimReportSettings      Configures DKIM report generation. [singleton]")
+            .Should().Be("DkimReportSettings");
 
     /// <summary>
-    /// Snapshot takes bare object names — "Use bare object names (Domain, Account…)" — so a view
-    /// or variant suffix is dropped rather than passed on to a command that rejects it.
+    /// Snapshot takes bare object names — "Use bare object names (Domain, Account…)" — so the
+    /// prefix and any view or variant suffix are dropped rather than passed to a command that
+    /// rejects them.
     /// </summary>
-    [Fact]
-    public void A_variant_suffix_is_dropped_from_the_name() =>
-        StalwartDnsService.DkimObjectInText("DkimSignature/list").Should().Be("DkimSignature");
+    [Theory]
+    [InlineData("x:DkimSignature    Defines a DKIM signature.", "DkimSignature")]
+    [InlineData("DkimSignature/list    Defines a DKIM signature.", "DkimSignature")]
+    public void The_name_handed_on_is_the_bare_one(string line, string expected) =>
+        StalwartDnsService.DkimObjectInText(line).Should().Be(expected);
 
     [Theory]
-    [InlineData("Objects:\n  Account\n  Domain")]
+    [InlineData("Account   Defines a user.\nDomain    Defines an email domain.")]
     [InlineData("")]
     public void A_listing_with_no_dkim_object_names_nothing(string described) =>
         StalwartDnsService.DkimObjectInText(described).Should().BeNull();
+
+    /// <summary>
+    /// The domain object is asked for alongside, because the server describes it as holding "its
+    /// DNS, DKIM, and TLS certificate settings" — so if the published form of a key lives anywhere
+    /// but the signature object, it is there. One snapshot takes both.
+    /// </summary>
+    [Fact]
+    public void The_domain_object_is_read_alongside_the_keys() =>
+        StalwartDnsService.AlsoSnapshot.Should().Contain("Domain");
 
     /// <summary>
     /// <c>snapshot</c> writes a plan file: NDJSON, one operation per line rather than one

@@ -482,29 +482,56 @@ public class StalwartDnsService(
     /// </summary>
     public static string? DkimObjectInText(string described)
     {
-        foreach (string token in (described ?? "")
-                 .Split([' ', '\t', '\n', '\r', ',', '"', '\'', '(', ')', '[', ']', ':'],
-                     StringSplitOptions.RemoveEmptyEntries))
+        // What the server itself lists, asked live:
+        //   DkimReportSettings   Configures DKIM authentication failure report generation. [singleton]
+        //   DkimSignature        Defines a DKIM signature used to sign outgoing email messages.
+        // The first rule written here took the first name containing "dkim" and got the report
+        // settings, because alphabetical order put them first — a singleton about failure reports,
+        // with no key in it. The name alone is not enough to tell one from the other.
+        List<(string Name, string Description)> candidates = [];
+
+        foreach (string line in (described ?? "")
+                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
         {
-            // The bare name is what snapshot takes — "Use bare object names (Domain, Account…)"
-            // — so a view or variant suffix is dropped rather than passed on.
-            string name = token.Trim().TrimEnd('.', ';');
+            int gap = line.IndexOf("  ", StringComparison.Ordinal);
+            string name = (gap > 0 ? line[..gap] : line).Trim();
+            string description = gap > 0 ? line[gap..].Trim() : "";
+
+            // Bare names only: snapshot rejects the view and variant slash forms, and describe
+            // accepts a name with or without the x: prefix.
             int slash = name.IndexOf('/');
+            name = slash > 0 ? name[..slash] : name;
+            name = name.StartsWith("x:", StringComparison.OrdinalIgnoreCase) ? name[2..] : name;
 
-            if (slash > 0)
-            {
-                name = name[..slash];
-            }
-
-            if (name.Contains("dkim", StringComparison.OrdinalIgnoreCase)
+            if (name.Length > 0
+                && name.Contains("dkim", StringComparison.OrdinalIgnoreCase)
                 && name.All(c => char.IsLetterOrDigit(c) || c == '_'))
             {
-                return name;
+                candidates.Add((name, description));
             }
         }
 
-        return null;
+        // The one that holds keys describes itself as signing, and is not a settings singleton.
+        // Ranked rather than filtered, so a server that words it differently still yields
+        // something rather than nothing.
+        return candidates
+            .OrderBy(c => c.Description.Contains("[singleton]", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+            .ThenBy(c => c.Name.Contains("Report", StringComparison.OrdinalIgnoreCase)
+                         || c.Name.Contains("Settings", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+            .ThenBy(c => c.Description.Contains("sign", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .Select(c => c.Name)
+            .FirstOrDefault();
     }
+
+    /// <summary>
+    /// The objects worth snapshotting for a domain's DNS, beside whatever holds the keys.
+    ///
+    /// <para><c>Domain</c> is included because the server describes it as holding "its DNS, DKIM,
+    /// and TLS certificate settings" — so if the published form of a key lives anywhere but the
+    /// signature object, it is there. Snapshot takes several types at once, so asking for both
+    /// costs one run rather than two.</para>
+    /// </summary>
+    public static readonly string[] AlsoSnapshot = ["Domain"];
 
     /// <summary>
     /// The DKIM records in a plan file — what <c>snapshot</c> writes, which is NDJSON: one

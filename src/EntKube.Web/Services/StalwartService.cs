@@ -2365,7 +2365,8 @@ public class StalwartService(
             // Deliberately without --include-secrets. This output is read back into EntKube and
             // shown on a page, and the private half of a signing key belongs in neither.
             string snapshot = await RunCliJobAsync(
-                config, releaseName, ns, kubeconfig, "dkim", ["snapshot", objectName], ct);
+                config, releaseName, ns, kubeconfig, "dkim",
+                ["snapshot", objectName, .. Mail.StalwartDnsService.AlsoSnapshot], ct);
 
             int written = await StoreDkimAsync(config.Id, snapshot, ct);
 
