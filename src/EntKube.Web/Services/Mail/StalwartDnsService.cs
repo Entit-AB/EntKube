@@ -131,9 +131,13 @@ public class StalwartDnsService(
         {
             return [new StalwartDnsFetch(
                 "", null,
-                "The mail server refused the token. The Keycloak service account exists, so what is "
-                + "missing is its standing with the server: the identity it maps to has to be the "
-                + "administrator, and that account has to carry the Admin role.",
+                "The mail server refused the token. The Keycloak service account exists and the "
+                + "request reached the server, so what is missing is the token's standing with it. "
+                + "The likeliest reason is the username its mapper claims: an OIDC directory "
+                + "resolves principals it knows, and the administrator here is a local account — it "
+                + "carries the Admin role, which the directory has no way to express, but it may be "
+                + "nobody the directory can resolve. The token has to claim a directory user who "
+                + "also holds that role, with the audience and scopes this server requires.",
                 Truncate(schema))];
         }
 
@@ -347,6 +351,11 @@ public class StalwartDnsService(
     public static string Query(string path) =>
         "read -r TOK; "
         + $"curl -sS --max-time 20 -H \"Authorization: Bearer $TOK\" "
+        // The server is configured to read the client's address from this header, and warns on
+        // every request arriving without one. Saying plainly that this came from loopback keeps
+        // that warning out of the log, where it otherwise appears once per fetch and looks, to
+        // whoever debugs next, like part of the problem.
+        + "-H \"X-Forwarded-For: 127.0.0.1\" "
         + $"\"http://127.0.0.1:{StalwartPlanBuilder.HttpPort}{path}\"";
 
     /// <summary>

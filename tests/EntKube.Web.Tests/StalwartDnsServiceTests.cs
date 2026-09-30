@@ -145,6 +145,10 @@ public class StalwartDnsServiceTests
         command.Should().StartWith("read -r TOK;");
         command.Should().Contain("http://127.0.0.1:8080/api/schema");
         command.Should().Contain("Authorization: Bearer $TOK");
+
+        // The server reads the client address from this header and warns once per request that
+        // arrives without one — noise that reads like part of the problem to whoever debugs next.
+        command.Should().Contain("X-Forwarded-For: 127.0.0.1");
         command.Should().NotContain("stalwart.stalwart.svc");
     }
 }
