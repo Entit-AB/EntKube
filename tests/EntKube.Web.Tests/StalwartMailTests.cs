@@ -2239,6 +2239,27 @@ public class StalwartMailTests
     public void SpfWithoutRecordedAddressesIsUnchanged() =>
         StalwartPlanBuilder.Spf(Config()).Should().Be("v=spf1 mx -all");
 
+    /// <summary>
+    /// <b>The apply Job runs on the node's network, and that is what keeps the server
+    /// configurable.</b> Stalwart demands a PROXY header from every peer matching
+    /// proxyTrustedNetworks, on every listener, with no way to exempt a port — so a list reaching
+    /// the pod CIDR locks out the one client that could put the list right again, with no error
+    /// anywhere. Measured live: from a pod a plain request is dropped and a PROXY greeting is
+    /// answered; from the node network it is exactly the other way round.
+    /// </summary>
+    [Fact]
+    public void TheApplyJobRunsOnTheNodeNetworkSoItCannotBeLockedOut()
+    {
+        string manifest = StalwartManifestBuilder.BuildApplyJobManifest(
+            "stalwart", "stalwart", "{}\n", "admin");
+
+        manifest.Should().Contain("hostNetwork: true");
+
+        // Without this the node's resolver is used and the Service name does not resolve — which
+        // fails in a way that looks exactly like the problem it is there to avoid.
+        manifest.Should().Contain("dnsPolicy: ClusterFirstWithHostNet");
+    }
+
     // ── PROXY protocol reach ──────────────────────────────────────────────────
 
     /// <summary>
