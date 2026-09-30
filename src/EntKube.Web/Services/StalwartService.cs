@@ -2069,6 +2069,16 @@ public class StalwartService(
                 await RunApplyJobAsync(config, releaseName, ns, kubeconfig, plan, ct);
             output.Add(applyLog);
 
+            // Still in recovery, which is the only window in which anything here can ask the
+            // server a question: outside it the directory checks logins and the administrator
+            // password is not a credential it accepts. So the DKIM keys are read now or not at
+            // all — see CaptureDkimAsync.
+            if (applied)
+            {
+                output.AddRange(
+                    await CaptureDkimAsync(config, releaseName, ns, kubeconfig, ct));
+            }
+
             output.Add("--- Leaving recovery mode ---");
             await k8sFactory.ApplyManifestAsync(
                 StalwartManifestBuilder.Build(config, releaseName, ns, ha: ha), kubeconfig, ct);
@@ -2305,6 +2315,159 @@ public class StalwartService(
         {
             return (0, 0);
         }
+    }
+
+    /// <summary>
+    /// Reads the DKIM records off the server and writes them onto the domains, so the DNS list
+    /// can show the whole zone.
+    ///
+    /// <para><b>Why here and not from a button.</b> Stalwart generates the keys, so only it knows
+    /// the selector and the public half — and outside an apply there is no credential EntKube can
+    /// present, because the directory is what checks logins and the administrator password
+    /// bypasses it only in recovery mode. This is that window. A page cannot open one; it would
+    /// mean restarting the mail server twice to answer a question.</para>
+    ///
+    /// <para><b>Two runs, because the object's name is the server's to give.</b> <c>describe</c>
+    /// lists what this server has; whichever of those holds DKIM keys is then snapshotted.
+    /// Guessing the name from documentation is what went wrong twice before — and a name that is
+    /// wrong is indistinguishable from a server that has none.</para>
+    ///
+    /// <para>Never fails the apply. The configuration is applied by the time this runs, and a
+    /// reading that did not work is worth a line in the output, not a failed apply. Whatever came
+    /// back is put in that output either way, so a shape nobody has seen yet is visible rather
+    /// than swallowed.</para>
+    /// </summary>
+    private async Task<List<string>> CaptureDkimAsync(
+        StalwartComponentConfig config, string releaseName, string ns, string kubeconfig,
+        CancellationToken ct)
+    {
+        List<string> output = ["--- Reading the DKIM records ---"];
+
+        try
+        {
+            string described = await RunCliJobAsync(
+                config, releaseName, ns, kubeconfig, "describe", ["describe"], ct);
+
+            string? objectName = Mail.StalwartDnsService.DkimObjectIn(described)
+                ?? Mail.StalwartDnsService.DkimObjectInText(described);
+
+            if (objectName is null)
+            {
+                output.Add(
+                    "The server lists no object holding DKIM keys, so there is nothing to read. "
+                    + "What it does list is below; one of those is the one to ask for.");
+                output.Add(described.Length > 4000 ? described[..4000] + "…" : described);
+                return output;
+            }
+
+            output.Add($"The server keeps them in {objectName}.");
+
+            // Deliberately without --include-secrets. This output is read back into EntKube and
+            // shown on a page, and the private half of a signing key belongs in neither.
+            string snapshot = await RunCliJobAsync(
+                config, releaseName, ns, kubeconfig, "dkim", ["snapshot", objectName], ct);
+
+            int written = await StoreDkimAsync(config.Id, snapshot, ct);
+
+            if (written > 0)
+            {
+                output.Add($"Recorded the DKIM records for {written} domain(s).");
+            }
+            else
+            {
+                output.Add(
+                    "Read it, but found no selector and public key in what came back. It is below.");
+                output.Add(snapshot.Length > 4000 ? snapshot[..4000] + "…" : snapshot);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Could not read the DKIM records for {Release}.", releaseName);
+            output.Add($"Could not read them: {ex.Message}");
+        }
+
+        return output;
+    }
+
+    /// <summary>Writes what was read onto the domains, and says how many got one.</summary>
+    private async Task<int> StoreDkimAsync(Guid configId, string snapshot, CancellationToken ct)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<StalwartMailDomain> domains = await db.StalwartMailDomains
+            .Where(d => d.ConfigId == configId).ToListAsync(ct);
+
+        int written = 0;
+
+        foreach (StalwartMailDomain domain in domains)
+        {
+            if (Mail.StalwartDnsService.DkimLinesInPlan(snapshot, domain.Name) is string records)
+            {
+                domain.DkimDnsRecords = records;
+                written++;
+            }
+        }
+
+        if (written > 0)
+        {
+            await db.SaveChangesAsync(ct);
+        }
+
+        return written;
+    }
+
+    /// <summary>
+    /// Runs <c>stalwart-cli</c> once against the server and returns what it printed.
+    ///
+    /// <para>The previous Job of the same purpose is removed first: a Job's pod template is
+    /// immutable, so a second run would otherwise be rejected outright — the same reason the
+    /// apply Job is deleted before it is recreated.</para>
+    /// </summary>
+    private async Task<string> RunCliJobAsync(
+        StalwartComponentConfig config, string releaseName, string ns, string kubeconfig,
+        string purpose, IReadOnlyList<string> args, CancellationToken ct)
+    {
+        string jobName = StalwartManifestBuilder.CliJobName(releaseName, purpose);
+
+        try
+        {
+            await k8sFactory.DeleteManifestAsync("job", jobName, ns, kubeconfig, ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "No previous {Job} Job to delete in {Namespace}.", jobName, ns);
+        }
+
+        await k8sFactory.ApplyManifestAsync(
+            StalwartManifestBuilder.BuildCliJobManifest(
+                releaseName, ns, config.AdminUsername, purpose, args),
+            kubeconfig, ct);
+
+        // Same poll as the apply's, and the same timeout. A read that overruns it is reported as
+        // whatever it managed to print rather than throwing: the configuration is already applied.
+        DateTime deadline = DateTime.UtcNow + ApplyTimeout;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            await Task.Delay(TimeSpan.FromSeconds(3), ct);
+
+            try
+            {
+                (int completed, int failed) = ReadJobStatus(
+                    await k8sFactory.GetJsonAsync($"job/{jobName}", ns, kubeconfig, ct: ct));
+
+                if (completed > 0 || failed > 0)
+                {
+                    break;
+                }
+            }
+            catch (Exception ex)
+            {
+                logger.LogDebug(ex, "Waiting for the {Job} Job in {Namespace}.", jobName, ns);
+            }
+        }
+
+        return await ReadJobLogAsync(jobName, ns, kubeconfig, ct);
     }
 
     private async Task<string> ReadJobLogAsync(string jobName, string ns, string kubeconfig, CancellationToken ct)

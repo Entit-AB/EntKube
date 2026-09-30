@@ -2278,6 +2278,28 @@ public class StalwartMailTests
             .Should().Be(("admin", "entit.eu", "admin@entit.eu"));
     }
 
+    /// <summary>
+    /// <b>A read is a Job, like the apply is a Job.</b> Outside an apply there is no credential
+    /// EntKube can present — the directory checks logins and the administrator password bypasses
+    /// it only in recovery mode — so the one window in which the server can be asked anything is
+    /// the one the apply already opens. Same credential, same network, no secrets in the output:
+    /// a Job's log is read back into EntKube and shown on a page.
+    /// </summary>
+    [Fact]
+    public void ACliJobAsksWithTheApplysOwnCredentialAndNeverPrintsSecrets()
+    {
+        string manifest = StalwartManifestBuilder.BuildCliJobManifest(
+            "stalwart", "stalwart", "admin", "dkim", ["snapshot", "DkimSignature"]);
+
+        manifest.Should().Contain("args: [\"snapshot\", \"DkimSignature\"]");
+        manifest.Should().Contain($"key: {StalwartManifestBuilder.AdminPasswordSecretName}");
+        manifest.Should().Contain("hostNetwork: true");
+        manifest.Should().Contain("dnsPolicy: ClusterFirstWithHostNet");
+
+        // The private half of a signing key belongs in neither a Job log nor a page.
+        manifest.Should().NotContain("--include-secrets");
+    }
+
     // ── PROXY protocol reach ──────────────────────────────────────────────────
 
     /// <summary>

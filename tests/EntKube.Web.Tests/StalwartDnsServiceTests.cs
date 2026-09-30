@@ -128,6 +128,61 @@ public class StalwartDnsServiceTests
     public void Nothing_usable_reads_as_nothing(string json) =>
         StalwartDnsService.DkimLinesIn(json, "entit.eu").Should().BeNull();
 
+    // ---- Reading what the CLI prints --------------------------------------------------------
+
+    /// <summary>
+    /// <c>describe</c> prints a human-readable listing, not JSON, so the structured reader finds
+    /// nothing in it. The rule is the same either way: the server names its own objects, and
+    /// whichever says "dkim" is the one to snapshot. Guessing that name is what went wrong twice.
+    /// </summary>
+    [Theory]
+    [InlineData("Objects:\n  Account\n  Domain\n  DkimSignature\n  NetworkListener", "DkimSignature")]
+    // The prefix is dropped: describe accepts a name "with or without x:", and snapshot wants
+    // the bare one, so the bare one is what this hands on.
+    [InlineData("x:DkimKey (DKIM key)", "DkimKey")]
+    public void The_object_name_is_found_in_the_cli_listing(string described, string expected) =>
+        StalwartDnsService.DkimObjectInText(described).Should().Be(expected);
+
+    /// <summary>
+    /// Snapshot takes bare object names — "Use bare object names (Domain, Account…)" — so a view
+    /// or variant suffix is dropped rather than passed on to a command that rejects it.
+    /// </summary>
+    [Fact]
+    public void A_variant_suffix_is_dropped_from_the_name() =>
+        StalwartDnsService.DkimObjectInText("DkimSignature/list").Should().Be("DkimSignature");
+
+    [Theory]
+    [InlineData("Objects:\n  Account\n  Domain")]
+    [InlineData("")]
+    public void A_listing_with_no_dkim_object_names_nothing(string described) =>
+        StalwartDnsService.DkimObjectInText(described).Should().BeNull();
+
+    /// <summary>
+    /// <c>snapshot</c> writes a plan file: NDJSON, one operation per line rather than one
+    /// document. Each line is read with the same lenient reader as any other answer.
+    /// </summary>
+    [Fact]
+    public void Records_are_read_out_of_a_snapshot_plan()
+    {
+        string plan =
+            """{"op":"upsert","type":"Domain","values":{"d0":{"name":"entit.eu"}}}""" + "\n"
+            + """{"selector":"v1-rsa-20260927","domain":"entit.eu","publicKey":"v=DKIM1; k=rsa; p=MIIB"}""" + "\n"
+            + """{"selector":"v1-ed25519-20260927","domain":"entit.eu","publicKey":"v=DKIM1; k=ed25519; p=11q"}""";
+
+        StalwartDnsService.DkimLinesInPlan(plan, "entit.eu").Should().Be(
+            "v1-rsa-20260927 v=DKIM1; k=rsa; p=MIIB\n"
+            + "v1-ed25519-20260927 v=DKIM1; k=ed25519; p=11q");
+    }
+
+    /// <summary>Progress chatter and blank lines are not JSON and are stepped over.</summary>
+    [Fact]
+    public void Noise_around_the_plan_is_ignored() =>
+        StalwartDnsService.DkimLinesInPlan(
+            "Snapshotting DkimSignature…\n\n"
+            + """{"selector":"s","domain":"entit.eu","publicKey":"v=DKIM1; p=A"}""" + "\ndone\n",
+            "entit.eu")
+            .Should().Be("s v=DKIM1; p=A");
+
     // ---- The request itself -----------------------------------------------------------------
 
     /// <summary>

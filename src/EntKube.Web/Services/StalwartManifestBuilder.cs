@@ -921,6 +921,78 @@ public static class StalwartManifestBuilder
         return string.Join("\n", y) + "\n";
     }
 
+    /// <summary>The name of a one-off CLI Job, by what it is for.</summary>
+    public static string CliJobName(string releaseName, string purpose) =>
+        $"{releaseName}-{purpose}";
+
+    /// <summary>
+    /// A Job that runs <c>stalwart-cli</c> once and prints what it got.
+    ///
+    /// <para><b>Why reading works this way and nothing else does.</b> Outside an apply there is no
+    /// credential EntKube can present: the directory is what checks logins, and the administrator
+    /// password bypasses it only while the server is in recovery mode. That window exists exactly
+    /// once per apply, and it is the only moment anything here can ask the server a question. So
+    /// a read is a Job like the apply is a Job, with the same credential and the same network,
+    /// run inside the same window.</para>
+    ///
+    /// <para>On the node's network for the reason the apply Job is: a trusted-networks list that
+    /// reaches the pod CIDR would otherwise drop the connection before a byte is read.</para>
+    /// </summary>
+    /// <param name="purpose">A short word naming what this run is for; part of the Job's name.</param>
+    /// <param name="args">
+    /// The CLI arguments. Never <c>--include-secrets</c>: a Job's output is read back into
+    /// EntKube and shown on a page, and a private key does not belong in either.
+    /// </param>
+    public static string BuildCliJobManifest(
+        string releaseName, string ns, string adminUsername, string purpose,
+        IReadOnlyList<string> args)
+    {
+        string argList = string.Join(", ", args.Select(a => $"\"{a}\""));
+
+        List<string> y =
+        [
+            "apiVersion: batch/v1",
+            "kind: Job",
+            "metadata:",
+            $"  name: {CliJobName(releaseName, purpose)}",
+            $"  namespace: {ns}",
+            "  labels:",
+            "    app.kubernetes.io/managed-by: entkube",
+            "spec:",
+            "  backoffLimit: 0",
+            "  template:",
+            "    metadata:",
+            "      labels:",
+            $"        app: {CliJobName(releaseName, purpose)}",
+            "    spec:",
+            "      restartPolicy: Never",
+            "      hostNetwork: true",
+            "      dnsPolicy: ClusterFirstWithHostNet",
+            "      containers:",
+            $"        - name: {purpose}",
+            $"          image: {CliImage}",
+            $"          args: [{argList}]",
+            "          env:",
+            "            - name: STALWART_URL",
+            $"              value: http://{releaseName}.{ns}.svc.cluster.local:{StalwartPlanBuilder.HttpPort}",
+            "            - name: STALWART_USER",
+            $"              value: {adminUsername}",
+            "            - name: STALWART_PASSWORD",
+            "              valueFrom:",
+            "                secretKeyRef:",
+            $"                  name: {releaseName}{CredentialsSecretSuffix}",
+            $"                  key: {AdminPasswordSecretName}",
+            "          resources:",
+            "            requests:",
+            "              cpu: 50m",
+            "              memory: 64Mi",
+            "            limits:",
+            "              memory: 256Mi",
+        ];
+
+        return string.Join("\n", y) + "\n";
+    }
+
     /// <summary>
     /// Vault secret holding <c>username:password</c> in the form <c>STALWART_RECOVERY_ADMIN</c>
     /// expects. Kept separate from the bare password, which the CLI needs on its own.

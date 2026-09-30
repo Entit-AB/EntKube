@@ -473,6 +473,69 @@ public class StalwartDnsService(
     }
 
     /// <summary>
+    /// The object holding DKIM keys, found in <c>describe</c>'s human-readable listing.
+    ///
+    /// <para>The CLI prints object names as text rather than JSON, so the structured reader finds
+    /// nothing in it. Same rule either way: the server names its own objects, and whichever says
+    /// "dkim" is the one to ask for. Guessing that name from documentation is what went wrong
+    /// twice, and a wrong name is indistinguishable from a server that has no such object.</para>
+    /// </summary>
+    public static string? DkimObjectInText(string described)
+    {
+        foreach (string token in (described ?? "")
+                 .Split([' ', '\t', '\n', '\r', ',', '"', '\'', '(', ')', '[', ']', ':'],
+                     StringSplitOptions.RemoveEmptyEntries))
+        {
+            // The bare name is what snapshot takes — "Use bare object names (Domain, Account…)"
+            // — so a view or variant suffix is dropped rather than passed on.
+            string name = token.Trim().TrimEnd('.', ';');
+            int slash = name.IndexOf('/');
+
+            if (slash > 0)
+            {
+                name = name[..slash];
+            }
+
+            if (name.Contains("dkim", StringComparison.OrdinalIgnoreCase)
+                && name.All(c => char.IsLetterOrDigit(c) || c == '_'))
+            {
+                return name;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// The DKIM records in a plan file — what <c>snapshot</c> writes, which is NDJSON: one
+    /// operation per line rather than one document.
+    ///
+    /// <para>Each line is read with the same lenient reader as any other answer, for the same
+    /// reason: this is a shape EntKube does not control, and a strict reader would give an empty
+    /// list with no explanation the day it gains a field.</para>
+    /// </summary>
+    public static string? DkimLinesInPlan(string plan, string domain)
+    {
+        List<string> lines = [];
+
+        foreach (string line in (plan ?? "")
+                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!line.StartsWith('{') && !line.StartsWith('['))
+            {
+                continue;
+            }
+
+            if (DkimLinesIn(line, domain) is string found)
+            {
+                lines.AddRange(found.Split('\n'));
+            }
+        }
+
+        return lines.Count == 0 ? null : string.Join('\n', lines.Distinct());
+    }
+
+    /// <summary>
     /// The DKIM records for a domain in whatever the server returned, as <c>selector value</c>
     /// lines.
     ///
