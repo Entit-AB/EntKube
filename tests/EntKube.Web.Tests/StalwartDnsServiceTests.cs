@@ -149,6 +149,38 @@ public class StalwartDnsServiceTests
         // The server reads the client address from this header and warns once per request that
         // arrives without one — noise that reads like part of the problem to whoever debugs next.
         command.Should().Contain("X-Forwarded-For: 127.0.0.1");
+
+        // And the status, because without it every outcome looks alike: a refusal is JSON, an
+        // answer is JSON, and a body that is neither cannot be told from a request that never
+        // arrived. The server's log does not distinguish them either.
+        command.Should().Contain(StalwartDnsService.StatusMarker);
+
+        // Never the Service name: EntKube runs outside the cluster, so that resolves nowhere
+        // here, and the API server's proxy would strip the Authorization header anyway.
         command.Should().NotContain("stalwart.stalwart.svc");
+    }
+
+    /// <summary>The status the server gave, split from the body it sent.</summary>
+    [Fact]
+    public void The_status_is_read_back_off_the_response()
+    {
+        (int? status, string body) = StalwartDnsService.SplitStatus(
+            "{\"objects\":{}}\n" + StalwartDnsService.StatusMarker + "200");
+
+        status.Should().Be(200);
+        body.Should().Be("{\"objects\":{}}");
+    }
+
+    /// <summary>
+    /// No marker means curl never got far enough to have a status — a different answer from any
+    /// status, and the one that used to be invisible.
+    /// </summary>
+    [Fact]
+    public void A_request_that_never_completed_has_no_status()
+    {
+        (int? status, string body) = StalwartDnsService.SplitStatus("(the request failed: …)");
+
+        status.Should().BeNull();
+        body.Should().Be("(the request failed: …)");
     }
 }

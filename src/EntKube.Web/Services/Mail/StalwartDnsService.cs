@@ -124,21 +124,29 @@ public class StalwartDnsService(
 
         // One exec for the schema, because what holds the records is the part nobody here has
         // seen. What it finds decides the next call; what it cannot read is handed back.
-        string schema = await AskAsync(pod, ns, "/api/schema", token, kubeconfig, ct);
+        (int? status, string schema) = SplitStatus(
+            await AskAsync(pod, ns, "/api/schema", token, kubeconfig, ct));
 
-        // Whether the answer is the schema at all. Claiming "authenticated" because bytes came
-        // back was wrong: a 401 body is bytes too, and it reads as a schema with nothing in it.
-        if (Unauthorized(schema))
+        if (status is null)
         {
             return [new StalwartDnsFetch(
                 "", null,
-                "The mail server refused the token. The Keycloak service account exists and the "
-                + "request reached the server, so what is missing is the token's standing with it. "
-                + "The likeliest reason is the username its mapper claims: an OIDC directory "
-                + "resolves principals it knows, and the administrator here is a local account — it "
-                + "carries the Admin role, which the directory has no way to express, but it may be "
-                + "nobody the directory can resolve. The token has to claim a directory user who "
-                + "also holds that role, with the audience and scopes this server requires.",
+                "The request never reached the mail server, so there is no status to report. What "
+                + "the attempt produced is below.",
+                Truncate(schema))];
+        }
+
+        if (status is not 200)
+        {
+            return [new StalwartDnsFetch(
+                "", null,
+                status is 401 or 403
+                    ? $"The mail server refused the token ({status}). The Keycloak service account "
+                      + "exists and the request arrived, so what is missing is the token's standing "
+                      + "with it: the username it claims has to resolve to an account the directory "
+                      + "knows, that account has to carry the Admin role, and the audience and "
+                      + "scopes the server requires have to match."
+                    : $"The mail server answered {status} when asked for its schema.",
                 Truncate(schema))];
         }
 
@@ -163,10 +171,10 @@ public class StalwartDnsService(
 
         foreach (StalwartMailDomain domain in config.Domains.OrderBy(d => d.Name))
         {
-            string body = await AskAsync(
-                pod, ns, $"/api/object/{Uri.EscapeDataString(objectName)}", token, kubeconfig, ct);
+            (int? recordStatus, string body) = SplitStatus(await AskAsync(
+                pod, ns, $"/api/object/{Uri.EscapeDataString(objectName)}", token, kubeconfig, ct));
 
-            string? records = DkimLinesIn(body, domain.Name);
+            string? records = recordStatus is 200 ? DkimLinesIn(body, domain.Name) : null;
 
             if (records is not null)
             {
@@ -177,8 +185,11 @@ public class StalwartDnsService(
             {
                 results.Add(new StalwartDnsFetch(
                     domain.Name, null,
-                    $"Read {objectName} from the mail server but found no DKIM record for "
-                    + $"{domain.Name} in it.",
+                    recordStatus is 200
+                        ? $"Read {objectName} from the mail server but found no DKIM record for "
+                          + $"{domain.Name} in it."
+                        : $"Asking the mail server for {objectName} answered "
+                          + $"{recordStatus?.ToString() ?? "nothing"}.",
                     Truncate(body)));
             }
         }
@@ -372,7 +383,34 @@ public class StalwartDnsService(
         // that warning out of the log, where it otherwise appears once per fetch and looks, to
         // whoever debugs next, like part of the problem.
         + "-H \"X-Forwarded-For: 127.0.0.1\" "
+        // The status, written after the body. Without it every outcome looks alike from here: a
+        // refusal is JSON, an answer is JSON, and a body that is neither cannot be told from a
+        // request that never arrived. The server's log is no fallback — a rejected token and an
+        // accepted one leave identical traces there, which is what made this take as long as it did.
+        + $"-w \"\\n{StatusMarker}%{{http_code}}\" "
         + $"\"http://127.0.0.1:{StalwartPlanBuilder.HttpPort}{path}\"";
+
+    /// <summary>What <see cref="Query"/> writes before the status, so the two can be told apart.</summary>
+    public const string StatusMarker = "<<<entkube-http-status:";
+
+    /// <summary>Splits what curl wrote into the status the server gave and the body it sent.</summary>
+    /// <returns>
+    /// A null status means the request never got far enough to have one, which is a different
+    /// answer from any status and the one that used to be invisible.
+    /// </returns>
+    public static (int? Status, string Body) SplitStatus(string raw)
+    {
+        int marker = raw.LastIndexOf(StatusMarker, StringComparison.Ordinal);
+
+        if (marker < 0)
+        {
+            return (null, raw);
+        }
+
+        string tail = raw[(marker + StatusMarker.Length)..].Trim();
+
+        return (int.TryParse(tail, out int status) ? status : null, raw[..marker].TrimEnd());
+    }
 
     /// <summary>
     /// The name of the schema object that holds DKIM keys, or null when nothing looks like one.
