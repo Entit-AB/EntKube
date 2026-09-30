@@ -187,6 +187,24 @@ public class StalwartDnsServiceTests
         StalwartDnsService.AlsoSnapshot.Should().Contain("Domain");
 
     /// <summary>
+    /// <b>The one type that must never be waved through.</b> The CLI refuses to export a plan
+    /// with a dangling reference — "DkimSignature references Tenant but Tenant is not in the
+    /// snapshot selection" — and allowing a type to go unresolved <em>drops that reference from
+    /// the output</em>. Harmless for a tenant or a certificate; fatal for Domain, which is how a
+    /// key is matched to the zone it has to be published in.
+    /// </summary>
+    [Fact]
+    public void The_domain_reference_is_never_allowed_to_go_unresolved()
+    {
+        StalwartDnsService.SnapshotUnresolved.Should().Contain("Tenant");
+        StalwartDnsService.SnapshotUnresolved.Should().NotContain("Domain");
+
+        // And the two lists must not contradict each other.
+        StalwartDnsService.AlsoSnapshot.Should()
+            .NotIntersectWith(StalwartDnsService.SnapshotUnresolved);
+    }
+
+    /// <summary>
     /// <c>snapshot</c> writes a plan file: NDJSON, one operation per line rather than one
     /// document. Each line is read with the same lenient reader as any other answer.
     /// </summary>

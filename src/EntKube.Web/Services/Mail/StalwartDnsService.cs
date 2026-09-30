@@ -534,6 +534,23 @@ public class StalwartDnsService(
     public static readonly string[] AlsoSnapshot = ["Domain"];
 
     /// <summary>
+    /// Types whose references may be left unresolved, so a snapshot of the signatures does not
+    /// drag the rest of the server in with it.
+    ///
+    /// <para>The CLI refuses to export a plan with a dangling reference — "DkimSignature
+    /// references Tenant but Tenant is not in the snapshot selection" — and offers two ways out:
+    /// add the type, or allow it to be unresolved. Allowing it <em>drops that reference from the
+    /// exported plan</em>, which is harmless for a tenant, a certificate or an ACME provider, and
+    /// would be fatal for <c>Domain</c>: the domain is how a key is matched to the zone it has to
+    /// be published in. So Domain is in the selection and never in this list.</para>
+    ///
+    /// <para>Named ahead of being asked for, because each missing type otherwise costs a whole
+    /// apply to discover. Every name here is one the server lists among its own object types.</para>
+    /// </summary>
+    public static readonly string[] SnapshotUnresolved =
+        ["Tenant", "Certificate", "AcmeProvider", "DnsServer"];
+
+    /// <summary>
     /// The DKIM records in a plan file — what <c>snapshot</c> writes, which is NDJSON: one
     /// operation per line rather than one document.
     ///

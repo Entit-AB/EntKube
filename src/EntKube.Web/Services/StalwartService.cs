@@ -2366,7 +2366,12 @@ public class StalwartService(
             // shown on a page, and the private half of a signing key belongs in neither.
             string snapshot = await RunCliJobAsync(
                 config, releaseName, ns, kubeconfig, "dkim",
-                ["snapshot", objectName, .. Mail.StalwartDnsService.AlsoSnapshot], ct);
+                [
+                    "snapshot", objectName, .. Mail.StalwartDnsService.AlsoSnapshot,
+                    "--allow-unresolved",
+                    string.Join(',', Mail.StalwartDnsService.SnapshotUnresolved),
+                ],
+                ct);
 
             int written = await StoreDkimAsync(config.Id, snapshot, ct);
 
