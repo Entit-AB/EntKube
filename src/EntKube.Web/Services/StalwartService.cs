@@ -2362,15 +2362,27 @@ public class StalwartService(
 
             output.Add($"The server keeps them in {objectName}.");
 
+            // Everything this server has, minus what is being asked for. The CLI refuses to
+            // export a plan with a dangling reference and names only the first type missing, so
+            // discovering them one at a time costs an apply each — and this server has 117.
+            // Waving a type through drops that reference from the output, which is why the
+            // selection itself is never in the list: the domain is how a key is matched to the
+            // zone it belongs in.
+            string[] selection = [objectName, .. Mail.StalwartDnsService.AlsoSnapshot];
+
+            IReadOnlyList<string> listed = Mail.StalwartDnsService.ObjectNamesInText(described);
+
+            List<string> unresolved =
+            [
+                .. (listed.Count > 0 ? listed : Mail.StalwartDnsService.SnapshotUnresolved)
+                    .Where(n => !selection.Contains(n, StringComparer.OrdinalIgnoreCase))
+            ];
+
             // Deliberately without --include-secrets. This output is read back into EntKube and
             // shown on a page, and the private half of a signing key belongs in neither.
             string snapshot = await RunCliJobAsync(
                 config, releaseName, ns, kubeconfig, "dkim",
-                [
-                    "snapshot", objectName, .. Mail.StalwartDnsService.AlsoSnapshot,
-                    "--allow-unresolved",
-                    string.Join(',', Mail.StalwartDnsService.SnapshotUnresolved),
-                ],
+                ["snapshot", .. selection, "--allow-unresolved", string.Join(',', unresolved)],
                 ct);
 
             int written = await StoreDkimAsync(config.Id, snapshot, ct);

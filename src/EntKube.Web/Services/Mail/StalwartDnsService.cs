@@ -534,8 +534,40 @@ public class StalwartDnsService(
     public static readonly string[] AlsoSnapshot = ["Domain"];
 
     /// <summary>
-    /// Types whose references may be left unresolved, so a snapshot of the signatures does not
-    /// drag the rest of the server in with it.
+    /// Every object type the server lists, from <c>describe</c>'s own output.
+    ///
+    /// <para>One name per line, followed by its description. Read so that a snapshot can wave
+    /// through every reference it is not asking for, rather than discovering them one failed
+    /// apply at a time — this server has 117 types and the CLI names only the first one missing.</para>
+    /// </summary>
+    public static IReadOnlyList<string> ObjectNamesInText(string described)
+    {
+        List<string> names = [];
+
+        foreach (string line in (described ?? "")
+                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int gap = line.IndexOf("  ", StringComparison.Ordinal);
+            string name = (gap > 0 ? line[..gap] : line).Trim();
+
+            int slash = name.IndexOf('/');
+            name = slash > 0 ? name[..slash] : name;
+            name = name.StartsWith("x:", StringComparison.OrdinalIgnoreCase) ? name[2..] : name;
+
+            if (name.Length > 0 && char.IsLetter(name[0])
+                && name.All(c => char.IsLetterOrDigit(c) || c == '_'))
+            {
+                names.Add(name);
+            }
+        }
+
+        return [.. names.Distinct(StringComparer.Ordinal)];
+    }
+
+    /// <summary>
+    /// What to wave through when the server's own listing could not be read — the references seen
+    /// to be needed, rather than nothing at all.
+    /// </summary>
     ///
     /// <para>The CLI refuses to export a plan with a dangling reference — "DkimSignature
     /// references Tenant but Tenant is not in the snapshot selection" — and offers two ways out:

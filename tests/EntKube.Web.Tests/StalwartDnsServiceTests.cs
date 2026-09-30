@@ -187,6 +187,27 @@ public class StalwartDnsServiceTests
         StalwartDnsService.AlsoSnapshot.Should().Contain("Domain");
 
     /// <summary>
+    /// <b>Every type the server has, so none has to be discovered by failing.</b> The CLI refuses
+    /// to export a plan with a dangling reference and names only the first one missing — so
+    /// finding them one at a time costs an apply each, and this server lists 117.
+    /// </summary>
+    [Fact]
+    public void Every_object_type_is_read_from_the_listing()
+    {
+        IReadOnlyList<string> names = StalwartDnsService.ObjectNamesInText(Listing);
+
+        names.Should().BeEquivalentTo(
+            "Directory", "DkimReportSettings", "DkimSignature", "DmarcReportSettings", "Domain");
+    }
+
+    /// <summary>Descriptions and blank lines are not names, and a name appears once.</summary>
+    [Fact]
+    public void Only_names_are_taken_from_the_listing() =>
+        StalwartDnsService.ObjectNamesInText(
+            "Account   Defines a user or group account.\n\nAccount   again\n   \n")
+            .Should().BeEquivalentTo("Account");
+
+    /// <summary>
     /// <b>The one type that must never be waved through.</b> The CLI refuses to export a plan
     /// with a dangling reference — "DkimSignature references Tenant but Tenant is not in the
     /// snapshot selection" — and allowing a type to go unresolved <em>drops that reference from
