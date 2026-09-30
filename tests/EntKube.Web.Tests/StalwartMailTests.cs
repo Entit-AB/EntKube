@@ -2260,6 +2260,24 @@ public class StalwartMailTests
         manifest.Should().Contain("dnsPolicy: ClusterFirstWithHostNet");
     }
 
+    /// <summary>
+    /// <b>The administrator is a mailbox, not a word.</b> Stalwart has no administrator concept of
+    /// its own — only an account carrying the Admin role — and an OIDC directory told a
+    /// usernameDomain resolves a claim with no domain by appending one. So a token claiming the
+    /// bare name typed into the settings resolves to an account that does not exist, and the 401
+    /// looks exactly like a broken client secret. Anything minting a token for the administrator
+    /// has to claim the address this returns.
+    /// </summary>
+    [Fact]
+    public void TheAdministratorIdentityIsAlwaysDomainQualified()
+    {
+        StalwartComponentConfig config = Config(c => c.AdminUsername = "admin");
+        List<StalwartMailDomain> domains = [Domain(config.Id, "entit.eu")];
+
+        StalwartService.ResolveAdminIdentity(config, domains)
+            .Should().Be(("admin", "entit.eu", "admin@entit.eu"));
+    }
+
     // ── PROXY protocol reach ──────────────────────────────────────────────────
 
     /// <summary>

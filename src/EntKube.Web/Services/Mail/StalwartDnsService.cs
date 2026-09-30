@@ -109,9 +109,10 @@ public class StalwartDnsService(
         if (token is null)
         {
             return [Failed(
-                "This mail server authenticates against OIDC, and no Keycloak realm is recorded for "
-                + "its issuer — so there is no service account to mint a token from. Set the realm on "
-                + "the mail server's authentication settings.")];
+                "There is no identity to ask as. This mail server authenticates against OIDC, so a "
+                + "token is the only credential it takes — which needs both a Keycloak realm "
+                + "recorded for its issuer and an administrator whose address is in one of this "
+                + "server's own domains. Set both on the mail server's settings.")];
         }
 
         string? pod = await ReadyPodAsync(ns, release, kubeconfig, ct);
@@ -272,11 +273,26 @@ public class StalwartDnsService(
             return null;
         }
 
+        // The administrator as the server knows it, which is a mailbox in a domain and not the
+        // bare word typed into the settings. Stalwart has no administrator concept of its own —
+        // only an account carrying the Admin role — and this directory is told a usernameDomain,
+        // so it resolves a claim with no domain by appending one. A token claiming "admin" is
+        // therefore resolved as "admin@somewhere" and matches no account, which is a 401 that
+        // looks exactly like a broken secret. The support mailbox has always claimed its full
+        // address for the same reason; this now does too.
+        List<StalwartMailDomain> domains = await db.StalwartMailDomains
+            .AsNoTracking().Where(d => d.ConfigId == config.Id).ToListAsync(ct);
+
+        if (StalwartService.ResolveAdminIdentity(config, domains) is not (_, _, string adminAddress))
+        {
+            return null;
+        }
+
         string clientId = $"entkube-mail-api-{componentId:N}"[..Math.Min(48, $"entkube-mail-api-{componentId:N}".Length)];
 
         (string id, string secret, string tokenEndpoint) =
             await keycloak.EnsureServiceAccountClientAsync(
-                tenantId, realmId, clientId, config.AdminUsername,
+                tenantId, realmId, clientId, adminAddress,
                 string.IsNullOrWhiteSpace(config.OidcRequireAudience)
                     ? "stalwart"
                     : config.OidcRequireAudience!.Trim(),
