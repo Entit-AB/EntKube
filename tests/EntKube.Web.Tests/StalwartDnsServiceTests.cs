@@ -43,6 +43,41 @@ public class StalwartDnsServiceTests
     public void A_schema_with_no_dkim_object_names_nothing(string schema) =>
         StalwartDnsService.DkimObjectIn(schema).Should().BeNull();
 
+    /// <summary>
+    /// <b>A refusal is not an empty schema.</b> The server says no in an RFC 7807 problem
+    /// document, which parses as JSON perfectly well — so "bytes came back" was reported as
+    /// "reached the server and authenticated", which was a claim nothing had checked.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"type":"about:blank","status":401,"title":"Unauthorized"}""")]
+    [InlineData("""{"status":403,"title":"Forbidden"}""")]
+    public void A_refusal_is_recognised_as_one(string body) =>
+        StalwartDnsService.Unauthorized(body).Should().BeTrue();
+
+    [Theory]
+    [InlineData("""{"objects":{"x:Domain":{}}}""")]
+    [InlineData("""{"status":"ok"}""")]
+    [InlineData("not json")]
+    public void An_answer_is_not_a_refusal(string body) =>
+        StalwartDnsService.Unauthorized(body).Should().BeFalse();
+
+    /// <summary>
+    /// When nothing in the schema holds DKIM keys, what the server does have is the useful thing
+    /// to say — a schema is thousands of lines of forms and layouts around a short list of
+    /// objects, and the list is what names the one to read instead.
+    /// </summary>
+    [Fact]
+    public void The_objects_the_schema_lists_can_be_named()
+    {
+        StalwartDnsService.ObjectNamesIn("""{"objects":{"x:Domain":{},"x:Account":{}}}""")
+            .Should().BeEquivalentTo("x:Domain", "x:Account");
+
+        StalwartDnsService.ObjectNamesIn("""{"objects":[{"name":"x:Domain"},"x:Account"]}""")
+            .Should().BeEquivalentTo("x:Domain", "x:Account");
+
+        StalwartDnsService.ObjectNamesIn("""{"forms":{}}""").Should().BeEmpty();
+    }
+
     // ---- Reading the records ----------------------------------------------------------------
 
     /// <summary>The selector and the public half, in the form the DNS list renders.</summary>

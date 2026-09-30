@@ -125,16 +125,33 @@ public class StalwartDnsService(
         // seen. What it finds decides the next call; what it cannot read is handed back.
         string schema = await AskAsync(pod, ns, "/api/schema", token, kubeconfig, ct);
 
+        // Whether the answer is the schema at all. Claiming "authenticated" because bytes came
+        // back was wrong: a 401 body is bytes too, and it reads as a schema with nothing in it.
+        if (Unauthorized(schema))
+        {
+            return [new StalwartDnsFetch(
+                "", null,
+                "The mail server refused the token. The Keycloak service account exists, so what is "
+                + "missing is its standing with the server: the identity it maps to has to be the "
+                + "administrator, and that account has to carry the Admin role.",
+                Truncate(schema))];
+        }
+
         string? objectName = DkimObjectIn(schema);
 
         if (objectName is null)
         {
+            IReadOnlyList<string> known = ObjectNamesIn(schema);
+
             return [new StalwartDnsFetch(
                 "", null,
-                "Reached the mail server and authenticated, but nothing in its schema named the "
-                + "object that holds DKIM keys. The response is below — it names every object this "
-                + "server has, and one of them is the one to read.",
-                Truncate(schema))];
+                known.Count > 0
+                    ? "Read the mail server's schema, and none of the objects it lists holds DKIM "
+                      + "keys by name — so they belong to something named differently, or are not "
+                      + "separate objects at all. What it lists: " + string.Join(", ", known)
+                    : "Read something from the mail server that is not a schema this can make sense "
+                      + "of. It is below, verbatim.",
+                known.Count > 0 ? null : Truncate(schema))];
         }
 
         List<StalwartDnsFetch> results = [];
@@ -167,6 +184,68 @@ public class StalwartDnsService(
     }
 
     private static StalwartDnsFetch Failed(string why) => new("", null, why);
+
+    /// <summary>
+    /// Whether this is the server saying no rather than answering. Its refusals are RFC 7807
+    /// problem documents, which parse perfectly well as JSON and would otherwise be reported as a
+    /// schema that happens to mention nothing.
+    /// </summary>
+    public static bool Unauthorized(string body)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(body);
+
+            return doc.RootElement.ValueKind == JsonValueKind.Object
+                && doc.RootElement.TryGetProperty("status", out JsonElement status)
+                && status.ValueKind == JsonValueKind.Number
+                && status.GetInt32() is 401 or 403;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>
+    /// The object types the schema lists, for when none of them is the one being looked for.
+    ///
+    /// <para>Names rather than the whole document: the operator reading this needs to see what the
+    /// server actually has, and a schema is thousands of lines of forms and layouts around a short
+    /// list of objects.</para>
+    /// </summary>
+    public static IReadOnlyList<string> ObjectNamesIn(string schemaJson)
+    {
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(schemaJson);
+
+            if (doc.RootElement.ValueKind != JsonValueKind.Object
+                || !doc.RootElement.TryGetProperty("objects", out JsonElement objects))
+            {
+                return [];
+            }
+
+            return objects.ValueKind switch
+            {
+                JsonValueKind.Object => [.. objects.EnumerateObject().Select(p => p.Name)],
+                JsonValueKind.Array =>
+                [
+                    .. objects.EnumerateArray()
+                        .Select(o => o.ValueKind == JsonValueKind.String
+                            ? o.GetString()
+                            : Text(o, "name") ?? Text(o, "id"))
+                        .Where(n => !string.IsNullOrWhiteSpace(n))
+                        .Select(n => n!)
+                ],
+                _ => [],
+            };
+        }
+        catch (JsonException)
+        {
+            return [];
+        }
+    }
 
     private static string Truncate(string body) =>
         string.IsNullOrWhiteSpace(body) ? "(nothing)"
