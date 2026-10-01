@@ -3,10 +3,10 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
 
-namespace EntKube.Web.Data.Migrations.Sqlite
+namespace EntKube.Web.Data.Migrations.Postgres
 {
     /// <inheritdoc />
-    public partial class AddSupportDutyAndAssignee : Migration
+    public partial class AddSupportRosterAndDeliveryReport : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
@@ -14,21 +14,35 @@ namespace EntKube.Web.Data.Migrations.Sqlite
             migrationBuilder.AddColumn<string>(
                 name: "AssigneeUserId",
                 table: "Tickets",
-                type: "TEXT",
+                type: "character varying(450)",
                 maxLength: 450,
                 nullable: true);
+
+            migrationBuilder.AddColumn<string>(
+                name: "FailedRecipient",
+                table: "InboundMailMessages",
+                type: "character varying(320)",
+                maxLength: 320,
+                nullable: true);
+
+            migrationBuilder.AddColumn<bool>(
+                name: "IsDeliveryReport",
+                table: "InboundMailMessages",
+                type: "boolean",
+                nullable: false,
+                defaultValue: false);
 
             migrationBuilder.CreateTable(
                 name: "SupportDuties",
                 columns: table => new
                 {
-                    Id = table.Column<Guid>(type: "TEXT", nullable: false),
-                    TenantId = table.Column<Guid>(type: "TEXT", nullable: false),
-                    UserId = table.Column<string>(type: "TEXT", maxLength: 450, nullable: false),
-                    IsActive = table.Column<bool>(type: "INTEGER", nullable: false),
-                    Note = table.Column<string>(type: "TEXT", maxLength: 500, nullable: true),
-                    UpdatedAt = table.Column<DateTime>(type: "TEXT", nullable: false),
-                    UpdatedBy = table.Column<string>(type: "TEXT", maxLength: 256, nullable: true)
+                    Id = table.Column<Guid>(type: "uuid", nullable: false),
+                    TenantId = table.Column<Guid>(type: "uuid", nullable: false),
+                    UserId = table.Column<string>(type: "character varying(450)", maxLength: 450, nullable: false),
+                    IsActive = table.Column<bool>(type: "boolean", nullable: false),
+                    Note = table.Column<string>(type: "character varying(500)", maxLength: 500, nullable: true),
+                    UpdatedAt = table.Column<DateTime>(type: "timestamp with time zone", nullable: false),
+                    UpdatedBy = table.Column<string>(type: "character varying(256)", maxLength: 256, nullable: true)
                 },
                 constraints: table =>
                 {
@@ -66,6 +80,14 @@ namespace EntKube.Web.Data.Migrations.Sqlite
             migrationBuilder.DropColumn(
                 name: "AssigneeUserId",
                 table: "Tickets");
+
+            migrationBuilder.DropColumn(
+                name: "FailedRecipient",
+                table: "InboundMailMessages");
+
+            migrationBuilder.DropColumn(
+                name: "IsDeliveryReport",
+                table: "InboundMailMessages");
         }
     }
 }

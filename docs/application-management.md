@@ -376,11 +376,37 @@ guard to protect against.
 **The cause was in the DNS checklist, not the mail server.** It listed MX, SPF, DMARC and the
 autodiscovery names — every one of them about the domain — and said nothing about the address
 the mail leaves from. An installation could publish all of it, pass every check it named, and
-still be refused. The A and PTR rows are now in it, with the distinction that matters: a
-pod's egress address is usually the node's, **not** the LoadBalancer address other servers
-connect in on, so the forward record has to describe what the receiving end actually sees.
-The PTR is not published in the domain's zone at all — it belongs to whoever owns the IP, and
-is usually a provider console field or a support request.
+still be refused.
+
+**A balancer address and a sending address are two different things**, and conflating them is
+what made this hard to see. A LoadBalancer address is where other servers connect *in*, and
+it is what the MX record and the mail host must point at. Traffic leaving a pod takes the
+cluster's own route out — on a plain install, a router with an address of its own and nothing
+to do with the balancer. The sending addresses were already asked for, because SPF needs them
+(`StalwartComponentConfig.SendingIpAddresses`); what was missing is that SPF only says we are
+*allowed* to send from an address, and says nothing about the two records a receiver checks
+before it will take the connection at all. Those are now generated: the sending address gets
+**its own name**, `smtp-out.<domain>`, because the mail host has to point at the balancer and
+cannot point at both — and a **PTR** from each sending address back to that name, with the
+row stating that it is not published in this zone. It belongs to whoever owns the address, a
+provider console field or a support request, which is precisely why it is the record that gets
+forgotten.
+
+And a list of records to publish cannot tell anybody that it is wrong, which is the deeper
+reason this got as far as a customer.
+[`MailDnsCheck`](../src/EntKube.Web/Services/Mail/MailDnsCheck.cs) asks DNS the questions the
+receiving end asks. Where sending addresses are known it checks those and ignores the inbound
+address entirely — a receiver only ever looks at where the connection came from — and it
+checks **both** halves: that the address has a PTR, and that the name the PTR gives resolves
+back to the same address. A PTR alone does not buy the second, which is what Gmail names in
+the same sentence as the missing one, and it is the half a provider setting the PTR does not
+give you. Pointing the PTR at the mail host is reported with its own explanation rather than
+as a bare mismatch, because it is the obvious thing to do and it cannot work.
+
+With no sending addresses configured the check says so rather than quietly examining the
+inbound address: assuming mail leaves from the address it arrives on is true of a
+single-homed server and false of most Kubernetes installs, and the same empty list also means
+SPF authorises nothing outbound.
 
 ### Whose ticket is it
 

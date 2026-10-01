@@ -11,8 +11,8 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.Sqlite
 {
     [DbContext(typeof(ApplicationDbContext))]
-    [Migration("20261001163630_AddInboundDeliveryReport")]
-    partial class AddInboundDeliveryReport
+    [Migration("20261001181737_AddSupportRosterAndDeliveryReport")]
+    partial class AddSupportRosterAndDeliveryReport
     {
         /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
@@ -7226,6 +7226,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<bool>("RspamdTempFailOnError")
                         .HasColumnType("INTEGER");
 
+                    b.Property<string>("SendingIpAddresses")
+                        .HasColumnType("TEXT");
+
                     b.Property<bool>("SmtpEnabled")
                         .HasColumnType("INTEGER");
 
@@ -7334,6 +7337,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<string>("Description")
                         .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("DkimDnsRecords")
                         .HasColumnType("TEXT");
 
                     b.Property<bool>("IsPrimary")

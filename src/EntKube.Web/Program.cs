@@ -580,6 +580,9 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.Mail.ISupportMailAnalyst,
             EntKube.Web.Services.Mail.RuleBasedMailAnalyst>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.MailTriageRuleService>();
+        builder.Services.AddSingleton<EntKube.Web.Services.Mail.IDnsLookup,
+            EntKube.Web.Services.Mail.SystemDnsLookup>();
+        builder.Services.AddScoped<EntKube.Web.Services.Mail.MailDnsCheck>();
         builder.Services.AddScoped<EntKube.Web.Services.Support.SupportDutyService>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailService>();
         builder.Services.AddScoped<EntKube.Web.Services.CurrentActor>();

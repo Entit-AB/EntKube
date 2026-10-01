@@ -6,7 +6,7 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace EntKube.Web.Data.Migrations.SqlServer
 {
     /// <inheritdoc />
-    public partial class AddSupportDutyAndAssignee : Migration
+    public partial class AddSupportRosterAndDeliveryReport : Migration
     {
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
@@ -17,6 +17,20 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                 type: "nvarchar(450)",
                 maxLength: 450,
                 nullable: true);
+
+            migrationBuilder.AddColumn<string>(
+                name: "FailedRecipient",
+                table: "InboundMailMessages",
+                type: "nvarchar(320)",
+                maxLength: 320,
+                nullable: true);
+
+            migrationBuilder.AddColumn<bool>(
+                name: "IsDeliveryReport",
+                table: "InboundMailMessages",
+                type: "bit",
+                nullable: false,
+                defaultValue: false);
 
             migrationBuilder.CreateTable(
                 name: "SupportDuties",
@@ -66,6 +80,14 @@ namespace EntKube.Web.Data.Migrations.SqlServer
             migrationBuilder.DropColumn(
                 name: "AssigneeUserId",
                 table: "Tickets");
+
+            migrationBuilder.DropColumn(
+                name: "FailedRecipient",
+                table: "InboundMailMessages");
+
+            migrationBuilder.DropColumn(
+                name: "IsDeliveryReport",
+                table: "InboundMailMessages");
         }
     }
 }

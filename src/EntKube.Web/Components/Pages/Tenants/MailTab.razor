@@ -5,6 +5,7 @@
 @inject KeycloakService Keycloak
 @inject ComponentInstallOrchestrator InstallOrchestrator
 @inject ToastService Toasts
+@inject MailDnsCheck DnsCheck
 
 @* ===========================================================================
    Mail Tab — manages EntKube-authored Stalwart mail servers.
@@ -707,7 +708,54 @@
                                 </tr>
                             </thead>
                             <tbody>
-                                @foreach (var domain in cfg.Domains.OrderByDescending(d => d.IsPrimary).ThenBy(d => d.Name))
+                                @* The records above say what to publish; they cannot say whether it worked.
+                       This asks DNS the same questions a receiving server asks. *@
+                    <div class="card shadow-sm mb-3"><div class="card-body">
+                        <div class="d-flex justify-content-between align-items-start">
+                            <div>
+                                <h6 class="card-title mb-0">
+                                    <i class="bi bi-search me-2"></i>Check the mail host
+                                </h6>
+                                <div class="form-text">
+                                    Forward and reverse DNS for <code>@cfg.Hostname</code>, which is what
+                                    decides whether Gmail and Microsoft accept mail from here at all.
+                                </div>
+                            </div>
+                            <AsyncButton CssClass="btn-sm btn-outline-primary" OnClick="CheckDnsAsync">
+                                <i class="bi bi-arrow-repeat me-1"></i>Check now
+                            </AsyncButton>
+                        </div>
+
+                        @if (dnsFindings is not null)
+                        {
+                            <table class="table table-sm mt-3 mb-0">
+                                <tbody>
+                                    @foreach (MailDnsFinding finding in dnsFindings)
+                                    {
+                                        <tr>
+                                            <td style="width: 1%">
+                                                <i class="bi @(finding.Verdict switch
+                                                    {
+                                                        MailDnsVerdict.Good => "bi-check-circle-fill text-success",
+                                                        MailDnsVerdict.Warning => "bi-exclamation-triangle-fill text-warning",
+                                                        _ => "bi-x-circle-fill text-danger",
+                                                    })"></i>
+                                            </td>
+                                            <td class="small">
+                                                <div class="fw-semibold">@finding.What</div>
+                                                <div class="font-monospace small text-muted">
+                                                    @(finding.Found ?? "nothing")
+                                                </div>
+                                            </td>
+                                            <td class="small text-muted">@finding.Explanation</td>
+                                        </tr>
+                                    }
+                                </tbody>
+                            </table>
+                        }
+                    </div></div>
+
+                    @foreach (var domain in cfg.Domains.OrderByDescending(d => d.IsPrimary).ThenBy(d => d.Name))
                                 {
                                     <tr @key="domain.Id">
                                         <td class="font-monospace">@domain.Name</td>
@@ -929,6 +977,36 @@
 
     private bool loading = true;
     private bool busy;
+
+    /// <summary>What DNS said last time it was asked, or null until it has been.</summary>
+    private List<MailDnsFinding>? dnsFindings;
+
+    /// <summary>
+    /// Asks DNS what a receiving server would ask it. Never throws: a resolver that cannot
+    /// answer is a thing to report on the page, not a reason to break the tab.
+    /// </summary>
+    private async Task CheckDnsAsync()
+    {
+        try
+        {
+            dnsFindings = await DnsCheck.CheckAsync(
+                cfg.Hostname, cfg.LoadBalancerIp, StalwartPlanBuilder.SendingAddressesOf(cfg));
+
+            if (dnsFindings.Any(f => f.Verdict == MailDnsVerdict.Refused))
+            {
+                Toasts.Error("Mail from this host will be refused — see what is below.");
+            }
+            else
+            {
+                Toasts.Success("The mail host's own records look right.");
+            }
+        }
+        catch (Exception ex)
+        {
+            dnsFindings = null;
+            Toasts.Error($"Could not look it up: {ex.Message}");
+        }
+    }
     private string view = "config";
     private string? applyOutput;
 
