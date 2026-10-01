@@ -583,101 +583,169 @@ public class StalwartDnsService(
         ["Tenant", "Certificate", "AcmeProvider", "DnsServer"];
 
     /// <summary>
-    /// The selectors a domain is signing with, read out of a snapshot plan.
+    /// The DNS value for a public key the server handed over, as it must be published.
     ///
-    /// <para><b>Why only the selectors.</b> A signature object carries the private half and
-    /// nothing else — the server returns secret fields anonymised, and says so. There is no
-    /// public key in it to publish, and no amount of asking differently produces one: the public
-    /// half exists only as something derived from the private key, which the server will not
-    /// hand over. So what can be learned here is which selectors are in use, which is the half
-    /// of the record nobody can guess, and the operator supplies the key beside it.</para>
-    ///
-    /// <para>The domain comes from a reference — <c>"domainId":"#domain-b"</c> — resolved against
-    /// the Domain upsert in the same plan, which is exactly why Domain is in the selection and
-    /// never waved through.</para>
+    /// <para>The server returns PEM. A DKIM record carries the key as one unbroken base64 string
+    /// in <c>p=</c>, so the armour and the line breaks come off — and what remains differs by
+    /// algorithm. For RSA, <c>p=</c> is the SubjectPublicKeyInfo, which is exactly the PEM body.
+    /// For Ed25519, RFC 8463 says <c>p=</c> is the bare 32-byte key, not the structure around it,
+    /// so the DER prefix is dropped. Publishing an Ed25519 key in RSA's form produces a record
+    /// that looks right and verifies nothing.</para>
     /// </summary>
-    public static IReadOnlyList<string> DkimSelectorsInPlan(string plan, string domain)
+    /// <param name="pem">The PEM the server returned.</param>
+    /// <param name="algorithm">
+    /// The signature's variant — <c>Dkim1Ed25519Sha256</c> and the like. Null is treated as RSA,
+    /// which is what a record with no <c>k=</c> means to every verifier that defaults.
+    /// </param>
+    public static string? DnsValueForPublicKey(string? pem, string? algorithm)
     {
-        Dictionary<string, string> domainRefs = [];
-        List<(string Ref, string Selector)> signatures = [];
-
-        foreach (string line in (plan ?? "")
-                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        if (string.IsNullOrWhiteSpace(pem))
         {
-            if (!line.StartsWith('{'))
-            {
-                continue;
-            }
-
-            try
-            {
-                using JsonDocument doc = JsonDocument.Parse(line);
-
-                if (!doc.RootElement.TryGetProperty("object", out JsonElement type)
-                    || !doc.RootElement.TryGetProperty("value", out JsonElement values)
-                    || values.ValueKind != JsonValueKind.Object)
-                {
-                    continue;
-                }
-
-                foreach (JsonProperty entry in values.EnumerateObject())
-                {
-                    if (type.GetString() == "Domain" && Text(entry.Value, "name") is string name)
-                    {
-                        domainRefs[entry.Name] = name;
-                    }
-                    else if (type.GetString() == "DkimSignature"
-                             && Text(entry.Value, "selector") is string selector
-                             && Text(entry.Value, "domainId") is string reference)
-                    {
-                        signatures.Add((reference.TrimStart('#'), selector));
-                    }
-                }
-            }
-            catch (JsonException)
-            {
-                // A progress line, not a plan line.
-            }
+            return null;
         }
 
-        return
-        [
-            .. signatures
-                .Where(sig => domainRefs.TryGetValue(sig.Ref, out string? name)
-                              && name.Trim().TrimEnd('.')
-                                  .Equals(domain.Trim().TrimEnd('.'), StringComparison.OrdinalIgnoreCase))
-                .Select(sig => sig.Selector)
-                .Distinct(StringComparer.OrdinalIgnoreCase)
-        ];
+        string body = string.Concat(
+            pem.Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(l => !l.StartsWith("-----", StringComparison.Ordinal)));
+
+        if (body.Length == 0)
+        {
+            return null;
+        }
+
+        bool ed25519 = algorithm?.Contains("ed25519", StringComparison.OrdinalIgnoreCase) == true;
+
+        if (!ed25519)
+        {
+            return $"v=DKIM1; k=rsa; p={body}";
+        }
+
+        try
+        {
+            byte[] der = Convert.FromBase64String(body);
+
+            // The last 32 bytes of the SubjectPublicKeyInfo are the key itself; everything before
+            // them says what kind of key it is, which the record states as k=ed25519 instead.
+            return der.Length < 32
+                ? null
+                : $"v=DKIM1; k=ed25519; p={Convert.ToBase64String(der[^32..])}";
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
     }
 
     /// <summary>
-    /// The DKIM records in a plan file — what <c>snapshot</c> writes, which is NDJSON: one
-    /// operation per line rather than one document.
+    /// The published records for a domain, from what <c>query</c> returned.
     ///
-    /// <para>Each line is read with the same lenient reader as any other answer, for the same
-    /// reason: this is a shape EntKube does not control, and a strict reader would give an empty
-    /// list with no explanation the day it gains a field.</para>
+    /// <para><b>Why query and not snapshot.</b> The public key is a server-set field, and a
+    /// snapshot exports only what can be applied again — so it leaves out the one field that
+    /// matters, and says so in a warning about secrets that reads like the whole story. Asked
+    /// for directly, the server hands it over: "PEM-encoded public key used to verify
+    /// signatures, derived from the private key".</para>
     /// </summary>
-    public static string? DkimLinesInPlan(string plan, string domain)
+    /// <param name="signatures">What the signature query printed.</param>
+    /// <param name="domainsById">Domain names by their identifier, from the domain query.</param>
+    /// <param name="domain">The domain being asked about.</param>
+    public static string? DkimLinesInQuery(
+        string signatures, IReadOnlyDictionary<string, string> domainsById, string domain)
     {
         List<string> lines = [];
 
-        foreach (string line in (plan ?? "")
-                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        foreach (JsonElement record in JsonObjectsIn(signatures))
         {
-            if (!line.StartsWith('{') && !line.StartsWith('['))
+            string? selector = Text(record, "selector");
+            string? pem = Text(record, "publicKey");
+            string? owner = Text(record, "domainId") is string id
+                && domainsById.TryGetValue(id.TrimStart('#'), out string? name) ? name : null;
+
+            if (selector is null
+                || owner is null
+                || !owner.Trim().TrimEnd('.').Equals(
+                    domain.Trim().TrimEnd('.'), StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
-            if (DkimLinesIn(line, domain) is string found)
+            if (DnsValueForPublicKey(pem, Text(record, "@type") ?? Text(record, "type")) is string value)
             {
-                lines.AddRange(found.Split('\n'));
+                lines.Add($"{selector} {value}");
             }
         }
 
         return lines.Count == 0 ? null : string.Join('\n', lines.Distinct());
+    }
+
+    /// <summary>Domain names by identifier, from what the domain query printed.</summary>
+    public static IReadOnlyDictionary<string, string> DomainsInQuery(string domains)
+    {
+        Dictionary<string, string> byId = [];
+
+        foreach (JsonElement record in JsonObjectsIn(domains))
+        {
+            if (Text(record, "name") is string name
+                && (Text(record, "id") ?? Text(record, "_id")) is string id)
+            {
+                byId[id.TrimStart('#')] = name;
+            }
+        }
+
+        return byId;
+    }
+
+    /// <summary>
+    /// Every object in what the CLI printed, whether it came as one array, one object per line,
+    /// or an array wrapped in something — read leniently for the reason everything here is.
+    /// </summary>
+    private static IEnumerable<JsonElement> JsonObjectsIn(string output)
+    {
+        string whole = (output ?? "").Trim();
+
+        // One document when the whole thing is one — a query prints an array — and line by line
+        // when it is not, because a plan prints an object per line. Not both: an array read twice
+        // reports every record twice.
+        if (TryParse(whole) is JsonElement document)
+        {
+            foreach (JsonElement element in Candidates(document))
+            {
+                yield return element;
+            }
+
+            yield break;
+        }
+
+        foreach (string line in whole
+                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                 .Where(l => l.StartsWith('{') || l.StartsWith('[')))
+        {
+            if (TryParse(line) is JsonElement parsed)
+            {
+                foreach (JsonElement element in Candidates(parsed))
+                {
+                    yield return element;
+                }
+            }
+        }
+
+        static JsonElement? TryParse(string text)
+        {
+            if (text.Length == 0 || (!text.StartsWith('{') && !text.StartsWith('[')))
+            {
+                return null;
+            }
+
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(text);
+                return doc.RootElement.Clone();
+            }
+            catch (JsonException)
+            {
+                // Progress chatter, not data.
+                return null;
+            }
+        }
     }
 
     /// <summary>

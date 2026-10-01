@@ -2362,37 +2362,19 @@ public class StalwartService(
 
             output.Add($"The server keeps them in {objectName}.");
 
-            // What that object is made of. Asked for because EntKube is going to have to write
-            // these itself — the server will not hand over a public key, so the only way the
-            // records can ever be published is for EntKube to own the keys — and writing an
-            // object from a reading of the documentation is what went wrong every other time.
-            output.Add(await RunCliJobAsync(
-                config, releaseName, ns, kubeconfig, "dkim-shape", ["describe", objectName], ct));
+            // query, not snapshot. The public key is a server-set field — "derived from the
+            // private key" — and a snapshot exports only what can be applied again, so it leaves
+            // out the one field that matters and warns about secrets instead, which reads like
+            // the whole story and is not. Asked directly, the server hands it over.
+            string domains = await RunCliJobAsync(
+                config, releaseName, ns, kubeconfig, "dkim-domains",
+                ["query", "Domain", "--json", "--fields", "id,name"], ct);
 
-            // Everything this server has, minus what is being asked for. The CLI refuses to
-            // export a plan with a dangling reference and names only the first type missing, so
-            // discovering them one at a time costs an apply each — and this server has 117.
-            // Waving a type through drops that reference from the output, which is why the
-            // selection itself is never in the list: the domain is how a key is matched to the
-            // zone it belongs in.
-            string[] selection = [objectName, .. Mail.StalwartDnsService.AlsoSnapshot];
-
-            IReadOnlyList<string> listed = Mail.StalwartDnsService.ObjectNamesInText(described);
-
-            List<string> unresolved =
-            [
-                .. (listed.Count > 0 ? listed : Mail.StalwartDnsService.SnapshotUnresolved)
-                    .Where(n => !selection.Contains(n, StringComparer.OrdinalIgnoreCase))
-            ];
-
-            // Deliberately without --include-secrets. This output is read back into EntKube and
-            // shown on a page, and the private half of a signing key belongs in neither.
-            string snapshot = await RunCliJobAsync(
+            string signatures = await RunCliJobAsync(
                 config, releaseName, ns, kubeconfig, "dkim",
-                ["snapshot", .. selection, "--allow-unresolved", string.Join(',', unresolved)],
-                ct);
+                ["query", objectName, "--json", "--fields", "selector,publicKey,domainId"], ct);
 
-            int written = await StoreDkimAsync(config.Id, snapshot, ct);
+            int written = await StoreDkimAsync(config.Id, domains, signatures, ct);
 
             if (written > 0)
             {
@@ -2400,13 +2382,11 @@ public class StalwartService(
                 return output;
             }
 
-            // No public key came back, and none ever will: a signature object carries the private
-            // half, the server returns secret fields anonymised, and the public half exists only
-            // as something derived from a key it will not hand over. What is knowable is which
-            // selectors are in use — the half of the record nobody can guess — so that is said,
-            // and the raw answer kept, rather than reporting a blank.
-            output.AddRange(await ReportSelectorsAsync(config.Id, snapshot, ct));
-            output.Add(snapshot.Length > 4000 ? snapshot[..4000] + "…" : snapshot);
+            output.Add(
+                "Asked for them and got nothing that reads as a selector and a public key. Both "
+                + "answers are below.");
+            output.Add(Trim(domains));
+            output.Add(Trim(signatures));
         }
         catch (Exception ex)
         {
@@ -2417,55 +2397,29 @@ public class StalwartService(
         return output;
     }
 
-    /// <summary>
-    /// Says which selectors each domain signs with, when the keys themselves could not be read.
-    ///
-    /// <para>Half an answer, and the half that cannot be worked out from outside: a selector is
-    /// an arbitrary name the server chose, and it changes when the key rotates. Published against
-    /// the wrong one, a perfectly good public key fails every check.</para>
-    /// </summary>
-    private async Task<List<string>> ReportSelectorsAsync(
-        Guid configId, string snapshot, CancellationToken ct)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-
-        List<StalwartMailDomain> domains = await db.StalwartMailDomains
-            .AsNoTracking().Where(d => d.ConfigId == configId).ToListAsync(ct);
-
-        List<string> said =
-        [
-            "The server will not hand over a public key: a signature object holds the private "
-            + "half, and secret fields come back anonymised. The selectors it signs with are "
-            + "below — the part of each record that cannot be guessed. Their public halves have "
-            + "to come from the server's own DNS page until EntKube owns these keys itself.",
-        ];
-
-        foreach (StalwartMailDomain domain in domains)
-        {
-            IReadOnlyList<string> selectors =
-                Mail.StalwartDnsService.DkimSelectorsInPlan(snapshot, domain.Name);
-
-            said.Add(selectors.Count > 0
-                ? $"  {domain.Name}: {string.Join(", ", selectors)}"
-                : $"  {domain.Name}: no signature found");
-        }
-
-        return said;
-    }
+    /// <summary>Enough of an answer to recognise it, never pages of it in an apply log.</summary>
+    private static string Trim(string output) =>
+        string.IsNullOrWhiteSpace(output) ? "(nothing)"
+        : output.Length <= 2000 ? output : output[..2000] + "…";
 
     /// <summary>Writes what was read onto the domains, and says how many got one.</summary>
-    private async Task<int> StoreDkimAsync(Guid configId, string snapshot, CancellationToken ct)
+    private async Task<int> StoreDkimAsync(
+        Guid configId, string domainsJson, string signaturesJson, CancellationToken ct)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         List<StalwartMailDomain> domains = await db.StalwartMailDomains
             .Where(d => d.ConfigId == configId).ToListAsync(ct);
 
+        IReadOnlyDictionary<string, string> byId =
+            Mail.StalwartDnsService.DomainsInQuery(domainsJson);
+
         int written = 0;
 
         foreach (StalwartMailDomain domain in domains)
         {
-            if (Mail.StalwartDnsService.DkimLinesInPlan(snapshot, domain.Name) is string records)
+            if (Mail.StalwartDnsService.DkimLinesInQuery(signaturesJson, byId, domain.Name)
+                is string records)
             {
                 domain.DkimDnsRecords = records;
                 written++;

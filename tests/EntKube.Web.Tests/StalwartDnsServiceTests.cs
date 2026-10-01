@@ -225,69 +225,89 @@ public class StalwartDnsServiceTests
             .NotIntersectWith(StalwartDnsService.SnapshotUnresolved);
     }
 
-    // ---- What a real snapshot contains ------------------------------------------------------
+    // ---- What the server actually returns ---------------------------------------------------
 
     /// <summary>
-    /// <b>Verbatim from the server, and the end of the matter.</b> A signature object carries the
-    /// private half and nothing else — the CLI says so itself: "DkimSignature has secret field(s)
-    /// the server returns anonymized (****); their values cannot be captured". There is no public
-    /// key here to publish and no way to ask for one; it exists only as something derived from a
-    /// key the server will not hand over.
-    ///
-    /// <para>What can be read is the selector, which is the half of the record nobody can guess —
-    /// an arbitrary name the server chose, which changes when the key rotates, and against which
-    /// a perfectly good public key fails every check if published wrongly.</para>
+    /// <b>The field that was there all along.</b> Asked to describe the object, the server says:
+    /// <c>publicKey  string&lt;text&gt;  server-set — PEM-encoded public key used to verify
+    /// signatures, derived from the private key</c>. A snapshot never showed it because a
+    /// snapshot exports what can be applied again, and a server-set field cannot be — so it was
+    /// left out, under a warning about secrets that read like the whole story.
     /// </summary>
-    private const string RealSnapshot = """
-        {"@type":"upsert","object":"Domain","matchOn":["name"],"value":{"domain-b":{"name":"entit.eu","dnsManagement":{"@type":"Manual"},"isEnabled":true}}}
-        {"@type":"upsert","object":"DkimSignature","matchOn":["selector"],"value":{"dkimsignature-jgyf3t9eaaqb":{"@type":"Dkim1RsaSha256","selector":"v1-rsa-20260927","privateKey":{"@type":"Text"},"domainId":"#domain-b"}}}
-        {"@type":"upsert","object":"DkimSignature","matchOn":["selector"],"value":{"dkimsignature-jgyf3syiaaab":{"@type":"Dkim1Ed25519Sha256","selector":"v1-ed25519-20260927","privateKey":{"@type":"Text"},"domainId":"#domain-b"}}}
+    private const string Signatures = """
+        [
+          {"selector":"v1-rsa-20260927","domainId":"domain-b","@type":"Dkim1RsaSha256",
+           "publicKey":"-----BEGIN PUBLIC KEY-----\nTUlJQkNnS0NBUUVB\n-----END PUBLIC KEY-----\n"},
+          {"selector":"v1-ed25519-20260927","domainId":"domain-b","@type":"Dkim1Ed25519Sha256",
+           "publicKey":"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA5fp3IbyRMhPCrSMsyHMUzL+6mFTzMVYYVjKl1vAlFFQ=\n-----END PUBLIC KEY-----\n"}
+        ]
         """;
 
-    [Fact]
-    public void A_real_snapshot_yields_no_publishable_record() =>
-        StalwartDnsService.DkimLinesInPlan(RealSnapshot, "entit.eu").Should().BeNull();
+    private static readonly Dictionary<string, string> Domains =
+        new() { ["domain-b"] = "entit.eu" };
 
     /// <summary>
-    /// The domain comes from a reference — <c>"domainId":"#domain-b"</c> — resolved against the
-    /// Domain upsert in the same plan. That is exactly why Domain is in the selection and never
-    /// waved through: allowing it would drop the reference and orphan every selector.
+    /// An RSA record publishes the SubjectPublicKeyInfo, which is exactly the PEM body with its
+    /// armour and line breaks removed.
     /// </summary>
     [Fact]
-    public void The_selectors_are_read_and_matched_to_their_domain() =>
-        StalwartDnsService.DkimSelectorsInPlan(RealSnapshot, "entit.eu")
-            .Should().BeEquivalentTo("v1-rsa-20260927", "v1-ed25519-20260927");
-
-    /// <summary>Another domain's signatures are not this domain's.</summary>
-    [Fact]
-    public void Selectors_belonging_elsewhere_are_not_claimed() =>
-        StalwartDnsService.DkimSelectorsInPlan(RealSnapshot, "other.example").Should().BeEmpty();
+    public void An_rsa_key_is_published_as_its_pem_body() =>
+        StalwartDnsService.DkimLinesInQuery(Signatures, Domains, "entit.eu")
+            .Should().Contain("v1-rsa-20260927 v=DKIM1; k=rsa; p=TUlJQkNnS0NBUUVB");
 
     /// <summary>
-    /// <c>snapshot</c> writes a plan file: NDJSON, one operation per line rather than one
-    /// document. Each line is read with the same lenient reader as any other answer.
+    /// <b>And an Ed25519 record does not.</b> RFC 8463 puts the bare 32-byte key in <c>p=</c>,
+    /// not the structure around it — publishing the SubjectPublicKeyInfo there gives a record
+    /// that looks right and verifies nothing.
     /// </summary>
     [Fact]
-    public void Records_are_read_out_of_a_snapshot_plan()
+    public void An_ed25519_key_is_published_without_its_der_wrapper()
     {
-        string plan =
-            """{"op":"upsert","type":"Domain","values":{"d0":{"name":"entit.eu"}}}""" + "\n"
-            + """{"selector":"v1-rsa-20260927","domain":"entit.eu","publicKey":"v=DKIM1; k=rsa; p=MIIB"}""" + "\n"
-            + """{"selector":"v1-ed25519-20260927","domain":"entit.eu","publicKey":"v=DKIM1; k=ed25519; p=11q"}""";
+        string? lines = StalwartDnsService.DkimLinesInQuery(Signatures, Domains, "entit.eu");
 
-        StalwartDnsService.DkimLinesInPlan(plan, "entit.eu").Should().Be(
-            "v1-rsa-20260927 v=DKIM1; k=rsa; p=MIIB\n"
-            + "v1-ed25519-20260927 v=DKIM1; k=ed25519; p=11q");
+        lines.Should().Contain("v1-ed25519-20260927 v=DKIM1; k=ed25519; p=");
+        lines.Should().Contain("5fp3IbyRMhPCrSMsyHMUzL+6mFTzMVYYVjKl1vAlFFQ=");
+
+        // The twelve bytes of "this is an Ed25519 key" belong in k=, not in p=.
+        lines.Should().NotContain("MCowBQYDK2VwAyEA5fp3");
     }
 
-    /// <summary>Progress chatter and blank lines are not JSON and are stepped over.</summary>
+    /// <summary>
+    /// The domain comes from an identifier resolved against the domain query — which is why both
+    /// are asked for. A signature whose domain is unknown is nobody's.
+    /// </summary>
     [Fact]
-    public void Noise_around_the_plan_is_ignored() =>
-        StalwartDnsService.DkimLinesInPlan(
-            "Snapshotting DkimSignature…\n\n"
-            + """{"selector":"s","domain":"entit.eu","publicKey":"v=DKIM1; p=A"}""" + "\ndone\n",
-            "entit.eu")
-            .Should().Be("s v=DKIM1; p=A");
+    public void A_signature_whose_domain_is_unknown_is_not_claimed() =>
+        StalwartDnsService.DkimLinesInQuery(Signatures, new Dictionary<string, string>(), "entit.eu")
+            .Should().BeNull();
+
+    [Fact]
+    public void Another_domains_signatures_are_not_claimed() =>
+        StalwartDnsService.DkimLinesInQuery(Signatures, Domains, "other.example")
+            .Should().BeNull();
+
+    /// <summary>Domain names come back keyed by the identifier the signatures refer to.</summary>
+    [Fact]
+    public void Domains_are_read_by_their_identifier() =>
+        StalwartDnsService.DomainsInQuery("""[{"id":"domain-b","name":"entit.eu"}]""")
+            .Should().Contain(new KeyValuePair<string, string>("domain-b", "entit.eu"));
+
+    /// <summary>
+    /// A key with no algorithm stated is published as RSA — which is what a record with no
+    /// <c>k=</c> means to every verifier that defaults.
+    /// </summary>
+    [Fact]
+    public void A_key_with_no_algorithm_is_published_as_rsa() =>
+        StalwartDnsService.DnsValueForPublicKey(
+            "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----", null)
+            .Should().Be("v=DKIM1; k=rsa; p=AAAA");
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("-----BEGIN PUBLIC KEY-----\n-----END PUBLIC KEY-----")]
+    public void Nothing_usable_publishes_nothing(string? pem) =>
+        StalwartDnsService.DnsValueForPublicKey(pem, "Dkim1RsaSha256").Should().BeNull();
 
     // ---- The request itself -----------------------------------------------------------------
 
