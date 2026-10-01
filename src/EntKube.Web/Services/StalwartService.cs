@@ -2362,6 +2362,13 @@ public class StalwartService(
 
             output.Add($"The server keeps them in {objectName}.");
 
+            // What that object is made of. Asked for because EntKube is going to have to write
+            // these itself — the server will not hand over a public key, so the only way the
+            // records can ever be published is for EntKube to own the keys — and writing an
+            // object from a reading of the documentation is what went wrong every other time.
+            output.Add(await RunCliJobAsync(
+                config, releaseName, ns, kubeconfig, "dkim-shape", ["describe", objectName], ct));
+
             // Everything this server has, minus what is being asked for. The CLI refuses to
             // export a plan with a dangling reference and names only the first type missing, so
             // discovering them one at a time costs an apply each — and this server has 117.
