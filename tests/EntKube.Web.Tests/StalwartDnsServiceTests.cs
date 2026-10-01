@@ -128,6 +128,187 @@ public class StalwartDnsServiceTests
     public void Nothing_usable_reads_as_nothing(string json) =>
         StalwartDnsService.DkimLinesIn(json, "entit.eu").Should().BeNull();
 
+    // ---- Reading what the CLI prints --------------------------------------------------------
+
+    /// <summary>
+    /// <c>describe</c> prints a human-readable listing, not JSON, so the structured reader finds
+    /// nothing in it. The rule is the same either way: the server names its own objects, and
+    /// whichever says "dkim" is the one to snapshot. Guessing that name is what went wrong twice.
+    /// </summary>
+    /// <summary>
+    /// <b>Verbatim from the server, and the reason the first rule was wrong.</b> Alphabetical
+    /// order puts the failure-report singleton first, so "the first name containing dkim" picked
+    /// a settings object with no key in it — and the snapshot that followed was of DKIM report
+    /// settings. The name alone cannot tell them apart; what each one says about itself can.
+    /// </summary>
+    private const string Listing = """
+        Directory               Defines an external directory for account authentication and lookups.
+        DkimReportSettings      Configures DKIM authentication failure report generation. [singleton]
+        DkimSignature           Defines a DKIM signature used to sign outgoing email messages.
+        DmarcReportSettings     Configures DMARC aggregate and failure report generation. [singleton]
+        Domain                  Defines an email domain and its DNS, DKIM, and TLS certificate settings.
+        """;
+
+    [Fact]
+    public void The_signing_object_is_preferred_over_the_report_settings() =>
+        StalwartDnsService.DkimObjectInText(Listing).Should().Be("DkimSignature");
+
+    /// <summary>A server that words it differently still yields something rather than nothing.</summary>
+    [Fact]
+    public void A_listing_with_only_a_settings_object_still_names_it() =>
+        StalwartDnsService.DkimObjectInText(
+            "DkimReportSettings      Configures DKIM report generation. [singleton]")
+            .Should().Be("DkimReportSettings");
+
+    /// <summary>
+    /// Snapshot takes bare object names — "Use bare object names (Domain, Account…)" — so the
+    /// prefix and any view or variant suffix are dropped rather than passed to a command that
+    /// rejects them.
+    /// </summary>
+    [Theory]
+    [InlineData("x:DkimSignature    Defines a DKIM signature.", "DkimSignature")]
+    [InlineData("DkimSignature/list    Defines a DKIM signature.", "DkimSignature")]
+    public void The_name_handed_on_is_the_bare_one(string line, string expected) =>
+        StalwartDnsService.DkimObjectInText(line).Should().Be(expected);
+
+    [Theory]
+    [InlineData("Account   Defines a user.\nDomain    Defines an email domain.")]
+    [InlineData("")]
+    public void A_listing_with_no_dkim_object_names_nothing(string described) =>
+        StalwartDnsService.DkimObjectInText(described).Should().BeNull();
+
+    /// <summary>
+    /// The domain object is asked for alongside, because the server describes it as holding "its
+    /// DNS, DKIM, and TLS certificate settings" — so if the published form of a key lives anywhere
+    /// but the signature object, it is there. One snapshot takes both.
+    /// </summary>
+    [Fact]
+    public void The_domain_object_is_read_alongside_the_keys() =>
+        StalwartDnsService.AlsoSnapshot.Should().Contain("Domain");
+
+    /// <summary>
+    /// <b>Every type the server has, so none has to be discovered by failing.</b> The CLI refuses
+    /// to export a plan with a dangling reference and names only the first one missing — so
+    /// finding them one at a time costs an apply each, and this server lists 117.
+    /// </summary>
+    [Fact]
+    public void Every_object_type_is_read_from_the_listing()
+    {
+        IReadOnlyList<string> names = StalwartDnsService.ObjectNamesInText(Listing);
+
+        names.Should().BeEquivalentTo(
+            "Directory", "DkimReportSettings", "DkimSignature", "DmarcReportSettings", "Domain");
+    }
+
+    /// <summary>Descriptions and blank lines are not names, and a name appears once.</summary>
+    [Fact]
+    public void Only_names_are_taken_from_the_listing() =>
+        StalwartDnsService.ObjectNamesInText(
+            "Account   Defines a user or group account.\n\nAccount   again\n   \n")
+            .Should().BeEquivalentTo("Account");
+
+    /// <summary>
+    /// <b>The one type that must never be waved through.</b> The CLI refuses to export a plan
+    /// with a dangling reference — "DkimSignature references Tenant but Tenant is not in the
+    /// snapshot selection" — and allowing a type to go unresolved <em>drops that reference from
+    /// the output</em>. Harmless for a tenant or a certificate; fatal for Domain, which is how a
+    /// key is matched to the zone it has to be published in.
+    /// </summary>
+    [Fact]
+    public void The_domain_reference_is_never_allowed_to_go_unresolved()
+    {
+        StalwartDnsService.SnapshotUnresolved.Should().Contain("Tenant");
+        StalwartDnsService.SnapshotUnresolved.Should().NotContain("Domain");
+
+        // And the two lists must not contradict each other.
+        StalwartDnsService.AlsoSnapshot.Should()
+            .NotIntersectWith(StalwartDnsService.SnapshotUnresolved);
+    }
+
+    // ---- What the server actually returns ---------------------------------------------------
+
+    /// <summary>
+    /// <b>The field that was there all along.</b> Asked to describe the object, the server says:
+    /// <c>publicKey  string&lt;text&gt;  server-set — PEM-encoded public key used to verify
+    /// signatures, derived from the private key</c>. A snapshot never showed it because a
+    /// snapshot exports what can be applied again, and a server-set field cannot be — so it was
+    /// left out, under a warning about secrets that read like the whole story.
+    /// </summary>
+    private const string Signatures = """
+        [
+          {"selector":"v1-rsa-20260927","domainId":"domain-b","@type":"Dkim1RsaSha256",
+           "publicKey":"-----BEGIN PUBLIC KEY-----\nTUlJQkNnS0NBUUVB\n-----END PUBLIC KEY-----\n"},
+          {"selector":"v1-ed25519-20260927","domainId":"domain-b","@type":"Dkim1Ed25519Sha256",
+           "publicKey":"-----BEGIN PUBLIC KEY-----\nMCowBQYDK2VwAyEA5fp3IbyRMhPCrSMsyHMUzL+6mFTzMVYYVjKl1vAlFFQ=\n-----END PUBLIC KEY-----\n"}
+        ]
+        """;
+
+    private static readonly Dictionary<string, string> Domains =
+        new() { ["domain-b"] = "entit.eu" };
+
+    /// <summary>
+    /// An RSA record publishes the SubjectPublicKeyInfo, which is exactly the PEM body with its
+    /// armour and line breaks removed.
+    /// </summary>
+    [Fact]
+    public void An_rsa_key_is_published_as_its_pem_body() =>
+        StalwartDnsService.DkimLinesInQuery(Signatures, Domains, "entit.eu")
+            .Should().Contain("v1-rsa-20260927 v=DKIM1; k=rsa; p=TUlJQkNnS0NBUUVB");
+
+    /// <summary>
+    /// <b>And an Ed25519 record does not.</b> RFC 8463 puts the bare 32-byte key in <c>p=</c>,
+    /// not the structure around it — publishing the SubjectPublicKeyInfo there gives a record
+    /// that looks right and verifies nothing.
+    /// </summary>
+    [Fact]
+    public void An_ed25519_key_is_published_without_its_der_wrapper()
+    {
+        string? lines = StalwartDnsService.DkimLinesInQuery(Signatures, Domains, "entit.eu");
+
+        lines.Should().Contain("v1-ed25519-20260927 v=DKIM1; k=ed25519; p=");
+        lines.Should().Contain("5fp3IbyRMhPCrSMsyHMUzL+6mFTzMVYYVjKl1vAlFFQ=");
+
+        // The twelve bytes of "this is an Ed25519 key" belong in k=, not in p=.
+        lines.Should().NotContain("MCowBQYDK2VwAyEA5fp3");
+    }
+
+    /// <summary>
+    /// The domain comes from an identifier resolved against the domain query — which is why both
+    /// are asked for. A signature whose domain is unknown is nobody's.
+    /// </summary>
+    [Fact]
+    public void A_signature_whose_domain_is_unknown_is_not_claimed() =>
+        StalwartDnsService.DkimLinesInQuery(Signatures, new Dictionary<string, string>(), "entit.eu")
+            .Should().BeNull();
+
+    [Fact]
+    public void Another_domains_signatures_are_not_claimed() =>
+        StalwartDnsService.DkimLinesInQuery(Signatures, Domains, "other.example")
+            .Should().BeNull();
+
+    /// <summary>Domain names come back keyed by the identifier the signatures refer to.</summary>
+    [Fact]
+    public void Domains_are_read_by_their_identifier() =>
+        StalwartDnsService.DomainsInQuery("""[{"id":"domain-b","name":"entit.eu"}]""")
+            .Should().Contain(new KeyValuePair<string, string>("domain-b", "entit.eu"));
+
+    /// <summary>
+    /// A key with no algorithm stated is published as RSA — which is what a record with no
+    /// <c>k=</c> means to every verifier that defaults.
+    /// </summary>
+    [Fact]
+    public void A_key_with_no_algorithm_is_published_as_rsa() =>
+        StalwartDnsService.DnsValueForPublicKey(
+            "-----BEGIN PUBLIC KEY-----\nAAAA\n-----END PUBLIC KEY-----", null)
+            .Should().Be("v=DKIM1; k=rsa; p=AAAA");
+
+    [Theory]
+    [InlineData(null)]
+    [InlineData("")]
+    [InlineData("-----BEGIN PUBLIC KEY-----\n-----END PUBLIC KEY-----")]
+    public void Nothing_usable_publishes_nothing(string? pem) =>
+        StalwartDnsService.DnsValueForPublicKey(pem, "Dkim1RsaSha256").Should().BeNull();
+
     // ---- The request itself -----------------------------------------------------------------
 
     /// <summary>
@@ -145,6 +326,42 @@ public class StalwartDnsServiceTests
         command.Should().StartWith("read -r TOK;");
         command.Should().Contain("http://127.0.0.1:8080/api/schema");
         command.Should().Contain("Authorization: Bearer $TOK");
+
+        // The server reads the client address from this header and warns once per request that
+        // arrives without one — noise that reads like part of the problem to whoever debugs next.
+        command.Should().Contain("X-Forwarded-For: 127.0.0.1");
+
+        // And the status, because without it every outcome looks alike: a refusal is JSON, an
+        // answer is JSON, and a body that is neither cannot be told from a request that never
+        // arrived. The server's log does not distinguish them either.
+        command.Should().Contain(StalwartDnsService.StatusMarker);
+
+        // Never the Service name: EntKube runs outside the cluster, so that resolves nowhere
+        // here, and the API server's proxy would strip the Authorization header anyway.
         command.Should().NotContain("stalwart.stalwart.svc");
+    }
+
+    /// <summary>The status the server gave, split from the body it sent.</summary>
+    [Fact]
+    public void The_status_is_read_back_off_the_response()
+    {
+        (int? status, string body) = StalwartDnsService.SplitStatus(
+            "{\"objects\":{}}\n" + StalwartDnsService.StatusMarker + "200");
+
+        status.Should().Be(200);
+        body.Should().Be("{\"objects\":{}}");
+    }
+
+    /// <summary>
+    /// No marker means curl never got far enough to have a status — a different answer from any
+    /// status, and the one that used to be invisible.
+    /// </summary>
+    [Fact]
+    public void A_request_that_never_completed_has_no_status()
+    {
+        (int? status, string body) = StalwartDnsService.SplitStatus("(the request failed: …)");
+
+        status.Should().BeNull();
+        body.Should().Be("(the request failed: …)");
     }
 }

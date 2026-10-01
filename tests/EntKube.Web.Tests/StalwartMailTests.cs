@@ -2260,6 +2260,46 @@ public class StalwartMailTests
         manifest.Should().Contain("dnsPolicy: ClusterFirstWithHostNet");
     }
 
+    /// <summary>
+    /// <b>The administrator is a mailbox, not a word.</b> Stalwart has no administrator concept of
+    /// its own — only an account carrying the Admin role — and an OIDC directory told a
+    /// usernameDomain resolves a claim with no domain by appending one. So a token claiming the
+    /// bare name typed into the settings resolves to an account that does not exist, and the 401
+    /// looks exactly like a broken client secret. Anything minting a token for the administrator
+    /// has to claim the address this returns.
+    /// </summary>
+    [Fact]
+    public void TheAdministratorIdentityIsAlwaysDomainQualified()
+    {
+        StalwartComponentConfig config = Config(c => c.AdminUsername = "admin");
+        List<StalwartMailDomain> domains = [Domain(config.Id, "entit.eu")];
+
+        StalwartService.ResolveAdminIdentity(config, domains)
+            .Should().Be(("admin", "entit.eu", "admin@entit.eu"));
+    }
+
+    /// <summary>
+    /// <b>A read is a Job, like the apply is a Job.</b> Outside an apply there is no credential
+    /// EntKube can present — the directory checks logins and the administrator password bypasses
+    /// it only in recovery mode — so the one window in which the server can be asked anything is
+    /// the one the apply already opens. Same credential, same network, no secrets in the output:
+    /// a Job's log is read back into EntKube and shown on a page.
+    /// </summary>
+    [Fact]
+    public void ACliJobAsksWithTheApplysOwnCredentialAndNeverPrintsSecrets()
+    {
+        string manifest = StalwartManifestBuilder.BuildCliJobManifest(
+            "stalwart", "stalwart", "admin", "dkim", ["snapshot", "DkimSignature"]);
+
+        manifest.Should().Contain("args: [\"snapshot\", \"DkimSignature\"]");
+        manifest.Should().Contain($"key: {StalwartManifestBuilder.AdminPasswordSecretName}");
+        manifest.Should().Contain("hostNetwork: true");
+        manifest.Should().Contain("dnsPolicy: ClusterFirstWithHostNet");
+
+        // The private half of a signing key belongs in neither a Job log nor a page.
+        manifest.Should().NotContain("--include-secrets");
+    }
+
     // ── PROXY protocol reach ──────────────────────────────────────────────────
 
     /// <summary>
