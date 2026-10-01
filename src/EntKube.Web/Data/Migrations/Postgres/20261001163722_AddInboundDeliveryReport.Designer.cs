@@ -3,6 +3,7 @@ using System;
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 
@@ -11,9 +12,11 @@ using Npgsql.EntityFrameworkCore.PostgreSQL.Metadata;
 namespace EntKube.Web.Data.Migrations.Postgres
 {
     [DbContext(typeof(PostgresApplicationDbContext))]
-    partial class PostgresApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261001163722_AddInboundDeliveryReport")]
+    partial class AddInboundDeliveryReport
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder
@@ -7228,9 +7231,6 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<bool>("RspamdTempFailOnError")
                         .HasColumnType("boolean");
 
-                    b.Property<string>("SendingIpAddresses")
-                        .HasColumnType("text");
-
                     b.Property<bool>("SmtpEnabled")
                         .HasColumnType("boolean");
 
@@ -7340,9 +7340,6 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<string>("Description")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
-
-                    b.Property<string>("DkimDnsRecords")
-                        .HasColumnType("text");
 
                     b.Property<bool>("IsPrimary")
                         .HasColumnType("boolean");

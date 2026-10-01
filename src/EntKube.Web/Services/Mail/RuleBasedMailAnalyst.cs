@@ -26,6 +26,17 @@ public class RuleBasedMailAnalyst(TicketReference references) : ISupportMailAnal
 
         List<MailSuggestion> suggestions = [];
 
+        // A bounce, before anything else — including before the sender is looked at. It is
+        // not a message from a person or from a colleague; it is our own mail returned, and
+        // the sender is a daemon on some server that may or may not be ours. Left to fall
+        // through it is placed by whichever address it was delivered to, which for a
+        // customer's own support address places it with that customer and opens a ticket
+        // in a daemon's name about our own failure to deliver.
+        if (context.IsDeliveryReport)
+        {
+            return Task.FromResult(FromABounce(context));
+        }
+
         // One of our own people, before anything else is asked. Everything below this
         // decides which customer a message is from and what to open for them, and none of it
         // applies: a colleague's mail is not a report, and the customer it concerns is the
@@ -162,6 +173,39 @@ public class RuleBasedMailAnalyst(TicketReference references) : ISupportMailAnal
         }
 
         return Task.FromResult<IReadOnlyList<MailSuggestion>>(suggestions);
+    }
+
+    /// <summary>
+    /// What to do with a bounce.
+    ///
+    /// <para>Never a ticket. The useful thing is the ticket it already belongs to: when the
+    /// receipt for #412 is refused, that customer never learned their number and nothing
+    /// anywhere said so. Putting it on #412 is the only place anybody would look — not
+    /// customer-visible, because it is about our own plumbing and the one person who must
+    /// not be told about it this way is the person it failed to reach.</para>
+    ///
+    /// <para>A bounce for something we cannot place is still said out loud rather than
+    /// dismissed: mail leaving the building and being refused is worth somebody's attention
+    /// even when we cannot say which conversation it belonged to.</para>
+    /// </summary>
+    private IReadOnlyList<MailSuggestion> FromABounce(MailContext context)
+    {
+        InboundMailMessage message = context.Message;
+        Ticket? about = MatchTicket(message, context.OpenTickets);
+
+        return [Suggestion(
+            message.Id, MailSuggestionKind.FlagDeliveryFailure,
+            about is null
+                ? "Mail we sent was refused, and it names no open ticket"
+                : $"Mail we sent about ticket #{about.Number} was refused — they never got it",
+            about is null
+                ? "A delivery report came back for a message that does not name a ticket we "
+                  + "still have open. Nothing has been opened for it; the report is below."
+                : "A delivery report for one of our own messages on that ticket. Whoever it "
+                  + "was addressed to did not receive it — if it was the receipt, they never "
+                  + "learned their ticket number. Recorded on the ticket, and not shown to "
+                  + "the customer.",
+            ticketId: about?.Id)];
     }
 
     /// <summary>

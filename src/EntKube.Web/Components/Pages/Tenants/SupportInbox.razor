@@ -100,7 +100,31 @@
                 </div>
                 <div class="card-body py-2">
                     @* ── Acted on as it arrived, before anyone read it ── *@
-                    @if (message.HandledBy == ArrivalPolicy.Actor && RelayedOnArrival(message))
+                    @if (message.HandledBy == ArrivalPolicy.Actor && message.IsDeliveryReport)
+                    {
+                        <div class="alert alert-danger py-2 small">
+                            <span class="bi bi-exclamation-octagon me-1"></span>
+                            <strong>Mail we sent was refused.</strong>
+                            <span>
+                                Recorded on
+                                @if (message.Ticket is not null)
+                                {
+                                    <text>ticket #@message.Ticket.Number</text>
+                                }
+                                else
+                                {
+                                    <text>its ticket</text>
+                                }
+                                , where it is not shown to the customer.
+                                @if (message.FailedRecipient is not null)
+                                {
+                                    <text>@message.FailedRecipient did not receive it</text>
+                                }
+                                — if it was the receipt, they never learned their number.
+                            </span>
+                        </div>
+                    }
+                    else if (message.HandledBy == ArrivalPolicy.Actor && RelayedOnArrival(message))
                     {
                         <div class="alert alert-success py-2 small">
                             <span class="bi bi-send me-1"></span>
@@ -460,7 +484,8 @@
     private static bool IsActionable(MailSuggestionKind kind) =>
         kind is MailSuggestionKind.OpenTicket
              or MailSuggestionKind.AppendToTicket
-             or MailSuggestionKind.ReplyToCustomer;
+             or MailSuggestionKind.ReplyToCustomer
+             or MailSuggestionKind.FlagDeliveryFailure;
 
     /// <summary>
     /// Whether the mailbox put this message on an existing ticket rather than opening one.
@@ -548,6 +573,7 @@
         MailSuggestionKind.FlagForgedSender => "not verified",
         MailSuggestionKind.ReplyToCustomer => "send to customer",
         MailSuggestionKind.FlagInternalSender => "one of ours",
+        MailSuggestionKind.FlagDeliveryFailure => "did not arrive",
         _ => kind.ToString(),
     };
 
@@ -564,6 +590,9 @@
         // so it does not read like filing something.
         MailSuggestionKind.ReplyToCustomer => "bg-success",
         MailSuggestionKind.FlagInternalSender => "bg-warning text-dark",
+        // In red with the forged sender. Both say a message did not do what it looked like
+        // it did, and this one means a customer is waiting on something they never got.
+        MailSuggestionKind.FlagDeliveryFailure => "bg-danger",
         _ => "bg-light text-dark border",
     };
 

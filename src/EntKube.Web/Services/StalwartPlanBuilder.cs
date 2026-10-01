@@ -1540,9 +1540,48 @@ public static class StalwartPlanBuilder
                 "DMARC — tells receivers what to do with mail that fails SPF and DKIM. Start at "
                 + "p=none and move to p=reject once a report shows both passing: p=reject while "
                 + "either is unpublished junks every message the domain sends."),
+
+            // The mail host's own A record, which the list never had — it is what the MX
+            // above points at and what other servers connect IN on.
+            new(host, "A", config.LoadBalancerIp ?? "the mail LoadBalancer address",
+                "The mail host itself, where mail is delivered TO. It must resolve to the "
+                + "balancer's address, which is a different thing from the address outbound "
+                + "mail leaves from — see the sending rows below."),
         ];
 
         records.AddRange(DkimRecords(domain));
+
+        // The sending address's own name, and its reverse. SPF already lists the address
+        // (Spf above), which says we are allowed to send from it — and says nothing about
+        // the two records a receiver checks before it will take the connection at all: that
+        // the address has a PTR, and that the name the PTR gives resolves back to it.
+        //
+        // It needs a name of its own. The mail host cannot serve: it has to resolve to the
+        // balancer so other servers can deliver, so it will never resolve back to the
+        // sending address. One name for all of them is fine — each address's PTR names it,
+        // and it resolves to the set, which contains that address.
+        IReadOnlyList<string> sending = SendingAddressesOf(config);
+
+        if (sending.Count > 0)
+        {
+            string sendingHost = $"smtp-out.{name}";
+
+            records.Add(new(sendingHost, "A", string.Join(", ", sending),
+                "A name for the address outbound mail leaves from. Its own name rather than "
+                + "the mail host, which has to point at the balancer and cannot point at "
+                + "both."));
+
+            foreach (string address in sending)
+            {
+                records.Add(new(
+                    $"{Reverse(address)} (not in this zone)", "PTR", $"{sendingHost}.",
+                    "Reverse DNS for the sending address, published by whoever owns it — the "
+                    + "cloud provider, not here, and usually a console field or a support "
+                    + "request. Gmail and Microsoft refuse mail from an address with no PTR "
+                    + "outright, before anything about the message is considered, and both "
+                    + "check that the name it gives resolves back to the same address."));
+            }
+        }
 
         // Client autodiscovery (autoconfig / autodiscover / MTA-STS / PACC) always points at the
         // mail host, in every TLS mode. These are names of the MAIL service: Stalwart answers them
@@ -1574,6 +1613,17 @@ public static class StalwartPlanBuilder
     /// The receiver evaluates SPF against an address no term matches and <c>-all</c> makes that a
     /// hard fail.</para>
     /// </summary>
+    /// <summary>
+    /// An address as its reverse-lookup name, which is the form the record is published
+    /// under. Shown rather than the bare address because somebody has to hand this to a
+    /// provider, and the address itself is not what goes in the request.
+    /// </summary>
+    private static string Reverse(string address) =>
+        System.Net.IPAddress.TryParse(address.Trim(), out System.Net.IPAddress? ip)
+            && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+            ? string.Join('.', ip.ToString().Split('.').Reverse()) + ".in-addr.arpa"
+            : address.Trim();
+
     public static string Spf(StalwartComponentConfig config)
     {
         IEnumerable<string> terms = SendingAddressesOf(config)

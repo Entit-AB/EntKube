@@ -27,6 +27,9 @@ public readonly record struct ArrivalDecision(ArrivalAction Action, string Reaso
 
     /// <summary>Whether what it says is to be sent on to the customer.</summary>
     public bool ReplyNow => Action == ArrivalAction.ReplyToCustomer;
+
+    /// <summary>Whether it is a refusal to be written onto the ticket it failed on.</summary>
+    public bool RecordFailureNow => Action == ArrivalAction.RecordDeliveryFailure;
 }
 
 /// <summary>What is to be done with an arriving message without waiting for a person.</summary>
@@ -51,6 +54,14 @@ public enum ArrivalAction
     /// that insists the sender was actually verified.
     /// </summary>
     ReplyToCustomer = 3,
+
+    /// <summary>
+    /// Write a refused message onto the ticket it failed on, where somebody will see that
+    /// the customer never heard from us. Sends nothing and is not shown to the customer, so
+    /// it is the safest of the four — and the one whose absence is most expensive, because
+    /// a bounce nobody records is a customer who simply never replied.
+    /// </summary>
+    RecordDeliveryFailure = 4,
 }
 
 /// <summary>
@@ -158,6 +169,20 @@ public static class ArrivalPolicy
         if (!mailboxAcknowledges)
         {
             return Leave("the mailbox is set to leave new mail for a person to open.");
+        }
+
+        // A bounce, and deliberately before the machine-generated test below — which it
+        // would otherwise fail, being the most machine-generated thing there is. That
+        // ordering is the whole point: "do not answer this" and "do not record this" are
+        // different instructions, and the old code only had the first. Recording sends
+        // nothing, so there is nothing here for the loop guard to protect against.
+        if (suggestions.Any(s => s.Kind == MailSuggestionKind.FlagDeliveryFailure
+                                 && s.TicketId is not null))
+        {
+            return new(
+                ArrivalAction.RecordDeliveryFailure,
+                "it is a delivery report for one of our own messages on a ticket that is "
+                + "still open, so the ticket says the customer never got it.");
         }
 
         if (message.IsMachineGenerated)

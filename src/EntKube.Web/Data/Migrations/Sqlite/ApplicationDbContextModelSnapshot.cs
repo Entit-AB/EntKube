@@ -4382,6 +4382,10 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<string>("DeliveredTo")
                         .HasColumnType("TEXT");
 
+                    b.Property<string>("FailedRecipient")
+                        .HasMaxLength(320)
+                        .HasColumnType("TEXT");
+
                     b.Property<string>("FromAddress")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -4397,6 +4401,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<string>("InReplyTo")
                         .HasColumnType("TEXT");
+
+                    b.Property<bool>("IsDeliveryReport")
+                        .HasColumnType("INTEGER");
 
                     b.Property<bool>("IsMachineGenerated")
                         .HasColumnType("INTEGER");

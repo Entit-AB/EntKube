@@ -3413,6 +3413,11 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .IsRequired(false);
         });
 
+        builder.Entity<InboundMailMessage>(entity =>
+        {
+            entity.Property(m => m.FailedRecipient).HasMaxLength(320);
+        });
+
         builder.Entity<SupportDuty>(entity =>
         {
             // One row per person per tenant: the roster is a set of people, and two rows

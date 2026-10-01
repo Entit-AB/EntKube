@@ -25,6 +25,12 @@ namespace EntKube.Web.Services.Mail;
 /// sender wrote, though, so what they are worth depends entirely on whether that header was
 /// ever checked. See <see cref="InboundMailMessage.SenderAuthenticity"/>.</para>
 /// </param>
+/// <param name="IsDeliveryReport">
+/// Set when the message is a delivery status notification — a bounce
+/// (<see cref="DeliveryReport"/>). Read before everything else, because it is not a message
+/// from anybody: it is our own mail coming back, and the only useful thing to say about it
+/// is which ticket's correspondence failed.
+/// </param>
 /// <param name="SenderIsOneOfOurs">
 /// Set when the From address belongs to a member of the mailbox's own tenant — one of our
 /// people, writing in rather than a customer.
@@ -47,7 +53,8 @@ public readonly record struct MailContext(
     MailTriageRuleSet Rules,
     bool PlacedOnTheSendersWord = false,
     bool PlacedOnTheFromAddress = false,
-    bool SenderIsOneOfOurs = false);
+    bool SenderIsOneOfOurs = false,
+    bool IsDeliveryReport = false);
 
 /// <summary>
 /// Reads an inbound support message and proposes what to do with it.

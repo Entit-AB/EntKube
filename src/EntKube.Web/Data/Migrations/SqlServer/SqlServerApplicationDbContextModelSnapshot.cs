@@ -4389,6 +4389,10 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<string>("DeliveredTo")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("FailedRecipient")
+                        .HasMaxLength(320)
+                        .HasColumnType("nvarchar(320)");
+
                     b.Property<string>("FromAddress")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
@@ -4404,6 +4408,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<string>("InReplyTo")
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("IsDeliveryReport")
+                        .HasColumnType("bit");
 
                     b.Property<bool>("IsMachineGenerated")
                         .HasColumnType("bit");

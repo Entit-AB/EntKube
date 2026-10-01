@@ -8,6 +8,7 @@ using EntKube.Web.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging.Abstractions;
 using FluentAssertions;
+using MimeKit;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 
@@ -1810,5 +1811,138 @@ public class SupportMailTests : IDisposable
         db.ChangeTracker.Clear();
         db.Tickets.Should().ContainSingle().Subject.Assignee.Should().BeNull();
         sink.Received.Should().NotContain(m => m.To == Technician);
+    }
+
+    // ---- When our own mail comes back ---------------------------------------------------------
+
+    /// <summary>
+    /// <b>The failure this was written for.</b> A receipt to a Gmail address was refused —
+    /// no reverse DNS on the sending IP — and the bounce came back to the support address,
+    /// was placed with the customer by the address it had been delivered to, and opened a
+    /// second ticket in a daemon's name about our own failure to deliver.
+    ///
+    /// <para>It now lands on the ticket whose receipt failed, where somebody can see that
+    /// the customer never learned their number — and not in front of the customer, who is
+    /// the one person it must not be explained to this way.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_refused_receipt_lands_on_its_ticket_and_opens_nothing()
+    {
+        MailboxAnswersOnArrival();
+
+        await Receive("Journalen svarar inte", "Ingen kommer in.");
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+
+        InboundMailMessage? bounce = await mail.IngestAsync(BounceOf(opened, Tue(11)));
+
+        db.Tickets.Should().ContainSingle("a bounce is not a report of a new fault");
+
+        bounce!.State.Should().Be(MailTriageState.Handled);
+        bounce.HandledBy.Should().Be(ArrivalPolicy.Actor);
+        bounce.TicketId.Should().Be(opened.Id);
+        bounce.IsDeliveryReport.Should().BeTrue();
+        bounce.FailedRecipient.Should().Be("marie.stahle@gmail.com");
+
+        db.ChangeTracker.Clear();
+
+        TicketEvent note = db.TicketEvents
+            .Where(e => e.TicketId == opened.Id)
+            .ToList()
+            .Should().ContainSingle(e => e.Detail.Contains("was refused"))
+            .Subject;
+
+        note.CustomerVisible.Should().BeFalse(
+            "the one person who must not be told this way is the person it failed to reach");
+        note.Detail.Should().Contain("marie.stahle@gmail.com");
+        note.Detail.Should().Contain("PTR record");
+    }
+
+    /// <summary>
+    /// And no receipt goes back to the daemon. Answering a bounce is writing to a wall at
+    /// best and to a loop at worst.
+    /// </summary>
+    [Fact]
+    public async Task Nothing_is_sent_back_to_a_bounce()
+    {
+        MailboxAnswersOnArrival();
+
+        await Receive("Journalen svarar inte", "Ingen kommer in.");
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+
+        int before = sink.Received.Count;
+
+        await mail.IngestAsync(BounceOf(opened, Tue(11)));
+
+        sink.Received.Count.Should().Be(before);
+    }
+
+    /// <summary>
+    /// A bounce for a ticket that has since closed, or for mail that was not about a ticket
+    /// at all. It must still not become a ticket — but it is said out loud rather than
+    /// dismissed, because mail of ours being refused is worth somebody's attention.
+    /// </summary>
+    [Fact]
+    public async Task A_bounce_naming_no_open_ticket_is_flagged_and_not_opened()
+    {
+        MailboxAnswersOnArrival();
+
+        InboundMailMessage bounce = BounceOf(number: 9999, sentAt: Tue(11));
+        InboundMailMessage? read = await mail.IngestAsync(bounce);
+
+        db.Tickets.Should().BeEmpty();
+
+        read!.Suggestions.Should().ContainSingle()
+            .Which.Should().Match<MailSuggestion>(s =>
+                s.Kind == MailSuggestionKind.FlagDeliveryFailure && s.TicketId == null);
+
+        read.State.Should().Be(MailTriageState.Proposed);
+    }
+
+    private InboundMailMessage BounceOf(Ticket ticket, DateTime sentAt) =>
+        BounceOf(ticket.Number, sentAt);
+
+    /// <summary>
+    /// The bounce as the reader produces it from what the mail server sends — built through
+    /// MailMessageReader rather than by hand, so the test cannot disagree with the parsing
+    /// about what a report looks like.
+    /// </summary>
+    private InboundMailMessage BounceOf(int number, DateTime sentAt)
+    {
+        MultipartReport report = new("delivery-status");
+
+        report.Add(new TextPart("plain")
+        {
+            Text = "<marie.stahle@gmail.com> (host 'gmail-smtp-in.l.google.com' rejected "
+                 + "command 'BDAT 2084 LAST' with code 550 (5.7.25) 'The IP address sending "
+                 + "this message does not have a PTR record setup')",
+        });
+
+        MessageDeliveryStatus status = new();
+        status.StatusGroups.Add(new HeaderList
+        {
+            { "Final-Recipient", "rfc822;marie.stahle@gmail.com" },
+            { "Action", "failed" },
+            { "Status", "5.7.25" },
+        });
+        report.Add(status);
+        report.Add(new TextPart("rfc822-headers")
+        {
+            Text = $"Message-Id: <{SupportMessageId.For(number)}>\r\n",
+        });
+
+        MimeMessage raw = new();
+        raw.From.Add(new MailboxAddress("Mail Delivery Subsystem", "MAILER-DAEMON@mail.entit.se"));
+        raw.To.Add(new MailboxAddress("", "support@entit.se"));
+        raw.Subject = "Delivery Status Notification (Failure)";
+        raw.Date = sentAt;
+        raw.Body = report;
+
+        InboundMailMessage read = MailMessageReader.Read(raw, tenantId, sentAt);
+
+        // Delivered to the customer's own support address, which is what placed the bounce
+        // with that customer and opened the second ticket.
+        read.DeliveredTo = "support@entit.se";
+
+        return read;
     }
 }

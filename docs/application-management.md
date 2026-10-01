@@ -340,6 +340,48 @@ loop in seconds, and being wrong about the number costs little: over the cap, th
 still taken in, analysed and queued, and a person opens it in one click. Only the automatic
 reply is withheld.
 
+### When our own mail comes back
+
+A receipt to a Gmail address was refused — no reverse DNS on the sending IP — and the bounce
+came back to the support address, was placed with the customer by the address it had been
+delivered to, and **opened a second ticket**: in a daemon's name, about our own failure to
+deliver.
+
+Two things were wrong. Whether a message was machine-generated was decided from
+`Auto-Submitted`, bulk `Precedence` values, a null `Return-Path` and a list of local parts
+nobody reads. Those are all good signals and all ones a particular server may simply not
+send. A delivery report, meanwhile, says what it is in its own content type: RFC 3462 defines
+it as `multipart/report` with `report-type=delivery-status`.
+[`DeliveryReport`](../src/EntKube.Web/Services/Mail/DeliveryReport.cs) reads that, which is
+the thing's self-description rather than a heuristic with a success rate. Read-receipt and
+spam-complaint reports are *also* `multipart/report` and also machine-generated, but neither
+is a failure to deliver, so the report type is checked rather than the container.
+
+The second was worse, and it is why a bounce is not merely suppressed. A recognised-and-dropped
+bounce would have been a *quieter* bug than the one we had: the customer never learned their
+ticket number, and with the bounce discarded nobody at our end would have learned it either.
+The symptom was the only thing that made the failure visible. So the report is **recorded on
+the ticket whose message failed** — the original's headers come back in the report, and the
+`Message-Id` among them is one of ours and names its ticket, so `ThreadParentOf` threads on
+it. Most servers do not put the failed id in `In-Reply-To`, which is why reading inside the
+report is the only way to find it.
+
+The note is **not customer-visible**: the one person who must not have this explained to them
+this way is the person it failed to reach. And `ArrivalPolicy` handles it **before** the
+machine-generated test, which it would otherwise fail, being the most machine-generated thing
+there is — "do not answer this" and "do not record this" are different instructions, and
+there was only ever the first. Recording sends nothing, so there is nothing for the loop
+guard to protect against.
+
+**The cause was in the DNS checklist, not the mail server.** It listed MX, SPF, DMARC and the
+autodiscovery names — every one of them about the domain — and said nothing about the address
+the mail leaves from. An installation could publish all of it, pass every check it named, and
+still be refused. The A and PTR rows are now in it, with the distinction that matters: a
+pod's egress address is usually the node's, **not** the LoadBalancer address other servers
+connect in on, so the forward record has to describe what the receiving end actually sees.
+The PTR is not published in the domain's zone at all — it belongs to whoever owns the IP, and
+is usually a provider console field or a support request.
+
 ### Whose ticket is it
 
 A queue nobody is looking at is the state this subsystem exists to get out of, and a ticket

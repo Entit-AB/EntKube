@@ -176,6 +176,22 @@ public class SupportMailService(
                 return message;
             }
 
+            if (decision.RecordFailureNow)
+            {
+                MailSuggestion failure = message.Suggestions
+                    .First(s => s.Kind == MailSuggestionKind.FlagDeliveryFailure);
+
+                await AcceptAsync(failure.Id, ArrivalPolicy.Actor, DateTime.UtcNow, ct: ct);
+
+                logger?.LogWarning(
+                    "Mail we sent about ticket #{Number} was refused{For}: {Reason}",
+                    await NumberOfAsync(db, failure.TicketId, ct),
+                    message.FailedRecipient is string who ? $" for {who}" : "",
+                    decision.Reason);
+
+                return await RereadAsync(message, ct);
+            }
+
             if (decision.ReplyNow)
             {
                 MailSuggestion reply = message.Suggestions
@@ -326,7 +342,7 @@ public class SupportMailService(
         // Without this the candidate list is empty and a reply names nothing.
         List<Ticket> candidates = openTickets;
 
-        if (ours && customer is null)
+        if ((ours || message.IsDeliveryReport) && customer is null)
         {
             candidates = [];
             await AddTicketsThisMessageNamesAsync(db, message, candidates, references, ct);
@@ -335,7 +351,8 @@ public class SupportMailService(
         return await analyst.AnalyseAsync(
             new MailContext(
                 message, customer, apps, candidates, bankSpent, ruleSet,
-                placedOnTheSendersWord, placedOnTheFromAddress, ours),
+                placedOnTheSendersWord, placedOnTheFromAddress, ours,
+                message.IsDeliveryReport),
             ct);
     }
 
@@ -641,6 +658,25 @@ public class SupportMailService(
                 // The From was one of ours, so nothing placed this message with a customer.
                 // The ticket says which one it is, and the queue is unreadable without it —
                 // a handled message belonging to nobody.
+                message.CustomerId ??= ticket?.CustomerId;
+                break;
+            }
+
+            case MailSuggestionKind.FlagDeliveryFailure
+                when suggestion.TicketId is Guid failedOn:
+            {
+                // Not customer-visible, and the wording says what it means rather than
+                // pasting a report at somebody: the point is that a particular person did
+                // not hear from us, which is the part that needs acting on.
+                await tickets.AddEventAsync(
+                    failedOn, TicketEventKind.Note,
+                    $"Mail we sent about this ticket was refused and did not arrive"
+                    + (message.FailedRecipient is string who ? $" for {who}" : "")
+                    + $". The server said:\n\n{message.Body}",
+                    actor, message.SentAt, customerVisible: false, ct);
+
+                message.TicketId = failedOn;
+                ticket = await tickets.GetAsync(failedOn, ct);
                 message.CustomerId ??= ticket?.CustomerId;
                 break;
             }
