@@ -47,13 +47,20 @@ public class TicketNotifier(
         {
             using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-            SmtpSettings settings = await smtp.ResolveAsync(ct);
+            // The tenant's own support mail server first. It is where the address the receipt
+            // comes from actually lives, so it is the only relay whose SPF and DKIM match the
+            // message — and for a mailbox chosen rather than typed it is the only thing anybody
+            // configured, which is why receipts used to go nowhere at all.
+            SmtpSettings settings = await smtp.ResolveAsync(ticket.TenantId, ct);
 
             if (!settings.IsConfigured)
             {
                 logger.LogWarning(
-                    "Ticket #{Number} was opened and nobody could be told: no SMTP is configured.",
-                    ticket.Number);
+                    "Ticket #{Number} was opened and nobody could be told: there is nowhere to "
+                    + "send from ({Source}). Either the tenant's support mailbox is not on a mail "
+                    + "server EntKube manages, or submission is switched off on it, or no SMTP "
+                    + "provider is configured.",
+                    ticket.Number, settings.Source);
                 return;
             }
 
@@ -205,13 +212,36 @@ public class TicketNotifier(
             mail.Headers.Add("X-Auto-Response-Suppress", "All");
 
             using SmtpClient client = new();
+
+            // A mail server EntKube deployed holds a certificate for the hostname its users
+            // reach it on, and this connection is made to its in-cluster Service name instead —
+            // so the name cannot match, and insisting fails a healthy handshake. The same
+            // reasoning the fetching side has always applied; see MailboxConnection.
+            if (!settings.ValidateCertificateName)
+            {
+                client.ServerCertificateValidationCallback = (_, _, _, _) => true;
+            }
+
             await client.ConnectAsync(
                 settings.Host, settings.Port,
                 settings.UseSsl ? SecureSocketOptions.Auto : SecureSocketOptions.None, ct);
 
             if (!string.IsNullOrEmpty(settings.Username))
             {
-                await client.AuthenticateAsync(settings.Username, settings.Password ?? "", ct);
+                if (settings.UseOAuth)
+                {
+                    // An OIDC directory validates bearer tokens and nothing else, so a password
+                    // presented here is not wrong — it is unverifiable. OAUTHBEARER rather than
+                    // XOAUTH2, and the same mechanism the fetching side presents to the same
+                    // server: two halves of one login disagreeing about how to say "this is a
+                    // token" is a failure that only shows up in one direction.
+                    await client.AuthenticateAsync(
+                        new SaslMechanismOAuthBearer(settings.Username, settings.Password ?? ""), ct);
+                }
+                else
+                {
+                    await client.AuthenticateAsync(settings.Username, settings.Password ?? "", ct);
+                }
             }
 
             await client.SendAsync(mail, ct);
@@ -219,9 +249,12 @@ public class TicketNotifier(
         }
         catch (Exception ex)
         {
-            // One recipient failing must not stop the others being told.
+            // One recipient failing must not stop the others being told. The host is named
+            // because "could not send" without it leaves an operator guessing which of the
+            // three possible senders was even tried.
             logger.LogWarning(
-                ex, "Could not tell {To} about ticket #{Number}.", to, ticket.Number);
+                ex, "Could not tell {To} about ticket #{Number} via {Host} ({Source}).",
+                to, ticket.Number, settings.Host, settings.Source);
         }
     }
 }

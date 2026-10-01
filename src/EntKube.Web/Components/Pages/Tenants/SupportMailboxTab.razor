@@ -3,6 +3,7 @@
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Mail
 @inject SupportMailboxService Mailboxes
+@inject SmtpSettingsResolver Smtp
 @inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
@@ -104,6 +105,36 @@
                 @if (!hasPassword)
                 {
                     <div class="mt-1">No credential is stored, so nothing can be fetched.</div>
+                }
+            </div>
+        </div>
+
+        @* ───────────── The other direction ─────────────
+           Fetching and sending are separate arrangements, and only one of them was ever
+           configured here. A mailbox that reads perfectly and cannot answer looks entirely
+           healthy from every screen — support mail arrives, tickets open, and the customer
+           is told nothing. So sending gets its own line, whether it works or not. *@
+        <div class="alert @(canSend ? "alert-light" : "alert-warning") py-2 small d-flex align-items-start gap-2">
+            <span class="bi @(canSend ? "bi-send-check" : "bi-send-exclamation") mt-1"></span>
+            <div>
+                @if (canSend)
+                {
+                    <strong>Replies are sent from @sendingFrom.</strong>
+                    <div>
+                        Through @sendingHost — @sendingSource. Receipts, the §14.1 notice to the
+                        customer's contact and every other ticket mail take this route.
+                    </div>
+                }
+                else
+                {
+                    <strong>Nothing can be sent.</strong>
+                    <div>
+                        Mail is fetched and tickets are opened, but the receipt with the ticket
+                        number never leaves — and nothing else says so. Either choose a mail
+                        server EntKube manages above, so submission is taken from it the same way
+                        the login is; or switch submission on for that server in its Mail tab and
+                        apply it; or configure an SMTP provider for this tenant.
+                    </div>
                 }
             </div>
         </div>
@@ -339,6 +370,13 @@
 
     private bool loading = true;
     private bool busy;
+
+    // What the other direction looks like. Loaded beside the mailbox, because "can it fetch"
+    // and "can it answer" are different questions with different remedies.
+    private bool canSend;
+    private string sendingHost = "";
+    private string sendingFrom = "";
+    private string sendingSource = "";
     private bool confirmingDelete;
     private string? error;
 
@@ -495,6 +533,8 @@
                     MoveToFolder = saved.MoveToFolder,
                     TrustedAuthenticationServer = saved.TrustedAuthenticationServer,
                 };
+
+            await LoadSendingAsync();
         }
         catch (Exception ex)
         {
@@ -503,6 +543,30 @@
         finally
         {
             loading = false;
+        }
+    }
+
+    /// <summary>
+    /// Whether outbound mail has anywhere to go, and where. Read through the same resolver the
+    /// notifier uses, so the screen cannot claim one thing while the send does another. Only
+    /// the host and where the answer came from are shown; the credential stays where it is.
+    /// </summary>
+    private async Task LoadSendingAsync()
+    {
+        try
+        {
+            SmtpSettings settings = await Smtp.ResolveAsync(TenantId);
+
+            canSend = settings.IsConfigured;
+            sendingHost = settings.Host ?? "";
+            sendingFrom = saved?.Address ?? settings.From;
+            sendingSource = settings.Source;
+        }
+        catch
+        {
+            // A screen that cannot answer the question says no rather than throwing: the
+            // mailbox settings above are still worth showing and still worth editing.
+            canSend = false;
         }
     }
 
