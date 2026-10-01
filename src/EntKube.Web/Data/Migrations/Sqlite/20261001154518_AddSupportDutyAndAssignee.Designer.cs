@@ -3,6 +3,7 @@ using System;
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
+using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 
 #nullable disable
@@ -10,9 +11,11 @@ using Microsoft.EntityFrameworkCore.Storage.ValueConversion;
 namespace EntKube.Web.Data.Migrations.Sqlite
 {
     [DbContext(typeof(ApplicationDbContext))]
-    partial class ApplicationDbContextModelSnapshot : ModelSnapshot
+    [Migration("20261001154518_AddSupportDutyAndAssignee")]
+    partial class AddSupportDutyAndAssignee
     {
-        protected override void BuildModel(ModelBuilder modelBuilder)
+        /// <inheritdoc />
+        protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
             modelBuilder.HasAnnotation("ProductVersion", "10.0.8");
@@ -7216,9 +7219,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<bool>("RspamdTempFailOnError")
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("SendingIpAddresses")
-                        .HasColumnType("TEXT");
-
                     b.Property<bool>("SmtpEnabled")
                         .HasColumnType("INTEGER");
 
@@ -7327,9 +7327,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<string>("Description")
                         .HasMaxLength(500)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("DkimDnsRecords")
                         .HasColumnType("TEXT");
 
                     b.Property<bool>("IsPrimary")

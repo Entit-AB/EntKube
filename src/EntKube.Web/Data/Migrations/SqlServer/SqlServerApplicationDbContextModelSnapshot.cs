@@ -7520,6 +7520,42 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("Subconsultants");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.SupportDuty", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasMaxLength(450)
+                        .HasColumnType("nvarchar(450)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "UserId")
+                        .IsUnique();
+
+                    b.ToTable("SupportDuties");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.SupportMailbox", b =>
                 {
                     b.Property<Guid>("Id")
@@ -7842,6 +7878,10 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<string>("Assignee")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("AssigneeUserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("nvarchar(450)");
+
                     b.Property<int>("Channel")
                         .HasColumnType("int");
 
@@ -7934,6 +7974,8 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasKey("Id");
 
                     b.HasIndex("AppId");
+
+                    b.HasIndex("TenantId", "AssigneeUserId");
 
                     b.HasIndex("TenantId", "Number")
                         .IsUnique();
@@ -11062,6 +11104,17 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired();
 
                     b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SupportDuty", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
 
                     b.Navigation("Tenant");
                 });

@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Services.Support;
 using EntKube.Web.Services.Tickets;
 using EntKube.Web.Services.Time;
 using Microsoft.EntityFrameworkCore;
@@ -24,10 +25,16 @@ public readonly record struct AppChoice(Guid? AppId)
 /// The support mailbox: takes messages in, has the analyst propose what to do, and applies
 /// what a person accepts.
 ///
-/// <para><b>One thing here acts on its own, and only one.</b> A fault report from a known
-/// contact opens its ticket the moment it lands, which is what gives the customer a number
-/// to quote — <see cref="ArrivalPolicy"/> holds the rule and says why a receipt is the one
-/// message that may go out unread. Everything after that still goes through a person
+/// <para><b>Three things here act on their own, and only three.</b> A fault report from a
+/// known contact opens its ticket the moment it lands, which is what gives the customer a
+/// number to quote; a reply carrying a reference we minted goes onto that ticket's history
+/// instead of waiting in the queue for somebody to agree it belongs there; and what one of
+/// our own people writes above the cut line goes on to the customer, which is how a ticket
+/// is answered without opening the application at all.
+/// <see cref="ArrivalPolicy"/> holds all three rules and says why each may happen unread —
+/// and insists, for the third alone, that the sender was actually verified, because it is
+/// the only one that puts words in a customer's inbox in our name. Everything else still
+/// goes through a person
 /// accepting a suggestion, with their name on the resulting ticket event: §14.3 makes
 /// confirming a priority a written act, §14.6 makes the timestamps evidence between the
 /// parties, and §14.4 makes resolution something the customer agrees to. The value here is
@@ -44,6 +51,8 @@ public class SupportMailService(
     MailTriageRuleService rules,
     TicketService tickets,
     TimeService time,
+    TicketReference references,
+    SupportDutyService duty,
     // Optional so that the tests, which build this by hand, are not made to care. What it
     // records is why a message was or was not answered on arrival, which is the only
     // account there is of a decision that leaves no mark when it goes the quiet way.
@@ -93,18 +102,22 @@ public class SupportMailService(
     }
 
     /// <summary>
-    /// Opens the ticket straight away where <see cref="ArrivalPolicy"/> allows it, so that
-    /// the person who reported the fault has its number within a poll of writing in rather
-    /// than whenever the queue is next read.
+    /// Does what <see cref="ArrivalPolicy"/> allows without waiting for a person: opens the
+    /// ticket, so that whoever reported the fault has its number within a poll of writing in
+    /// rather than whenever the queue is next read — or, for a reply carrying a reference we
+    /// minted, puts it straight onto the history of the ticket it names.
+    ///
+    /// <para><b>Why the append is checked twice.</b> The policy decides on the proof, and
+    /// this method then confirms that the ticket the analyst's suggestion points at is the one
+    /// the proof actually named. They are two readings of the same message and they agree —
+    /// but a disagreement here would write a customer's words onto a ticket nobody pointed at,
+    /// in a history §14.6 makes evidence between the parties, so it is checked rather than
+    /// trusted.</para>
     ///
     /// <para><b>The receipt is not sent from here.</b> Opening the ticket is what sends it:
     /// <c>TicketService.CreateAsync</c> announces every ticket it creates, whatever opened
     /// it, from the support address and with the reference in the subject. Adding a second
     /// path that sends mail would be a second wording to keep in step with the first.</para>
-    ///
-    /// <para><b>It re-reads the message afterwards.</b> Accepting runs in its own context
-    /// and moves the row to handled; returning the copy this method was given would hand
-    /// the caller a message that still says nobody has touched it.</para>
     ///
     /// <para>Never throws. A mail server that will not take the receipt, or a ticket that
     /// cannot be opened, must leave the message in the queue where a person will find it —
@@ -124,6 +137,11 @@ public class SupportMailService(
             // the messages rather than from the tickets, because the question is how much
             // mail we have sent this correspondent — a ticket opened by a person is not
             // something we did to them.
+            //
+            // Narrowed to the ones that opened a ticket, because those are the ones that
+            // sent a letter. An append is handled by the same actor and sends nothing, and
+            // counting it here would let a chatty thread on one ticket use up the budget
+            // that stops us writing to somebody in a loop.
             DateTime since = DateTime.UtcNow - ArrivalPolicy.RepeatWindow;
             string sender = message.FromAddress.Trim().ToLowerInvariant();
 
@@ -132,19 +150,73 @@ public class SupportMailService(
                     m => m.TenantId == message.TenantId
                          && m.HandledBy == ArrivalPolicy.Actor
                          && m.HandledAt >= since
-                         && m.FromAddress.ToLower() == sender,
+                         && m.FromAddress.ToLower() == sender
+                         && m.Suggestions.Any(
+                             s => s.Kind == MailSuggestionKind.OpenTicket
+                                  && s.State == MailSuggestionState.Accepted),
                     ct);
 
-            ArrivalDecision decision = ArrivalPolicy.Decide(
-                message, message.Suggestions, acknowledges, answeredRecently);
+            // What, if anything, proves this message belongs to a ticket already. The thread
+            // is one of our own Message-Ids, which we minted and sent to the people the
+            // ticket concerns; the token is the check characters on the reference in the
+            // subject. Either is something only a person we wrote to could be holding.
+            int? provenByThread = SupportMessageId.TicketNumberIn(message.InReplyTo);
+            int? provenByToken = references.ProvenIn(message.Subject);
 
-            if (!decision.OpenNow)
+            ArrivalDecision decision = ArrivalPolicy.Decide(
+                message, message.Suggestions, acknowledges, answeredRecently,
+                referenceIsProven: provenByThread is not null || provenByToken is not null);
+
+            if (decision.Action == ArrivalAction.LeaveForAPerson)
             {
                 logger?.LogInformation(
                     "Support mail from {From} was left for a person: {Reason}",
                     message.FromAddress, decision.Reason);
 
                 return message;
+            }
+
+            if (decision.ReplyNow)
+            {
+                MailSuggestion reply = message.Suggestions
+                    .First(s => s.Kind == MailSuggestionKind.ReplyToCustomer);
+
+                await AcceptAsync(reply.Id, ArrivalPolicy.Actor, DateTime.UtcNow, ct: ct);
+
+                logger?.LogInformation(
+                    "Support mail from {From} was sent on to the customer on ticket "
+                    + "#{Number}: {Reason}",
+                    message.FromAddress,
+                    await NumberOfAsync(db, reply.TicketId, ct),
+                    decision.Reason);
+
+                return await RereadAsync(message, ct);
+            }
+
+            if (decision.AppendNow)
+            {
+                MailSuggestion append = message.Suggestions
+                    .First(s => s.Kind == MailSuggestionKind.AppendToTicket);
+
+                int? onto = await NumberOfAsync(db, append.TicketId, ct);
+
+                if (onto is null || (onto != provenByThread && onto != provenByToken))
+                {
+                    logger?.LogWarning(
+                        "Support mail from {From} proved ticket #{Proven} but the suggestion "
+                        + "pointed at #{Onto}; it is being left for a person.",
+                        message.FromAddress, provenByThread ?? provenByToken, onto);
+
+                    return message;
+                }
+
+                await AcceptAsync(append.Id, ArrivalPolicy.Actor, DateTime.UtcNow, ct: ct);
+
+                logger?.LogInformation(
+                    "Support mail from {From} was added to ticket #{Number} on arrival: {Reason}",
+                    message.FromAddress, onto, decision.Reason);
+
+                return await RereadAsync(message, ct);
             }
 
             MailSuggestion open =
@@ -157,22 +229,42 @@ public class SupportMailService(
                 "Support mail from {From} opened ticket #{Number} on arrival: {Reason}",
                 message.FromAddress, ticket?.Number, decision.Reason);
 
-            using ApplicationDbContext fresh = await dbFactory.CreateDbContextAsync(ct);
-
-            return await fresh.InboundMailMessages
-                .Include(m => m.Suggestions)
-                .FirstOrDefaultAsync(m => m.Id == message.Id, ct) ?? message;
+            return await RereadAsync(message, ct);
         }
         catch (Exception ex)
         {
             logger?.LogError(
                 ex,
-                "Could not open a ticket on arrival for support mail from {From}; it stays in "
-                + "the queue.",
+                "Could not act on arrival for support mail from {From}; it stays in the queue.",
                 message.FromAddress);
 
             return message;
         }
+    }
+
+    /// <summary>The number of a ticket we hold the id of, for a log line.</summary>
+    private static async Task<int?> NumberOfAsync(
+        ApplicationDbContext db, Guid? ticketId, CancellationToken ct) =>
+        ticketId is Guid id
+            ? await db.Tickets.AsNoTracking()
+                .Where(t => t.Id == id)
+                .Select(t => (int?)t.Number)
+                .FirstOrDefaultAsync(ct)
+            : null;
+
+    /// <summary>
+    /// The message as it stands after accepting something. Accepting runs in its own context
+    /// and moves the row to handled; returning the copy we were given would hand the caller a
+    /// message that still says nobody has touched it.
+    /// </summary>
+    private async Task<InboundMailMessage> RereadAsync(
+        InboundMailMessage message, CancellationToken ct)
+    {
+        using ApplicationDbContext fresh = await dbFactory.CreateDbContextAsync(ct);
+
+        return await fresh.InboundMailMessages
+            .Include(m => m.Suggestions)
+            .FirstOrDefaultAsync(m => m.Id == message.Id, ct) ?? message;
     }
 
     /// <summary>
@@ -212,7 +304,7 @@ public class SupportMailService(
                             && t.Status != TicketStatus.Rejected)
                 .ToListAsync(ct);
 
-        await AddTicketsThisMessageNamesAsync(db, message, openTickets, ct);
+        await AddTicketsThisMessageNamesAsync(db, message, openTickets, references, ct);
 
         bool bankSpent = false;
 
@@ -224,10 +316,26 @@ public class SupportMailService(
 
         MailTriageRuleSet ruleSet = await rules.GetEffectiveAsync(message.TenantId, ct);
 
+        // Whether this is one of our own people writing. Asked of the mailbox's tenant,
+        // which is whose staff could be replying to a mail it sent.
+        bool ours = await duty.FindByAddressAsync(
+            message.TenantId, message.FromAddress, ct) is not null;
+
+        // A colleague's reply is about the ticket's customer, not the sender's — so the
+        // tickets it may name have to be gathered without a customer having been placed.
+        // Without this the candidate list is empty and a reply names nothing.
+        List<Ticket> candidates = openTickets;
+
+        if (ours && customer is null)
+        {
+            candidates = [];
+            await AddTicketsThisMessageNamesAsync(db, message, candidates, references, ct);
+        }
+
         return await analyst.AnalyseAsync(
             new MailContext(
-                message, customer, apps, openTickets, bankSpent, ruleSet,
-                placedOnTheSendersWord, placedOnTheFromAddress),
+                message, customer, apps, candidates, bankSpent, ruleSet,
+                placedOnTheSendersWord, placedOnTheFromAddress, ours),
             ct);
     }
 
@@ -251,10 +359,15 @@ public class SupportMailService(
     /// <item><b>A thread on one of our own Message-Ids.</b> We minted it, it carries a
     /// random half nobody can guess, and it was sent to the people this ticket concerns.
     /// That is a capability, and it is honoured wherever the ticket now lives.</item>
-    /// <item><b>A number in the subject, from the person who reported it.</b> Weaker — a
-    /// subject is typed — so it only reaches a ticket whose own reporter is this sender.
-    /// That covers the case the instruction in the receipt creates: a new message, weeks
-    /// later, with the reference and no thread behind it.</item>
+    /// <item><b>A reference in the subject whose check token validates.</b> Also a
+    /// capability, and for the same reason: the token is a MAC over the number
+    /// (<see cref="TicketReference"/>), so a subject carrying a good one was copied from
+    /// something we sent. This is the case the instruction in the receipt creates — a new
+    /// message, weeks later, with the reference and no thread behind it.</item>
+    /// <item><b>A bare number in the subject, from the person who reported it.</b> Weakest —
+    /// anybody can type a number, and the old <c>[#412]</c> references still in customers'
+    /// mailboxes have nothing else to offer — so it only reaches a ticket whose own reporter
+    /// is this sender.</item>
     /// </list>
     ///
     /// <para>A closed ticket is never added, so a reference to one still opens a new ticket
@@ -262,12 +375,13 @@ public class SupportMailService(
     /// </summary>
     private static async Task AddTicketsThisMessageNamesAsync(
         ApplicationDbContext db, InboundMailMessage message, List<Ticket> candidates,
-        CancellationToken ct)
+        TicketReference references, CancellationToken ct)
     {
         int? threaded = SupportMessageId.TicketNumberIn(message.InReplyTo);
-        int? quoted = RuleBasedMailAnalyst.ReferencedNumber(message.Subject);
+        SubjectReference? quoted = references.InSubject(message.Subject);
+        int? quotedNumber = quoted?.Number;
 
-        if (threaded is null && quoted is null)
+        if (threaded is null && quotedNumber is null)
         {
             return;
         }
@@ -275,7 +389,7 @@ public class SupportMailService(
         string sender = message.FromAddress.Trim().ToLowerInvariant();
 
         List<Ticket> named = await db.Tickets.AsNoTracking()
-            .Where(t => (t.Number == threaded || t.Number == quoted)
+            .Where(t => (t.Number == threaded || t.Number == quotedNumber)
                         && t.Status != TicketStatus.Closed
                         && t.Status != TicketStatus.Rejected)
             .ToListAsync(ct);
@@ -285,6 +399,7 @@ public class SupportMailService(
             bool alreadyThere = candidates.Any(t => t.Id == ticket.Id);
 
             bool mayReach = ticket.Number == threaded
+                || (quoted is { Proven: true } proven && ticket.Number == proven.Number)
                 || (ticket.RequestedByEmail != null
                     && ticket.RequestedByEmail.Trim().ToLowerInvariant() == sender);
 
@@ -507,6 +622,26 @@ public class SupportMailService(
                     ct: ct);
 
                 message.TicketId = ticket.Id;
+                break;
+            }
+
+            case MailSuggestionKind.ReplyToCustomer
+                when suggestion.TicketId is Guid repliedTo
+                     && !string.IsNullOrWhiteSpace(suggestion.DraftText):
+            {
+                // The text on the suggestion, which is what the operator was shown and what
+                // the analyst cut at the line. Re-cutting here could disagree with what they
+                // read, and the one thing that must not happen is a customer receiving
+                // something nobody saw.
+                ticket = await tickets.ReplyToCustomerAsync(
+                    repliedTo, suggestion.DraftText, actor, message.SentAt, ct);
+
+                message.TicketId = repliedTo;
+
+                // The From was one of ours, so nothing placed this message with a customer.
+                // The ticket says which one it is, and the queue is unreadable without it —
+                // a handled message belonging to nobody.
+                message.CustomerId ??= ticket?.CustomerId;
                 break;
             }
 

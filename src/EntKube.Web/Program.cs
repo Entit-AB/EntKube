@@ -15,6 +15,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services;
 using EntKube.Web.Services.Agents;
 using EntKube.Web.Services.Telemetry;
+using EntKube.Web.Services.Tickets;
 using EntKube.Web.Services.Tickets.Bridge;
 using StackExchange.Redis;
 
@@ -311,6 +312,11 @@ public class Program
             ?? throw new InvalidOperationException("Vault:RootKey must be configured (32-byte base64-encoded key).");
         byte[] rootKey = Convert.FromBase64String(rootKeyBase64);
         builder.Services.AddSingleton(new VaultEncryptionService(rootKey));
+
+        // The ticket reference in a subject line is signed with a key derived from the same
+        // root key: stable for the life of the installation, so a reference we sent a year
+        // ago still validates, and never written down anywhere of its own.
+        builder.Services.AddSingleton(new TicketReference(rootKey));
         builder.Services.AddSingleton<DeploymentStatusNotifier>();
         builder.Services.AddScoped<VaultService>();
         builder.Services.AddScoped<DockerRegistryService>();
@@ -574,6 +580,7 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.Mail.ISupportMailAnalyst,
             EntKube.Web.Services.Mail.RuleBasedMailAnalyst>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.MailTriageRuleService>();
+        builder.Services.AddScoped<EntKube.Web.Services.Support.SupportDutyService>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailService>();
         builder.Services.AddScoped<EntKube.Web.Services.CurrentActor>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.SmtpSettingsResolver>();

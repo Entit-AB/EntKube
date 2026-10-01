@@ -25,6 +25,19 @@ namespace EntKube.Web.Services.Mail;
 /// sender wrote, though, so what they are worth depends entirely on whether that header was
 /// ever checked. See <see cref="InboundMailMessage.SenderAuthenticity"/>.</para>
 /// </param>
+/// <param name="SenderIsOneOfOurs">
+/// Set when the From address belongs to a member of the mailbox's own tenant — one of our
+/// people, writing in rather than a customer.
+///
+/// <para>It changes what the message <em>is</em>, not merely who sent it. A customer's mail
+/// is a report or an addition to one; ours, on a ticket, is an answer meant to go out to the
+/// customer. So this is read before anything else and short-circuits the rest: none of the
+/// placement machinery below applies, because the customer is the ticket's, not the
+/// sender's.</para>
+///
+/// <para>Membership, deliberately, and not the support roster — a colleague standing down
+/// this week is still ours, and an answer they write should still reach the customer.</para>
+/// </param>
 public readonly record struct MailContext(
     InboundMailMessage Message,
     Customer? Customer,
@@ -33,7 +46,8 @@ public readonly record struct MailContext(
     bool TimebankExhausted,
     MailTriageRuleSet Rules,
     bool PlacedOnTheSendersWord = false,
-    bool PlacedOnTheFromAddress = false);
+    bool PlacedOnTheFromAddress = false,
+    bool SenderIsOneOfOurs = false);
 
 /// <summary>
 /// Reads an inbound support message and proposes what to do with it.

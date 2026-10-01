@@ -79,8 +79,10 @@ public class TicketMoveTests : IDisposable
         ContractService contracts = new(factory);
         tickets = new TicketService(factory, contracts, SilentTicketNotifier.For(factory));
         mail = new SupportMailService(
-            factory, new RuleBasedMailAnalyst(), new MailTriageRuleService(factory), tickets,
-            new TimeService(factory, contracts));
+            factory, new RuleBasedMailAnalyst(TestTicketReference.Instance),
+            new MailTriageRuleService(factory), tickets,
+            new TimeService(factory, contracts), TestTicketReference.Instance,
+            new SupportDutyService(factory));
     }
 
     private void Cover(Guid appId, Guid tenantId, SupportWindow window)

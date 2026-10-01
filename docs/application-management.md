@@ -251,11 +251,37 @@ A reply is threaded onto its ticket by the Message-Id we sent, which carries the
 number —
 [`SupportMessageId`](../src/EntKube.Web/Services/Mail/SupportMessageId.cs) writes that
 format and is the only thing that reads it. The number is in the identifier so a reply
-needs no lookup table and nothing stored: the thread carries the answer back. Subjects are
-also matched on `[#1042]`, but subjects get edited, translated by clients and lost to
-forwards, and the thread headers survive all three. Only our own identifiers are read — a
-reply pointing at a colleague's message must not be mined for a number that merely looks
-like one.
+needs no lookup table and nothing stored: the thread carries the answer back. Only our own
+identifiers are read — a reply pointing at a colleague's message must not be mined for a
+number that merely looks like one.
+
+Subjects are matched too, because the thread headers do not always survive: a subject gets
+edited, a client translates it, a forward loses it, and the message written three weeks
+later from a phone has no thread behind it at all. A subject reference is
+`[EK-1042-K7QX9]` —
+[`TicketReference`](../src/EntKube.Web/Services/Tickets/TicketReference.cs) writes that
+format and is the only thing that reads it. The five characters on the end are a MAC over
+the number, keyed from `Vault:RootKey`, and they exist because the old format could not tell
+a reference from any other number in a subject. `#(\d+)` matched "Order #90210". Worse, it
+matched a **mistyped digit**: `[#413]` is a perfectly good reference to somebody else's
+ticket and nothing about it looked wrong. With a token, a reference either came from us or
+it did not.
+
+That distinction is what a **proven** reference means, and it is a capability rather than a
+format: knowing exactly how a reference is built does not let anybody produce one for a
+ticket they were never told about. It is why a proven reference is honoured from any sender
+and wherever the ticket now lives, and why it is enough to act on a reply before a person
+reads it.
+
+The number is deliberately **not** scoped to the customer. It was the obvious next step and
+it is wrong twice: numbers are allocated across the installation, so two customers cannot
+collide on one and a customer code protects nothing, and a ticket that moves to another
+customer would invalidate every reference already sitting in the reporter's mailbox.
+
+Bare `[#1042]` is still read, because that is what every receipt sent before this format
+existed said and those tickets are still open. It reaches its ticket exactly as it always
+did — it simply arrives unproven, so it waits for a person. Nothing was migrated and nothing
+was backfilled.
 
 ### Answering at the door
 
@@ -265,22 +291,44 @@ had nothing to put in the subject of the next message about the same fault — a
 message opened a second ticket.
 
 [`ArrivalPolicy`](../src/EntKube.Web/Services/Mail/ArrivalPolicy.cs) now opens the ticket at
-the door, which is what sends the receipt: `TicketService.CreateAsync` announces every
-ticket it creates, whatever opened it. There is deliberately no second path that sends mail.
+the door, which is what sends the receipt: `TicketService.CreateAsync` announces every ticket
+it creates, whatever opened it, and no other path sends that particular message — a second
+wording for the receipt would be a second wording to keep in step.
 
-It opens one only where **all four** hold, and each is something visible on the message:
+The policy decides three acts, and only three: open a ticket, add a reply to one, or send one
+of our own people's words on to the customer. The second and third are covered under
+[answering by mail](#answering-the-customer-by-replying-to-a-mail); a ticket is opened only
+where **all four** of these hold, and each is something visible on the message:
 
 - it was written by a person, not by a program;
 - it is not already a reply to a ticket that has a number;
 - it is placed with a customer, and not on an address the sender merely typed;
 - our own server did not say the From is forged.
 
-Anything else goes to the queue exactly as before. Every decision carries a reason in plain
-words and is logged, because *nothing happened* is the hardest state of this subsystem to
-debug: the mailbox is healthy, the message is in the queue, and nothing anywhere is an
-error. `SupportMailbox.AcknowledgeOnArrival` turns the whole thing off per tenant — it is
-the only thing here that sends mail with nobody's name on it, so whoever answers for what
-leaves the building can stop it without stopping the mailbox.
+Anything else goes to the queue exactly as before.
+
+**A reply is placed as well as recognised.** The second condition above prevents the
+duplicate ticket, which was the point — but the reply itself then sat in the queue until
+somebody pressed a button to put it where the reference already said it went. It now goes
+there at the door, on one condition: that the reference is **proven**. A bare number
+somebody typed still waits for a person, because a typed digit can be the wrong digit and
+the cost of being wrong is a customer's words on the history of a ticket that is not theirs
+— a history §14.6 makes evidence between the parties. Who sent it still matters too: a
+forged or unplaced From stops the append, because the message is attributed to that address
+on a history the customer reads.
+
+Appending sends nothing — `TicketService.AddEventAsync` writes an event and no mail — which
+is why it needs less justifying than the receipt rather than more, and why the six-per-hour
+cap below does not apply to it. The cap counts letters we send, so its count is narrowed to
+the messages that opened a ticket — otherwise a morning of replies into one ticket would use
+up the budget that stops us writing to somebody in a loop.
+
+Every decision — either act, or neither — carries a reason in plain words and is logged,
+because *nothing happened* is the hardest state of this subsystem to debug: the mailbox is healthy, the message is in the queue, and nothing anywhere is an
+error. `SupportMailbox.AcknowledgeOnArrival` turns both acts off per tenant — opening a
+ticket is the only thing here that sends mail with nobody's name on it, so whoever answers
+for what leaves the building can stop it without stopping the mailbox, and an operator who
+switched it off asked for nothing to happen to arriving mail on its own.
 
 There is a fifth condition, and it is about the sender rather than the message: **six
 automatic replies to one address per hour**. The four above each judge a message on its own,
@@ -292,6 +340,94 @@ loop in seconds, and being wrong about the number costs little: over the cap, th
 still taken in, analysed and queued, and a person opens it in one click. Only the automatic
 reply is withheld.
 
+### Whose ticket is it
+
+A queue nobody is looking at is the state this subsystem exists to get out of, and a ticket
+with nobody's name on it is that state with extra steps. So a new ticket is handed to
+somebody as it opens.
+
+**The roster is the tenant's own members**, not a register of its own
+([`SupportDutyService`](../src/EntKube.Web/Services/Support/SupportDutyService.cs)). A
+separate table of technicians would be a second list of people to keep in step with the
+first, holding addresses nobody verified; membership already carries a real account with a
+real address. The only thing added on top is
+[`SupportDuty`](../src/EntKube.Web/Data/SupportDuty.cs) — whether that person takes support
+work.
+
+Two states, deliberately kept apart:
+
+- **Not enrolled.** Every member is not a technician: somebody only looks at the invoices,
+  somebody else was given access for one migration two years ago. Rotating over "everybody
+  with access" would hand a P1 to whoever that is at three in the morning, so enrolment is a
+  deliberate act and the absence of a row means *not in the rota*.
+- **Enrolled but standing down**, with a note. Leaving the rota for a fortnight is not the
+  same as never having been in it, and the difference is what a colleague reads: "parental
+  leave until March" rather than a name silently missing from the rotation.
+
+**The rotation has no counter.** It is "the next active technician after whoever holds the
+most recently assigned ticket", read from the tickets each time. A stored cursor would be a
+second source of truth about something the tickets already say, and it would drift the first
+time somebody assigned a ticket by hand — which people do constantly, and which should
+plainly count as that person's turn. `Ticket.AssigneeUserId` is what it reads; `Assignee`
+stays a free string, because an assignment is not always an account.
+
+An empty rota is an ordinary outcome and says so on the screen. The ticket opens unassigned
+and waits, exactly as every ticket did before any of this existed. What must never happen is
+a ticket handed to somebody who is not there, because the mail about it then goes to a
+mailbox nobody is reading and the ticket *looks* handled — strictly worse than the state
+this replaced. Enrolled-and-active with no address is the one combination that looks fine and
+cannot work, so the rotation passes over it.
+
+### Answering the customer by replying to a mail
+
+Assigning a ticket sends mail, and that mail is the thing the technician replies to in order
+to answer the customer. The ticket is answered without the application being opened at all.
+
+The same message goes to the on-call engineer and to the assignee — one wording to keep
+right — and it carries a **cut line**:
+
+```
+Reply above this line to answer the customer
+───────────────────────────────────────────────
+  Reference:   [EK-412-K7QX9]
+  Priority:    P1 (as reported — confirm it in writing, §14.3)
+  Respond by:  Tue 22 Sep 14:00
+  Reported by: Karin Karlsson
+```
+
+[`SupportReplyBody`](../src/EntKube.Web/Services/Mail/SupportReplyBody.cs) relays only what
+is above it. **This is not tidiness.** Everything below the line is ours and not the
+customer's: the deadline §14.4 measures us against, the priority described as unconfirmed,
+the name of the person who reported it. The usual approach is to guess where the quoted part
+starts — strip lines beginning with `>`, look for "On … wrote:" — and that guess fails
+silently, in the direction that leaks, on any client that top-posts without a marker or
+writes "Den … skrev:". An explicit line is a question with an answer instead of a heuristic
+with a success rate: either it was found or it was not, and when it was not, nothing is sent
+and a person is asked.
+
+A relayed reply is the §14.4 **response**. The arrival receipt deliberately does not
+discharge the clock — it is a fact about the past with nobody's name on it — but this is
+somebody at ENTIT writing to the customer about their fault, which is what the clock was
+waiting for. A reply that reached nobody is recorded as a failure, visible only to us, and
+the clock keeps running: an event saying we answered, written when the relay refused the
+message, would be a false record in the one document meant to settle disputes.
+
+**The guards, and why this one is the strictest.** Every other automatic act here either
+files a message or writes to the person who sent it. This one puts words in a customer's
+inbox, in our name, saying whatever the From address asked us to say. So on top of a proven
+reference, a non-machine sender and the tenant's own switch, it insists the sender was
+actually **verified** — `SenderAuthenticity.Verified`, not merely not-Failed. `Unknown` is
+not a lesser failure here: it means nobody told us whose `Authentication-Results` to believe,
+so a forged From on our own domain reads exactly like a real one, and the forger needs only a
+reference we already sent them. An unverified reply waits in the queue with the extracted
+text on it, one click from going out, and the refusal names the missing setting rather than
+failing silently.
+
+The machine-generated check earns its place twice over here: a technician's own out-of-office,
+bounced back off the mail announcing their new ticket, carries a real reference from a real
+colleague's address — and relaying it would send "I am on holiday until the 14th" to a
+customer waiting on a P1.
+
 ### Moving a ticket somewhere else
 
 A support address takes what it is sent. A report arrives at whichever mailbox the sender
@@ -302,7 +438,7 @@ from, the history §14.6 makes evidence, and the number the reporter has already
 quote.
 
 **The number never changes.** That is the constraint everything else bends around. The
-receipt instructs the customer to keep `[#1042]` in the subject for as long as the ticket is
+receipt instructs the customer to keep `[EK-1042-K7QX9]` in the subject for as long as the ticket is
 open, and it is the only identifying part of the Message-Id their client threads on — so
 renumbering would strand every reply in flight and make a liar of the receipt. Ticket
 numbers are therefore allocated **across the installation** rather than per tenant, so a
@@ -539,7 +675,7 @@ The response target is the useful sentence: a deadline computed inside the suppo
 is the one thing the customer cannot work out for themselves.
 
 The closing instruction is the other one, and it is a standing rule rather than advice about
-the message it arrives in: **keep `[#1042]` in the subject of everything you write about
+the message it arrives in: **keep `[EK-1042-K7QX9]` in the subject of everything you write about
 this, for as long as it is open** — with what happens if they do not, because an instruction
 with no consequence attached reads as a formality. The message it has to survive is the one
 written three weeks later from a phone, to the same address, about the same fault, with no

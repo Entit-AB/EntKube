@@ -2,6 +2,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services;
 using EntKube.Web.Services.Contracts;
 using EntKube.Web.Services.Mail;
+using EntKube.Web.Services.Support;
 using EntKube.Web.Services.Tickets;
 using EntKube.Web.Services.Time;
 using FluentAssertions;
@@ -58,10 +59,12 @@ public class UnencryptedMailboxTests : IDisposable
 
         SupportMailService mail = new(
             factory,
-            new RuleBasedMailAnalyst(),
+            new RuleBasedMailAnalyst(TestTicketReference.Instance),
             new MailTriageRuleService(factory),
             new TicketService(factory, contracts, SilentTicketNotifier.For(factory)),
-            new TimeService(factory, contracts));
+            new TimeService(factory, contracts),
+            TestTicketReference.Instance,
+            new SupportDutyService(factory));
 
         mailboxes = new SupportMailboxService(
             factory, vault, mail,

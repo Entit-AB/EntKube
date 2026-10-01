@@ -102,6 +102,7 @@ public class TicketNotifierTests : IDisposable
             factory,
             new SmtpSettingsResolver(factory, smtp),
             new OnCallService(factory),
+            TestTicketReference.Instance,
             NullLogger<TicketNotifier>.Instance));
     }
 
@@ -165,7 +166,8 @@ public class TicketNotifierTests : IDisposable
         SentMail receipt = sink.Received.Should()
             .ContainSingle(m => m.To == "karin@entit.example").Subject;
 
-        receipt.Message.Subject.Should().StartWith($"[#{ticket.Number}]");
+        receipt.Message.Subject.Should()
+            .StartWith(TestTicketReference.Instance.For(ticket.Number));
         receipt.Message.TextBody.Should().Contain("We have received your report");
         receipt.Message.TextBody.Should().Contain("as reported, not yet confirmed");
     }
@@ -378,6 +380,7 @@ public class TicketNotifierTests : IDisposable
             factory,
             new SmtpSettingsResolver(factory, nowhere),
             new OnCallService(factory),
+            TestTicketReference.Instance,
             NullLogger<TicketNotifier>.Instance));
 
         Ticket ticket = await tickets.CreateAsync(

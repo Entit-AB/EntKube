@@ -15,11 +15,13 @@
    message. Everything here is a proposal: accepting one is what makes
    it happen, and your name goes on it.
 
-   The exception is a fault report from a recorded contact, which
-   ArrivalPolicy opens as it arrives so the sender has a number to
-   quote. Those are already handled when this screen first sees them,
-   and say so on the card — because a receipt the operator did not send
-   is the one thing here they could otherwise send twice.
+   Two exceptions, both ArrivalPolicy's: a fault report from a recorded
+   contact is opened as it arrives so the sender has a number to quote,
+   and a reply carrying a reference we minted is put on that ticket's
+   history. Those are already handled when this screen first sees them,
+   and each says which of the two happened — because a receipt the
+   operator did not send is the one thing here they could send twice,
+   and an append that sent nothing must not read as one that did.
    ═══════════════════════════════════════════════════════════════════ *@
 
 <LoadingPanel Loading="@loading" Error="@error">
@@ -97,8 +99,44 @@
                     </div>
                 </div>
                 <div class="card-body py-2">
-                    @* ── Answered on arrival, before anyone read it ── *@
-                    @if (message.HandledBy == ArrivalPolicy.Actor)
+                    @* ── Acted on as it arrived, before anyone read it ── *@
+                    @if (message.HandledBy == ArrivalPolicy.Actor && RelayedOnArrival(message))
+                    {
+                        <div class="alert alert-success py-2 small">
+                            <span class="bi bi-send me-1"></span>
+                            <strong>Sent on to the customer as it arrived.</strong>
+                            <span>
+                                One of ours wrote above the cut line on a ticket their
+                                reference proves
+                                @if (message.Ticket is not null)
+                                {
+                                    <text>, #@message.Ticket.Number</text>
+                                }
+                                , and our own mail server verified the sender — so it went
+                                out from the support address and onto the history.
+                            </span>
+                        </div>
+                    }
+                    else if (message.HandledBy == ArrivalPolicy.Actor && AppendedOnArrival(message))
+                    {
+                        @* Deliberately not the same banner. Nothing was sent here, and an
+                           operator who reads "the receipt went out" will not send the reply
+                           they would otherwise have written. *@
+                        <div class="alert alert-info py-2 small">
+                            <span class="bi bi-arrow-return-right me-1"></span>
+                            <strong>Added to its ticket as it arrived.</strong>
+                            <span>
+                                It carried one of our own references
+                                @if (message.Ticket is not null)
+                                {
+                                    <text>to ticket #@message.Ticket.Number</text>
+                                }
+                                , so it went onto that history rather than waiting here.
+                                Nothing was sent — the reply is still yours to write.
+                            </span>
+                        </div>
+                    }
+                    else if (message.HandledBy == ArrivalPolicy.Actor)
                     {
                         <div class="alert alert-success py-2 small">
                             <span class="bi bi-send-check me-1"></span>
@@ -106,7 +144,7 @@
                             @if (message.Ticket is not null)
                             {
                                 <span>
-                                    Ticket [#@message.Ticket.Number] was opened and the receipt went
+                                    Ticket #@message.Ticket.Number was opened and the receipt went
                                     out from the support address, with the reference in the subject
                                     and the instruction to keep it there.
                                 </span>
@@ -420,7 +458,26 @@
     /// confirms it, not by clicking Accept on a keyword match.
     /// </summary>
     private static bool IsActionable(MailSuggestionKind kind) =>
-        kind is MailSuggestionKind.OpenTicket or MailSuggestionKind.AppendToTicket;
+        kind is MailSuggestionKind.OpenTicket
+             or MailSuggestionKind.AppendToTicket
+             or MailSuggestionKind.ReplyToCustomer;
+
+    /// <summary>
+    /// Whether the mailbox put this message on an existing ticket rather than opening one.
+    /// Read from the suggestion it accepted, which is the only record of which of the two
+    /// things ArrivalPolicy allowed actually happened.
+    /// </summary>
+    private static bool AppendedOnArrival(InboundMailMessage message) =>
+        message.Suggestions.Any(s => s.Kind == MailSuggestionKind.AppendToTicket
+                                     && s.State == MailSuggestionState.Accepted);
+
+    /// <summary>
+    /// Whether the mailbox sent this one on to the customer. The loudest thing it can do by
+    /// itself, so it says so rather than sharing a banner with the quieter two.
+    /// </summary>
+    private static bool RelayedOnArrival(InboundMailMessage message) =>
+        message.Suggestions.Any(s => s.Kind == MailSuggestionKind.ReplyToCustomer
+                                     && s.State == MailSuggestionState.Accepted);
 
     /// <summary>
     /// The application chosen for a suggestion, as the select's value: whatever a person
@@ -450,9 +507,15 @@
 
         chosenApps.Remove(suggestion.Id);
 
-        Toasts.Success(ticket is null
-            ? "Done."
-            : $"Ticket #{ticket.Number} — confirm the priority on it, with a reason (§14.3).");
+        Toasts.Success((ticket, suggestion.Kind) switch
+        {
+            (null, _) => "Done.",
+            (not null, MailSuggestionKind.ReplyToCustomer) =>
+                $"Sent to the customer on ticket #{ticket.Number}.",
+            (not null, MailSuggestionKind.AppendToTicket) =>
+                $"Added to ticket #{ticket.Number}.",
+            _ => $"Ticket #{ticket.Number} — confirm the priority on it, with a reason (§14.3).",
+        });
 
         await LoadAsync();
     }
@@ -483,6 +546,8 @@
         MailSuggestionKind.FlagTimebank => "hour bank",
         MailSuggestionKind.FlagUnknownSender => "unknown",
         MailSuggestionKind.FlagForgedSender => "not verified",
+        MailSuggestionKind.ReplyToCustomer => "send to customer",
+        MailSuggestionKind.FlagInternalSender => "one of ours",
         _ => kind.ToString(),
     };
 
@@ -495,6 +560,10 @@
         // message; this is our own server saying the message is not from who it says.
         MailSuggestionKind.FlagForgedSender => "bg-danger",
         MailSuggestionKind.FlagTimebank or MailSuggestionKind.FlagDevelopment => "bg-warning text-dark",
+        // Accepting this one sends mail to the customer. Marked as the outbound act it is,
+        // so it does not read like filing something.
+        MailSuggestionKind.ReplyToCustomer => "bg-success",
+        MailSuggestionKind.FlagInternalSender => "bg-warning text-dark",
         _ => "bg-light text-dark border",
     };
 

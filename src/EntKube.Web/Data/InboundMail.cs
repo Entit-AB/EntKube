@@ -175,6 +175,18 @@ public enum MailSuggestionKind
 
     /// <summary>Our own mail server says the From address is not who it claims to be.</summary>
     FlagForgedSender = 8,
+
+    /// <summary>
+    /// The message is one of our own people answering the customer, so what they wrote goes
+    /// on to the customer rather than onto the ticket as a note from them.
+    /// </summary>
+    ReplyToCustomer = 9,
+
+    /// <summary>
+    /// It came from one of our own people, and could not be turned into a reply — there is
+    /// no reference saying which ticket, or nothing was written above the cut line.
+    /// </summary>
+    FlagInternalSender = 10,
 }
 
 /// <summary>Whether a suggestion has been acted on.</summary>

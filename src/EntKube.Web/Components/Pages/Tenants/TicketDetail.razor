@@ -1,9 +1,11 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
+@using EntKube.Web.Services.Support
 @using EntKube.Web.Services.Tickets
 @using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.EntityFrameworkCore
 @inject TicketService Tickets
+@inject SupportDutyService Duty
 @inject ToastService Toasts
 @inject CurrentActor ActorService
 @inject UserAccessService Access
@@ -198,7 +200,7 @@
                     </button>
                 }
 
-                @* Claim, hand over, or put it back. Nobody is assigned work by the system. *@
+                @* Claim, hand over, or put it back. *@
                 @if (ticket.Assignee is null)
                 {
                     <AsyncButton CssClass="btn-sm btn-outline-primary" OnClick="ClaimAsync">
@@ -216,6 +218,31 @@
                     <AsyncButton CssClass="btn-sm btn-outline-warning" OnClick="ClaimAsync">
                         <i class="bi bi-person-up me-1"></i>Take it from @ticket.Assignee
                     </AsyncButton>
+                }
+
+                @* Hand it to somebody else. Only rendered once the roster has arrived: a
+                   select takes its selection from options rendered in the same batch, so one
+                   built before its options have loaded shows the placeholder and then quietly
+                   disagrees with what the page thinks is chosen. *@
+                @if (roster is not null && roster.Count > 0)
+                {
+                    <select class="form-select form-select-sm w-auto d-inline-block"
+                            value="@(ticket.AssigneeUserId ?? "")"
+                            @onchange="HandToAsync">
+                        <option value="">Hand to…</option>
+                        @foreach (SupportTechnician technician in roster)
+                        {
+                            <option value="@technician.UserId">@technician.Name</option>
+                        }
+                    </select>
+                }
+                else if (roster is not null)
+                {
+                    @* Said rather than left blank. Nobody on the rota is a normal state and a
+                       missing control is indistinguishable from a broken one. *@
+                    <span class="text-muted small align-self-center">
+                        <i class="bi bi-person-slash me-1"></i>Nobody is on the support rota
+                    </span>
                 }
             </div>
 
@@ -624,6 +651,11 @@
             {
                 status = TicketService.StatusOf(ticket, now);
                 formPriority = ticket.Priority;
+
+                // Loaded here rather than on initialisation, because whose rota applies is
+                // the ticket's tenant and that is not known until it has been read. Reloaded
+                // with the ticket too, which is what a move to another tenant needs.
+                roster = await Duty.GetActiveAsync(ticket.TenantId);
             }
         }
         catch (Exception ex)
@@ -659,10 +691,57 @@
         await OnChanged.InvokeAsync();
     }
 
+    /// <summary>
+    /// Takes the ticket.
+    ///
+    /// <para>Matched against the roster by name, because that is what the actor is — the
+    /// signed-in user's name, which <see cref="SupportTechnician.Name"/> is built from. The
+    /// point of finding them is the address: claiming a ticket should put the same repliable
+    /// mail in your inbox that being handed one does, since replying to it is how the
+    /// customer gets answered.</para>
+    /// </summary>
     private async Task ClaimAsync()
     {
-        await Tickets.AssignAsync(TicketId, Actor, Actor, DateTime.UtcNow);
-        Toasts.Success("Yours.");
+        SupportTechnician? me = roster?
+            .Cast<SupportTechnician?>()
+            .FirstOrDefault(t => t!.Value.Name == Actor);
+
+        await Tickets.AssignAsync(
+            TicketId, Actor, Actor, DateTime.UtcNow, me?.UserId, me?.Email);
+
+        Toasts.Success(
+            me?.Email is null
+                ? "Yours. You are not on the support rota, so nothing was mailed to you."
+                : "Yours — the ticket is in your inbox, and replying to it answers the customer.");
+
+        await LoadAsync();
+        await OnChanged.InvokeAsync();
+    }
+
+    /// <summary>Hands it to somebody else on the rota, who is told by mail.</summary>
+    private async Task HandToAsync(ChangeEventArgs e)
+    {
+        string? userId = e.Value?.ToString();
+
+        if (string.IsNullOrWhiteSpace(userId) || roster is null)
+        {
+            return;
+        }
+
+        SupportTechnician? to = roster
+            .Cast<SupportTechnician?>()
+            .FirstOrDefault(t => t!.Value.UserId == userId);
+
+        if (to is not { } technician)
+        {
+            return;
+        }
+
+        await Tickets.AssignAsync(
+            TicketId, technician.Name, Actor, DateTime.UtcNow,
+            technician.UserId, technician.Email);
+
+        Toasts.Success($"{technician.Name} has it, and has been told by mail.");
         await LoadAsync();
         await OnChanged.InvokeAsync();
     }
@@ -767,6 +846,12 @@
     [Parameter] public string? CurrentActor { get; set; }
 
     private string? resolvedActor;
+
+    /// <summary>
+    /// Who can be handed a ticket: enrolled, active and with an address to write to. Null
+    /// until it has loaded, which is what the select waits for.
+    /// </summary>
+    private List<SupportTechnician>? roster;
 
     /// <summary>Who this is being done by. Resolved once, used everywhere below.</summary>
     private string Actor => CurrentActor ?? resolvedActor ?? EntKube.Web.Services.CurrentActor.Unattributed;

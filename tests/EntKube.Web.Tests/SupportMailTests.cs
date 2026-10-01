@@ -4,6 +4,9 @@ using EntKube.Web.Services.Mail;
 using EntKube.Web.Services.Support;
 using EntKube.Web.Services.Tickets;
 using EntKube.Web.Services.Time;
+using EntKube.Web.Services;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.Logging.Abstractions;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -31,6 +34,16 @@ public class SupportMailTests : IDisposable
     private readonly ApplicationDbContext db;
     private readonly SupportMailService mail;
     private readonly TicketService tickets;
+
+    /// <summary>
+    /// A real SMTP server on a loopback port, rather than a notifier that says nothing.
+    ///
+    /// <para>What the customer actually receives is the whole point of the reply path, and a
+    /// notifier with nowhere to send reports that it reached nobody — which is correct
+    /// behaviour and tests nothing. With a sink, the assertions can be about the message on
+    /// the wire.</para>
+    /// </summary>
+    private readonly SmtpSink sink = new();
 
     private readonly Guid tenantId = Guid.NewGuid();
     private readonly Guid customerId = Guid.NewGuid();
@@ -84,22 +97,42 @@ public class SupportMailTests : IDisposable
 
         TestDbContextFactory factory = new(connection);
         ContractService contracts = new(factory);
-        tickets = new TicketService(factory, contracts, SilentTicketNotifier.For(factory));
+        IConfiguration smtp = new ConfigurationBuilder().AddInMemoryCollection(
+            new Dictionary<string, string?>
+            {
+                ["Smtp:Host"] = sink.Host,
+                ["Smtp:Port"] = sink.Port.ToString(),
+                ["Smtp:FromAddress"] = "support@entit.se",
+            }).Build();
+
+        tickets = new TicketService(
+            factory, contracts,
+            new TicketNotifier(
+                factory,
+                new SmtpSettingsResolver(factory, smtp),
+                new OnCallService(factory),
+                TestTicketReference.Instance,
+                NullLogger<TicketNotifier>.Instance),
+            new SupportDutyService(factory));
+
         MailTriageRuleService ruleService = new(factory);
         mail = new SupportMailService(
-            factory, new RuleBasedMailAnalyst(), ruleService, tickets,
-            new TimeService(factory, contracts));
+            factory, new RuleBasedMailAnalyst(TestTicketReference.Instance), ruleService, tickets,
+            new TimeService(factory, contracts), TestTicketReference.Instance,
+            new SupportDutyService(factory));
     }
 
     public void Dispose()
     {
+        sink.Dispose();
         db.Dispose();
         connection.Dispose();
         GC.SuppressFinalize(this);
     }
 
     private Task<InboundMailMessage?> Receive(
-        string subject, string body, string from = KnownSender, DateTime? sentAt = null) =>
+        string subject, string body, string from = KnownSender, DateTime? sentAt = null,
+        SenderAuthenticity authenticity = SenderAuthenticity.Unknown) =>
         mail.IngestAsync(new InboundMailMessage
         {
             TenantId = tenantId,
@@ -109,7 +142,40 @@ public class SupportMailTests : IDisposable
             Subject = subject,
             Body = body,
             SentAt = sentAt ?? Tue(10),
+            SenderAuthenticity = authenticity,
         });
+
+    /// <summary>One of our own people: a member of the mailbox's tenant.</summary>
+    private const string Technician = "nils@entit.example";
+
+    private void TechnicianOnStaff()
+    {
+        Guid roleId = Guid.NewGuid();
+
+        db.TenantRoles.Add(new TenantRole { Id = roleId, TenantId = tenantId, Name = "Support" });
+        db.Users.Add(new ApplicationUser
+        {
+            Id = "user-nils", UserName = "nils", Email = Technician,
+        });
+        db.TenantMemberships.Add(new TenantMembership
+        {
+            UserId = "user-nils", TenantId = tenantId, RoleId = roleId,
+        });
+
+        db.SaveChanges();
+    }
+
+    /// <summary>A technician's reply, shaped as their client sends it back.</summary>
+    private static string Replying(string said) =>
+        $"""
+         {said}
+
+         > {SupportReplyBody.Sentinel}
+         > ───────────────────────────────────────────────
+         >   Priority:    P1 (as reported — confirm it in writing, §14.3)
+         >   Respond by:  Tue 22 Sep 14:00
+         >   Reported by: Karin Karlsson
+         """;
 
     private void RegisterDomain(string domain, Guid? forCustomer = null) =>
         db.CustomerEmailDomains.Add(new CustomerEmailDomain
@@ -1379,5 +1445,370 @@ public class SupportMailTests : IDisposable
 
         queue.Should().BeEmpty();
         (await mail.GetQueueAsync(tenantId, includeHandled: true)).Should().ContainSingle();
+    }
+
+    // ---- A reply that can be placed is placed -------------------------------------------------
+
+    /// <summary>
+    /// <b>What used to happen, and no longer does.</b> A reply carrying a reference we minted
+    /// was recognised — the duplicate ticket was prevented, which was the point — and then sat
+    /// in the queue until somebody pressed a button to put it where the reference already said
+    /// it went. It now goes there on arrival.
+    ///
+    /// <para>No second ticket, no second receipt, and the reply is on the history §14.6 makes
+    /// the record between the parties, timed from when it was written.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_reply_carrying_our_reference_lands_on_its_ticket_without_a_person()
+    {
+        MailboxAnswersOnArrival();
+
+        await Receive("Journalen svarar inte", "Ingen på avdelning 4 kommer in.");
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+
+        InboundMailMessage? reply = await Receive(
+            $"Re: {TestTicketReference.Instance.For(opened.Number)} Journalen svarar inte",
+            "Nu är det fler avdelningar.",
+            sentAt: Tue(11));
+
+        db.Tickets.Should().ContainSingle("a reply must never open a second ticket");
+
+        reply!.TicketId.Should().Be(opened.Id);
+        reply.State.Should().Be(MailTriageState.Handled);
+        reply.HandledBy.Should().Be(ArrivalPolicy.Actor);
+
+        db.TicketEvents
+            .Where(e => e.TicketId == opened.Id && e.Kind == TicketEventKind.Note)
+            .Should().Contain(e => e.Detail.Contains("Nu är det fler avdelningar")
+                                   && e.At == Tue(11));
+    }
+
+    /// <summary>
+    /// The same reply with a number somebody typed instead of a reference we minted. It still
+    /// finds its ticket and still opens nothing — but a typed digit can be the wrong digit, so
+    /// putting a customer's words on that history stays a person's decision.
+    /// </summary>
+    [Fact]
+    public async Task A_reply_quoting_a_bare_number_is_recognised_but_left_in_the_queue()
+    {
+        MailboxAnswersOnArrival();
+
+        await Receive("Journalen svarar inte", "Ingen på avdelning 4 kommer in.");
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+
+        InboundMailMessage? reply = await Receive(
+            $"Re: [#{opened.Number}] Journalen svarar inte", "Nu är det fler avdelningar.");
+
+        db.Tickets.Should().ContainSingle();
+
+        reply!.State.Should().Be(MailTriageState.Proposed);
+        reply.TicketId.Should().BeNull();
+        reply.Suggestions.Should()
+            .Contain(s => s.Kind == MailSuggestionKind.AppendToTicket
+                          && s.TicketId == opened.Id
+                          && s.State == MailSuggestionState.Pending);
+    }
+
+    /// <summary>
+    /// A number in a subject that is not a reference at all. The old reader took the first
+    /// <c>#</c> it found, so an order number could reach a ticket that happened to carry it;
+    /// now the reference is looked for first, and this one is simply a new report.
+    /// </summary>
+    [Fact]
+    public async Task Another_number_in_the_subject_does_not_win_over_the_reference()
+    {
+        MailboxAnswersOnArrival();
+
+        await Receive("Journalen svarar inte", "Ingen kommer in.");
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+
+        InboundMailMessage? unrelated = await Receive(
+            $"Order #90210 — re: {TestTicketReference.Instance.For(opened.Number)}",
+            "Samma fel igen.");
+
+        unrelated!.TicketId.Should().Be(opened.Id);
+        db.Tickets.Should().ContainSingle();
+    }
+
+    /// <summary>
+    /// <b>The budget an append must not spend.</b> <see cref="ArrivalPolicy.RepeatWindow"/>
+    /// bounds how much mail one address can make us send. Appends send none, so a morning of
+    /// replies into one ticket must leave a genuine new report still able to be answered.
+    /// </summary>
+    [Fact]
+    public async Task A_morning_of_replies_does_not_use_up_the_budget_for_answering()
+    {
+        MailboxAnswersOnArrival();
+
+        await Receive("Journalen svarar inte", "Ingen kommer in.");
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+        string reference = TestTicketReference.Instance.For(opened.Number);
+
+        for (int i = 0; i < ArrivalPolicy.AutomaticRepliesPerSender + 2; i++)
+        {
+            await Receive($"Re: {reference} Journalen svarar inte", $"Uppdatering {i}.");
+        }
+
+        InboundMailMessage? fresh = await Receive("Nytt fel i exporten", "Exporten stannar.");
+
+        db.Tickets.Should().HaveCount(2);
+        fresh!.TicketId.Should().NotBeNull();
+    }
+
+
+    // ---- One of ours answering the customer --------------------------------------------------
+
+    /// <summary>
+    /// <b>The whole point of assigning by mail.</b> A technician replies to the message
+    /// about their ticket, and what they wrote above the line reaches the customer — on the
+    /// history §14.6 makes the record, visible to them, without anybody opening the
+    /// application.
+    /// </summary>
+    [Fact]
+    public async Task A_technicians_reply_is_sent_to_the_customer_and_recorded()
+    {
+        MailboxAnswersOnArrival();
+        TechnicianOnStaff();
+
+        await Receive("Journalen svarar inte", "Ingen kommer in.");
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+
+        InboundMailMessage? reply = await Receive(
+            $"Re: {TestTicketReference.Instance.For(opened.Number)} Journalen svarar inte",
+            Replying("Vi har hittat felet och rullar ut en rättning i kväll."),
+            from: Technician,
+            sentAt: Tue(11),
+            authenticity: SenderAuthenticity.Verified);
+
+        db.Tickets.Should().ContainSingle("answering is not opening a new ticket");
+
+        reply!.State.Should().Be(MailTriageState.Handled);
+        reply.HandledBy.Should().Be(ArrivalPolicy.Actor);
+        reply.TicketId.Should().Be(opened.Id);
+
+        // Placed with the ticket's customer, not the sender's — the From was one of ours.
+        reply.CustomerId.Should().Be(customerId);
+
+        db.ChangeTracker.Clear();
+
+        TicketEvent said = db.TicketEvents
+            .Where(e => e.TicketId == opened.Id && e.CustomerVisible)
+            .ToList()
+            .Should().ContainSingle(e => e.Detail.Contains("rullar ut en rättning"))
+            .Subject;
+
+        // The history is the record §14.6 settles disputes from, so it names who heard it.
+        said.Detail.Should().Contain(KnownSender);
+
+        // And none of what we sent the technician, which is the thing this must never leak.
+        said.Detail.Should().NotContain("Respond by");
+        said.Detail.Should().NotContain("Reported by");
+        said.Detail.Should().NotContain("as reported");
+
+        // What actually went out: from the support address, to the reporter, with the
+        // reference in the subject so their reply comes back onto this ticket.
+        SentMail toCustomer = sink.Received
+            .Where(m => m.To == KnownSender)
+            .Should().HaveCount(2, "the receipt, then the answer")
+            .And.Subject.Last();
+
+        toCustomer.Message.Subject.Should()
+            .StartWith(TestTicketReference.Instance.For(opened.Number));
+        toCustomer.Message.TextBody.Should().Contain("rullar ut en rättning i kväll");
+        toCustomer.Message.TextBody.Should().NotContain("Respond by");
+        toCustomer.Message.TextBody.Should().NotContain(SupportReplyBody.Sentinel);
+    }
+
+    /// <summary>
+    /// Answering the customer is the §14.4 response. The arrival receipt deliberately does
+    /// not discharge it — it is a fact about the past with nobody's name on it — but this is
+    /// a person writing to them about their fault, which is what the clock was waiting for.
+    /// </summary>
+    [Fact]
+    public async Task Answering_the_customer_is_the_response_the_clock_was_waiting_for()
+    {
+        MailboxAnswersOnArrival();
+        TechnicianOnStaff();
+
+        await Receive("Journalen svarar inte", "Ingen kommer in.");
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+
+        opened.FirstResponseAt.Should().BeNull("a receipt is not an assessment");
+
+        await Receive(
+            $"Re: {TestTicketReference.Instance.For(opened.Number)} Journalen svarar inte",
+            Replying("Vi tittar på det nu."),
+            from: Technician, sentAt: Tue(11),
+            authenticity: SenderAuthenticity.Verified);
+
+        db.ChangeTracker.Clear();
+        Ticket after = db.Tickets.Single();
+
+        after.FirstResponseAt.Should().Be(Tue(11));
+        after.Status.Should().Be(TicketStatus.InProgress);
+    }
+
+    /// <summary>
+    /// Our own server could not verify the sender, so nothing goes out. The message is in
+    /// the queue with the reply on it, which a person can send in one click — what must not
+    /// happen is mail leaving in our name on a From nobody checked.
+    /// </summary>
+    [Fact]
+    public async Task An_unverified_reply_waits_in_the_queue_with_the_text_on_it()
+    {
+        MailboxAnswersOnArrival();
+        TechnicianOnStaff();
+
+        await Receive("Journalen svarar inte", "Ingen kommer in.");
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+
+        InboundMailMessage? reply = await Receive(
+            $"Re: {TestTicketReference.Instance.For(opened.Number)} Journalen svarar inte",
+            Replying("Vi tittar på det."),
+            from: Technician, sentAt: Tue(11));
+
+        reply!.State.Should().Be(MailTriageState.Proposed);
+
+        reply.Suggestions.Should().ContainSingle()
+            .Which.Should().Match<MailSuggestion>(s =>
+                s.Kind == MailSuggestionKind.ReplyToCustomer
+                && s.State == MailSuggestionState.Pending
+                && s.TicketId == opened.Id
+                && s.DraftText == "Vi tittar på det.");
+
+        db.ChangeTracker.Clear();
+        db.TicketEvents.Where(e => e.TicketId == opened.Id && e.CustomerVisible)
+            .Should().NotContain(e => e.Detail.Contains("Vi tittar"));
+    }
+
+    /// <summary>
+    /// A colleague writing with nothing above the line. There is nothing to send, and what
+    /// is below the line is what we sent them — which the customer must not be handed. So it
+    /// says so rather than opening a ticket in a technician's name.
+    /// </summary>
+    [Fact]
+    public async Task A_reply_with_nothing_above_the_line_says_so_and_opens_nothing()
+    {
+        MailboxAnswersOnArrival();
+        TechnicianOnStaff();
+
+        await Receive("Journalen svarar inte", "Ingen kommer in.");
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+
+        InboundMailMessage? reply = await Receive(
+            $"Re: {TestTicketReference.Instance.For(opened.Number)} Journalen svarar inte",
+            Replying(""),
+            from: Technician, sentAt: Tue(11),
+            authenticity: SenderAuthenticity.Verified);
+
+        db.Tickets.Should().ContainSingle();
+
+        reply!.Suggestions.Should().ContainSingle()
+            .Which.Kind.Should().Be(MailSuggestionKind.FlagInternalSender);
+    }
+
+    /// <summary>
+    /// One of ours writing to support about nothing in particular. It must not become a
+    /// ticket in their own name against a customer nobody chose.
+    /// </summary>
+    [Fact]
+    public async Task A_colleague_naming_no_ticket_does_not_open_one()
+    {
+        MailboxAnswersOnArrival();
+        TechnicianOnStaff();
+
+        InboundMailMessage? message = await Receive(
+            "Har vi hört något från kunden?", "Undrar bara.",
+            from: Technician, authenticity: SenderAuthenticity.Verified);
+
+        db.Tickets.Should().BeEmpty();
+
+        message!.Suggestions.Should().ContainSingle()
+            .Which.Kind.Should().Be(MailSuggestionKind.FlagInternalSender);
+    }
+
+    // ---- Handing a new ticket to somebody ----------------------------------------------------
+
+    /// <summary>
+    /// <b>The chain the whole feature is.</b> A report arrives, the rota hands it to
+    /// somebody, and that person's mailbox gets a message they can reply to in order to
+    /// answer the customer. Nobody opened the application.
+    /// </summary>
+    [Fact]
+    public async Task A_new_report_is_handed_to_whoever_is_taking_work()
+    {
+        MailboxAnswersOnArrival();
+        TechnicianOnStaff();
+        await new SupportDutyService(new TestDbContextFactory(connection))
+            .SetDutyAsync(tenantId, "user-nils", true, null, "nils");
+
+        await Receive("Journalen svarar inte", "Ingen kommer in.");
+
+        db.ChangeTracker.Clear();
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+
+        opened.Assignee.Should().Be("nils");
+        opened.AssigneeUserId.Should().Be("user-nils");
+
+        // Not the customer's business whose it is — §14.1 promises them a named contact,
+        // not our rota.
+        db.TicketEvents.Should().Contain(e =>
+            e.Detail.Contains("Assigned to nils") && !e.CustomerVisible);
+
+        SentMail toTechnician = sink.Received
+            .Where(m => m.To == Technician)
+            .Should().ContainSingle().Subject;
+
+        toTechnician.Message.Subject.Should()
+            .StartWith(TestTicketReference.Instance.For(opened.Number));
+
+        // The line that makes replying possible, and the deadline that must stay behind it.
+        toTechnician.Message.TextBody.Should().Contain(SupportReplyBody.Sentinel);
+        toTechnician.Message.TextBody.Should().Contain("Respond by");
+
+        SupportReplyBody.Above(toTechnician.Message.TextBody)
+            .Should().BeNull("there is nothing above the line in what we send");
+    }
+
+    /// <summary>
+    /// Nobody taking work is an ordinary state, not a failure. The ticket opens unassigned
+    /// and waits in the queue, exactly as every ticket did before the rota existed — what
+    /// must not happen is it being handed to somebody who is not there.
+    /// </summary>
+    [Fact]
+    public async Task With_nobody_on_the_rota_a_ticket_opens_unassigned()
+    {
+        MailboxAnswersOnArrival();
+        TechnicianOnStaff();
+
+        await Receive("Journalen svarar inte", "Ingen kommer in.");
+
+        db.ChangeTracker.Clear();
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+
+        opened.Assignee.Should().BeNull();
+        opened.AssigneeUserId.Should().BeNull();
+        sink.Received.Should().NotContain(m => m.To == Technician);
+    }
+
+    /// <summary>
+    /// Standing down takes somebody out of the rotation. Somebody has to be able to be free
+    /// of work, and the test of that is a ticket arriving while they are.
+    /// </summary>
+    [Fact]
+    public async Task Somebody_standing_down_is_not_handed_a_new_ticket()
+    {
+        MailboxAnswersOnArrival();
+        TechnicianOnStaff();
+
+        SupportDutyService roster = new(new TestDbContextFactory(connection));
+        await roster.SetDutyAsync(tenantId, "user-nils", true, null, "nils");
+        await roster.SetDutyAsync(tenantId, "user-nils", false, "Semester", "nils");
+
+        await Receive("Journalen svarar inte", "Ingen kommer in.");
+
+        db.ChangeTracker.Clear();
+        db.Tickets.Should().ContainSingle().Subject.Assignee.Should().BeNull();
+        sink.Received.Should().NotContain(m => m.To == Technician);
     }
 }

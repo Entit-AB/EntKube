@@ -151,6 +151,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<TelemetrySegment> TelemetrySegments => Set<TelemetrySegment>();
     public DbSet<TelemetryStorageSetting> TelemetryStorageSettings => Set<TelemetryStorageSetting>();
     public DbSet<NotificationProviderConfig> NotificationProviderConfigs => Set<NotificationProviderConfig>();
+
+    public DbSet<SupportDuty> SupportDuties => Set<SupportDuty>();
     public DbSet<SecretExpiryNotificationConfig> SecretExpiryNotificationConfigs => Set<SecretExpiryNotificationConfig>();
     public DbSet<SecretExpiryNotification> SecretExpiryNotifications => Set<SecretExpiryNotification>();
     public DbSet<ClusterServer> ClusterServers => Set<ClusterServer>();
@@ -497,6 +499,12 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
             // already quoting the old one. Tenants therefore see gaps in their sequence,
             // which costs nothing.
             entity.HasIndex(t => new { t.TenantId, t.Number }).IsUnique();
+
+            entity.Property(t => t.AssigneeUserId).HasMaxLength(450);
+
+            // The round-robin reads this: the most recently assigned ticket in a tenant is
+            // where the rotation carries on from.
+            entity.HasIndex(t => new { t.TenantId, t.AssigneeUserId });
 
             // The queue: open tickets for a customer, worst first. Also the shape the
             // monthly report reads for a period.
@@ -3403,6 +3411,23 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
                 .HasForeignKey(r => r.MatchClusterId)
                 .OnDelete(DeleteBehavior.SetNull)
                 .IsRequired(false);
+        });
+
+        builder.Entity<SupportDuty>(entity =>
+        {
+            // One row per person per tenant: the roster is a set of people, and two rows
+            // for one of them would let the rota disagree with itself about whether they
+            // are taking work.
+            entity.HasIndex(d => new { d.TenantId, d.UserId }).IsUnique();
+
+            entity.Property(d => d.UserId).HasMaxLength(450).IsRequired();
+            entity.Property(d => d.Note).HasMaxLength(500);
+            entity.Property(d => d.UpdatedBy).HasMaxLength(256);
+
+            entity.HasOne(d => d.Tenant)
+                .WithMany()
+                .HasForeignKey(d => d.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<NotificationProviderConfig>(entity =>

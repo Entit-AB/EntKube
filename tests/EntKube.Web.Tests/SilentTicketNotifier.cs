@@ -32,6 +32,7 @@ internal static class SilentTicketNotifier
             factory,
             new SmtpSettingsResolver(factory, nothingConfigured),
             new OnCallService(factory),
+            TestTicketReference.Instance,
             NullLogger<TicketNotifier>.Instance);
     }
 }
