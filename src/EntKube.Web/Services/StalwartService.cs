@@ -2390,13 +2390,16 @@ public class StalwartService(
             if (written > 0)
             {
                 output.Add($"Recorded the DKIM records for {written} domain(s).");
+                return output;
             }
-            else
-            {
-                output.Add(
-                    "Read it, but found no selector and public key in what came back. It is below.");
-                output.Add(snapshot.Length > 4000 ? snapshot[..4000] + "…" : snapshot);
-            }
+
+            // No public key came back, and none ever will: a signature object carries the private
+            // half, the server returns secret fields anonymised, and the public half exists only
+            // as something derived from a key it will not hand over. What is knowable is which
+            // selectors are in use — the half of the record nobody can guess — so that is said,
+            // and the raw answer kept, rather than reporting a blank.
+            output.AddRange(await ReportSelectorsAsync(config.Id, snapshot, ct));
+            output.Add(snapshot.Length > 4000 ? snapshot[..4000] + "…" : snapshot);
         }
         catch (Exception ex)
         {
@@ -2405,6 +2408,42 @@ public class StalwartService(
         }
 
         return output;
+    }
+
+    /// <summary>
+    /// Says which selectors each domain signs with, when the keys themselves could not be read.
+    ///
+    /// <para>Half an answer, and the half that cannot be worked out from outside: a selector is
+    /// an arbitrary name the server chose, and it changes when the key rotates. Published against
+    /// the wrong one, a perfectly good public key fails every check.</para>
+    /// </summary>
+    private async Task<List<string>> ReportSelectorsAsync(
+        Guid configId, string snapshot, CancellationToken ct)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        List<StalwartMailDomain> domains = await db.StalwartMailDomains
+            .AsNoTracking().Where(d => d.ConfigId == configId).ToListAsync(ct);
+
+        List<string> said =
+        [
+            "The server will not hand over a public key: a signature object holds the private "
+            + "half, and secret fields come back anonymised. The selectors it signs with are "
+            + "below — the part of each record that cannot be guessed. Their public halves have "
+            + "to come from the server's own DNS page until EntKube owns these keys itself.",
+        ];
+
+        foreach (StalwartMailDomain domain in domains)
+        {
+            IReadOnlyList<string> selectors =
+                Mail.StalwartDnsService.DkimSelectorsInPlan(snapshot, domain.Name);
+
+            said.Add(selectors.Count > 0
+                ? $"  {domain.Name}: {string.Join(", ", selectors)}"
+                : $"  {domain.Name}: no signature found");
+        }
+
+        return said;
     }
 
     /// <summary>Writes what was read onto the domains, and says how many got one.</summary>

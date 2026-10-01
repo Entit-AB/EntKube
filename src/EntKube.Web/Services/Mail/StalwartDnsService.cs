@@ -583,6 +583,75 @@ public class StalwartDnsService(
         ["Tenant", "Certificate", "AcmeProvider", "DnsServer"];
 
     /// <summary>
+    /// The selectors a domain is signing with, read out of a snapshot plan.
+    ///
+    /// <para><b>Why only the selectors.</b> A signature object carries the private half and
+    /// nothing else — the server returns secret fields anonymised, and says so. There is no
+    /// public key in it to publish, and no amount of asking differently produces one: the public
+    /// half exists only as something derived from the private key, which the server will not
+    /// hand over. So what can be learned here is which selectors are in use, which is the half
+    /// of the record nobody can guess, and the operator supplies the key beside it.</para>
+    ///
+    /// <para>The domain comes from a reference — <c>"domainId":"#domain-b"</c> — resolved against
+    /// the Domain upsert in the same plan, which is exactly why Domain is in the selection and
+    /// never waved through.</para>
+    /// </summary>
+    public static IReadOnlyList<string> DkimSelectorsInPlan(string plan, string domain)
+    {
+        Dictionary<string, string> domainRefs = [];
+        List<(string Ref, string Selector)> signatures = [];
+
+        foreach (string line in (plan ?? "")
+                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            if (!line.StartsWith('{'))
+            {
+                continue;
+            }
+
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(line);
+
+                if (!doc.RootElement.TryGetProperty("object", out JsonElement type)
+                    || !doc.RootElement.TryGetProperty("value", out JsonElement values)
+                    || values.ValueKind != JsonValueKind.Object)
+                {
+                    continue;
+                }
+
+                foreach (JsonProperty entry in values.EnumerateObject())
+                {
+                    if (type.GetString() == "Domain" && Text(entry.Value, "name") is string name)
+                    {
+                        domainRefs[entry.Name] = name;
+                    }
+                    else if (type.GetString() == "DkimSignature"
+                             && Text(entry.Value, "selector") is string selector
+                             && Text(entry.Value, "domainId") is string reference)
+                    {
+                        signatures.Add((reference.TrimStart('#'), selector));
+                    }
+                }
+            }
+            catch (JsonException)
+            {
+                // A progress line, not a plan line.
+            }
+        }
+
+        return
+        [
+            .. signatures
+                .Where(sig => domainRefs.TryGetValue(sig.Ref, out string? name)
+                              && name.Trim().TrimEnd('.')
+                                  .Equals(domain.Trim().TrimEnd('.'), StringComparison.OrdinalIgnoreCase))
+                .Select(sig => sig.Selector)
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+        ];
+    }
+
+    /// <summary>
     /// The DKIM records in a plan file — what <c>snapshot</c> writes, which is NDJSON: one
     /// operation per line rather than one document.
     ///

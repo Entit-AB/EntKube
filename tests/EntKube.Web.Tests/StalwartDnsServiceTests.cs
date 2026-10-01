@@ -225,6 +225,44 @@ public class StalwartDnsServiceTests
             .NotIntersectWith(StalwartDnsService.SnapshotUnresolved);
     }
 
+    // ---- What a real snapshot contains ------------------------------------------------------
+
+    /// <summary>
+    /// <b>Verbatim from the server, and the end of the matter.</b> A signature object carries the
+    /// private half and nothing else — the CLI says so itself: "DkimSignature has secret field(s)
+    /// the server returns anonymized (****); their values cannot be captured". There is no public
+    /// key here to publish and no way to ask for one; it exists only as something derived from a
+    /// key the server will not hand over.
+    ///
+    /// <para>What can be read is the selector, which is the half of the record nobody can guess —
+    /// an arbitrary name the server chose, which changes when the key rotates, and against which
+    /// a perfectly good public key fails every check if published wrongly.</para>
+    /// </summary>
+    private const string RealSnapshot = """
+        {"@type":"upsert","object":"Domain","matchOn":["name"],"value":{"domain-b":{"name":"entit.eu","dnsManagement":{"@type":"Manual"},"isEnabled":true}}}
+        {"@type":"upsert","object":"DkimSignature","matchOn":["selector"],"value":{"dkimsignature-jgyf3t9eaaqb":{"@type":"Dkim1RsaSha256","selector":"v1-rsa-20260927","privateKey":{"@type":"Text"},"domainId":"#domain-b"}}}
+        {"@type":"upsert","object":"DkimSignature","matchOn":["selector"],"value":{"dkimsignature-jgyf3syiaaab":{"@type":"Dkim1Ed25519Sha256","selector":"v1-ed25519-20260927","privateKey":{"@type":"Text"},"domainId":"#domain-b"}}}
+        """;
+
+    [Fact]
+    public void A_real_snapshot_yields_no_publishable_record() =>
+        StalwartDnsService.DkimLinesInPlan(RealSnapshot, "entit.eu").Should().BeNull();
+
+    /// <summary>
+    /// The domain comes from a reference — <c>"domainId":"#domain-b"</c> — resolved against the
+    /// Domain upsert in the same plan. That is exactly why Domain is in the selection and never
+    /// waved through: allowing it would drop the reference and orphan every selector.
+    /// </summary>
+    [Fact]
+    public void The_selectors_are_read_and_matched_to_their_domain() =>
+        StalwartDnsService.DkimSelectorsInPlan(RealSnapshot, "entit.eu")
+            .Should().BeEquivalentTo("v1-rsa-20260927", "v1-ed25519-20260927");
+
+    /// <summary>Another domain's signatures are not this domain's.</summary>
+    [Fact]
+    public void Selectors_belonging_elsewhere_are_not_claimed() =>
+        StalwartDnsService.DkimSelectorsInPlan(RealSnapshot, "other.example").Should().BeEmpty();
+
     /// <summary>
     /// <c>snapshot</c> writes a plan file: NDJSON, one operation per line rather than one
     /// document. Each line is read with the same lenient reader as any other answer.
