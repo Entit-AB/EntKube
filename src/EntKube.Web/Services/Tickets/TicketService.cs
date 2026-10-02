@@ -79,7 +79,15 @@ public class TicketService(
     // callers. A ticket arrives by three routes — the portal, the mailbox and monitoring —
     // and "remember to tell somebody" at three call sites is how it ends up done at none.
     // Tests that do not care pass a notifier that says nothing.
-    TicketNotifier notifier)
+    TicketNotifier notifier,
+    // Optional, and the one dependency here that is. A tenant with nobody on its support
+    // roster is an ordinary tenant, and a test that is not about the rota should not have to
+    // build one — absent, a ticket simply opens unassigned, exactly as every ticket did
+    // before the roster existed.
+    SupportDutyService? duty = null,
+    // Also optional, and for the same reason. What it records is why a ticket opened
+    // unassigned, which is the one outcome here that leaves no mark of its own.
+    ILogger<TicketService>? logger = null)
 {
     /// <summary>
     /// Registers a ticket and starts its clocks.
@@ -177,17 +185,66 @@ public class TicketService(
         db.Tickets.Add(ticket);
         await db.SaveChangesAsync(ct);
 
+        DateTime? responseDue = TicketClock.Response(
+            ticket.ClockStartsAt, ticket.PriorityEffectiveFrom, ticket.Priority, window,
+            firstResponseAt: null, now: reportedAt).Deadline;
+
         // After the save, deliberately: the ticket exists whether or not anybody can be
         // reached, and AnnounceAsync never throws.
-        await notifier.AnnounceAsync(
-            ticket,
-            window,
-            TicketClock.Response(
-                ticket.ClockStartsAt, ticket.PriorityEffectiveFrom, ticket.Priority, window,
-                firstResponseAt: null, now: reportedAt).Deadline,
-            ct);
+        await notifier.AnnounceAsync(ticket, window, responseDue, ct);
+
+        await AssignOnArrivalAsync(ticket, window, responseDue, ct);
 
         return ticket;
+    }
+
+    /// <summary>
+    /// Hands a new ticket to whoever's turn it is, when anybody is taking work.
+    ///
+    /// <para><b>Why at the door rather than when somebody opens the queue.</b> The queue
+    /// being read is the thing that was never guaranteed. A ticket that arrives at 02:00
+    /// with nobody's name on it waits for the morning; the same ticket assigned on arrival
+    /// has reached a particular person's mailbox, which is also what gives them something
+    /// to reply to.</para>
+    ///
+    /// <para><b>Why an unassigned ticket is still a normal outcome.</b> A tenant that has
+    /// enrolled nobody, or whose whole team is standing down, gets exactly what it got
+    /// before: a ticket in the queue. What this must never do is assign to somebody who is
+    /// not there, because the mail then goes to a mailbox nobody is reading and the ticket
+    /// looks handled.</para>
+    ///
+    /// <para>Never throws, for the same reason as the announcement: the ticket stands.</para>
+    /// </summary>
+    private async Task AssignOnArrivalAsync(
+        Ticket ticket, SupportWindow window, DateTime? responseDue, CancellationToken ct)
+    {
+        if (duty is null)
+        {
+            return;
+        }
+
+        try
+        {
+            SupportTechnician? next = await duty.NextAsync(ticket.TenantId, ct: ct);
+
+            if (next is not { } technician)
+            {
+                return;
+            }
+
+            await AssignAsync(
+                ticket.Id, technician.Name, SupportDutyService.RoundRobinActor,
+                DateTime.UtcNow, technician.UserId, technician.Email, window, responseDue, ct);
+
+            ticket.Assignee = technician.Name;
+            ticket.AssigneeUserId = technician.UserId;
+        }
+        catch (Exception ex)
+        {
+            logger?.LogError(
+                ex, "Could not assign ticket #{Number} on arrival; it stays unassigned.",
+                ticket.Number);
+        }
     }
 
     /// <summary>
@@ -431,6 +488,76 @@ public class TicketService(
             changed ? TicketEventKind.Reprioritised : TicketEventKind.PriorityConfirmed,
             at, actor,
             changed ? $"{previous} → {priority}. {reason}" : $"Confirmed as {priority}. {reason}"));
+
+        await db.SaveChangesAsync(ct);
+        return ticket;
+    }
+
+    /// <summary>
+    /// Sends one of our own people's answer to the customer and puts it on the history.
+    ///
+    /// <para><b>Why this also stops §14.4's response clock.</b> The clock measures the time
+    /// until the customer hears an assessment from a person. The arrival receipt deliberately
+    /// does not discharge it — it is a fact about the past with nobody's name on it — but
+    /// this is somebody at ENTIT writing to them about their fault, which is the thing the
+    /// clock was waiting for. Leaving it running would make us late for having answered.</para>
+    ///
+    /// <para><b>And why a reply that reached nobody is recorded differently.</b> §14.6 makes
+    /// the history the record between the parties. An event saying we answered, written when
+    /// the relay refused the message, is a false record in the one document that is supposed
+    /// to settle disputes — so it goes down as a failure, visible only to us, and the clock
+    /// is left running because the customer is still waiting.</para>
+    /// </summary>
+    /// <param name="said">What goes to the customer. Already cut to what was meant for them.</param>
+    public async Task<Ticket?> ReplyToCustomerAsync(
+        Guid ticketId, string said, string? actor, DateTime at, CancellationToken ct = default)
+    {
+        if (string.IsNullOrWhiteSpace(said))
+        {
+            // Nothing to send. Guarded here as well as at the caller, because an empty mail
+            // to a customer in our name is worse than a message left in the queue.
+            throw new ArgumentException("A reply to the customer cannot be empty.", nameof(said));
+        }
+
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+
+        if (ticket is null)
+        {
+            return null;
+        }
+
+        List<string> reached = await notifier.ReplyToCustomerAsync(ticket, said, ct);
+
+        if (reached.Count == 0)
+        {
+            db.TicketEvents.Add(Event(
+                ticket.Id, TicketEventKind.Note, at, actor,
+                $"A reply to the customer could not be sent, so they have not heard it. "
+                + $"What was written:\n\n{said}",
+                customerVisible: false));
+
+            await db.SaveChangesAsync(ct);
+            return ticket;
+        }
+
+        db.TicketEvents.Add(Event(
+            ticket.Id, TicketEventKind.Note, at, actor,
+            $"Replied to {string.Join(", ", reached)}:\n\n{said}",
+            customerVisible: true));
+
+        if (ticket.FirstResponseAt is null)
+        {
+            ticket.FirstResponseAt = at;
+            ticket.Status = TicketStatus.InProgress;
+
+            db.TicketEvents.Add(Event(
+                ticket.Id, TicketEventKind.Responded, at, actor,
+                "First response given by replying to the customer (§14.4)."));
+        }
+
+        ticket.UpdatedAt = at;
 
         await db.SaveChangesAsync(ct);
         return ticket;
@@ -701,8 +828,25 @@ public class TicketService(
     /// the failure a queue without ownership actually produces — not idleness.</para>
     /// </summary>
     /// <param name="assignee">The person taking it, or null to put it back.</param>
+    /// <param name="assigneeUserId">
+    /// The account behind the name, when there is one. What makes the assignment something
+    /// that can be written to, and what the round-robin counts from.
+    /// </param>
+    /// <param name="assigneeEmail">
+    /// Where to tell them. Given, the assignment is announced — including when somebody
+    /// takes a ticket themselves, because the mail is also the thing they reply to in order
+    /// to answer the customer, and a person who claimed a ticket wants that as much as one
+    /// who was handed it.
+    /// </param>
+    /// <param name="window">
+    /// The support window, for the deadline in that mail. Resolved here when not supplied,
+    /// so the common caller does not have to know it.
+    /// </param>
+    /// <param name="responseDue">§14.4's response target, likewise.</param>
     public async Task<Ticket?> AssignAsync(
         Guid ticketId, string? assignee, string actor, DateTime at,
+        string? assigneeUserId = null, string? assigneeEmail = null,
+        SupportWindow? window = null, DateTime? responseDue = null,
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
@@ -717,12 +861,13 @@ public class TicketService(
         string? previous = ticket.Assignee;
         string? next = string.IsNullOrWhiteSpace(assignee) ? null : assignee.Trim();
 
-        if (previous == next)
+        if (previous == next && ticket.AssigneeUserId == assigneeUserId)
         {
             return ticket;
         }
 
         ticket.Assignee = next;
+        ticket.AssigneeUserId = next is null ? null : assigneeUserId;
 
         // Not customer-visible: who at ENTIT is holding it is our business, and §14.1
         // promises the customer a named contact, not our rota.
@@ -736,6 +881,21 @@ public class TicketService(
             customerVisible: false));
 
         await db.SaveChangesAsync(ct);
+
+        // After the save, and never fatal: an assignment that could not be announced is
+        // still an assignment, and the technician will find it in the queue.
+        if (next is not null && !string.IsNullOrWhiteSpace(assigneeEmail))
+        {
+            SupportWindow resolved = window ?? ticket.SupportWindow;
+
+            await notifier.AnnounceAssignmentAsync(
+                ticket, assigneeEmail, resolved,
+                responseDue ?? TicketClock.Response(
+                    ticket.ClockStartsAt, ticket.PriorityEffectiveFrom, ticket.Priority,
+                    resolved, ticket.FirstResponseAt, at).Deadline,
+                ct);
+        }
+
         return ticket;
     }
 

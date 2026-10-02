@@ -1,5 +1,5 @@
-using System.Text.RegularExpressions;
 using EntKube.Web.Data;
+using EntKube.Web.Services.Tickets;
 
 namespace EntKube.Web.Services.Mail;
 
@@ -16,7 +16,7 @@ namespace EntKube.Web.Services.Mail;
 /// they are whatever the customers actually write — necessarily in the customer's language,
 /// and changing as a portfolio does. The set in force arrives on the context.</para>
 /// </summary>
-public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
+public class RuleBasedMailAnalyst(TicketReference references) : ISupportMailAnalyst
 {
     public Task<IReadOnlyList<MailSuggestion>> AnalyseAsync(
         MailContext context, CancellationToken ct = default)
@@ -25,6 +25,27 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
         string text = $"{message.Subject}\n{message.Body}".ToLowerInvariant();
 
         List<MailSuggestion> suggestions = [];
+
+        // A bounce, before anything else — including before the sender is looked at. It is
+        // not a message from a person or from a colleague; it is our own mail returned, and
+        // the sender is a daemon on some server that may or may not be ours. Left to fall
+        // through it is placed by whichever address it was delivered to, which for a
+        // customer's own support address places it with that customer and opens a ticket
+        // in a daemon's name about our own failure to deliver.
+        if (context.IsDeliveryReport)
+        {
+            return Task.FromResult(FromABounce(context));
+        }
+
+        // One of our own people, before anything else is asked. Everything below this
+        // decides which customer a message is from and what to open for them, and none of it
+        // applies: a colleague's mail is not a report, and the customer it concerns is the
+        // ticket's rather than the sender's. Left to fall through, a technician's answer
+        // would be flagged as an unrecognised sender and queued for somebody to puzzle over.
+        if (context.SenderIsOneOfOurs)
+        {
+            return Task.FromResult(FromOneOfOurs(context));
+        }
 
         if (context.Customer is null)
         {
@@ -155,11 +176,93 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
     }
 
     /// <summary>
+    /// What to do with a bounce.
+    ///
+    /// <para>Never a ticket. The useful thing is the ticket it already belongs to: when the
+    /// receipt for #412 is refused, that customer never learned their number and nothing
+    /// anywhere said so. Putting it on #412 is the only place anybody would look — not
+    /// customer-visible, because it is about our own plumbing and the one person who must
+    /// not be told about it this way is the person it failed to reach.</para>
+    ///
+    /// <para>A bounce for something we cannot place is still said out loud rather than
+    /// dismissed: mail leaving the building and being refused is worth somebody's attention
+    /// even when we cannot say which conversation it belonged to.</para>
+    /// </summary>
+    private IReadOnlyList<MailSuggestion> FromABounce(MailContext context)
+    {
+        InboundMailMessage message = context.Message;
+        Ticket? about = MatchTicket(message, context.OpenTickets);
+
+        return [Suggestion(
+            message.Id, MailSuggestionKind.FlagDeliveryFailure,
+            about is null
+                ? "Mail we sent was refused, and it names no open ticket"
+                : $"Mail we sent about ticket #{about.Number} was refused — they never got it",
+            about is null
+                ? "A delivery report came back for a message that does not name a ticket we "
+                  + "still have open. Nothing has been opened for it; the report is below."
+                : "A delivery report for one of our own messages on that ticket. Whoever it "
+                  + "was addressed to did not receive it — if it was the receipt, they never "
+                  + "learned their ticket number. Recorded on the ticket, and not shown to "
+                  + "the customer.",
+            ticketId: about?.Id)];
+    }
+
+    /// <summary>
+    /// What to do with a message from one of our own people.
+    ///
+    /// <para>There is one useful thing it can be: an answer for the customer, written above
+    /// the cut line in a mail we sent about a ticket. That needs both halves — a reference
+    /// saying which ticket, and something written above the line — and when either is
+    /// missing the honest answer is to say so and let a person look. Guessing would either
+    /// send the wrong thing to a customer or relay the quoted deadline and the reporter's
+    /// name along with it.</para>
+    ///
+    /// <para>The text that will be sent is carried on the suggestion, so that what an
+    /// operator reads in the queue is the thing that goes out and not a description of
+    /// it.</para>
+    /// </summary>
+    private IReadOnlyList<MailSuggestion> FromOneOfOurs(MailContext context)
+    {
+        InboundMailMessage message = context.Message;
+        Ticket? about = MatchTicket(message, context.OpenTickets);
+
+        if (about is null)
+        {
+            return [Suggestion(
+                message.Id, MailSuggestionKind.FlagInternalSender,
+                $"{message.FromAddress} is one of ours, and this names no open ticket",
+                "A reply to the customer is sent on the ticket it answers, and nothing in the "
+                + "subject or the thread says which one. Nothing has been sent.")];
+        }
+
+        if (SupportReplyBody.Above(message.Body) is not string said)
+        {
+            return [Suggestion(
+                message.Id, MailSuggestionKind.FlagInternalSender,
+                $"Nothing was written above the cut line, on ticket #{about.Number}",
+                $"A reply is the part above \"{SupportReplyBody.Sentinel}\". There is nothing "
+                + "there, so there is nothing to send — and what is below the line is what we "
+                + "sent them, which the customer must not be handed. Nothing has been sent.",
+                ticketId: about.Id)];
+        }
+
+        return [Suggestion(
+            message.Id, MailSuggestionKind.ReplyToCustomer,
+            $"Send this to the customer on ticket #{about.Number} — {about.Title}",
+            "Written above the cut line by one of our own people, so it is an answer for the "
+            + "customer rather than a note on the ticket. It goes from the support address, "
+            + "with the reference in the subject, and onto the history as customer-visible.",
+            draftText: said,
+            ticketId: about.Id)];
+    }
+
+    /// <summary>
     /// The ticket a message belongs to: a "#123" in the subject, or a mail thread we can
     /// follow. Nothing fuzzier — attaching a message to the wrong ticket corrupts the
     /// history §14.6 makes evidence.
     /// </summary>
-    public static Ticket? MatchTicket(InboundMailMessage message, IReadOnlyList<Ticket> open)
+    public Ticket? MatchTicket(InboundMailMessage message, IReadOnlyList<Ticket> open)
     {
         // What the message is a reply to, first. A subject can be edited, translated by a
         // client, or lost to a forward; the thread headers survive all three, and a reply
@@ -175,7 +278,7 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
             }
         }
 
-        if (ReferencedNumber(message.Subject) is int number)
+        if (ReferencedNumber(references, message.Subject) is int number)
         {
             Ticket? byNumber = open.FirstOrDefault(t => t.Number == number);
             if (byNumber is not null)
@@ -196,19 +299,8 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
     /// looking for it. One reader, so the queue and the matcher cannot come to different
     /// conclusions about what a subject says.</para>
     /// </summary>
-    public static int? ReferencedNumber(string? subject)
-    {
-        if (string.IsNullOrWhiteSpace(subject))
-        {
-            return null;
-        }
-
-        Match reference = TicketReference().Match(subject);
-
-        return reference.Success && int.TryParse(reference.Groups[1].Value, out int number)
-            ? number
-            : null;
-    }
+    public static int? ReferencedNumber(TicketReference references, string? subject) =>
+        references.InSubject(subject)?.Number;
 
     /// <summary>
     /// The application a message names. Longest name first, so "Journal export" is not
@@ -261,6 +353,4 @@ public partial class RuleBasedMailAnalyst : ISupportMailAnalyst
     private static string Truncate(string value) =>
         value.Length <= 60 ? value : value[..57] + "…";
 
-    [GeneratedRegex(@"#(\d{1,9})")]
-    private static partial Regex TicketReference();
 }

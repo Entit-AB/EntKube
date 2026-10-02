@@ -53,6 +53,24 @@ public class InboundMailMessage
     /// <summary>The thread this belongs to, from the mail headers, when there is one.</summary>
     public string? InReplyTo { get; set; }
 
+    /// <summary>
+    /// Whether this is a bounce — a delivery status notification for something we sent
+    /// (<see cref="Services.Mail.DeliveryReport"/>).
+    ///
+    /// <para>Kept rather than worked out again, because the analysis runs a second time
+    /// when somebody assigns a customer by hand and the raw message is long gone by then.
+    /// Separate from <see cref="IsMachineGenerated"/>, which it implies: that one says
+    /// "do not answer this", and this one says "this is our own mail coming back", which
+    /// is a different thing to do about it.</para>
+    /// </summary>
+    public bool IsDeliveryReport { get; set; }
+
+    /// <summary>
+    /// The address the bounce says it failed for, from the report's machine-readable part.
+    /// Null for anything that is not a bounce, or a report that did not name one.
+    /// </summary>
+    public string? FailedRecipient { get; set; }
+
     public required string FromAddress { get; set; }
 
     /// <summary>
@@ -175,6 +193,24 @@ public enum MailSuggestionKind
 
     /// <summary>Our own mail server says the From address is not who it claims to be.</summary>
     FlagForgedSender = 8,
+
+    /// <summary>
+    /// The message is one of our own people answering the customer, so what they wrote goes
+    /// on to the customer rather than onto the ticket as a note from them.
+    /// </summary>
+    ReplyToCustomer = 9,
+
+    /// <summary>
+    /// It came from one of our own people, and could not be turned into a reply — there is
+    /// no reference saying which ticket, or nothing was written above the cut line.
+    /// </summary>
+    FlagInternalSender = 10,
+
+    /// <summary>
+    /// It is a bounce: something we sent about a ticket was refused, so whoever it was
+    /// addressed to never heard it.
+    /// </summary>
+    FlagDeliveryFailure = 11,
 }
 
 /// <summary>Whether a suggestion has been acted on.</summary>

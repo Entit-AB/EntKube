@@ -34,13 +34,6 @@ public readonly record struct Acknowledgement(string Subject, string Body);
 public static class TicketAcknowledgement
 {
     /// <summary>
-    /// The reference as it appears in a subject line. Put there so a reply threads even
-    /// from a client that strips In-Reply-To, or from somebody forwarding by hand.
-    /// </summary>
-    public static string Reference(int number) =>
-        string.Create(CultureInfo.InvariantCulture, $"[#{number}]");
-
-    /// <summary>
     /// Builds the receipt.
     /// </summary>
     /// <param name="ticket">The ticket as it stands the moment it was created.</param>
@@ -50,22 +43,28 @@ public static class TicketAcknowledgement
     /// When §14.4's response target expires, counted inside the window. Null when the
     /// priority carries no response target.
     /// </param>
+    /// <param name="reference">
+    /// The reference to quote, from <see cref="TicketReference.For"/>. Passed in rather than
+    /// built here: minting it needs the installation's key, and this class stays pure so the
+    /// wording can go on being argued over in a test.
+    /// </param>
     /// <param name="portalUrl">Where they can see it, when the installation has a portal.</param>
     public static Acknowledgement For(
         Ticket ticket,
         SupportWindow window,
         string? appName,
         DateTime? responseDue,
+        string reference,
         string? portalUrl = null)
     {
         StringBuilder body = new();
 
         body.Append("We have received your report and opened ticket ")
-            .Append(Reference(ticket.Number))
+            .Append(reference)
             .AppendLine(".")
             .AppendLine();
 
-        body.Append("  Reference:   ").Append(Reference(ticket.Number)).AppendLine();
+        body.Append("  Reference:   ").Append(reference).AppendLine();
         body.Append("  Reported:    ").AppendLine(Stockholm(ticket.ReportedAt));
 
         if (!string.IsNullOrWhiteSpace(appName))
@@ -111,7 +110,7 @@ public static class TicketAcknowledgement
         // one written three weeks later from a phone, to the same address, about the same
         // fault — with no thread behind it and nothing but the subject line to go on.
         body.Append("Please keep ")
-            .Append(Reference(ticket.Number))
+            .Append(reference)
             .AppendLine(" in the subject line of everything you write to us about this,")
             .AppendLine("for as long as it is open. Replying to this message already does that.")
             .AppendLine(
@@ -124,7 +123,7 @@ public static class TicketAcknowledgement
         }
 
         return new Acknowledgement(
-            $"{Reference(ticket.Number)} {ticket.Title}",
+            $"{reference} {ticket.Title}",
             body.ToString());
     }
 
