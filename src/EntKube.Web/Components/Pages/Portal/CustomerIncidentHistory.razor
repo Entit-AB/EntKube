@@ -150,9 +150,9 @@ else
 
     private static RenderFragment SeverityDot(string severity) => severity switch
     {
-        "critical" => @<span style="width:10px;height:10px;border-radius:50%;background:#dc3545;flex-shrink:0;display:inline-block"></span>,
-        "warning"  => @<span style="width:10px;height:10px;border-radius:50%;background:#ffc107;flex-shrink:0;display:inline-block"></span>,
-        _          => @<span style="width:10px;height:10px;border-radius:50%;background:#0dcaf0;flex-shrink:0;display:inline-block"></span>
+        "critical" => @<span style="width:10px;height:10px;border-radius:50%;background:hsl(var(--destructive));flex-shrink:0;display:inline-block"></span>,
+        "warning"  => @<span style="width:10px;height:10px;border-radius:50%;background:hsl(var(--warning));flex-shrink:0;display:inline-block"></span>,
+        _          => @<span style="width:10px;height:10px;border-radius:50%;background:hsl(var(--primary));flex-shrink:0;display:inline-block"></span>
     };
 
     private static RenderFragment StatusBadge(IncidentStatus status) => status switch

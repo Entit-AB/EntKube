@@ -211,3 +211,20 @@
         overflow-y: auto;
     }
 }
+
+/* ── Theme toggle ────────────────────────────────────────────────── */
+/* One button showing the theme you would switch TO, which is the thing people
+   reach for. Visibility is driven off data-bs-theme rather than component state,
+   so it is correct on a statically rendered page and never has to re-render. */
+.entit-theme-toggle {
+    border: 0;
+    background: none;
+    line-height: 1;
+}
+
+/* Which icon shows is in app.css, not here: data-bs-theme sits on <html>, and a
+   scoped stylesheet can only ever address this component's own elements. The
+   first attempt wrote `:global([data-bs-theme="dark"]) .theme-when-light` —
+   :global() is a CSS Modules feature, not a Blazor one, so it was emitted
+   verbatim, the browser read an invalid selector and dropped the rule, and the
+   button sat there offering to turn on the dark mode it was already in. */

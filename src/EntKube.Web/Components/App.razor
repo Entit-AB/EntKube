@@ -5,6 +5,32 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <base href="/" />
+    @* Theme, before anything paints.
+
+       This is deliberately a blocking inline script in <head> rather than anything
+       Blazor does. A circuit starts well after the first paint, so setting the
+       attribute from a component would show the light theme first and then snap to
+       dark — on every single navigation. Here it runs before <body> exists.
+
+       localStorage throws rather than returning null when site data is blocked, so
+       the read is guarded; the fallback is the operating system's own preference. *@
+    <script>
+        (function () {
+            var theme = null;
+            try { theme = localStorage.getItem('entkube-theme'); } catch { }
+            if (theme !== 'dark' && theme !== 'light') {
+                theme = window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches
+                    ? 'dark' : 'light';
+            }
+            document.documentElement.setAttribute('data-bs-theme', theme);
+        })();
+
+        function entkubeToggleTheme() {
+            var next = document.documentElement.getAttribute('data-bs-theme') === 'dark' ? 'light' : 'dark';
+            document.documentElement.setAttribute('data-bs-theme', next);
+            try { localStorage.setItem('entkube-theme', next); } catch { }
+        }
+    </script>
     <ResourcePreloader />
     <link rel="stylesheet" href="lib/fonts/fonts.css" />
     <link rel="stylesheet" href="@Assets["lib/bootstrap/dist/css/bootstrap.min.css"]" />
