@@ -9,7 +9,7 @@
 .kb-prose {
     font-size: .9rem;
     line-height: 1.6;
-    color: #22303f;
+    color: hsl(var(--foreground));
     max-width: 52rem;
 }
 
@@ -40,17 +40,19 @@
 }
 
 .kb-prose ::deep code {
-    background: #f2f4f7;
-    border-radius: 4px;
+    background: hsl(var(--muted));
+    border-radius: calc(var(--radius) - 4px);
     padding: .1rem .3rem;
     font-size: .85em;
-    color: #b5316a;
+    color: hsl(340 58% 45%);
 }
 
 .kb-prose ::deep pre {
-    background: #1b2430;
-    color: #e7edf4;
-    border-radius: 8px;
+    /* Always dark, in either theme: a code block is a quotation from a terminal,
+       and inverting it with the page would make it read as ordinary prose. */
+    background: hsl(213 28% 15%);
+    color: hsl(207 38% 93%);
+    border-radius: var(--radius);
     padding: .75rem .9rem;
     overflow-x: auto;
     margin-bottom: .9rem;
@@ -72,20 +74,20 @@
 
 .kb-prose ::deep th,
 .kb-prose ::deep td {
-    border: 1px solid rgba(0, 0, 0, .1);
+    border: 1px solid hsl(var(--border));
     padding: .35rem .5rem;
     text-align: left;
 }
 
 .kb-prose ::deep th {
-    background: #f7f9fb;
+    background: hsl(var(--surface-sunken));
     font-weight: 600;
 }
 
 .kb-prose ::deep blockquote {
-    border-left: 3px solid rgba(13, 110, 253, .35);
+    border-left: 3px solid hsl(var(--primary) / .35);
     padding-left: .8rem;
-    color: #556677;
+    color: hsl(var(--muted-foreground));
     margin: 0 0 .9rem;
 }
 
@@ -112,10 +114,10 @@
 }
 
 .kb-preview {
-    border: 1px dashed rgba(0, 0, 0, .14);
-    border-radius: 8px;
+    border: 1px dashed hsl(var(--border));
+    border-radius: var(--radius);
     padding: .8rem .95rem;
     overflow-y: auto;
     max-height: 30rem;
-    background: #fdfdfe;
+    background: hsl(var(--surface-sunken) / .5);
 }
