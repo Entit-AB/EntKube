@@ -37,6 +37,25 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
 
     private static DateTime Tue(int hour) => Swedish(2026, 9, 22, hour);
 
+    /// <summary>
+    /// An hour booked inside the month the hours panel is showing.
+    ///
+    /// <para><b>Why this is not <see cref="Tue"/>.</b> <c>CustomerHoursPanel</c> opens on the
+    /// current month, and these fixtures were pinned to September 2026 — which was the current
+    /// month on the day they were written. On 1 October they began seeding a month the panel
+    /// was not looking at: it rendered "No hours this month", and every assertion about the
+    /// §11.1 gate failed. Nothing was wrong with the panel.</para>
+    ///
+    /// <para>The ticket tests keep <see cref="Tue"/>, because there the specific Tuesday is the
+    /// point — a business day, inside support hours, in no holiday week. Here only the month is,
+    /// so the 15th of whichever month is current does the job and keeps doing it.</para>
+    /// </summary>
+    private static DateTime Booked(int hour)
+    {
+        DateTime now = DateTime.UtcNow;
+        return Swedish(now.Year, now.Month, 15, hour);
+    }
+
     private readonly SqliteConnection connection;
     private readonly ApplicationDbContext db;
     private readonly TicketService tickets;
@@ -124,6 +143,45 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
             tenantId, customer.Id, appId, "Journalen svarar inte", "Ingen kommer in.",
             TicketChannel.Portal, TicketPriority.P3, Tue(9), "Karin", "karin@entit.example");
 
+    /// <summary>
+    /// A bank of two hours with three booked against it, so one hour is beyond it and §11.1's
+    /// gate is live.
+    ///
+    /// <para>Shared because the gate cannot be tested at all while there is nothing to approve:
+    /// with no agreement and no hours, <c>NeedsApproval</c> is false and the approval block is
+    /// absent for every role, so a test that only asserts its absence passes whatever the role
+    /// check says.</para>
+    /// </summary>
+    private async Task SpendTheHourBankAsync()
+    {
+        db.PortfolioAgreements.Add(new PortfolioAgreement
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customer.Id,
+            PricingModel = PricingModel.HourBank,
+            HourBankHoursPerMonth = 2m,
+            EffectiveFrom = Swedish(2026, 1, 1, 0),
+        });
+
+        Ticket ticket = await Raise();
+
+        db.TimeEntries.Add(new TimeEntry
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            CustomerId = customer.Id,
+            TicketId = ticket.Id,
+            AppId = appId,
+            StartedAt = Booked(9),
+            EndedAt = Booked(12),
+            Description = "Investigating",
+            PerformedBy = "nils",
+        });
+
+        await db.SaveChangesAsync();
+    }
+
     // ---- Attribution --------------------------------------------------------------------------
 
     /// <summary>
@@ -204,32 +262,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
     {
         SignIn("ekonomi@entit.example");
 
-        // A bank of two hours, with three booked against it: one hour needs approval.
-        db.PortfolioAgreements.Add(new PortfolioAgreement
-        {
-            Id = Guid.NewGuid(),
-            TenantId = tenantId,
-            CustomerId = customer.Id,
-            PricingModel = PricingModel.HourBank,
-            HourBankHoursPerMonth = 2m,
-            EffectiveFrom = Swedish(2026, 1, 1, 0),
-        });
-
-        Ticket ticket = await Raise();
-
-        db.TimeEntries.Add(new TimeEntry
-        {
-            Id = Guid.NewGuid(),
-            TenantId = tenantId,
-            CustomerId = customer.Id,
-            TicketId = ticket.Id,
-            AppId = appId,
-            StartedAt = Tue(9),
-            EndedAt = Tue(12),
-            Description = "Investigating",
-            PerformedBy = "nils",
-        });
-        await db.SaveChangesAsync();
+        await SpendTheHourBankAsync();
 
         IRenderedComponent<CustomerHoursPanel> panel = Render<CustomerHoursPanel>(p => p
             .Add(c => c.Customer, customer)
@@ -288,8 +321,8 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
             CustomerId = customer.Id,
             TicketId = ticket.Id,
             AppId = appId,
-            StartedAt = Tue(9),
-            EndedAt = Tue(12),
+            StartedAt = Booked(9),
+            EndedAt = Booked(12),
             Description = "Investigating",
             PerformedBy = "nils",
         });
@@ -307,17 +340,35 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
     /// <summary>
     /// A viewer can read the hours and cannot commit the money. §11.1's approval is the
     /// clearest case there is for the role gate meaning something.
+    ///
+    /// <para><b>Why it asserts both roles.</b> This used to seed nothing and check only that a
+    /// viewer saw no approve button — which it did, because with no agreement and no hours
+    /// there was nothing to approve and the block was absent for everybody. The test passed
+    /// with <c>CanApprove</c> hard-wired to <c>true</c>, i.e. with the gate deleted. Spending
+    /// the bank first puts the block on screen, and rendering the operator alongside proves
+    /// the viewer's missing button is the role and not the empty fixture.</para>
     /// </summary>
     [Fact]
-    public void A_viewer_cannot_approve_work_beyond_the_bank()
+    public async Task A_viewer_cannot_approve_work_beyond_the_bank()
     {
         SignIn("lasse@entit.example");
+
+        await SpendTheHourBankAsync();
 
         IRenderedComponent<CustomerHoursPanel> viewer = Render<CustomerHoursPanel>(p => p
             .Add(c => c.Customer, customer)
             .Add(c => c.AccessRole, CustomerAccessRole.Viewer));
 
+        viewer.Markup.Should().Contain("The hour bank for this month is spent",
+            "the viewer still reads what happened — it is only committing the money they cannot do");
         viewer.Markup.Should().NotContain("Approve further work");
+
+        IRenderedComponent<CustomerHoursPanel> operatorView = Render<CustomerHoursPanel>(p => p
+            .Add(c => c.Customer, customer)
+            .Add(c => c.AccessRole, CustomerAccessRole.Operator));
+
+        operatorView.Markup.Should().Contain("Approve further work",
+            "otherwise the viewer's missing button proves nothing about the role");
     }
 
     // ---- §18 from the customer's side ---------------------------------------------------

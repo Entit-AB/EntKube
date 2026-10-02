@@ -44,12 +44,33 @@
     --border: 224 28% 92%;            /* Entit border #E6E9F1 */
     --input: 224 28% 92%;
     --ring: 227 86% 58%;
+    --purple: 261 51% 51%;
     --radius: 0.5rem;
 
     /* Surfaces one step off --background: a tree's gutter, a table head. Named
        for depth rather than colour so dark mode can invert the relationship. */
     --surface-sunken: 220 38% 98%;
     --surface-raised: 0 0% 100%;
+
+    /* ── Theme-invariant ───────────────────────────────────────────────── */
+    /* These do NOT get a dark counterpart, and that is the point. A log pane is
+       a terminal and reads as one in either theme; inverting it would turn a
+       quotation from a machine into ordinary prose. A chart's series keep their
+       hue for the same reason a legend does — the colour IS the meaning, and a
+       series that changes colour with the theme is a series you cannot talk
+       about. All of them are mid-tone enough to sit on a light or a dark page.
+
+       DesignTokenTests knows about the --console-* and --chart-* prefixes; add
+       a new prefix there as well, or the dark-coverage check will fail. */
+    --console: 0 0% 12%;
+    --console-foreground: 0 0% 83%;
+    --console-rule: 0 0% 18%;
+    --console-gutter: 0 0% 53%;
+    --console-accent: 207 61% 59%;
+    --console-chrome: 240 19% 20%;
+    --console-chrome-rule: 240 15% 27%;
+    --chart-series: 211 65% 57%;
+    --chart-error: 10 86% 70%;
 
     /* ── Brand ─────────────────────────────────────────────────────────── */
     /* The type stacks stay named for the brand because that is what they are.
@@ -100,16 +121,17 @@
     --bs-box-shadow-lg: 0 10px 15px -3px hsl(var(--foreground) / .1), 0 4px 6px -4px hsl(var(--foreground) / .1);
 }
 
-/* Dark mode is written out but nothing switches to it yet: Bootstrap 5.3 reads
-   data-bs-theme natively, so turning it on is an attribute on <html> plus a pass
-   over the inline style="…#hex" still left in a handful of components. Keeping
-   the two halves side by side is the only way the second one stays true —
-   filling it in later means reading every rule again.
+/* Dark mode. Bootstrap 5.3 reads data-bs-theme natively, so the switch is the
+   attribute on <html> — set before first paint by the inline script in App.razor,
+   and flipped by the control in the top nav.
 
-   Every colour token above is redefined here except three, and they are absent
-   on purpose rather than overlooked: --destructive-foreground is white on a red
-   fill in either theme, and --entit-navy belongs to the hero gradient, which
-   must not invert. Nothing else may be left out. */
+   Every themed token above is redefined here. The ones that are not are absent on
+   purpose rather than overlooked, and DesignTokenTests holds the same list so the
+   difference stays visible: --destructive-foreground is white on a red fill either
+   way, --entit-navy belongs to the hero gradient, and the --console-* / --chart-*
+   families are deliberately theme-invariant (see their note above). Nothing else
+   may be left out — a token with no dark value silently keeps its light one, which
+   is how you get light text on a light surface in a theme nobody tested. */
 [data-bs-theme="dark"] {
     --background: 222 34% 11%;
     --foreground: 220 38% 97%;
@@ -133,6 +155,7 @@
     --border: 222 24% 24%;
     --input: 222 24% 24%;
     --ring: 228 100% 72%;
+    --purple: 261 70% 70%;
     --surface-sunken: 222 34% 9%;
     --surface-raised: 222 34% 14%;
     --bs-primary-rgb: 143, 166, 255;
@@ -480,6 +503,13 @@ a, .btn-link {
     color: hsl(var(--muted-foreground)) !important;
 }
 
+/* Bootstrap has no purple utility, so the one badge using this carried an inline
+   `!important` to force the colour. A real rule leaves it nothing to beat. */
+.badge.bg-purple {
+    background-color: hsl(var(--purple)) !important;
+    color: hsl(0 0% 100%) !important;
+}
+
 /* ==========================================================================
    Popovers — one treatment for every floating surface.
    ========================================================================== */
@@ -640,6 +670,87 @@ code, kbd, samp, pre {
     padding: .125rem .3rem;
     border-radius: calc(var(--radius) - 3px);
 }
+
+/* ==========================================================================
+   Console — the log and trace panes.
+
+   Four screens were each spelling this out inline, with the values drifting
+   apart between them: the same near-black appeared as its own literal in every
+   one, and the row rule in three. It is one surface and now has one definition.
+   It does not follow the theme — see the note on the tokens.
+   ========================================================================== */
+.console {
+    background: hsl(var(--console));
+    color: hsl(var(--console-foreground));
+}
+
+/* The strip of controls above a console — container picker, line count — which
+   belongs to the dark pane rather than to the page around it. */
+.console-chrome {
+    background: hsl(var(--console-chrome));
+    border-bottom: 1px solid hsl(var(--console-chrome-rule));
+    color: hsl(var(--console-foreground));
+}
+
+.console-chrome .text-muted {
+    color: hsl(var(--console-gutter)) !important;
+}
+
+.console-line {
+    line-height: 1.4;
+    border-bottom: 1px solid hsl(var(--console-rule));
+}
+
+/* Timestamps and line numbers: present for when you need them, recessive until
+   then, and never selected when someone copies the log out. */
+.console-gutter {
+    color: hsl(var(--console-gutter));
+    font-size: .72rem;
+    user-select: none;
+}
+
+.console-key {
+    color: hsl(var(--console-accent));
+    font-size: .72rem;
+    user-select: none;
+}
+
+/* A control sitting on the dark chrome — the replica stepper beside a workload.
+   Bootstrap's own .btn/.form-control colours assume the page background, so they
+   need overriding here rather than inheriting. */
+.console-control {
+    color: hsl(var(--console-foreground));
+    background: none;
+    border: 1px solid hsl(var(--console-chrome-rule));
+    border-radius: calc(var(--radius) - 3px);
+}
+
+input.console-control {
+    background: hsl(var(--console-chrome));
+}
+
+input.console-control:focus {
+    background: hsl(var(--console-chrome));
+    color: hsl(var(--console-foreground));
+    border-color: hsl(var(--console-accent));
+}
+
+/* Bars in the volume histogram above a log or trace list. */
+.chart-bar { background: hsl(var(--chart-series)); }
+.chart-bar-error { background: hsl(var(--chart-error)); }
+.chart-track {
+    background: hsl(var(--muted));
+    border-radius: calc(var(--radius) - 4px);
+}
+
+/* The theme toggle shows the theme you would switch TO, which is what people
+   reach for. It lives here rather than in TopNav.razor.css because data-bs-theme
+   is set on <html>: a scoped stylesheet can only address its own component's
+   elements, never an ancestor. */
+.theme-when-dark { display: none; }
+
+[data-bs-theme="dark"] .theme-when-light { display: none; }
+[data-bs-theme="dark"] .theme-when-dark { display: inline; }
 
 /* ==========================================================================
    App chrome
