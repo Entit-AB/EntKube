@@ -22,12 +22,18 @@ public class TenantNavigationTests
     private const string Component =
         "../../../../../src/EntKube.Web/Components/Pages/Tenants/TenantExplorer.razor";
 
-    private static string Source()
+    private const string TopNav =
+        "../../../../../src/EntKube.Web/Components/Layout/TopNav.razor";
+
+    private static string Source() => Read(Component, "the navigation");
+    private static string TopNavSource() => Read(TopNav, "the top-nav mega menu");
+
+    private static string Read(string relative, string what)
     {
-        string path = Path.Combine(AppContext.BaseDirectory, Component);
+        string path = Path.Combine(AppContext.BaseDirectory, relative);
 
         File.Exists(path).Should().BeTrue(
-            $"the navigation lives in {Component}; if it moved, this test has to follow it "
+            $"{what} lives in {relative}; if it moved, this test has to follow it "
             + "rather than quietly stop checking anything");
 
         return File.ReadAllText(path);
@@ -64,6 +70,32 @@ public class TenantNavigationTests
         string.Join(", ", orphaned).Should().BeEmpty(
             "an entry the router does not know about renders an empty pane, and the tree "
             + "goes on advertising it");
+    }
+
+    /// <summary>
+    /// The top nav deep-links into sections that are not necessarily tree entries, so
+    /// <see cref="Every_entry_in_the_tree_opens_something"/> does not cover them — and the
+    /// gap is not hypothetical. <c>customers</c> stopped being a leaf when it was promoted to
+    /// a heading of its own, while the mega menu went on linking <c>?section=customers</c>:
+    /// after that, nothing at all checked that the link still opened the customer list.
+    /// </summary>
+    [Fact]
+    public void Every_section_the_top_nav_links_to_opens_something()
+    {
+        HashSet<string> routed = RoutedKeys(Source());
+
+        List<string> linked = [.. Regex.Matches(TopNavSource(), """\?section=([a-z0-9-]+)""")
+            .Select(m => m.Groups[1].Value)
+            .Distinct()
+            .Order()];
+
+        linked.Should().NotBeEmpty(
+            "the mega menu's deep links are the pattern this test reads; matching none means "
+            + "it has stopped fitting TopNav.razor and is checking nothing");
+
+        string.Join(", ", linked.Where(key => !routed.Contains(key))).Should().BeEmpty(
+            "a mega-menu link the router does not know about opens a blank pane, and the "
+            + "menu is the one navigation surface the tree itself cannot keep honest");
     }
 
     /// <summary>

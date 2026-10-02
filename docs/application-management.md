@@ -655,7 +655,13 @@ they are used.
 
 What is left in **Operations** is work on the platform rather than for a person:
 the advisor's priorities, maintenance windows, the VPN mesh, disaster recovery,
-lifecycle, delivery, access and cost.
+lifecycle, delivery and access.
+
+Cost & chargeback used to be in that list and is now under **Observability**,
+which is the same test applied the other way round: an alert rule is authored and
+acted on, so it belongs with the work, while a cost report is only ever read.
+Nothing in it changes the platform, and "what is this costing, and who for" is the
+same kind of question as what the latency is.
 
 The per-record panels hang off what they describe: Annex A on the application,
 Annex B/C and the §23 contacts on the customer, the knowledge panel on the
