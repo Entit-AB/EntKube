@@ -163,6 +163,42 @@ else
                     }
                 }
 
+                @* ── Customers ──
+                   The tenant's customers, flat and tenant-wide, as opposed to the
+                   environment-scoped copies under Environments above. They had been one
+                   leaf inside Manage, beside the API tokens, which is a filing cabinet for
+                   a thing most of the product is about: apps, tickets, contracts and
+                   chargeback all hang off a customer. Selecting one opens its apps
+                   directly; ?section=customers still opens the full list, which is what the
+                   top-nav mega menu links to. *@
+                <div class="tree-section-head">
+                    <span class="tree-section-label">Customers</span>
+                    <button type="button" class="tree-add" title="New customer" aria-label="New customer"
+                            @onclick="StartAddTenantCustomer"><i class="bi bi-plus-lg"></i></button>
+                </div>
+                @if (addingTenantCustomer)
+                {
+                    <div class="tree-add-row indent-1">
+                        <input placeholder="New customer name" @bind="newCustomerName" @bind:event="oninput"
+                               @onkeydown="e => OnAddKey(e, AddTenantCustomer)" />
+                        <button type="button" class="tree-add-ok" @onclick="AddTenantCustomer" aria-label="Create"><i class="bi bi-check-lg"></i></button>
+                    </div>
+                }
+                @if (VisibleCustomers().Count == 0 && !addingTenantCustomer)
+                {
+                    <div class="tree-empty">@(HasFilter ? "No matches" : "No customers yet")</div>
+                }
+                @foreach (Customer c in VisibleCustomers())
+                {
+                    <button type="button" class="node leaf indent-1 @(selectedCustomer?.Id == c.Id ? "selected" : "")"
+                            @onclick="() => SelectCustomer(c)">
+                        <span class="caret"></span>
+                        <i class="ico bi bi-person-badge" aria-hidden="true"></i>
+                        <span class="label">@c.Name</span>
+                        <span class="badge-count">@AppsOf(c).Count</span>
+                    </button>
+                }
+
                 @* ── Platform (tenant-wide) ── *@
                 <div class="tree-section-head"><span class="tree-section-label">Platform</span></div>
                 @foreach (SectionItem item in VisiblePlatform())
@@ -174,97 +210,88 @@ else
                     </button>
                 }
 
-                @* ── Infrastructure (clusters + services, grouped by type) ── *@
-                <div class="tree-section-head"><span class="tree-section-label">Infrastructure</span></div>
-
-                @{ bool opsClustersOpen = GroupOpen("ops:clusters"); }
-                <button type="button" class="node group indent-1" @onclick='() => ToggleGroup("ops:clusters")' aria-expanded="@opsClustersOpen">
-                    <span class="caret">@(opsClustersOpen ? "▾" : "▸")</span>
-                    <i class="ico bi bi-hexagon-fill" aria-hidden="true"></i>
-                    <span class="label">Clusters</span>
-                    <span class="badge-count">@clusters.Count</span>
-                </button>
-                @if (opsClustersOpen)
+                @* ── Clusters, by environment ──
+                   Its own heading rather than a group under "Infrastructure": that heading
+                   held exactly two things, and spelling out the category they share cost a
+                   click and a level of indentation on both of the most-visited parts of the
+                   tree. The environment rows sit at indent-1 because .node-row.indent-1
+                   zeroes its own padding (see the comment in the .css) so a level-1 row
+                   lines up with a level-1 leaf. *@
+                <div class="tree-section-head"><span class="tree-section-label">Clusters</span></div>
+                @foreach (Data.Environment env in VisibleEnvironments())
                 {
-                    @foreach (Data.Environment env in VisibleEnvironments())
+                    List<KubernetesCluster> ecls = VisibleClustersInEnv(env);
+                    if (HasFilter && ecls.Count == 0) { continue; }
+                    string ck = $"ops:clusters:{env.Id}";
+                    bool cOpen = GroupOpen(ck);
+                    <div class="node-row indent-1">
+                        <button type="button" class="node group" @onclick="() => ToggleGroup(ck)" aria-expanded="@cOpen">
+                            <span class="caret">@(cOpen ? "▾" : "▸")</span>
+                            <i class="ico bi bi-diagram-3-fill" aria-hidden="true"></i>
+                            <span class="label">@env.Name</span>
+                            <span class="badge-count">@ecls.Count</span>
+                        </button>
+                        <button type="button" class="tree-add" title="New cluster in @env.Name" aria-label="New cluster"
+                                @onclick="() => RegisterClusterInEnv(env.Id)"><i class="bi bi-plus-lg"></i></button>
+                    </div>
+                    @if (cOpen)
                     {
-                        List<KubernetesCluster> ecls = VisibleClustersInEnv(env);
-                        if (HasFilter && ecls.Count == 0) { continue; }
-                        string ck = $"ops:clusters:{env.Id}";
-                        bool cOpen = GroupOpen(ck);
-                        <div class="node-row indent-2">
-                            <button type="button" class="node group" @onclick="() => ToggleGroup(ck)" aria-expanded="@cOpen">
-                                <span class="caret">@(cOpen ? "▾" : "▸")</span>
-                                <i class="ico bi bi-diagram-3-fill" aria-hidden="true"></i>
-                                <span class="label">@env.Name</span>
-                                <span class="badge-count">@ecls.Count</span>
-                            </button>
-                            <button type="button" class="tree-add" title="New cluster in @env.Name" aria-label="New cluster"
-                                    @onclick="() => RegisterClusterInEnv(env.Id)"><i class="bi bi-plus-lg"></i></button>
-                        </div>
-                        @if (cOpen)
+                        @if (ecls.Count == 0)
                         {
-                            @if (ecls.Count == 0)
+                            @if (HasFilter)
                             {
-                                @if (HasFilter)
-                                {
-                                    <div class="tree-empty" style="padding-left:3.2rem">—</div>
-                                }
-                                else
-                                {
-                                    <button type="button" class="tree-empty btn btn-link btn-sm text-decoration-none p-0" style="padding-left:3.2rem !important"
-                                            @onclick="() => RegisterClusterInEnv(env.Id)">
-                                        <i class="bi bi-plus-circle me-1"></i>New cluster
-                                    </button>
-                                }
+                                <div class="tree-empty" style="padding-left:2rem">—</div>
                             }
-                            @foreach (KubernetesCluster cl in ecls)
+                            else
                             {
-                                <button type="button" class="node leaf indent-3 @(selectedCluster?.Id == cl.Id ? "selected" : "")"
-                                        @onclick="() => SelectCluster(cl)">
-                                    <span class="caret"></span>
-                                    <i class="ico bi bi-hexagon-fill" aria-hidden="true"></i>
-                                    <span class="label">@cl.Name</span>
+                                <button type="button" class="tree-empty btn btn-link btn-sm text-decoration-none p-0" style="padding-left:2rem !important"
+                                        @onclick="() => RegisterClusterInEnv(env.Id)">
+                                    <i class="bi bi-plus-circle me-1"></i>New cluster
                                 </button>
                             }
+                        }
+                        @foreach (KubernetesCluster cl in ecls)
+                        {
+                            <button type="button" class="node leaf indent-2 @(selectedCluster?.Id == cl.Id ? "selected" : "")"
+                                    @onclick="() => SelectCluster(cl)">
+                                <span class="caret"></span>
+                                <i class="ico bi bi-hexagon-fill" aria-hidden="true"></i>
+                                <span class="label">@cl.Name</span>
+                            </button>
                         }
                     }
                 }
 
-                @{ bool opsServicesOpen = GroupOpen("ops:services"); }
-                <button type="button" class="node group indent-1" @onclick='() => ToggleGroup("ops:services")' aria-expanded="@opsServicesOpen">
-                    <span class="caret">@(opsServicesOpen ? "▾" : "▸")</span>
-                    <i class="ico bi bi-hdd-stack" aria-hidden="true"></i>
-                    <span class="label">Services</span>
-                    <span class="badge-count">@EnvServiceItems.Length</span>
-                </button>
-                @if (opsServicesOpen)
+                @* ── Services, by environment ──
+                   The environment level stays because it is not decoration: every pane here
+                   is opened for one environment (SelectEnvService), and the component
+                   catalog already calls these panes "Services › …" — the code was treating
+                   Services as a top-level name while the tree buried it two deep. *@
+                <div class="tree-section-head"><span class="tree-section-label">Services</span></div>
+                @foreach (Data.Environment env in VisibleEnvironments())
                 {
-                    @foreach (Data.Environment env in VisibleEnvironments())
+                    List<SectionItem> esvcs = VisibleEnvServices();
+                    if (HasFilter && esvcs.Count == 0) { continue; }
+                    string sk = $"ops:services:{env.Id}";
+                    bool sOpen = GroupOpen(sk);
+                    <div class="node-row indent-1">
+                        <button type="button" class="node group" @onclick="() => ToggleGroup(sk)" aria-expanded="@sOpen">
+                            <span class="caret">@(sOpen ? "▾" : "▸")</span>
+                            <i class="ico bi bi-diagram-3-fill" aria-hidden="true"></i>
+                            <span class="label">@env.Name</span>
+                            <span class="badge-count">@esvcs.Count</span>
+                        </button>
+                    </div>
+                    @if (sOpen)
                     {
-                        List<SectionItem> esvcs = VisibleEnvServices();
-                        if (HasFilter && esvcs.Count == 0) { continue; }
-                        string sk = $"ops:services:{env.Id}";
-                        bool sOpen = GroupOpen(sk);
-                        <div class="node-row indent-2">
-                            <button type="button" class="node group" @onclick="() => ToggleGroup(sk)" aria-expanded="@sOpen">
-                                <span class="caret">@(sOpen ? "▾" : "▸")</span>
-                                <i class="ico bi bi-diagram-3-fill" aria-hidden="true"></i>
-                                <span class="label">@env.Name</span>
-                                <span class="badge-count">@esvcs.Count</span>
-                            </button>
-                        </div>
-                        @if (sOpen)
+                        @foreach (SectionItem svc in esvcs)
                         {
-                            @foreach (SectionItem svc in esvcs)
-                            {
-                                <button type="button" class="node leaf indent-3 @(selectedSection == svc.Key && selectedServiceEnvId == env.Id ? "selected" : "")"
-                                        @onclick="() => SelectEnvService(env.Id, svc.Key)">
-                                    <span class="caret"></span>
-                                    <i class="ico bi @svc.Icon" aria-hidden="true"></i>
-                                    <span class="label">@svc.Label</span>
-                                </button>
-                            }
+                            <button type="button" class="node leaf indent-2 @(selectedSection == svc.Key && selectedServiceEnvId == env.Id ? "selected" : "")"
+                                    @onclick="() => SelectEnvService(env.Id, svc.Key)">
+                                <span class="caret"></span>
+                                <i class="ico bi @svc.Icon" aria-hidden="true"></i>
+                                <span class="label">@svc.Label</span>
+                            </button>
                         }
                     }
                 }
@@ -367,6 +394,10 @@ else
                            InitialEnvironmentId="selectedAppEnvId" ShowBackLink="false"
                            OnBack="ClearSelection" OnDeleted="OnAppDeleted" @key="(selectedApp.Id, selectedAppEnvId)" />
             }
+            else if (selectedCustomer is not null)
+            {
+                <CustomerTab TenantId="tenant.Id" InitialCustomerId="selectedCustomer.Id" @key="selectedCustomer.Id" />
+            }
             else if (selectedCluster is not null)
             {
                 <ClusterDetail Cluster="selectedCluster" TenantId="tenant.Id" ShowBackLink="false"
@@ -393,6 +424,7 @@ else
     [Parameter] public string Slug { get; set; } = "";
     [SupplyParameterFromQuery(Name = "app")] private Guid? AppParam { get; set; }
     [SupplyParameterFromQuery(Name = "cluster")] private Guid? ClusterParam { get; set; }
+    [SupplyParameterFromQuery(Name = "customer")] private Guid? CustomerParam { get; set; }
     [SupplyParameterFromQuery(Name = "section")] private string? SectionParam { get; set; }
     [SupplyParameterFromQuery(Name = "env")] private Guid? EnvParam { get; set; }
     [SupplyParameterFromQuery(Name = "incident")] private Guid? IncidentParam { get; set; }
@@ -430,6 +462,11 @@ else
     /// carried everything, because it was simply where new things got added, and a queue of
     /// people waiting for an answer filed under "Observability" reads as a dashboard —
     /// which is exactly how it gets scrolled past.
+    ///
+    /// <para>Cost is here on that same test, not in spite of it. A chargeback report is read,
+    /// not acted on: nothing in it changes the platform, and the question it answers — what
+    /// is this costing, and who for — is the same kind of question as what the latency is.
+    /// It sat under Operations only because that is where it was added.</para>
     /// </summary>
     private static readonly TreeGroup[] ObservabilityGroups =
     [
@@ -441,6 +478,8 @@ else
         [ new("ingress", "Routes & Ingress", "bi-signpost-split") ]),
         new("Monitoring", "bi-speedometer2",
         [ new("overview", "Overview", "bi-speedometer2"), new("workloads", "Workloads", "bi-boxes"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
+        new("Cost", "bi-cash-coin",
+        [ new("cost", "Cost & chargeback", "bi-cash-coin") ]),
     ];
 
     /// <summary>
@@ -506,13 +545,10 @@ else
         [ new("rollouts", "Rollouts", "bi-rocket-takeoff") ]),
         new("Access", "bi-terminal",
         [ new("jit-access", "JIT cluster access", "bi-terminal") ]),
-        new("Cost", "bi-cash-coin",
-        [ new("cost", "Cost & chargeback", "bi-cash-coin") ]),
     ];
 
     private static readonly SectionItem[] ManageItems =
     [
-        new("customers", "Customers", "bi-people"),
         new("groups", "Groups", "bi-diagram-2"),
         new("blueprints", "Blueprints", "bi-diagram-2-fill"),
         new("api-tokens", "API tokens", "bi-key"),
@@ -543,11 +579,13 @@ else
     private string newCustomerName = "";
     private Guid? linkingCustomerEnv;      // env whose "add existing customer" picker is open
     private Guid? linkCustomerId;
+    private bool addingTenantCustomer;     // the Customers heading's own "+" (no environment)
     private (Guid Env, Guid Cust)? addingApp;
     private string newAppName = "";
 
     private Data.App? selectedApp;
     private Customer? selectedAppCustomer;
+    private Customer? selectedCustomer;    // a customer opened from the Customers heading
     private KubernetesCluster? selectedCluster;
     private string? selectedSection;
     private Guid? selectedServiceEnvId;   // environment a per-env service was opened under
@@ -555,7 +593,7 @@ else
     private Guid? registerEnvId;
 
     private string? _loadedSlug;                              // tenant whose data is currently loaded
-    private (Guid?, Guid?, string?, Guid?, Guid?)? _appliedQuery;   // last (app, cluster, section, env, incident) applied
+    private (Guid?, Guid?, Guid?, string?, Guid?, Guid?)? _appliedQuery;   // last (app, cluster, customer, section, env, incident) applied
 
     private bool HasFilter => !string.IsNullOrWhiteSpace(filter);
 
@@ -576,7 +614,7 @@ else
         // Re-derive the open pane from the query string whenever it changes. This is what makes
         // the mega menu's ?section=… / ?app=… links act when you're already on a tenant page:
         // those change only the query, which never re-runs OnInitializedAsync.
-        (Guid?, Guid?, string?, Guid?, Guid?) sig = (AppParam, ClusterParam, SectionParam, EnvParam, IncidentParam);
+        (Guid?, Guid?, Guid?, string?, Guid?, Guid?) sig = (AppParam, ClusterParam, CustomerParam, SectionParam, EnvParam, IncidentParam);
         if (_appliedQuery is not { } applied || applied != sig)
         {
             _appliedQuery = sig;
@@ -604,8 +642,9 @@ else
         appsByCustomer.Clear();
         customersByEnv.Clear();
         filter = "";
-        selectedApp = null; selectedAppCustomer = null; selectedCluster = null;
+        selectedApp = null; selectedAppCustomer = null; selectedCustomer = null; selectedCluster = null;
         selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        addingTenantCustomer = false;
 
         environments = await TenantService.GetEnvironmentsAsync(t.Id);
         customers = await TenantService.GetCustomersAsync(t.Id);
@@ -640,7 +679,7 @@ else
         // first so switching (e.g. app → section via the mega menu) clears the previous pane.
         // registerEnvId is transient UI state not encoded in the URL, so it is left untouched.
         selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null;
-        selectedSection = null; selectedServiceEnvId = null;
+        selectedCustomer = null; selectedSection = null; selectedServiceEnvId = null;
 
         if (AppParam is Guid appId)
         {
@@ -661,6 +700,10 @@ else
         else if (ClusterParam is Guid clusterId)
         {
             selectedCluster = clusters.FirstOrDefault(c => c.Id == clusterId);
+        }
+        else if (CustomerParam is Guid customerId)
+        {
+            selectedCustomer = customers.FirstOrDefault(c => c.Id == customerId);
         }
         else if (!string.IsNullOrEmpty(SectionParam))
         {
@@ -727,6 +770,12 @@ else
         HasFilter ? g.Items.Where(i => Match(i.Label) || Match(g.Name)).ToList() : g.Items.ToList();
     private List<SectionItem> VisibleManage() =>
         HasFilter ? ManageItems.Where(i => Match(i.Label)).ToList() : ManageItems.ToList();
+    // The tenant-wide customer list under its own heading: matched on its own name or on any
+    // of its apps, so filtering for an app still shows you who owns it.
+    private List<Customer> VisibleCustomers() =>
+        HasFilter
+            ? customers.Where(c => Match(c.Name) || AppsOf(c).Any(a => Match(a.Name))).ToList()
+            : customers;
     private List<SectionItem> VisibleEnvServices() =>
         HasFilter ? EnvServiceItems.Where(i => Match(i.Label)).ToList() : EnvServiceItems.ToList();
     private List<SectionItem> VisiblePlatform() =>
@@ -779,6 +828,31 @@ else
         newCustomerName = ""; addingCustomerEnv = null;
     }
 
+    private void StartAddTenantCustomer()
+    {
+        addingTenantCustomer = !addingTenantCustomer;
+        addingCustomerEnv = null; linkingCustomerEnv = null;
+        newCustomerName = "";
+    }
+
+    /// <summary>
+    /// A customer created from the Customers heading, which belongs to no environment yet —
+    /// unlike <see cref="AddCustomer"/>, where the environment it was created under is the
+    /// membership. It shows up under Environments once an app is deployed or it is added to
+    /// one explicitly.
+    /// </summary>
+    private async Task AddTenantCustomer()
+    {
+        string name = newCustomerName.Trim();
+        if (name.Length == 0 || tenant is null) return;
+        Customer c = await TenantService.CreateCustomerAsync(tenant.Id, name, null);
+        customers = await TenantService.GetCustomersAsync(tenant.Id);
+        appsByCustomer[c.Id] = await TenantService.GetAppsAsync(c.Id);
+        await LoadCustomerEnvironmentsAsync(tenant.Id);
+        RebuildAppIndex();
+        newCustomerName = ""; addingTenantCustomer = false;
+    }
+
     private async Task LinkCustomer()
     {
         if (tenant is null || linkingCustomerEnv is not { } envId || linkCustomerId is not { } custId) return;
@@ -823,42 +897,49 @@ else
     private void SelectApp(Customer c, Data.App app, Data.Environment env)
     {
         selectedApp = app; selectedAppCustomer = c; selectedAppEnvId = env.Id;
-        selectedCluster = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        selectedCluster = null; selectedCustomer = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
         UpdateUrl(app: app.Id, cluster: null, section: null, env: env.Id);
     }
     private void SelectCluster(KubernetesCluster cl)
     {
-        selectedCluster = cl; selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        selectedCluster = cl; selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCustomer = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
         UpdateUrl(app: null, cluster: cl.Id, section: null, env: null);
+    }
+    private void SelectCustomer(Customer c)
+    {
+        selectedCustomer = c; selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        UpdateUrl(app: null, cluster: null, section: null, env: null, customer: c.Id);
     }
     private void SelectSection(string key)
     {
-        selectedSection = key; selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedServiceEnvId = null; registerEnvId = null;
+        selectedSection = key; selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedCustomer = null; selectedServiceEnvId = null; registerEnvId = null;
         UpdateUrl(app: null, cluster: null, section: key, env: null);
     }
     private void SelectEnvService(Guid envId, string key)
     {
         selectedSection = key; selectedServiceEnvId = envId;
-        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; registerEnvId = null;
+        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedCustomer = null; registerEnvId = null;
         UpdateUrl(app: null, cluster: null, section: key, env: envId);
     }
     private void RegisterClusterInEnv(Guid envId)
     {
         registerEnvId = envId;
-        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedServiceEnvId = null;
+        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedCustomer = null; selectedServiceEnvId = null;
         selectedSection = "new-cluster";
         UpdateUrl(app: null, cluster: null, section: "new-cluster", env: envId);
     }
     private void ClearSelection()
     {
-        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
+        selectedApp = null; selectedAppCustomer = null; selectedAppEnvId = null; selectedCluster = null; selectedCustomer = null; selectedSection = null; selectedServiceEnvId = null; registerEnvId = null;
         UpdateUrl(null, null, null, null);
     }
-    private void UpdateUrl(Guid? app, Guid? cluster, string? section, Guid? env)
+    // customer defaults to null so every other Select* clears it by omission — a null value
+    // removes the parameter rather than writing an empty one.
+    private void UpdateUrl(Guid? app, Guid? cluster, string? section, Guid? env, Guid? customer = null)
     {
         string uri = Nav.GetUriWithQueryParameters(new Dictionary<string, object?>
         {
-            ["app"] = app, ["cluster"] = cluster, ["section"] = section, ["env"] = env,
+            ["app"] = app, ["cluster"] = cluster, ["section"] = section, ["env"] = env, ["customer"] = customer,
         });
         Nav.NavigateTo(uri, forceLoad: false, replace: true);
     }
