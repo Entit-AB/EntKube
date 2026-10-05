@@ -13,6 +13,7 @@ using EntKube.Web.Components;
 using EntKube.Web.Components.Account;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
+using EntKube.Web.Modules.Composition;
 using EntKube.Web.Services;
 using EntKube.Web.Services.Agents;
 using EntKube.Web.Services.Telemetry;
@@ -119,7 +120,25 @@ public class Program
 
         authBuilder.AddIdentityCookies();
 
-        builder.Services.AddScoped<EntKube.Web.Services.Sso.ExternalGroupSync>();
+        // One call per module; each file holds that module's service registrations.
+        // This used to be 188 Add* lines in a row with nothing saying where one subsystem
+        // ended and the next began. ModuleMap.Services records which module owns which
+        // service, and ModuleCompositionTests holds the two together.
+        //
+        // Cross-cutting wiring that belongs to no module — presence, the current actor,
+        // toasts, kubeconfig materialisation, the backup bundle — stays below.
+        builder.Services.AddIdentityModule();
+        builder.Services.AddFleetModule();
+        builder.Services.AddCatalogModule();
+        builder.Services.AddDataServicesModule();
+        builder.Services.AddMailModule();
+        builder.Services.AddDeliveryModule();
+        builder.Services.AddConnectivityModule();
+        builder.Services.AddSecretsModule();
+        builder.Services.AddTelemetryModule();
+        builder.Services.AddCostModule();
+        builder.Services.AddSupportModule();
+        builder.Services.AddAdvisorModule();
 
         // The app runs behind the Caddy reverse proxy which terminates TLS. Honor the
         // X-Forwarded-Proto/For headers so the app knows the original request was HTTPS —
@@ -307,10 +326,6 @@ public class Program
         builder.Services.AddSingleton<IEmailSender<ApplicationUser>, IdentityNoOpEmailSender>();
         builder.Services.AddHttpClient();
         builder.Services.AddScoped<ToastService>();
-        builder.Services.AddScoped<TenantService>();
-        builder.Services.AddScoped<UserAccessService>();
-        builder.Services.AddScoped<UserManagementService>();
-        builder.Services.AddScoped<TenantRoleService>();
 
         // Vault encryption: the root key is loaded from configuration.
         // In production this should come from a secure source (env var, key vault, etc.)
@@ -323,19 +338,10 @@ public class Program
         // root key: stable for the life of the installation, so a reference we sent a year
         // ago still validates, and never written down anywhere of its own.
         builder.Services.AddSingleton(new TicketReference(rootKey));
-        builder.Services.AddSingleton<DeploymentStatusNotifier>();
-        builder.Services.AddScoped<VaultService>();
-        builder.Services.AddScoped<DockerRegistryService>();
-        builder.Services.AddScoped<DeploymentService>();
-        builder.Services.AddScoped<CustomerAccessService>();
-        builder.Services.AddScoped<KubernetesOperationsService>();
-        builder.Services.AddScoped<NodeManagementService>();
-        builder.Services.AddScoped<WorkloadService>();
         // One long-lived Kubernetes client per cluster, shared by every service that reaches an in-cluster
         // HTTP API through the API-server proxy (Prometheus, Loki, and the in-cluster telemetry querier).
         // These used to build a client per call, so each query paid its own TLS handshake to the API
         // server — a dozen per dashboard render. Singleton: the pool is shared across circuits.
-        builder.Services.AddSingleton<KubernetesProxyClientPool>();
 
         // Just-in-time customer access.
         //
@@ -350,7 +356,6 @@ public class Program
         {
             builder.Services.AddScoped<EntKube.Web.Services.Jit.IJitProvisioner,
                 EntKube.Web.Services.Jit.KubernetesJitProvisioner>();
-            builder.Services.AddHostedService<EntKube.Web.Services.Jit.JitGrantReaperService>();
         }
         else
         {
@@ -360,14 +365,10 @@ public class Program
 
         // The provisioner is scoped because it takes the scoped change gate; the upstream pool is a
         // singleton because its whole purpose is to keep connections warm across requests.
-        builder.Services.AddScoped<EntKube.Web.Services.Jit.JitAccessService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Jit.JitProxyService>();
-        builder.Services.AddSingleton<EntKube.Web.Services.Jit.JitUpstreamClientPool>();
         // Short-lived PromQL cache with single-flight: a dashboard render asks the same question from
         // several panels at once, and each one otherwise crosses the WAN on its own.
         builder.Services.AddSingleton(new EntKube.Web.Services.Telemetry.PromQueryCache(
             TimeSpan.FromSeconds(builder.Configuration.GetValue<int?>("Metrics:QueryCacheSeconds") ?? 10)));
-        builder.Services.AddScoped<PrometheusService>();
         // Telemetry engine: the self-built Lucene/S3 segment engine is the sole backend for logs, traces,
         // and RUM. OTLP/RUM writes go through SegmentTelemetryStore (no per-request DB connection — the
         // Postgres "too many clients" failure that motivated this cannot occur), and queries run over the
@@ -400,9 +401,6 @@ public class Program
         // The segment catalog — the engine's only tie to the management-plane database. Everything behind
         // this interface is Lucene indexes, local files and object storage, which is what lets the same
         // engine run inside a cluster with a SQLite catalog on its PV. See docs/telemetry-in-cluster.md.
-        builder.Services.AddSingleton<ISegmentCatalog, EfSegmentCatalog>();
-        builder.Services.AddSingleton<TelemetryStorageSettingService>();
-        builder.Services.AddSingleton<TenantBlobStoreFactory>();
         // Telemetry is TENANT-SCOPED: one segment manager per (tenant, signal), created lazily on first
         // ingest/query, each with its own active index, catalog partition, and object storage — no tenant's
         // logs/traces/RUM ever share a segment or a bucket with another's. The registries hold them.
@@ -438,20 +436,10 @@ public class Program
                 sp.GetRequiredService<ISegmentCatalog>(),
                 sp.GetRequiredService<TenantBlobStoreFactory>().CreateFor(tenantId),
                 segmentOptions, sp.GetRequiredService<ILogger<TraceSummarySegmentManager>>())));
-        builder.Services.AddSingleton<ITelemetryIngest, SegmentTelemetryStore>();
         // Reads route per cluster: to the cluster's own in-cluster telemetry node when one is installed,
         // otherwise to the management plane's local segment store. LogQueryService's existing native-vs-Loki
         // decision sits above this and is unchanged — the viewers still see one ILogBackend.
         // See docs/telemetry-in-cluster.md.
-        builder.Services.AddScoped<TelemetryNodeClient>();
-        builder.Services.AddScoped<SegmentLogService>();
-        builder.Services.AddScoped<SegmentTraceService>();
-        builder.Services.AddScoped<NodeLogBackend>();
-        builder.Services.AddScoped<NodeTraceService>();
-        builder.Services.AddScoped<ILogBackend, ClusterRoutedLogBackend>();
-        builder.Services.AddScoped<ITraceQueryService, ClusterRoutedTraceService>();
-        builder.Services.AddScoped<IRumQueryService, SegmentRumService>();
-        builder.Services.AddScoped<IMetricsQuery, PromMetricsService>();
         // One seal/retention loop per signal; each iterates that signal's live per-tenant managers.
         builder.Services.AddHostedService(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<LogSegmentManager>>(), segmentOptions,
@@ -468,188 +456,44 @@ public class Program
         builder.Services.AddHostedService(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
-        builder.Services.AddSingleton<IngestTokenService>();
         // Configures the in-cluster telemetry components from platform state (bucket, identity, tokens).
-        builder.Services.AddScoped<EntKubeTelemetryService>();
-        builder.Services.AddScoped<EntKube.Web.Services.PublicApi.ApiTokenService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Scim.ScimUserService>();
-        builder.Services.AddSingleton<IngestRateLimiter>();
         // Real User Monitoring: resolves per-site public keys for the public browser ingest endpoint.
-        builder.Services.AddSingleton<RumSiteService>();
         // The engine resolves cluster→tenant through IClusterTenantResolver; in the management plane that
         // is the DB-backed ClusterTenantResolver (in-cluster it is FixedClusterTenantResolver).
-        builder.Services.AddScoped<ClusterTenantResolver>();
         builder.Services.AddScoped<IClusterTenantResolver>(sp => sp.GetRequiredService<ClusterTenantResolver>());
         // Native telemetry alerting: rules evaluated over logs/spans → incidents via the existing pipeline.
-        builder.Services.AddScoped<TelemetryAlertRuleService>();
-        builder.Services.AddScoped<DashboardService>();
-        builder.Services.AddScoped<IncidentDispatcher>();
-        builder.Services.AddHostedService<TelemetryAlertEvaluator>();
         // Backend-agnostic log facade: routes each cluster to the segment engine (when it has data)
         // or Loki. The log viewers inject this instead of LokiService.
-        builder.Services.AddScoped<LogQueryService>();
-        builder.Services.AddScoped<ComponentLifecycleService>();
-        builder.Services.AddScoped<ExternalRouteService>();
-        builder.Services.AddScoped<AppRouteService>();
-        builder.Services.AddScoped<AppL4RouteService>();
-        builder.Services.AddScoped<ConnectivityGraphService>();
-        builder.Services.AddScoped<IngressDashboardService>();
-        builder.Services.AddScoped<DatabaseService>();
-        builder.Services.AddScoped<CnpgService>();
-        builder.Services.AddScoped<MongoService>();
-        builder.Services.AddScoped<RegisteredPostgresService>();
-        builder.Services.AddScoped<EntKube.Web.Services.ClusterChanges.IClusterChangeGate, EntKube.Web.Services.ClusterChanges.ClusterChangeGate>();
-        builder.Services.AddScoped<IKubernetesClientFactory, KubernetesClientFactory>();
         // Singleton: pools one HTTP handler per distinct OpenStack egress transport.
-        builder.Services.AddSingleton<OpenStackHttpFactory>();
         // Singleton: owns long-lived `kubectl port-forward` processes to cluster relays.
-        builder.Services.AddSingleton<ClusterEgressTunnel>();
         // Singleton: an agent link outlives any request or circuit that uses it.
-        builder.Services.AddSingleton<AgentRegistry>();
-        builder.Services.AddScoped<ClusterEgressRelay>();
-        builder.Services.AddScoped<OpenStackKeystoneClient>();
-        builder.Services.AddScoped<OpenStackS3Service>();
-        builder.Services.AddScoped<OpenStackComputeService>();
-        builder.Services.AddScoped<OpenStackInventoryService>();
-        builder.Services.AddScoped<ClusterProvisioningService>();
-        builder.Services.AddScoped<StorageService>();
-        builder.Services.AddScoped<StorageLinkClientFactory>();
-        builder.Services.AddScoped<StorageBrowserService>();
-        builder.Services.AddScoped<ComponentScanService>();
-        builder.Services.AddScoped<DeploymentImportService>();
-        builder.Services.AddScoped<KeycloakService>();
-        builder.Services.AddScoped<RabbitMQService>();
-        builder.Services.AddScoped<RedisService>();
-        builder.Services.AddScoped<KafkaService>();
-        builder.Services.AddScoped<ElasticsearchService>();
-        builder.Services.AddScoped<HarborService>();
-        builder.Services.AddScoped<OpenLdapService>();
-        builder.Services.AddScoped<StalwartService>();
 
         // Resolved from the already-registered scoped instances rather than constructed again, so a
         // provider and the service that owns the configuration are always the same object.
         builder.Services.AddScoped<IComponentFormValueProvider>(sp => sp.GetRequiredService<OpenLdapService>());
         builder.Services.AddScoped<IComponentFormValueProvider>(sp => sp.GetRequiredService<StalwartService>());
-        builder.Services.AddScoped<TailscaleService>();
-        builder.Services.AddScoped<HeadscaleService>();
-        builder.Services.AddScoped<AuditService>();
-        builder.Services.AddScoped<IncidentService>();
-        builder.Services.AddScoped<NotificationService>();
-        builder.Services.AddScoped<NotificationProviderConfigService>();
-        builder.Services.AddScoped<RemediationService>();
-        builder.Services.AddScoped<OnCallService>();
-        builder.Services.AddScoped<AlertRoutingService>();
-        builder.Services.AddScoped<LokiService>();
-        builder.Services.AddScoped<MimirService>();
-        builder.Services.AddScoped<TempoService>();
         builder.Services.AddScoped<BackupService>();
-        builder.Services.AddScoped<VpnService>();
-        builder.Services.AddScoped<KyvernoPolicyService>();
-        builder.Services.AddScoped<KedaScalerService>();
-        builder.Services.AddScoped<TrustBundleService>();
-        builder.Services.AddScoped<MtlsService>();
-        builder.Services.AddScoped<MeshMtlsService>();
-        builder.Services.AddScoped<OutboundMtlsService>();
-        builder.Services.AddScoped<CertificateDistributionService>();
         builder.Services.Configure<CertificateDistributionReconcileOptions>(
             builder.Configuration.GetSection("CertificateDistribution"));
-        builder.Services.AddHostedService<CertificateDistributionReconcileService>();
-        builder.Services.AddScoped<SecretExpiryService>();
-        builder.Services.AddScoped<IncidentCorrelationService>();
-        builder.Services.AddScoped<StormSuppressionService>();
-        builder.Services.AddScoped<ErrorBudgetService>();
-        builder.Services.AddScoped<AdvisorStateService>();
-        builder.Services.AddScoped<AdvisorDigestConfigService>();
         // Singleton so the fetched chart indexes are shared: one repo backs several catalog
         // entries, and a per-scope client would refetch a multi-megabyte index per component.
-        builder.Services.AddSingleton<EntKube.Web.Services.Upgrades.HelmRepoIndexClient>();
-        builder.Services.AddScoped<EntKube.Web.Services.Upgrades.ComponentUpgradeService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Upgrades.ReleaseVolumeGuard>();
-        builder.Services.AddScoped<EntKube.Web.Services.Upgrades.ComponentUpgradeRunner>();
-        builder.Services.AddScoped<EntKube.Web.Services.Upgrades.DriftDetectionService>();
         // Singleton cache + background sweep: the advisor reads the cache and never forks a
         // server-side dry-run per deployment while rendering a page.
-        builder.Services.AddSingleton<EntKube.Web.Services.Upgrades.DriftScanCache>();
-        builder.Services.AddHostedService<EntKube.Web.Services.Upgrades.DriftScanService>();
-        builder.Services.AddScoped<EntKube.Web.Services.SupplyChain.SupplyChainService>();
-        builder.Services.AddSingleton<EntKube.Web.Services.SupplyChain.SupplyChainScanCache>();
-        builder.Services.AddHostedService<EntKube.Web.Services.SupplyChain.SupplyChainScanService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Cost.CostReportService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Cost.CostRateService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Cost.CostLedgerWriter>();
-        builder.Services.AddScoped<EntKube.Web.Services.Cost.CostLedgerService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Contracts.ContractService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Tickets.TicketService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Tickets.AlertTicketBridge>();
-        builder.Services.AddScoped<EntKube.Web.Services.Time.TimeService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Knowledge.KnowledgeService>();
         builder.Services.AddScoped<EntKube.Web.Services.Mail.ISupportMailAnalyst,
             EntKube.Web.Services.Mail.RuleBasedMailAnalyst>();
-        builder.Services.AddScoped<EntKube.Web.Services.Mail.MailTriageRuleService>();
         builder.Services.AddSingleton<EntKube.Web.Services.Mail.IDnsLookup,
             EntKube.Web.Services.Mail.SystemDnsLookup>();
-        builder.Services.AddScoped<EntKube.Web.Services.Mail.MailDnsCheck>();
-        builder.Services.AddScoped<EntKube.Web.Services.Support.SupportDutyService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailService>();
         builder.Services.AddScoped<EntKube.Web.Services.CurrentActor>();
-        builder.Services.AddScoped<EntKube.Web.Services.Mail.SmtpSettingsResolver>();
-        builder.Services.AddScoped<EntKube.Web.Services.Tickets.TicketNotifier>();
-        builder.Services.AddScoped<EntKube.Web.Services.Mail.SupportMailboxService>();
         // Singleton: its token cache is the point, and a scoped one would mint a token per request.
-        builder.Services.AddSingleton<EntKube.Web.Services.Mail.MailboxTokenProvider>();
-        builder.Services.AddScoped<EntKube.Web.Services.Mail.StalwartDnsService>();
 
         // The inbound ticket bridge. One adapter per system, registered as the interface —
         // so adding Ivanti is a class and a line here, which is the whole point of the seam.
-        builder.Services.AddScoped<IInboundTicketAdapter, JiraAdapter>();
-        builder.Services.AddScoped<IInboundTicketAdapter, ServiceNowAdapter>();
-        builder.Services.AddScoped<TicketBridgeService>();
-        builder.Services.AddScoped<TicketBridgeAdmin>();
 
         // Fetches support mail into the triage queue. Does nothing until a tenant has
         // configured a mailbox and switched it on.
-        builder.Services.AddHostedService<EntKube.Web.Services.Mail.SupportMailPoller>();
-        builder.Services.AddScoped<EntKube.Web.Services.Reporting.MonthlyReportService>();
-        builder.Services.AddSingleton<EntKube.Web.Services.Cost.CostScanCache>();
-        builder.Services.AddHostedService<EntKube.Web.Services.Cost.CostScanService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Rollouts.RolloutService>();
         builder.Services.AddScoped<EntKube.Web.Services.Rollouts.IRolloutStarter>(
             sp => sp.GetRequiredService<EntKube.Web.Services.Rollouts.RolloutService>());
-        builder.Services.AddHostedService<EntKube.Web.Services.Rollouts.RolloutWatcherService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Adoption.DriftAdoptionService>();
-        builder.Services.AddScoped<EntKube.Web.Services.Dr.VeleroService>();
-        builder.Services.AddSingleton<EntKube.Web.Services.Dr.DrScanCache>();
-        builder.Services.AddHostedService<EntKube.Web.Services.Dr.DrScanService>();
-        builder.Services.AddScoped<OperationsAdvisorService>();
-        builder.Services.AddScoped<CustomerNotificationService>();
 
-        builder.Services.AddScoped<ComponentInstallOrchestrator>();
-        builder.Services.AddScoped<CatalogComponentRegistrar>();
-        builder.Services.AddScoped<ClusterBlueprintService>();
-        builder.Services.AddScoped<BlueprintFromClusterService>();
-        builder.Services.AddScoped<AppGovernanceService>();
-        builder.Services.AddScoped<PortalServiceScopeService>();
-        builder.Services.AddScoped<GitOperationsService>();
-        builder.Services.AddScoped<GitRepositoryService>();
-        builder.Services.AddScoped<CustomerGitService>();
-        builder.Services.AddScoped<AppOfAppsService>();
-        builder.Services.AddSingleton<GitSyncService>();
-        builder.Services.AddScoped<GitWebhookService>();
-        builder.Services.AddHostedService<DeploymentSyncService>();
-        builder.Services.AddHostedService<ExternalRouteHealthService>();
-        builder.Services.AddHostedService<AppL4RouteHealthService>();
-        builder.Services.AddHostedService<AlertSyncService>();
-        builder.Services.AddHostedService<AlertEscalationService>();
-        builder.Services.AddHostedService<UptimeTrackingService>();
-        builder.Services.AddHostedService<KeycloakBackupSchedulerService>();
-        builder.Services.AddHostedService<AdvisorScanService>();
-        builder.Services.AddHostedService<ResourceUsageCollectorService>();
-        builder.Services.AddHostedService<HeadscaleCertSyncService>();
-        builder.Services.AddHostedService<SecretExpiryNotificationService>();
-        builder.Services.AddHostedService<ObservedSecretRefreshService>();
-        builder.Services.AddHostedService<MessagingStatusPollingService>();
-        builder.Services.AddHostedService<SearchStatusPollingService>();
-        builder.Services.AddHostedService<BootstrapRunnerService>();
         builder.Services.AddHostedService(sp => sp.GetRequiredService<GitSyncService>());
 
         builder.Services.AddHttpClient("Notifications", client =>

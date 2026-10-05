@@ -16,7 +16,7 @@ namespace EntKube.Web.Modules;
 /// points at <see cref="Tenant"/>, which Identity owns. The test measures those edges and
 /// ratchets them rather than pretending they are zero.</para>
 /// </summary>
-public static class ModuleMap
+public static partial class ModuleMap
 {
     /// <summary>Every entity in the model, and the module that owns it.</summary>
     public static readonly IReadOnlyDictionary<Type, Module> Entities = new Dictionary<Type, Module>
