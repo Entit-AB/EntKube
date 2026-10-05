@@ -4382,10 +4382,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<string>("DeliveredTo")
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("FailedRecipient")
-                        .HasMaxLength(320)
-                        .HasColumnType("TEXT");
-
                     b.Property<string>("FromAddress")
                         .IsRequired()
                         .HasColumnType("TEXT");
@@ -4401,9 +4397,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<string>("InReplyTo")
                         .HasColumnType("TEXT");
-
-                    b.Property<bool>("IsDeliveryReport")
-                        .HasColumnType("INTEGER");
 
                     b.Property<bool>("IsMachineGenerated")
                         .HasColumnType("INTEGER");
@@ -5765,6 +5758,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasMaxLength(30)
                         .HasColumnType("TEXT");
 
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
                     b.Property<DateTime>("UpdatedAt")
                         .HasColumnType("TEXT");
 
@@ -5774,7 +5770,7 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.HasKey("Id");
 
-                    b.HasIndex("ProviderType")
+                    b.HasIndex("TenantId", "ProviderType")
                         .IsUnique();
 
                     b.ToTable("NotificationProviderConfigs");
@@ -7223,9 +7219,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<bool>("RspamdTempFailOnError")
                         .HasColumnType("INTEGER");
 
-                    b.Property<string>("SendingIpAddresses")
-                        .HasColumnType("TEXT");
-
                     b.Property<bool>("SmtpEnabled")
                         .HasColumnType("INTEGER");
 
@@ -7334,9 +7327,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
 
                     b.Property<string>("Description")
                         .HasMaxLength(500)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("DkimDnsRecords")
                         .HasColumnType("TEXT");
 
                     b.Property<bool>("IsPrimary")
@@ -7516,42 +7506,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("TenantId", "IsActive");
 
                     b.ToTable("Subconsultants");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.SupportDuty", b =>
-                {
-                    b.Property<Guid>("Id")
-                        .ValueGeneratedOnAdd()
-                        .HasColumnType("TEXT");
-
-                    b.Property<bool>("IsActive")
-                        .HasColumnType("INTEGER");
-
-                    b.Property<string>("Note")
-                        .HasMaxLength(500)
-                        .HasColumnType("TEXT");
-
-                    b.Property<Guid>("TenantId")
-                        .HasColumnType("TEXT");
-
-                    b.Property<DateTime>("UpdatedAt")
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("UpdatedBy")
-                        .HasMaxLength(256)
-                        .HasColumnType("TEXT");
-
-                    b.Property<string>("UserId")
-                        .IsRequired()
-                        .HasMaxLength(450)
-                        .HasColumnType("TEXT");
-
-                    b.HasKey("Id");
-
-                    b.HasIndex("TenantId", "UserId")
-                        .IsUnique();
-
-                    b.ToTable("SupportDuties");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.SupportMailbox", b =>
@@ -7876,10 +7830,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<string>("Assignee")
                         .HasColumnType("TEXT");
 
-                    b.Property<string>("AssigneeUserId")
-                        .HasMaxLength(450)
-                        .HasColumnType("TEXT");
-
                     b.Property<int>("Channel")
                         .HasColumnType("INTEGER");
 
@@ -7972,8 +7922,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasKey("Id");
 
                     b.HasIndex("AppId");
-
-                    b.HasIndex("TenantId", "AssigneeUserId");
 
                     b.HasIndex("TenantId", "Number")
                         .IsUnique();
@@ -10617,6 +10565,17 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Incident");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.NotificationProviderConfig", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+
+                    b.Navigation("Tenant");
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.OnCallSchedule", b =>
                 {
                     b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
@@ -11097,17 +11056,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .IsRequired();
 
                     b.Navigation("Customer");
-
-                    b.Navigation("Tenant");
-                });
-
-            modelBuilder.Entity("EntKube.Web.Data.SupportDuty", b =>
-                {
-                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
-                        .WithMany()
-                        .HasForeignKey("TenantId")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired();
 
                     b.Navigation("Tenant");
                 });

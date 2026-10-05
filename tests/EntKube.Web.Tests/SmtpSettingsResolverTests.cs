@@ -60,15 +60,16 @@ public class SmtpSettingsResolverTests : IDisposable
                     c => new KeyValuePair<string, string?>(c.Key, c.Value)))
                 .Build());
 
-    private void ProviderRow(bool enabled)
+    private void ProviderRow(bool enabled, Guid? owner = null, string host = "relay.example")
     {
         db.NotificationProviderConfigs.Add(new NotificationProviderConfig
         {
+            TenantId = owner ?? tenantId,
             ProviderType = NotificationProviderType.Smtp,
             IsEnabled = enabled,
             ConfigurationJson = JsonSerializer.Serialize(new
             {
-                host = "relay.example",
+                host,
                 port = 587,
                 from = "alerts@entit.se",
             }),
@@ -113,7 +114,7 @@ public class SmtpSettingsResolverTests : IDisposable
 
         settings.Host.Should().Be("relay.example");
         settings.From.Should().Be("alerts@entit.se");
-        settings.Source.Should().Be("the SMTP notification provider");
+        settings.Source.Should().Be("the tenant's SMTP notification provider");
     }
 
     /// <summary>
@@ -155,16 +156,58 @@ public class SmtpSettingsResolverTests : IDisposable
     }
 
     /// <summary>
-    /// The alert path passes no tenant and must keep behaving exactly as it did: it has no
-    /// customer-facing address to align, and its mail is not a support receipt.
+    /// <b>Without a tenant there is no provider to find.</b> Provider rows belong to a tenant,
+    /// so a caller that does not say whose mail this is gets the installation configuration or
+    /// nothing — never some tenant's relay picked arbitrarily. Returning the first row found
+    /// would mean sending one customer's mail through another customer's authenticated relay.
     /// </summary>
     [Fact]
-    public async Task Without_a_tenant_the_answer_is_what_it_always_was()
+    public async Task Without_a_tenant_no_tenants_relay_is_borrowed()
     {
         ProviderRow(enabled: true);
 
-        SmtpSettings settings = await Resolver().ResolveAsync();
+        (await Resolver().ResolveAsync()).IsConfigured.Should().BeFalse();
 
-        settings.Host.Should().Be("relay.example");
+        SmtpSettings configured = await Resolver(("Smtp:Host", "smtp.example")).ResolveAsync();
+        configured.Source.Should().Be("the Smtp: configuration section");
+    }
+
+    /// <summary>
+    /// <b>One tenant's relay is invisible to another.</b> The whole reason these rows moved
+    /// under a tenant: the row holds an SMTP password, and the unique index is on
+    /// (tenant, kind) so each tenant configures its own without displacing anyone else's.
+    /// </summary>
+    [Fact]
+    public async Task A_tenants_provider_is_not_visible_to_another_tenant()
+    {
+        Guid other = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = other, Name = "Other", Slug = "other" });
+        db.SaveChanges();
+
+        ProviderRow(enabled: true, owner: other, host: "relay.other.example");
+
+        // Our tenant has configured nothing, and must not inherit theirs.
+        (await Resolver().ResolveAsync(tenantId)).IsConfigured.Should().BeFalse();
+
+        // Theirs still answers for them.
+        (await Resolver().ResolveAsync(other)).Host.Should().Be("relay.other.example");
+    }
+
+    /// <summary>
+    /// Both tenants configuring SMTP is the ordinary case, not a unique-index collision —
+    /// which is exactly what the old single-column index on ProviderType made it.
+    /// </summary>
+    [Fact]
+    public async Task Two_tenants_can_each_configure_their_own()
+    {
+        Guid other = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = other, Name = "Other", Slug = "other" });
+        db.SaveChanges();
+
+        ProviderRow(enabled: true, host: "relay.ours.example");
+        ProviderRow(enabled: true, owner: other, host: "relay.theirs.example");
+
+        (await Resolver().ResolveAsync(tenantId)).Host.Should().Be("relay.ours.example");
+        (await Resolver().ResolveAsync(other)).Host.Should().Be("relay.theirs.example");
     }
 }
