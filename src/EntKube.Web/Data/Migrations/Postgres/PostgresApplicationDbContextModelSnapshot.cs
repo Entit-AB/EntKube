@@ -4387,6 +4387,10 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<string>("DeliveredTo")
                         .HasColumnType("text");
 
+                    b.Property<string>("FailedRecipient")
+                        .HasMaxLength(320)
+                        .HasColumnType("character varying(320)");
+
                     b.Property<string>("FromAddress")
                         .IsRequired()
                         .HasColumnType("text");
@@ -4402,6 +4406,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<string>("InReplyTo")
                         .HasColumnType("text");
+
+                    b.Property<bool>("IsDeliveryReport")
+                        .HasColumnType("boolean");
 
                     b.Property<bool>("IsMachineGenerated")
                         .HasColumnType("boolean");
@@ -7221,6 +7228,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<bool>("RspamdTempFailOnError")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("SendingIpAddresses")
+                        .HasColumnType("text");
+
                     b.Property<bool>("SmtpEnabled")
                         .HasColumnType("boolean");
 
@@ -7330,6 +7340,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<string>("Description")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
+
+                    b.Property<string>("DkimDnsRecords")
+                        .HasColumnType("text");
 
                     b.Property<bool>("IsPrimary")
                         .HasColumnType("boolean");
@@ -7508,6 +7521,42 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("TenantId", "IsActive");
 
                     b.ToTable("Subconsultants");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SupportDuty", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasMaxLength(450)
+                        .HasColumnType("character varying(450)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "UserId")
+                        .IsUnique();
+
+                    b.ToTable("SupportDuties");
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.SupportMailbox", b =>
@@ -7832,6 +7881,10 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<string>("Assignee")
                         .HasColumnType("text");
 
+                    b.Property<string>("AssigneeUserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("character varying(450)");
+
                     b.Property<int>("Channel")
                         .HasColumnType("integer");
 
@@ -7924,6 +7977,8 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasKey("Id");
 
                     b.HasIndex("AppId");
+
+                    b.HasIndex("TenantId", "AssigneeUserId");
 
                     b.HasIndex("TenantId", "Number")
                         .IsUnique();
@@ -11051,6 +11106,17 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .IsRequired();
 
                     b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SupportDuty", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
 
                     b.Navigation("Tenant");
                 });

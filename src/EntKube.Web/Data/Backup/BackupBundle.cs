@@ -27,7 +27,7 @@ public class BackupBundle
     /// literal here and a second literal in the import's guard, which is how a bundle
     /// this very code wrote came to be rejected by it.</para>
     /// </summary>
-    public const int CurrentVersion = 9;
+    public const int CurrentVersion = 10;
 
     public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -142,6 +142,11 @@ public class BackupBundle
     public List<AlertRoutingRule> AlertRoutingRules { get; set; } = [];
     public List<OnCallSchedule> OnCallSchedules { get; set; } = [];
     public List<OnCallShift> OnCallShifts { get; set; } = [];
+
+    // Who takes support work. Tenant configuration rather than a running total: restoring
+    // without it would leave every ticket opening unassigned on the new installation, which
+    // looks exactly like the rota working and nobody's turn ever coming up.
+    public List<SupportDuty> SupportDuties { get; set; } = [];
 
     // Observability config (dashboards, telemetry alert rules, RUM sites, storage target, digests)
     public List<Dashboard> Dashboards { get; set; } = [];

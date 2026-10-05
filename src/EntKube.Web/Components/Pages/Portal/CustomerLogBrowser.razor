@@ -202,13 +202,13 @@ else
             </div>
         }
 
-        <div class="border rounded font-monospace" style="background:#1e1e1e;max-height:560px;overflow:auto" @ref="logContainer">
+        <div class="border rounded font-monospace console"  style="max-height:560px;overflow:auto" @ref="logContainer">
             <Virtualize Items="shown" Context="entry" ItemSize="21" OverscanCount="20">
-                <div class="logrow px-3 py-0" style="line-height:1.45;border-bottom:1px solid #2d2d2d;position:relative">
-                    <span style="color:#888;font-size:0.72rem;user-select:none">
+                <div class="logrow px-3 py-0 console-line"  style="position:relative">
+                    <span class="console-gutter">
                         @FormatTs(entry.Timestamp)
                     </span>
-                    <span class="ms-2" style="color:#569cd6;font-size:0.72rem;user-select:none" title="@entry.Namespace">@entry.Pod</span>
+                    <span class="ms-2 console-key"  title="@entry.Namespace">@entry.Pod</span>
                     @if (entry.DeploymentName is not null)
                     {
                         <span class="ms-2 badge bg-dark border border-secondary" style="font-size:0.62rem;font-weight:normal">@entry.DeploymentName</span>

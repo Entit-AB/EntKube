@@ -1,3 +1,5 @@
+using System.Net;
+using System.Net.Sockets;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
@@ -288,6 +290,70 @@ public static class StalwartPlanBuilder
                 .Where(n => !n.StartsWith('#'))
                 .Distinct(StringComparer.OrdinalIgnoreCase)
                 .ToList();
+
+    /// <summary>
+    /// Whether a trusted-networks entry reaches inside the cluster.
+    ///
+    /// <para><b>The check that matters, and the one that was missing.</b> Covering the ingress
+    /// gateway was tested for, because those addresses were in hand. But the entry that does the
+    /// most damage is a broad private or CGNAT range, because it also covers the pod network — and
+    /// the client that then cannot connect is <em>EntKube's own apply Job</em>. The server becomes
+    /// unconfigurable by the thing that configures it, and the failure is a connection that never
+    /// completes, which reads as a network fault rather than as the setting that caused it.</para>
+    ///
+    /// <para>Verified on a running server rather than reasoned about: with such a list in force, a
+    /// request from a pod is closed before any HTTP is read, and the identical request sending a
+    /// PROXY v1 greeting is answered.</para>
+    ///
+    /// <para>Overlap, not containment: <c>10.0.0.0/8</c> and <c>10.240.3.0/24</c> both reach inside,
+    /// and either breaks every in-cluster client.</para>
+    /// </summary>
+    public static bool CoversClusterAddresses(string network) =>
+        InternalRanges.Any(internalRange => RangesOverlap(internalRange, network));
+
+    /// <summary>Whether two CIDR entries have any address in common.</summary>
+    private static bool RangesOverlap(string left, string right)
+    {
+        (IPAddress? leftAddress, int leftPrefix) = ParseCidr(left);
+        (IPAddress? rightAddress, int rightPrefix) = ParseCidr(right);
+
+        if (leftAddress is null
+            || rightAddress is null
+            || leftAddress.AddressFamily != rightAddress.AddressFamily)
+        {
+            return false;
+        }
+
+        // Either the wider one contains the narrower one's base address, or they are disjoint.
+        try
+        {
+            return leftPrefix <= rightPrefix
+                ? new IPNetwork(leftAddress, leftPrefix).Contains(rightAddress)
+                : new IPNetwork(rightAddress, rightPrefix).Contains(leftAddress);
+        }
+        catch (ArgumentException)
+        {
+            return false;
+        }
+    }
+
+    /// <summary>An entry as an address and a prefix length, defaulting to a full-length prefix.</summary>
+    private static (IPAddress? Address, int Prefix) ParseCidr(string entry)
+    {
+        string text = (entry ?? "").Trim();
+        int slash = text.LastIndexOf('/');
+
+        if (!IPAddress.TryParse(slash < 0 ? text : text[..slash].Trim(), out IPAddress? address))
+        {
+            return (null, 0);
+        }
+
+        int full = address.AddressFamily == AddressFamily.InterNetworkV6 ? 128 : 32;
+
+        return slash < 0 || !int.TryParse(text[(slash + 1)..].Trim(), out int prefix)
+            ? (address, full)
+            : (address, prefix);
+    }
 
     /// <summary>
     /// Whether a trusted-networks entry covers this address.
@@ -1450,9 +1516,13 @@ public static class StalwartPlanBuilder
     /// almost never lives anywhere EntKube can reach, and mail that half-works because one record is
     /// missing is the most expensive kind of mail misconfiguration.
     ///
-    /// <para>DKIM is absent by design — Stalwart generates those keys itself, and the selector and
-    /// public key only exist once the domain has been applied, so they are read back from the
-    /// running server rather than predicted here.</para>
+    /// <para><b>DKIM is here now, and it is the record most likely to be missing.</b> It used to be
+    /// left out with a note saying to read it from the mail server's admin UI, which is true and is
+    /// also how a domain ends up signing every message with a key nobody published. That failure is
+    /// silent and total — the receiver looks the key up, finds nothing, and
+    /// <c>dkim=fail reason="key not found in DNS"</c> takes DMARC down with it. Stalwart still owns
+    /// the keys; what the domain carries is a copy of the records to publish, pasted once, so that
+    /// the list handed to whoever runs the zone is the whole list.</para>
     /// </summary>
     public static IReadOnlyList<DnsRecord> DnsRecordsFor(StalwartComponentConfig config, StalwartMailDomain domain)
     {
@@ -1462,11 +1532,56 @@ public static class StalwartPlanBuilder
         List<DnsRecord> records =
         [
             new(name, "MX", $"10 {host}.", "Where other servers deliver mail for this domain."),
-            new(name, "TXT", $"v=spf1 mx -all",
-                "SPF — authorises this server to send for the domain and refuses everything else."),
-            new($"_dmarc.{name}", "TXT", $"v=DMARC1; p=reject; rua=mailto:postmaster@{name}",
-                "DMARC — tells receivers what to do with mail that fails SPF and DKIM."),
+            new(name, "TXT", Spf(config),
+                "SPF — authorises this server to send for the domain and refuses everything else. "
+                + "`mx` covers the address mail is delivered TO; outbound usually leaves from "
+                + "another one, which has to be listed or every message fails SPF."),
+            new($"_dmarc.{name}", "TXT", $"v=DMARC1; p=none; rua=mailto:postmaster@{name}",
+                "DMARC — tells receivers what to do with mail that fails SPF and DKIM. Start at "
+                + "p=none and move to p=reject once a report shows both passing: p=reject while "
+                + "either is unpublished junks every message the domain sends."),
+
+            // The mail host's own A record, which the list never had — it is what the MX
+            // above points at and what other servers connect IN on.
+            new(host, "A", config.LoadBalancerIp ?? "the mail LoadBalancer address",
+                "The mail host itself, where mail is delivered TO. It must resolve to the "
+                + "balancer's address, which is a different thing from the address outbound "
+                + "mail leaves from — see the sending rows below."),
         ];
+
+        records.AddRange(DkimRecords(domain));
+
+        // The sending address's own name, and its reverse. SPF already lists the address
+        // (Spf above), which says we are allowed to send from it — and says nothing about
+        // the two records a receiver checks before it will take the connection at all: that
+        // the address has a PTR, and that the name the PTR gives resolves back to it.
+        //
+        // It needs a name of its own. The mail host cannot serve: it has to resolve to the
+        // balancer so other servers can deliver, so it will never resolve back to the
+        // sending address. One name for all of them is fine — each address's PTR names it,
+        // and it resolves to the set, which contains that address.
+        IReadOnlyList<string> sending = SendingAddressesOf(config);
+
+        if (sending.Count > 0)
+        {
+            string sendingHost = $"smtp-out.{name}";
+
+            records.Add(new(sendingHost, "A", string.Join(", ", sending),
+                "A name for the address outbound mail leaves from. Its own name rather than "
+                + "the mail host, which has to point at the balancer and cannot point at "
+                + "both."));
+
+            foreach (string address in sending)
+            {
+                records.Add(new(
+                    $"{Reverse(address)} (not in this zone)", "PTR", $"{sendingHost}.",
+                    "Reverse DNS for the sending address, published by whoever owns it — the "
+                    + "cloud provider, not here, and usually a console field or a support "
+                    + "request. Gmail and Microsoft refuse mail from an address with no PTR "
+                    + "outright, before anything about the message is considered, and both "
+                    + "check that the name it gives resolves back to the same address."));
+            }
+        }
 
         // Client autodiscovery (autoconfig / autodiscover / MTA-STS / PACC) always points at the
         // mail host, in every TLS mode. These are names of the MAIL service: Stalwart answers them
@@ -1484,6 +1599,85 @@ public static class StalwartPlanBuilder
             records.Add(new($"{prefix}.{name}", "CNAME", $"{host}.",
                 note + " Answered by the mail server on its own address, over HTTPS — so this must "
                 + "resolve to the mail host, whose certificate covers the name."));
+        }
+
+        return records;
+    }
+
+    /// <summary>
+    /// The SPF value: the MX hosts, plus every address the server actually sends from.
+    ///
+    /// <para><c>mx</c> alone is the common recommendation and it is wrong for a mail server in a
+    /// cluster. It authorises what the MX records resolve to — the address other servers deliver
+    /// <em>to</em> — while outbound connections leave translated to a node's or a gateway's address.
+    /// The receiver evaluates SPF against an address no term matches and <c>-all</c> makes that a
+    /// hard fail.</para>
+    /// </summary>
+    /// <summary>
+    /// An address as its reverse-lookup name, which is the form the record is published
+    /// under. Shown rather than the bare address because somebody has to hand this to a
+    /// provider, and the address itself is not what goes in the request.
+    /// </summary>
+    private static string Reverse(string address) =>
+        System.Net.IPAddress.TryParse(address.Trim(), out System.Net.IPAddress? ip)
+            && ip.AddressFamily == System.Net.Sockets.AddressFamily.InterNetwork
+            ? string.Join('.', ip.ToString().Split('.').Reverse()) + ".in-addr.arpa"
+            : address.Trim();
+
+    public static string Spf(StalwartComponentConfig config)
+    {
+        IEnumerable<string> terms = SendingAddressesOf(config)
+            .Select(a => a.Contains(':', StringComparison.Ordinal) ? $"ip6:{a}" : $"ip4:{a}");
+
+        return string.Join(' ', ["v=spf1", "mx", .. terms, "-all"]);
+    }
+
+    /// <summary>The addresses an operator recorded as this server's outbound ones.</summary>
+    public static IReadOnlyList<string> SendingAddressesOf(StalwartComponentConfig config) =>
+        [.. (config.SendingIpAddresses ?? "")
+            .Split(['\n', '\r', ',', ' '], StringSplitOptions.RemoveEmptyEntries
+                                                  | StringSplitOptions.TrimEntries)];
+
+    /// <summary>
+    /// The DKIM records the operator copied off the mail server, one per line as
+    /// <c>selector value</c> or <c>selector: value</c>.
+    ///
+    /// <para>A line already naming <c>_domainkey</c> is taken as a complete record name and left
+    /// alone — that is what the server's own DNS page prints, and retyping it is where a selector
+    /// gets mangled.</para>
+    /// </summary>
+    public static IReadOnlyList<DnsRecord> DkimRecords(StalwartMailDomain domain)
+    {
+        string name = domain.Name.Trim().TrimEnd('.');
+
+        List<DnsRecord> records = [];
+
+        foreach (string line in (domain.DkimDnsRecords ?? "")
+                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int split = line.IndexOfAny([' ', '\t', ':']);
+
+            if (split <= 0)
+            {
+                continue;
+            }
+
+            string selector = line[..split].Trim().TrimEnd(':');
+            string value = line[(split + 1)..].Trim().TrimStart(':').Trim();
+
+            if (selector.Length == 0 || value.Length == 0)
+            {
+                continue;
+            }
+
+            records.Add(new(
+                selector.Contains("_domainkey", StringComparison.OrdinalIgnoreCase)
+                    ? selector
+                    : $"{selector}._domainkey.{name}",
+                "TXT",
+                value,
+                "DKIM — the public half of a key this server signs with. Unpublished, every "
+                + "signature fails as \"key not found in DNS\" and takes DMARC with it."));
         }
 
         return records;

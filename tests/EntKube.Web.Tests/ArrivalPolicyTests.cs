@@ -15,8 +15,18 @@ namespace EntKube.Web.Tests;
 /// </summary>
 public class ArrivalPolicyTests
 {
+    private static MailSuggestion Replies(string said = "Vi tittar på det.") => new()
+    {
+        Id = Guid.NewGuid(),
+        Kind = MailSuggestionKind.ReplyToCustomer,
+        Summary = "Send this to the customer",
+        DraftText = said,
+        TicketId = Guid.NewGuid(),
+    };
+
     private static InboundMailMessage Message(
-        Guid? customerId = null, bool machine = false) => new()
+        Guid? customerId = null, bool machine = false,
+        SenderAuthenticity authenticity = SenderAuthenticity.Verified) => new()
         {
             Id = Guid.NewGuid(),
             TenantId = Guid.NewGuid(),
@@ -26,6 +36,7 @@ public class ArrivalPolicyTests
             Body = "Ingen kommer in.",
             CustomerId = customerId ?? Guid.NewGuid(),
             IsMachineGenerated = machine,
+            SenderAuthenticity = authenticity,
         };
 
     private static MailSuggestion Suggestion(MailSuggestionKind kind) => new()
@@ -96,6 +107,112 @@ public class ArrivalPolicyTests
             mailboxAcknowledges: true);
 
         decision.OpenNow.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// <b>The second thing that happens without a person.</b> A reply holding a reference we
+    /// minted goes onto its ticket now rather than waiting in the queue for somebody to agree
+    /// with what the reference already says. Nothing is sent: an append writes an event, which
+    /// is why it needs less justifying than the receipt and not more.
+    /// </summary>
+    [Fact]
+    public void A_reply_carrying_one_of_our_references_is_put_on_its_ticket()
+    {
+        ArrivalDecision decision = ArrivalPolicy.Decide(
+            Message(),
+            [Suggestion(MailSuggestionKind.AppendToTicket)],
+            mailboxAcknowledges: true,
+            referenceIsProven: true);
+
+        decision.AppendNow.Should().BeTrue();
+        decision.OpenNow.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// <b>And the line it stops at.</b> A number somebody typed is not a reference we minted:
+    /// a digit can be wrong, and the cost of being wrong is a customer's words on the history
+    /// of a ticket that is not theirs — a history §14.6 makes evidence between the parties.
+    /// So an unproven number does exactly what it did before, which is wait for a person.
+    /// </summary>
+    [Fact]
+    public void A_reply_quoting_a_bare_number_still_waits_for_a_person()
+    {
+        ArrivalDecision decision = ArrivalPolicy.Decide(
+            Message(),
+            [Suggestion(MailSuggestionKind.AppendToTicket)],
+            mailboxAcknowledges: true,
+            referenceIsProven: false);
+
+        decision.Action.Should().Be(ArrivalAction.LeaveForAPerson);
+        decision.Reason.Should().Contain("typed");
+    }
+
+    /// <summary>
+    /// A bounce or an out-of-office threaded onto a ticket is a program writing, and its
+    /// text does not belong on a history shown to the customer.
+    /// </summary>
+    [Fact]
+    public void A_reference_does_not_let_a_program_write_on_a_ticket()
+    {
+        ArrivalPolicy.Decide(
+                Message(machine: true),
+                [Suggestion(MailSuggestionKind.AppendToTicket)],
+                mailboxAcknowledges: true,
+                referenceIsProven: true)
+            .AppendNow.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Holding a reference says the sender was written to. It does not say the From address
+    /// is theirs, and the append is attributed to that address on a history the customer
+    /// reads — so the analyst's two doubts about who sent it still stop it.
+    /// </summary>
+    [Theory]
+    [InlineData(MailSuggestionKind.FlagForgedSender)]
+    [InlineData(MailSuggestionKind.FlagUnknownSender)]
+    public void A_reference_does_not_settle_who_the_reply_is_from(MailSuggestionKind doubt)
+    {
+        ArrivalDecision decision = ArrivalPolicy.Decide(
+            Message(),
+            [Suggestion(MailSuggestionKind.AppendToTicket), Suggestion(doubt)],
+            mailboxAcknowledges: true,
+            referenceIsProven: true);
+
+        decision.AppendNow.Should().BeFalse();
+        decision.Reason.Should().Contain("reference");
+    }
+
+    /// <summary>
+    /// The tenant's switch is the outer one for both acts. An operator who turned it off
+    /// asked for nothing to happen to arriving mail on its own, and an append is something
+    /// happening — even though it sends nothing.
+    /// </summary>
+    [Fact]
+    public void The_mailbox_switch_also_settles_whether_a_reply_is_appended()
+    {
+        ArrivalPolicy.Decide(
+                Message(),
+                [Suggestion(MailSuggestionKind.AppendToTicket)],
+                mailboxAcknowledges: false,
+                referenceIsProven: true)
+            .AppendNow.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// The cap counts mail we send, and an append sends none. A correspondent replying into
+    /// one ticket all morning costs a long history and a person's attention; it must not also
+    /// use up the budget that stops us writing letters to somebody in a loop.
+    /// </summary>
+    [Fact]
+    public void The_reply_cap_does_not_apply_to_an_append()
+    {
+        ArrivalPolicy.Decide(
+                Message(),
+                [Suggestion(MailSuggestionKind.AppendToTicket)],
+                mailboxAcknowledges: true,
+                answeredRecently: ArrivalPolicy.AutomaticRepliesPerSender * 10,
+                referenceIsProven: true)
+            .AppendNow.Should().BeTrue();
     }
 
     /// <summary>
@@ -202,5 +319,116 @@ public class ArrivalPolicyTests
             ArrivalPolicy.Decide(Message(machine: true), ProposesATicket(), acknowledges)
                 .Reason.Should().NotBeNullOrWhiteSpace();
         }
+    }
+
+    // ---- One of ours answering the customer --------------------------------------------------
+
+    /// <summary>
+    /// <b>The third thing that happens without a person, and the loudest.</b> A technician
+    /// replies to the mail we sent them about their ticket; what they wrote above the cut
+    /// line goes to the customer. This is the whole point of assigning by mail — a ticket
+    /// answered without opening the application.
+    /// </summary>
+    [Fact]
+    public void What_one_of_ours_wrote_above_the_line_is_sent_to_the_customer()
+    {
+        ArrivalDecision decision = ArrivalPolicy.Decide(
+            Message(), [Replies()], mailboxAcknowledges: true, referenceIsProven: true);
+
+        decision.ReplyNow.Should().BeTrue();
+        decision.OpenNow.Should().BeFalse();
+        decision.AppendNow.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// <b>The guard that matters most.</b> This is the only decision here that puts words in
+    /// a customer's inbox in our name, saying whatever the From address asked us to say — so
+    /// it is the only one that insists the sender was actually verified.
+    ///
+    /// <para>Unknown is not a lesser failure than Failed for this purpose. It means nobody
+    /// told us whose verdicts to believe, so a forged From on our own domain reads exactly
+    /// like a real one — and the forger only needs a reference we already sent them.</para>
+    /// </summary>
+    [Theory]
+    [InlineData(SenderAuthenticity.Unknown)]
+    [InlineData(SenderAuthenticity.Failed)]
+    public void An_unverified_sender_cannot_make_us_write_to_the_customer(
+        SenderAuthenticity authenticity)
+    {
+        ArrivalDecision decision = ArrivalPolicy.Decide(
+            Message(authenticity: authenticity), [Replies()],
+            mailboxAcknowledges: true, referenceIsProven: true);
+
+        decision.ReplyNow.Should().BeFalse();
+        decision.Action.Should().Be(ArrivalAction.LeaveForAPerson);
+        decision.Reason.Should().Contain("customer");
+    }
+
+    /// <summary>
+    /// Unknown says what to configure rather than only that it refused. "Nothing happened"
+    /// with no reason is this subsystem's worst failure mode, and a feature that silently
+    /// does nothing on every installation that has not set one field is exactly that.
+    /// </summary>
+    [Fact]
+    public void An_unconfigured_mailbox_is_told_what_is_missing()
+    {
+        ArrivalPolicy.Decide(
+                Message(authenticity: SenderAuthenticity.Unknown), [Replies()],
+                mailboxAcknowledges: true, referenceIsProven: true)
+            .Reason.Should().Contain("trusted server name");
+    }
+
+    /// <summary>
+    /// A typed number is not a reference we minted, and sending a colleague's words to
+    /// whichever customer that number belongs to is not a mistake that can be taken back.
+    /// </summary>
+    [Fact]
+    public void A_reply_on_an_unproven_number_is_not_sent_anywhere()
+    {
+        ArrivalDecision decision = ArrivalPolicy.Decide(
+            Message(), [Replies()], mailboxAcknowledges: true, referenceIsProven: false);
+
+        decision.ReplyNow.Should().BeFalse();
+        decision.Reason.Should().Contain("not one we minted");
+    }
+
+    /// <summary>
+    /// <b>The loop, in its most expensive form.</b> A technician's own out-of-office, sent
+    /// back at the mail announcing their new ticket, carries a real reference from a real
+    /// colleague's address — and relaying it would send "I am on holiday until the 14th" to
+    /// a customer waiting on a P1.
+    /// </summary>
+    [Fact]
+    public void A_technicians_own_out_of_office_is_not_relayed()
+    {
+        ArrivalPolicy.Decide(
+                Message(machine: true), [Replies()],
+                mailboxAcknowledges: true, referenceIsProven: true)
+            .ReplyNow.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// Nothing above the line is nothing to send. The analyst does not raise this suggestion
+    /// without the text, and an empty mail to a customer in our name is not a thing to risk
+    /// on that staying true.
+    /// </summary>
+    [Fact]
+    public void An_empty_reply_is_not_sent()
+    {
+        MailSuggestion nothing = Replies();
+        nothing.DraftText = "   ";
+
+        ArrivalPolicy.Decide(
+                Message(), [nothing], mailboxAcknowledges: true, referenceIsProven: true)
+            .ReplyNow.Should().BeFalse();
+    }
+
+    /// <summary>The tenant's switch is the outer one for all three acts.</summary>
+    [Fact]
+    public void The_mailbox_switch_also_settles_whether_a_reply_is_relayed()
+    {
+        ArrivalPolicy.Decide(
+                Message(), [Replies()], mailboxAcknowledges: false, referenceIsProven: true)
+            .ReplyNow.Should().BeFalse();
     }
 }

@@ -1,9 +1,14 @@
-/* Global top navigation — Entit brand (navy bar, accent-blue actions). */
+/* Global top navigation — Entit brand (navy bar, accent-blue actions).
+
+   Colours come from the design tokens in app.css, except on the bar itself: the
+   navy and the whites on top of it are brand identity, so they stay literal and
+   do not invert with the theme. Everything hanging off the bar — the mega
+   panels, the dropdowns — is an ordinary popover surface and uses the tokens. */
 .entit-topnav {
     position: sticky;
     top: 0;
     z-index: 1030;
-    background-image: linear-gradient(90deg, #2C3A5A 0%, #232E47 100%);
+    background-image: linear-gradient(90deg, hsl(var(--entit-navy)) 0%, hsl(222 34% 21%) 100%);
     border-bottom: 1px solid rgba(255, 255, 255, 0.08);
     padding-top: 0.4rem;
     padding-bottom: 0.4rem;
@@ -32,20 +37,20 @@
     font-size: 0.95rem;
     padding-left: 0.85rem;
     padding-right: 0.85rem;
-    border-radius: 6px;
+    border-radius: calc(var(--radius) - 2px);
     transition: background-color 0.12s ease, color 0.12s ease;
 }
 
 .navbar-nav .nav-link:hover,
 .navbar-nav .nav-link:focus {
     color: #fff;
-    background-color: rgba(143, 166, 255, 0.14);
+    background-color: rgb(255 255 255 / .12);
 }
 
 .navbar-nav .nav-link.active,
 .navbar-nav .show > .nav-link {
     color: #fff;
-    background-color: rgba(143, 166, 255, 0.20);
+    background-color: rgb(255 255 255 / .18);
 }
 
 /* ── Mega menu panel ─────────────────────────────────────────────── */
@@ -55,10 +60,10 @@
     width: 100%;
     margin-top: 0.4rem;
     padding: 20px 24px 16px;
-    border: 1px solid var(--entit-border, #E6E9F1);
-    border-radius: 12px;
-    box-shadow: 0 16px 40px rgba(35, 46, 71, 0.18);
-    color: var(--entit-text, #232E47);
+    border: 1px solid hsl(var(--border));
+    border-radius: calc(var(--radius) + 4px);
+    box-shadow: 0 10px 15px -3px hsl(var(--foreground) / .12), 0 4px 6px -4px hsl(var(--foreground) / .1);
+    color: hsl(var(--popover-foreground));
 }
 
 .mega-grid {
@@ -78,10 +83,10 @@
     font-family: var(--entit-heading, "Space Grotesk"), system-ui, sans-serif;
     font-weight: 500;
     letter-spacing: -0.01em;
-    color: var(--entit-text, #232E47);
+    color: hsl(var(--popover-foreground));
     text-decoration: none;
     padding: 4px 8px;
-    border-radius: 6px;
+    border-radius: calc(var(--radius) - 2px);
     margin-bottom: 2px;
     white-space: nowrap;
     overflow: hidden;
@@ -89,12 +94,12 @@
 }
 
 .mega-title:hover {
-    color: var(--entit-accent, #3A63F0);
-    background-color: var(--entit-muted, #F4F6FA);
+    color: hsl(var(--primary));
+    background-color: hsl(var(--accent));
 }
 
 .mega-title i {
-    color: var(--entit-accent, #3A63F0);
+    color: hsl(var(--primary));
     margin-right: 4px;
 }
 
@@ -102,7 +107,7 @@
     font-size: 0.72rem;
     text-transform: uppercase;
     letter-spacing: 0.06em;
-    color: var(--entit-text-muted, #5B6478);
+    color: hsl(var(--muted-foreground));
     padding: 4px 8px 2px;
 }
 
@@ -111,9 +116,9 @@
     align-items: center;
     gap: 8px;
     padding: 5px 8px;
-    border-radius: 6px;
+    border-radius: calc(var(--radius) - 2px);
     font-size: 0.875rem;
-    color: var(--entit-text-muted, #5B6478);
+    color: hsl(var(--muted-foreground));
     text-decoration: none;
     white-space: nowrap;
     overflow: hidden;
@@ -121,17 +126,17 @@
 }
 
 .mega-link i {
-    color: var(--entit-accent-light, #8FA6FF);
+    color: hsl(var(--primary) / .55);
     flex: none;
 }
 
 .mega-link:hover {
-    color: var(--entit-accent, #3A63F0);
-    background-color: var(--entit-muted, #F4F6FA);
+    color: hsl(var(--primary));
+    background-color: hsl(var(--accent));
 }
 
 .mega-link:hover i {
-    color: var(--entit-accent, #3A63F0);
+    color: hsl(var(--primary));
 }
 
 .mega-foot {
@@ -140,30 +145,30 @@
     gap: 16px;
     margin-top: 14px;
     padding-top: 12px;
-    border-top: 1px solid var(--entit-border, #E6E9F1);
+    border-top: 1px solid hsl(var(--border));
 }
 
 .mega-foot a {
     font-size: 0.875rem;
     font-weight: 500;
-    color: var(--entit-accent, #3A63F0);
+    color: hsl(var(--primary));
     text-decoration: none;
 }
 
 .mega-foot a:hover {
-    color: var(--entit-accent-hover, #2E4EBE);
+    color: hsl(var(--primary-hover));
 }
 
 .mega-empty {
     padding: 6px 4px;
-    color: var(--entit-text-muted, #5B6478);
+    color: hsl(var(--muted-foreground));
     font-size: 0.9rem;
 }
 
 /* ── Plain dropdowns (Admin, user) ───────────────────────────────── */
 .dropdown-menu {
-    border-color: var(--entit-border, #E6E9F1);
-    box-shadow: 0 10px 30px rgba(35, 46, 71, 0.14);
+    border-color: hsl(var(--border));
+    box-shadow: 0 4px 6px -1px hsl(var(--foreground) / .1), 0 2px 4px -2px hsl(var(--foreground) / .1);
 }
 
 .dropdown-item {
@@ -172,13 +177,13 @@
 }
 
 .dropdown-item:active {
-    background-color: var(--entit-accent, #3A63F0);
+    background-color: hsl(var(--primary));
 }
 
 .dropdown-item:hover,
 .dropdown-item:focus {
-    background-color: var(--entit-muted, #F4F6FA);
-    color: var(--entit-accent, #3A63F0);
+    background-color: hsl(var(--accent));
+    color: hsl(var(--primary));
 }
 
 .dropdown-menu form {
@@ -206,3 +211,20 @@
         overflow-y: auto;
     }
 }
+
+/* ── Theme toggle ────────────────────────────────────────────────── */
+/* One button showing the theme you would switch TO, which is the thing people
+   reach for. Visibility is driven off data-bs-theme rather than component state,
+   so it is correct on a statically rendered page and never has to re-render. */
+.entit-theme-toggle {
+    border: 0;
+    background: none;
+    line-height: 1;
+}
+
+/* Which icon shows is in app.css, not here: data-bs-theme sits on <html>, and a
+   scoped stylesheet can only ever address this component's own elements. The
+   first attempt wrote `:global([data-bs-theme="dark"]) .theme-when-light` —
+   :global() is a CSS Modules feature, not a Blazor one, so it was emitted
+   verbatim, the browser read an invalid selector and dropped the rule, and the
+   button sat there offering to turn on the dark mode it was already in. */

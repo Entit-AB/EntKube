@@ -58,8 +58,10 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
         ContractService contracts = new(factory);
         TicketService tickets = new(factory, contracts, SilentTicketNotifier.For(factory));
         mail = new SupportMailService(
-            factory, new RuleBasedMailAnalyst(), new MailTriageRuleService(factory), tickets,
-            new TimeService(factory, contracts));
+            factory, new RuleBasedMailAnalyst(TestTicketReference.Instance),
+            new MailTriageRuleService(factory), tickets,
+            new TimeService(factory, contracts), TestTicketReference.Instance,
+            new SupportDutyService(factory));
 
         Services.AddSingleton<IDbContextFactory<ApplicationDbContext>>(factory);
         Services.AddSingleton(contracts);
@@ -214,7 +216,11 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
         Ticket ticket = db.Tickets.Single();
 
         inbox.Markup.Should().Contain("Answered as it arrived");
-        inbox.Markup.Should().Contain($"[#{ticket.Number}]");
+
+        // The plain number, not a reference. The reference a customer quotes is signed
+        // (TicketReference) and this is an operator reading their own queue, so showing the
+        // bracketed form here would only teach them a format that no longer means anything.
+        inbox.Markup.Should().Contain($"#{ticket.Number}");
 
         // And that the priority is still nobody's decision.
         inbox.Markup.Should().Contain("unconfirmed");

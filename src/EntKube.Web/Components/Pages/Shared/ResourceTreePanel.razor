@@ -883,7 +883,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
             {
                 @if (_containers.Count > 1)
                 {
-                    <div class="px-2 py-1 d-flex gap-2 align-items-center" style="background:#2a2a3e;border-bottom:1px solid #3a3a4e;">
+                    <div class="px-2 py-1 d-flex gap-2 align-items-center console-chrome" >
                         <span class="text-muted small">Container:</span>
                         @foreach (string c in _containers)
                         {
@@ -893,7 +893,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                         }
                     </div>
                 }
-                <div class="px-2 py-1 d-flex gap-2 align-items-center" style="background:#2a2a3e;border-bottom:1px solid #3a3a4e;">
+                <div class="px-2 py-1 d-flex gap-2 align-items-center console-chrome" >
                     <span class="text-muted small">Lines:</span>
                     @foreach (int tl in new[] { 100, 500, 1000 })
                     {
@@ -961,14 +961,14 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
                     }
                     <div class="d-flex align-items-center gap-2 flex-wrap">
                         <div class="d-flex align-items-center gap-1">
-                            <button class="btn btn-sm py-0 px-2" style="color:#ccc;border:1px solid #555;border-radius:4px;background:none;"
+                            <button class="btn btn-sm py-0 px-2 console-control"
                                     @onclick="() => _scaleValue = Math.Max(0, _scaleValue - 1)" disabled="@_opBusy">
                                 <i class="bi bi-dash"></i>
                             </button>
-                            <input type="number" class="form-control form-control-sm text-center"
-                                   style="width:60px;background:#2a2a3e;border-color:#555;color:white;"
+                            <input type="number" class="form-control form-control-sm text-center console-control"
+                                   style="width:60px"
                                    min="0" max="99" @bind="_scaleValue" />
-                            <button class="btn btn-sm py-0 px-2" style="color:#ccc;border:1px solid #555;border-radius:4px;background:none;"
+                            <button class="btn btn-sm py-0 px-2 console-control"
                                     @onclick="() => _scaleValue++" disabled="@_opBusy">
                                 <i class="bi bi-plus"></i>
                             </button>

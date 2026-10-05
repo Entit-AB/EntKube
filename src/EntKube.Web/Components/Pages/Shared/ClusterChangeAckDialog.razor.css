@@ -60,9 +60,13 @@
     white-space: pre;
 }
 
-.ccack-add { color: #1a7f37; display: block; background: rgba(46, 160, 67, 0.12); }
-.ccack-del { color: #cf222e; display: block; background: rgba(207, 34, 46, 0.12); }
-.ccack-hunk { color: #8250df; display: block; }
+/* Added and removed are the theme's own success/destructive: this is a diff of a
+   change about to be applied, and green-is-added is the same claim either way.
+   The hunk header's violet has no token because nothing else in the app means
+   "position in a file", so it is declared here. */
+.ccack-add { color: hsl(var(--success)); display: block; background: hsl(var(--success) / .12); }
+.ccack-del { color: hsl(var(--destructive)); display: block; background: hsl(var(--destructive) / .12); }
+.ccack-hunk { color: hsl(264 65% 59%); display: block; }
 .ccack-comment { color: var(--bs-secondary-color); display: block; }
 
 .ccack-actions {

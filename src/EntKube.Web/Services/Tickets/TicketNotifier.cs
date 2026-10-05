@@ -31,6 +31,7 @@ public class TicketNotifier(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     SmtpSettingsResolver smtp,
     OnCallService onCall,
+    TicketReference references,
     ILogger<TicketNotifier> logger)
 {
     /// <summary>
@@ -71,13 +72,19 @@ public class TicketNotifier(
 
             string from = await SenderAddressAsync(db, ticket, settings, ct);
 
+            string senderName = await SenderNameAsync(db, ticket, ct);
+
+            // Minted once and used in both receipts, so the customer and the engineer are
+            // quoting the same string at each other.
+            string reference = references.For(ticket.Number);
+
             Acknowledgement receipt =
-                TicketAcknowledgement.For(ticket, window, appName, responseDue);
+                TicketAcknowledgement.For(ticket, window, appName, responseDue, reference);
 
             // ── The reporter ──
             if (!string.IsNullOrWhiteSpace(ticket.RequestedByEmail))
             {
-                await SendAsync(settings, from, ticket.RequestedByEmail, receipt, ticket, ct);
+                await SendAsync(settings, from, ticket.RequestedByEmail, receipt, ticket, senderName, ct);
             }
             else
             {
@@ -91,7 +98,7 @@ public class TicketNotifier(
             {
                 if (!address.Equals(ticket.RequestedByEmail, StringComparison.OrdinalIgnoreCase))
                 {
-                    await SendAsync(settings, from, address, receipt, ticket, ct);
+                    await SendAsync(settings, from, address, receipt, ticket, senderName, ct);
                 }
             }
 
@@ -100,7 +107,9 @@ public class TicketNotifier(
 
             if (!string.IsNullOrWhiteSpace(shift?.AssigneeEmail))
             {
-                await SendAsync(settings, from, shift.AssigneeEmail, Internal(ticket, appName, responseDue), ticket, ct);
+                await SendAsync(
+                    settings, from, shift.AssigneeEmail,
+                    Internal(ticket, appName, responseDue, reference), ticket, senderName, ct);
             }
         }
         catch (Exception ex)
@@ -114,21 +123,164 @@ public class TicketNotifier(
     }
 
     /// <summary>
+    /// Tells a technician a ticket is theirs, in the same mail the on-call engineer gets —
+    /// so a reply to either reaches the customer and there is one wording to keep right.
+    ///
+    /// <para><b>Why assignment sends mail at all.</b> A queue nobody is looking at is the
+    /// state this whole subsystem exists to get out of. The assignment is the moment there
+    /// is a particular person to tell, and telling them by mail is also what gives them
+    /// something to reply to — which is the only way to answer the customer without opening
+    /// the application.</para>
+    ///
+    /// <para>Never throws. An assignment that could not be announced is still an
+    /// assignment, and losing it because a mail server was down would be worse than a
+    /// technician finding out from the queue.</para>
+    /// </summary>
+    public async Task AnnounceAssignmentAsync(
+        Ticket ticket, string toEmail, SupportWindow window, DateTime? responseDue,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+            SmtpSettings settings = await smtp.ResolveAsync(ticket.TenantId, ct);
+
+            if (!settings.IsConfigured)
+            {
+                logger.LogWarning(
+                    "Ticket #{Number} was assigned to {To} and they could not be told: there "
+                    + "is nowhere to send from ({Source}).",
+                    ticket.Number, toEmail, settings.Source);
+                return;
+            }
+
+            string? appName = ticket.AppId is Guid appId
+                ? await db.Apps.AsNoTracking()
+                    .Where(a => a.Id == appId).Select(a => a.Name).FirstOrDefaultAsync(ct)
+                : null;
+
+            // From the support address, not from a no-reply: the whole point is that the
+            // reply goes somewhere we read.
+            string from = await SenderAddressAsync(db, ticket, settings, ct);
+
+            await SendAsync(
+                settings, from, toEmail,
+                Internal(ticket, appName, responseDue, references.For(ticket.Number)),
+                ticket, await SenderNameAsync(db, ticket, ct), ct);
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex, "Could not tell {To} about ticket #{Number}; the assignment stands.",
+                toEmail, ticket.Number);
+        }
+    }
+
+    /// <summary>
+    /// Sends one of our own people's words on to the customer, from the support address.
+    ///
+    /// <para><b>Why it goes to the §14.1 contacts and not only to the reporter.</b> The
+    /// reporter is who asked, but §14.1 names the technical contact and their deputy as the
+    /// people kept informed, and the receipt already went to all three. Answering a narrower
+    /// set than we acknowledged would leave somebody holding a reference to a conversation
+    /// they are not party to.</para>
+    ///
+    /// <para>Returns who it actually reached, so the ticket's history can record that rather
+    /// than an intention. Never throws: see the class remarks.</para>
+    /// </summary>
+    public async Task<List<string>> ReplyToCustomerAsync(
+        Ticket ticket, string said, CancellationToken ct = default)
+    {
+        List<string> reached = [];
+
+        try
+        {
+            using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+            SmtpSettings settings = await smtp.ResolveAsync(ticket.TenantId, ct);
+
+            if (!settings.IsConfigured)
+            {
+                logger.LogWarning(
+                    "A reply on ticket #{Number} could not be sent: there is nowhere to send "
+                    + "from ({Source}).",
+                    ticket.Number, settings.Source);
+
+                return reached;
+            }
+
+            string from = await SenderAddressAsync(db, ticket, settings, ct);
+            string reference = references.For(ticket.Number);
+
+            // The reference in the subject and the ticket's own Message-Id on the message,
+            // so the customer's reply comes back onto this ticket by either route.
+            Acknowledgement reply = new($"{reference} {ticket.Title}", said);
+
+            List<string> to = [];
+
+            if (!string.IsNullOrWhiteSpace(ticket.RequestedByEmail))
+            {
+                to.Add(ticket.RequestedByEmail);
+            }
+
+            foreach (string address in await DesignatedContactsAsync(db, ticket, ct))
+            {
+                if (!to.Any(a => a.Equals(address, StringComparison.OrdinalIgnoreCase)))
+                {
+                    to.Add(address);
+                }
+            }
+
+            string senderName = await SenderNameAsync(db, ticket, ct);
+
+            foreach (string address in to)
+            {
+                if (await SendAsync(settings, from, address, reply, ticket, senderName, ct))
+                {
+                    reached.Add(address);
+                }
+            }
+
+            if (reached.Count == 0)
+            {
+                logger.LogWarning(
+                    "A reply on ticket #{Number} reached nobody: it has no reporter address "
+                    + "and no §14.1 contacts.",
+                    ticket.Number);
+            }
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(
+                ex, "Could not send a reply on ticket #{Number}.", ticket.Number);
+        }
+
+        return reached;
+    }
+
+    /// <summary>
     /// What the on-call engineer gets. Deliberately not the customer's receipt: they need
     /// the number, the clock and where to look, not an explanation of what a priority is.
     /// </summary>
-    private static Acknowledgement Internal(Ticket ticket, string? appName, DateTime? responseDue)
+    private static Acknowledgement Internal(
+        Ticket ticket, string? appName, DateTime? responseDue, string reference)
     {
         string due = responseDue is DateTime d
             ? BusinessCalendar.ToLocal(d).ToString("ddd d MMM HH:mm")
             : "no response target";
 
+        // The sentinel first, before anything the customer must not be sent. Everything
+        // below it — the deadline, the unconfirmed priority, the reporter's name, the
+        // description — is held back by SupportReplyBody when this mail is replied to.
         return new Acknowledgement(
-            $"{TicketAcknowledgement.Reference(ticket.Number)} {ticket.Priority} — {ticket.Title}",
+            $"{reference} {ticket.Priority} — {ticket.Title}",
             $"""
-             A new ticket is open.
+             {SupportReplyBody.Block}
+             A new ticket is open. Replying to this message answers the customer directly,
+             from the support address, and is recorded on the ticket.
 
-               Reference:   {TicketAcknowledgement.Reference(ticket.Number)}
+               Reference:   {reference}
                Priority:    {ticket.Priority} (as reported — confirm it in writing, §14.3)
                Application: {appName ?? "not identified"}
                Reported by: {ticket.RequestedBy ?? ticket.RequestedByEmail ?? "unknown"}
@@ -137,6 +289,22 @@ public class TicketNotifier(
              {ticket.Description}
              """);
     }
+
+    /// <summary>
+    /// Whose support desk this is, for the From line. The tenant's own name, because the
+    /// customer knows who they bought the service from.
+    ///
+    /// <para>One derivation rather than three. Assignment mail and a relayed reply go out
+    /// from the same address as the receipt, so a different name on them would read as a
+    /// different desk.</para>
+    /// </summary>
+    private static async Task<string> SenderNameAsync(
+        ApplicationDbContext db, Ticket ticket, CancellationToken ct) =>
+        await db.Tenants.AsNoTracking()
+            .Where(t => t.Id == ticket.TenantId).Select(t => t.Name).FirstOrDefaultAsync(ct)
+            is string tenant && !string.IsNullOrWhiteSpace(tenant)
+                ? $"{tenant} support"
+                : "Support";
 
     /// <summary>
     /// The addresses §14.1 says must hear about an incident: the customer's technical
@@ -184,14 +352,27 @@ public class TicketNotifier(
         return string.IsNullOrWhiteSpace(tenant) ? settings.From : tenant;
     }
 
-    private async Task SendAsync(
+    /// <summary>
+    /// Sends one message to one recipient. Returns whether it left, because a caller that
+    /// records who was told cannot record an intention — a reply logged on a ticket as
+    /// having reached the customer, when the relay refused it, is worse than no log at all.
+    /// </summary>
+    private async Task<bool> SendAsync(
         SmtpSettings settings, string from, string to, Acknowledgement message, Ticket ticket,
-        CancellationToken ct)
+        string senderName, CancellationToken ct)
     {
         try
         {
             MimeMessage mail = new();
-            mail.From.Add(MailboxAddress.Parse(from));
+
+            // With a name on it. A bare address in From is a small thing on its own and a
+            // consistent one across every signal a filter weighs — and the person reading
+            // this on a phone sees who it is from before they see anything else.
+            MailboxAddress sender = MailboxAddress.Parse(from);
+            mail.From.Add(string.IsNullOrWhiteSpace(sender.Name)
+                ? new MailboxAddress(senderName, sender.Address)
+                : sender);
+
             mail.To.Add(MailboxAddress.Parse(to));
             mail.Subject = message.Subject;
             mail.Body = new TextPart("plain") { Text = message.Body };
@@ -200,7 +381,13 @@ public class TicketNotifier(
             // the ticket even where the subject has been mangled by a client or a forward.
             // SupportMessageId is the only thing that writes this format and the only thing
             // that reads it.
-            mail.MessageId = SupportMessageId.For(ticket.Number);
+            //
+            // Built from the sending address, so its right-hand side is a domain that
+            // exists and matches the From. It used to be the bare word "entkube", which
+            // resolves to nothing and matches nothing — a cheap, old signal to a filter
+            // that a message came from something which does not send much mail, spent at
+            // the moment a receipt is judged by a mailbox that has never heard of us.
+            mail.MessageId = SupportMessageId.For(ticket.Number, from);
 
             // We say what we are, in the two places a mail system looks. RFC 3834's header
             // is what stops the recipient's out-of-office answering this, and Exchange reads
@@ -246,6 +433,8 @@ public class TicketNotifier(
 
             await client.SendAsync(mail, ct);
             await client.DisconnectAsync(true, ct);
+
+            return true;
         }
         catch (Exception ex)
         {
@@ -255,6 +444,8 @@ public class TicketNotifier(
             logger.LogWarning(
                 ex, "Could not tell {To} about ticket #{Number} via {Host} ({Source}).",
                 to, ticket.Number, settings.Host, settings.Source);
+
+            return false;
         }
     }
 }

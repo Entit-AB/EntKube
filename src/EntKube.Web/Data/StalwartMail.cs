@@ -112,6 +112,24 @@ public class StalwartComponentConfig
     public required string Hostname { get; set; }
 
     /// <summary>
+    /// The addresses this server's outbound mail actually leaves from, one per line — added to the
+    /// SPF record as <c>ip4:</c> / <c>ip6:</c> terms.
+    ///
+    /// <para><b>Why <c>v=spf1 mx -all</c> is not enough here.</b> That authorises whatever the MX
+    /// records resolve to, which is the address other servers <em>deliver to</em>. A mail server in
+    /// a cluster does not generally send from that address: the inbound one belongs to a load
+    /// balancer, and outbound connections leave translated to a node's or a gateway's address. The
+    /// receiver then evaluates SPF against an address no term matches, and <c>-all</c> turns that
+    /// into <c>spf=fail</c> — which, with a DMARC policy of reject, is the whole message.</para>
+    ///
+    /// <para>It cannot be derived: egress is decided by the cluster's network, not by anything
+    /// EntKube configures. The honest way to find it is to send one message out and read the address
+    /// in the receiving server's <c>Received</c> header, which is also the only address that
+    /// matters.</para>
+    /// </summary>
+    public string? SendingIpAddresses { get; set; }
+
+    /// <summary>
     /// Public hostname for the administrative web surfaces: the admin UI, JMAP and the OAuth
     /// endpoints. Published through the cluster's gateway (Istio or Traefik) as an ExternalRoute, so
     /// it is a normal HTTPS hostname and not one of the mail ports. Null leaves the HTTP listener
@@ -394,6 +412,24 @@ public class StalwartMailDomain
 
     /// <summary>Let Stalwart generate and rotate the DKIM keys for this domain itself.</summary>
     public bool AutomaticDkim { get; set; } = true;
+
+    /// <summary>
+    /// The DKIM records to publish for this domain, one per line, as
+    /// <c>selector value</c> or <c>selector: value</c>.
+    ///
+    /// <para><b>Why this is typed in rather than derived.</b> Stalwart generates the keys, so the
+    /// selector and the public half only exist once the domain has been applied and only the server
+    /// knows them. EntKube's DNS panel therefore used to omit DKIM entirely and tell the operator to
+    /// read it from the mail server's own admin UI — which is true, and is also how a domain ends up
+    /// signing every message with a key that was never published. The failure is silent and total:
+    /// the signature is there, the receiver looks the key up, finds nothing, and
+    /// <c>dkim=fail reason="key not found in DNS"</c> takes DMARC down with it.</para>
+    ///
+    /// <para>So the records are carried here: pasted once from the server, and from then on part of
+    /// the one list of DNS this domain needs — which is the list somebody hands to whoever runs the
+    /// zone. It is a record of what should be published, not proof that it is.</para>
+    /// </summary>
+    public string? DkimDnsRecords { get; set; }
 
     /// <summary>Enable plus-addressing (<c>user+tag@domain</c>).</summary>
     public bool SubAddressing { get; set; } = true;

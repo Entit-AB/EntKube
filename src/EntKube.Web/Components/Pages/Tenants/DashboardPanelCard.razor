@@ -41,8 +41,8 @@
                         int barPx = maxReq > 0 ? (int)Math.Round(b.Count * 72.0 / maxReq) : 0;
                         int errPx = b.Count > 0 ? (int)Math.Round(b.Errors * (double)barPx / b.Count) : 0;
                         <div style="flex:1 1 0;display:flex;flex-direction:column;justify-content:flex-end;height:80px">
-                            <div style="background:#f48771;height:@(errPx)px"></div>
-                            <div style="background:#4a90d9;height:@(barPx - errPx)px"></div>
+                            <div class="chart-bar-error" style="height:@(errPx)px"></div>
+                            <div class="chart-bar" style="height:@(barPx - errPx)px"></div>
                         </div>
                     }
                 </div>
@@ -60,8 +60,8 @@
                         int barPx = maxTotal > 0 ? (int)Math.Round(b.Total * 100.0 / maxTotal) : 0;
                         int errPx = b.Total > 0 ? (int)Math.Round(b.Errors * (double)barPx / b.Total) : 0;
                         <div style="flex:1 1 0;display:flex;flex-direction:column;justify-content:flex-end;height:110px">
-                            <div style="background:#f48771;height:@(errPx)px"></div>
-                            <div style="background:#4a90d9;height:@(barPx - errPx)px"></div>
+                            <div class="chart-bar-error" style="height:@(errPx)px"></div>
+                            <div class="chart-bar" style="height:@(barPx - errPx)px"></div>
                         </div>
                     }
                 </div>

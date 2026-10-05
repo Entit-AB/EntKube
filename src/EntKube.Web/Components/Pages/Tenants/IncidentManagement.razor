@@ -706,11 +706,11 @@ else if (!isLoading)
 
             <strong class="small d-block mb-2">Timeline</strong>
             <div style="position:relative;padding-left:28px">
-                <div style="position:absolute;left:9px;top:0;bottom:0;width:2px;background:#dee2e6"></div>
+                <div style="position:absolute;left:9px;top:0;bottom:0;width:2px;background:hsl(var(--border))"></div>
                 @foreach (TimelineEvent ev in BuildTimeline(incident))
                 {
                     <div style="position:relative;margin-bottom:14px">
-                        <span style="position:absolute;left:-19px;top:2px;width:20px;height:20px;border-radius:50%;background:white;border:2px solid #dee2e6;display:flex;align-items:center;justify-content:center;font-size:.72rem"
+                        <span style="position:absolute;left:-19px;top:2px;width:20px;height:20px;border-radius:50%;background:hsl(var(--background));border:2px solid hsl(var(--border));display:flex;align-items:center;justify-content:center;font-size:.72rem"
                               class="@ev.IconColor">
                             <i class="bi @ev.Icon"></i>
                         </span>
