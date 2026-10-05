@@ -1,6 +1,7 @@
 # Decomposing EntKube into a product
 
-**Status:** proposal, nothing built yet. Written 2026-10-05 against commit `02f970d`.
+**Status:** Phase 0 under way — the module map and its enforcing test are in.
+Written 2026-10-05 against `02f970d`; measurements in §4.0 taken against `7357fb2`.
 
 This document answers three asks that arrived together — "make it microservices",
 "give it a proper frontend with BFFs", "make it easy to run EntKube agents inside
@@ -100,6 +101,52 @@ two modules earn their own store, and both already essentially have one.
 ---
 
 ## 4. Target architecture
+
+### 4.0 What the boundaries actually cost (measured, not estimated)
+
+The module map below is now enforced by `ModuleBoundaryTests`, which walks the EF model and
+counts every foreign key crossing a module boundary. Measured 2026-10-05 against `7357fb2`:
+
+**164 cross-module foreign keys, across 39 module pairs.**
+
+That number splits in two, and the split is the whole story:
+
+| | count | what it is |
+|---|---|---|
+| **Universal** | **70** | `Tenant` (55) and `Customer` (15). Tenancy. Permanent — and barely a join, since a module needs the *id*, not the row. |
+| **Structural** | **94** | Everything else. This is the actual bill. |
+
+The structural weight concentrates on five tables:
+
+| target | edges | owner |
+|---|---|---|
+| `App` | 21 | Delivery |
+| `KubernetesCluster` | 19 | Fleet |
+| `ClusterComponent` | 9 | Catalog |
+| `Environment` | 7 | Delivery |
+| `StorageLink` | 5 | DataServices |
+
+**`App` and `KubernetesCluster` are the two hubs of this schema** — 40 of the 94 structural
+edges point at one or the other. Any decomposition has to treat them as shared reference
+data, which is another way of saying Delivery and Fleet are the two modules least able to
+leave.
+
+**This confirms §3 with numbers instead of instinct.** Splitting databases means converting
+94 real joins into network calls, against a schema where two tables account for nearly half
+of them.
+
+It also sharpens the order of extraction, and corrects an impression:
+
+- **Support looks like the most coupled module and is in fact the least.** It has 39 outbound
+  edges, more than any other — but 28 are `Tenant`/`Customer`, and *all eleven* of the rest
+  point at exactly one table, `App`. One foreign key to sever, repeated eleven times.
+- **Delivery→DataServices (15) is the genuinely hard one.** It is spread across
+  `CnpgDatabase`, `RegisteredPostgresDatabase`, `RedisCluster`, `MongoDatabase`,
+  `KafkaCluster`, `RabbitMQCluster` and `StorageLink` — the service bindings. Seven tables,
+  not one.
+
+So the sequence in §6 stands, and Support-before-DataServices is now justified rather than
+asserted.
 
 ### 4.1 Modules (logical — inside the monolith first)
 
@@ -262,10 +309,22 @@ Nothing moves. The monolith becomes modular.
    migration history.** EF Core handles this fine; it is a compile-time boundary, not a
    database change. The day a module needs its own store, it already has a context.
 2. One `IXxxApi` interface per module — the module's whole contract, in `EntKube.Contracts`.
-3. **An architecture test that fails the build when module A touches module B's
-   entities.** This is the load-bearing item. Without the test, the boundaries decay in
-   a fortnight. The repo already has a precedent in `BackupCoverageTests`, which walks
-   the EF model to stop the backup bundle drifting — the same technique applies here.
+3. **An architecture test that fails the build when the boundaries erode.** ☑ **Done.**
+   `ModuleMap` assigns all 165 entities to a module and `ModuleBoundaryTests` holds it to the
+   EF model in both directions — an unassigned table fails the build, and so does a mapping
+   for a table that no longer exists. It then counts every cross-module foreign key and
+   ratchets it: a pair may shrink or vanish, it may not grow, and a new pair may not appear
+   without someone raising the baseline deliberately. A second test fails when the baseline
+   carries *slack*, so a reduction has to be banked rather than left as headroom for the
+   coupling to creep back. Both directions were verified to actually fail by injecting a
+   violation. Same technique as `BackupCoverageTests`.
+
+   **What this does not yet catch** is a *service* in module A querying module B's table.
+   That deliberately waits for item 1: once each module has its own context, "module A cannot
+   query module B's table" becomes a compile error, which is strictly better than a test.
+   Enforcing it by reflection in the meantime would mean baselining 141 services and then
+   throwing the baseline away — so the data boundary is enforced now and the code boundary
+   follows the contexts.
 4. Split `Program.cs` into 12 `AddXxxModule()` extensions.
 
 *Exit criterion: the architecture test is green and `Program.cs` is under 200 lines.*
