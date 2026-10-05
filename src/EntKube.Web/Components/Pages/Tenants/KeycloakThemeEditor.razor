@@ -177,7 +177,7 @@ else
                                     <button class="te-preset-btn" title="@p.Name" @onclick="() => ApplyPreset(p)">
                                         <span style="background:@p.HeaderBg" class="te-preset-swatch"></span>
                                         <span style="background:@p.Primary" class="te-preset-swatch"></span>
-                                        <span style="background:@p.PageBg;border:1px solid #ccc" class="te-preset-swatch"></span>
+                                        <span style="background:@p.PageBg;border:1px solid hsl(var(--border))" class="te-preset-swatch"></span>
                                         <span class="te-preset-label">@p.Name</span>
                                     </button>
                                 }
@@ -712,7 +712,7 @@ else
                                         <span class="te-preset-swatch" title="Primary"
                                               style="background:@entry.Variables.PrimaryColor"></span>
                                         <span class="te-preset-swatch" title="Page background"
-                                              style="background:@entry.Variables.PageBackground;outline:1px solid #ccc;outline-offset:-1px"></span>
+                                              style="background:@entry.Variables.PageBackground;outline:1px solid hsl(var(--border));outline-offset:-1px"></span>
                                         <span class="small text-truncate flex-grow-1 text-muted">@RelativeTime(entry.SavedAt)</span>
                                         <button class="btn btn-link btn-sm p-0 small"
                                                 title="Load this version into the editor (save to make permanent)"

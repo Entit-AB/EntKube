@@ -4,11 +4,13 @@ using FluentAssertions;
 namespace EntKube.Web.Tests;
 
 /// <summary>
-/// The two ways the design-token layer breaks silently.
+/// The ways the design-token layer breaks silently.
 ///
-/// <para><b>Why this reads the stylesheets.</b> CSS is not compiled, so neither of the
-/// failures below is a build error, and neither is visible on the page you happen to be
-/// looking at. The token layer is only worth having if it holds everywhere.</para>
+/// <para><b>Why this reads the stylesheets.</b> CSS is not compiled, so none of the failures
+/// below is a build error, and none is visible on the page you happen to be looking at. Each
+/// one has already happened once: a token with no dark value, a triplet handed to a colour
+/// property, and a <c>:global()</c> selector Blazor emits verbatim for the browser to discard.
+/// The token layer is only worth having if it holds everywhere.</para>
 /// </summary>
 public class DesignTokenTests
 {
@@ -70,6 +72,19 @@ public class DesignTokenTests
         "--entit-navy",               // the signed-out hero's gradient, which must not invert
     ];
 
+    /// <summary>
+    /// Whole families that are theme-invariant by design: a log pane is a terminal in either
+    /// theme, and a chart series that changed colour with the theme would be a series you
+    /// could not talk about. Adding a family here is a decision, not a convenience — it opts
+    /// those tokens out of the dark-coverage check below.
+    /// </summary>
+    private static readonly string[] ThemeInvariantPrefixes = ["--console-", "--chart-"];
+
+    private static bool IsThemeInvariant(string token) =>
+        LightOnly.Contains(token)
+        || token == "--console"
+        || ThemeInvariantPrefixes.Any(p => token.StartsWith(p, StringComparison.Ordinal));
+
     [Fact]
     public void Every_colour_token_has_a_dark_counterpart()
     {
@@ -86,10 +101,12 @@ public class DesignTokenTests
             "matching almost no colour tokens means the HSL-triplet convention has changed "
             + "and this test has stopped checking anything");
 
-        string.Join(", ", colours.Except(dark.Keys).Except(LightOnly).Order()).Should().BeEmpty(
-            "a token with no dark value falls back to its light one, so dark mode would "
-            + "render a light surface under light text — and nothing says which omissions "
-            + "were meant (see LightOnly in this test, and the note beside the dark block)");
+        string.Join(", ", colours.Except(dark.Keys).Where(t => !IsThemeInvariant(t)).Order())
+            .Should().BeEmpty(
+                "a token with no dark value falls back to its light one, so dark mode would "
+                + "render a light surface under light text — and nothing says which omissions "
+                + "were meant (see LightOnly and ThemeInvariantPrefixes in this test, and the "
+                + "note beside the dark block in app.css)");
     }
 
     /// <summary>
@@ -142,5 +159,34 @@ public class DesignTokenTests
         string.Join("\n  ", offences).Should().BeEmpty(
             "a triplet used as a colour makes the browser drop the declaration silently, "
             + "and a var() fallback does not save it");
+    }
+
+    /// <summary>
+    /// <c>:global()</c> is a CSS Modules feature. Blazor's scoped CSS does not implement it and
+    /// emits the selector verbatim, so the browser reads something invalid and drops the whole
+    /// rule — no build error, no console warning, just styling that quietly does not apply. The
+    /// theme toggle shipped like this for one build: it kept offering to turn on the dark mode
+    /// it was already in.
+    ///
+    /// <para>When a rule needs an ancestor a scoped sheet cannot reach — <c>data-bs-theme</c>
+    /// lives on <c>&lt;html&gt;</c> — it belongs in <c>app.css</c> instead.</para>
+    /// </summary>
+    [Fact]
+    public void No_scoped_stylesheet_uses_the_css_modules_global_selector()
+    {
+        List<string> offences = [];
+
+        foreach (string sheet in Stylesheets().Skip(1))   // app.css is not scoped
+        {
+            string path = Path.IsPathRooted(sheet) ? sheet : Path.Combine(AppContext.BaseDirectory, sheet);
+            if (Strip(File.ReadAllText(path)).Contains(":global(", StringComparison.Ordinal))
+            {
+                offences.Add(Path.GetFileName(path));
+            }
+        }
+
+        string.Join(", ", offences).Should().BeEmpty(
+            "Blazor passes :global() straight through, so the browser drops the rule and the "
+            + "styling silently does not apply; a rule needing an ancestor belongs in app.css");
     }
 }
