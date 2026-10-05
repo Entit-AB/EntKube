@@ -330,7 +330,7 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        NotificationProviderConfig? graphConfig = await ProviderConfigService.GetAsync(NotificationProviderType.MsTeamsGraph);
+        NotificationProviderConfig? graphConfig = await ProviderConfigService.GetAsync(TenantId, NotificationProviderType.MsTeamsGraph);
         teamsGraphConfigured = graphConfig?.IsEnabled == true;
         await LoadChannels();
     }

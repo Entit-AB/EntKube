@@ -42,7 +42,7 @@ public readonly record struct SmtpSettings(
 }
 
 /// <summary>
-/// Reads the one SMTP configuration the installation has.
+/// Reads the SMTP configuration a given tenant sends through.
 ///
 /// <para><b>Why this is its own class.</b> The same fifteen lines of precedence were about to
 /// exist in two places, one for alert mail and one for support mail. Two copies of a credential
@@ -74,49 +74,43 @@ public class SmtpSettingsResolver(
     /// Where outbound mail for this tenant goes.
     /// </summary>
     /// <param name="tenantId">
-    /// Whose mail this is. Given, the tenant's own support mailbox is preferred; omitted — the
-    /// alert path, which has no customer-facing From address to align — the provider row and the
-    /// configuration answer as they always did.
+    /// Whose mail this is. Given, the tenant's own support mailbox is preferred, then that
+    /// tenant's SMTP provider row. Omitted, only the installation <c>Smtp:</c> configuration
+    /// is left — provider rows belong to a tenant, so there is nothing else to consult.
     /// </param>
     /// <param name="ct">Cancellation.</param>
     public async Task<SmtpSettings> ResolveAsync(
         Guid? tenantId, CancellationToken ct = default)
     {
-        if (tenantId is Guid tenant
-            && await FromSupportMailboxAsync(tenant, ct) is SmtpSettings derived)
+        if (tenantId is Guid tenant)
         {
-            return derived;
+            if (await FromSupportMailboxAsync(tenant, ct) is SmtpSettings derived)
+            {
+                return derived;
+            }
+
+            if (await FromProviderAsync(tenant, ct) is SmtpSettings configured)
+            {
+                return configured;
+            }
         }
 
         return await ResolveAsync(ct);
     }
 
-    public async Task<SmtpSettings> ResolveAsync(CancellationToken ct = default)
+    /// <summary>
+    /// The installation-wide answer, for a caller with no tenant to ask about.
+    ///
+    /// <para>Since provider rows became per-tenant there is nothing installation-wide left
+    /// in the database, so this is the <c>Smtp:</c> configuration section or nothing. A
+    /// caller that <em>has</em> a tenant must pass it — the overload above is the one that
+    /// can still find a configured server.</para>
+    /// </summary>
+    public Task<SmtpSettings> ResolveAsync(CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-
-        NotificationProviderConfig? provider = await db.NotificationProviderConfigs
-            .AsNoTracking()
-            .FirstOrDefaultAsync(c => c.ProviderType == NotificationProviderType.Smtp, ct);
-
-        if (provider?.IsEnabled == true)
-        {
-            using JsonDocument doc = JsonDocument.Parse(provider.ConfigurationJson);
-            JsonElement root = doc.RootElement;
-
-            return new SmtpSettings(
-                root.TryGetProperty("host", out JsonElement h) ? h.GetString() : null,
-                root.TryGetProperty("port", out JsonElement p) ? p.GetInt32() : 587,
-                root.TryGetProperty("from", out JsonElement f) ? f.GetString() ?? DefaultFrom : DefaultFrom,
-                root.TryGetProperty("username", out JsonElement u) ? u.GetString() : null,
-                root.TryGetProperty("password", out JsonElement pw) ? pw.GetString() : null,
-                !root.TryGetProperty("enableSsl", out JsonElement ssl) || ssl.GetBoolean(),
-                Source: "the SMTP notification provider");
-        }
-
         string? configured = configuration["Smtp:Host"];
 
-        return new SmtpSettings(
+        return Task.FromResult(new SmtpSettings(
             configured,
             configuration.GetValue("Smtp:Port", 587),
             configuration["Smtp:FromAddress"] ?? DefaultFrom,
@@ -125,7 +119,43 @@ public class SmtpSettingsResolver(
             true,
             Source: string.IsNullOrWhiteSpace(configured)
                 ? "nothing configured"
-                : "the Smtp: configuration section");
+                : "the Smtp: configuration section"));
+    }
+
+    /// <summary>
+    /// The tenant's own SMTP notification provider row — the relay an operator typed in on the
+    /// tenant's "Notification providers" tab.
+    ///
+    /// <para>Second in precedence, behind the tenant's own mail server: a server EntKube
+    /// deployed publishes SPF and DKIM for the address it sends as, and a typed-in relay
+    /// generally does not. Null when the tenant has configured none, or has switched it
+    /// off, so the caller falls through to the installation configuration.</para>
+    /// </summary>
+    private async Task<SmtpSettings?> FromProviderAsync(Guid tenantId, CancellationToken ct)
+    {
+        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        NotificationProviderConfig? provider = await db.NotificationProviderConfigs
+            .AsNoTracking()
+            .FirstOrDefaultAsync(
+                c => c.TenantId == tenantId && c.ProviderType == NotificationProviderType.Smtp, ct);
+
+        if (provider?.IsEnabled != true)
+        {
+            return null;
+        }
+
+        using JsonDocument doc = JsonDocument.Parse(provider.ConfigurationJson);
+        JsonElement root = doc.RootElement;
+
+        return new SmtpSettings(
+            root.TryGetProperty("host", out JsonElement h) ? h.GetString() : null,
+            root.TryGetProperty("port", out JsonElement p) ? p.GetInt32() : 587,
+            root.TryGetProperty("from", out JsonElement f) ? f.GetString() ?? DefaultFrom : DefaultFrom,
+            root.TryGetProperty("username", out JsonElement u) ? u.GetString() : null,
+            root.TryGetProperty("password", out JsonElement pw) ? pw.GetString() : null,
+            !root.TryGetProperty("enableSsl", out JsonElement ssl) || ssl.GetBoolean(),
+            Source: "the tenant's SMTP notification provider");
     }
 
     /// <summary>

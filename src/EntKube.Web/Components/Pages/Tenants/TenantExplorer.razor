@@ -514,7 +514,7 @@ else
           // every ticket opens unassigned.
           new("support-roster", "Support roster", "bi-person-check") ]),
         new("Alerting", "bi-bell",
-        [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
+        [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast"), new("notification-providers", "Notification providers", "bi-bell-fill") ]),
         new("Incidents", "bi-exclamation-octagon",
         [ new("on-call", "On-call", "bi-person-workspace"), new("incidents", "Incidents", "bi-exclamation-octagon"), new("subconsultants", "Subconsultants", "bi-people") ]),
         // Named for what it is rather than for the section it sits in: a mailbox, its
@@ -1031,6 +1031,7 @@ else
             case "alert-rules": builder.OpenComponent<TenantAlertRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "alert-routing": builder.OpenComponent<AlertRoutingTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "notifications": builder.OpenComponent<NotificationChannels>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "notification-providers": builder.OpenComponent<NotificationProviders>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "subconsultants": builder.OpenComponent<SubconsultantRegister>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "on-call": builder.OpenComponent<OnCallTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-roster": builder.OpenComponent<SupportRosterTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
