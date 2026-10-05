@@ -56,6 +56,7 @@ public static partial class ModuleMap
 
         // ---- Fleet -----------------------------------------------------------------
         [typeof(AgentRegistry)] = Module.Fleet,
+        [typeof(Api.FleetApi)] = Module.Fleet,
         [typeof(BlueprintFromClusterService)] = Module.Fleet,
         [typeof(BootstrapRunnerService)] = Module.Fleet,
         [typeof(ClusterBlueprintService)] = Module.Fleet,
@@ -79,6 +80,7 @@ public static partial class ModuleMap
         [typeof(WorkloadService)] = Module.Fleet,
 
         // ---- Catalog ---------------------------------------------------------------
+        [typeof(Api.CatalogApi)] = Module.Catalog,
         [typeof(CatalogComponentRegistrar)] = Module.Catalog,
         [typeof(CertificateDistributionReconcileService)] = Module.Catalog,
         [typeof(CertificateDistributionService)] = Module.Catalog,
@@ -123,6 +125,7 @@ public static partial class ModuleMap
         [typeof(StalwartService)] = Module.Mail,
 
         // ---- Delivery --------------------------------------------------------------
+        [typeof(Api.DeliveryApi)] = Module.Delivery,
         [typeof(AppGovernanceService)] = Module.Delivery,
         [typeof(AppOfAppsService)] = Module.Delivery,
         [typeof(CustomerGitService)] = Module.Delivery,

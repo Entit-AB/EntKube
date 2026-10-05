@@ -54,6 +54,9 @@ internal static class CatalogServices
         services.AddScoped<ComponentInstallOrchestrator>();
         services.AddScoped<CatalogComponentRegistrar>();
 
+        // The module's contract — what everyone else is allowed to know about it.
+        services.AddScoped<EntKube.Contracts.Catalog.ICatalogApi, EntKube.Web.Modules.Api.CatalogApi>();
+
         return services;
     }
 }

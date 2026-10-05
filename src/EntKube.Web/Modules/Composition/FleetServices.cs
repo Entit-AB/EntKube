@@ -58,6 +58,9 @@ internal static class FleetServices
         services.AddScoped<BlueprintFromClusterService>();
         services.AddHostedService<BootstrapRunnerService>();
 
+        // The module's contract — what everyone else is allowed to know about it.
+        services.AddScoped<EntKube.Contracts.Fleet.IFleetApi, EntKube.Web.Modules.Api.FleetApi>();
+
         return services;
     }
 }
