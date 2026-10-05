@@ -16,6 +16,7 @@ internal static class IdentityModel
 {
     internal static void Configure(ModelBuilder builder)
     {
+        builder.Entity<IdentityBinding>().ToTable("IdentityBindings");
         // Table names, stated rather than inferred.
         //
         // EF derives a table name from the DbSet property on whichever context declares it,

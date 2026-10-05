@@ -91,12 +91,19 @@ public class ModuleContractTests
 
     /// <summary>
     /// How many services each module still routes through <see cref="ApplicationDbContext"/>.
-    /// <b>59 of 176</b>, down from 117 when the first module contract was written.
+    /// <b>60 of 176</b>, down from 117 when the first module contract was written.
     ///
     /// <para>The 58 that came off needed no contract at all. Two kinds: services touching only
     /// their own module's tables, and services whose only reach outside it was a read of one of
     /// the four hubs — which every module context already exposes read-only. Neither is a
     /// behaviour change, because the model is identical whichever context you hold.</para>
+    ///
+    /// <para><b>It went up by one here, on purpose.</b> Reassigning the service bindings to
+    /// DataServices showed that <c>PortalServiceScopeService</c> and
+    /// <c>DeploymentImportService</c> read them — so they were never own-module-only, and the
+    /// earlier conversion of those two had been wrong on a boundary that was itself wrong.
+    /// They are back on the shared context until there is a bindings contract to read
+    /// instead. A ratchet that only ever moves one way would have hidden that.</para>
     ///
     /// <para><b>Secrets is at zero</b> — the first module entirely off the all-seeing context.
     /// What remains elsewhere is the harder half: services that genuinely read another module's
@@ -110,12 +117,12 @@ public class ModuleContractTests
     /// </summary>
     private static readonly Dictionary<Module, int> Baseline = new()
     {
-        [Module.DataServices] = 13,
+        [Module.DataServices] = 12,
         [Module.Telemetry] = 11,
         [Module.Connectivity] = 8,
         [Module.Support] = 7,
         [Module.Catalog] = 6,
-        [Module.Delivery] = 4,
+        [Module.Delivery] = 6,
         [Module.Identity] = 4,
         [Module.Fleet] = 2,
         [Module.Mail] = 2,

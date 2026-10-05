@@ -22,6 +22,7 @@ public static partial class ModuleMap
     public static readonly IReadOnlyDictionary<Type, Module> Entities = new Dictionary<Type, Module>
     {
         // ---- Identity -----------------------------------------------------------------
+        [typeof(IdentityBinding)] = Module.Identity,
         [typeof(ApplicationUser)] = Module.Identity,
         [typeof(Tenant)] = Module.Identity,
         [typeof(TenantMembership)] = Module.Identity,
@@ -63,6 +64,12 @@ public static partial class ModuleMap
         [typeof(CertificateDistribution)] = Module.Catalog,
 
         // ---- DataServices -------------------------------------------------------------
+        [typeof(StorageBinding)] = Module.DataServices,
+        [typeof(ElasticsearchBinding)] = Module.DataServices,
+        [typeof(KafkaBinding)] = Module.DataServices,
+        [typeof(MessagingBinding)] = Module.DataServices,
+        [typeof(CacheBinding)] = Module.DataServices,
+        [typeof(DatabaseBinding)] = Module.DataServices,
         [typeof(CnpgCluster)] = Module.DataServices,
         [typeof(CnpgDatabase)] = Module.DataServices,
         [typeof(CnpgBackup)] = Module.DataServices,
@@ -128,13 +135,6 @@ public static partial class ModuleMap
         [typeof(GitKnownHost)] = Module.Delivery,
         [typeof(CustomerGitCredential)] = Module.Delivery,
         [typeof(CustomerGitRepoPolicy)] = Module.Delivery,
-        [typeof(CacheBinding)] = Module.Delivery,
-        [typeof(DatabaseBinding)] = Module.Delivery,
-        [typeof(ElasticsearchBinding)] = Module.Delivery,
-        [typeof(KafkaBinding)] = Module.Delivery,
-        [typeof(MessagingBinding)] = Module.Delivery,
-        [typeof(StorageBinding)] = Module.Delivery,
-        [typeof(IdentityBinding)] = Module.Delivery,
 
         // ---- Connectivity -------------------------------------------------------------
         [typeof(AppRoute)] = Module.Connectivity,

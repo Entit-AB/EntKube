@@ -25,7 +25,7 @@ namespace EntKube.Web.Services;
 /// Mirrors the scan→preview→import shape of <see cref="ComponentScanService"/>.
 /// </summary>
 public class DeploymentImportService(
-    IDbContextFactory<DeliveryDbContext> dbFactory,
+    IDbContextFactory<ApplicationDbContext> dbFactory,
     DeploymentService deploymentService,
     VaultService vaultService,
     RegisteredPostgresService postgresService,
@@ -418,7 +418,7 @@ public class DeploymentImportService(
     private async Task<IReadOnlySet<string>> GetManagedSecretTargetsAsync(
         KubernetesCluster cluster, CancellationToken ct)
     {
-        using DeliveryDbContext db = dbFactory.CreateDbContext();
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         List<(string? Name, string? Namespace)> targets = await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == cluster.TenantId
@@ -777,7 +777,7 @@ public class DeploymentImportService(
         Guid appId;
         bool appCreated;
         string envName;
-        using (DeliveryDbContext db = dbFactory.CreateDbContext())
+        using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
             // When launched from within an app the target is fixed by id — reuse it and
             // never resolve by name. Otherwise resolve/create by (customer, name).
@@ -1120,7 +1120,7 @@ public class DeploymentImportService(
             RegisteredPostgresDatabase database = await postgresService.ImportDatabaseAsync(
                 tenantId, instanceId, pg.Database!, pg.Username!, pg.Password ?? "", ct);
 
-            using DeliveryDbContext db = dbFactory.CreateDbContext();
+            using ApplicationDbContext db = dbFactory.CreateDbContext();
             db.DatabaseBindings.Add(new DatabaseBinding
             {
                 Id = Guid.NewGuid(),

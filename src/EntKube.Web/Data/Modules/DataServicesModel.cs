@@ -16,6 +16,13 @@ internal static class DataServicesModel
 {
     internal static void Configure(ModelBuilder builder)
     {
+        builder.Entity<StorageBinding>().ToTable("StorageBindings");
+
+        builder.Entity<ElasticsearchBinding>().ToTable("ElasticsearchBindings");
+        builder.Entity<KafkaBinding>().ToTable("KafkaBindings");
+        builder.Entity<MessagingBinding>().ToTable("MessagingBindings");
+        builder.Entity<CacheBinding>().ToTable("CacheBindings");
+        builder.Entity<DatabaseBinding>().ToTable("DatabaseBindings");
         // Table names, stated rather than inferred.
         //
         // EF derives a table name from the DbSet property on whichever context declares it,
