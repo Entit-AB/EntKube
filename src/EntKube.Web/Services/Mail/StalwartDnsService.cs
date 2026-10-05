@@ -109,9 +109,10 @@ public class StalwartDnsService(
         if (token is null)
         {
             return [Failed(
-                "This mail server authenticates against OIDC, and no Keycloak realm is recorded for "
-                + "its issuer — so there is no service account to mint a token from. Set the realm on "
-                + "the mail server's authentication settings.")];
+                "There is no identity to ask as. This mail server authenticates against OIDC, so a "
+                + "token is the only credential it takes — which needs both a Keycloak realm "
+                + "recorded for its issuer and an administrator whose address is in one of this "
+                + "server's own domains. Set both on the mail server's settings.")];
         }
 
         string? pod = await ReadyPodAsync(ns, release, kubeconfig, ct);
@@ -123,17 +124,29 @@ public class StalwartDnsService(
 
         // One exec for the schema, because what holds the records is the part nobody here has
         // seen. What it finds decides the next call; what it cannot read is handed back.
-        string schema = await AskAsync(pod, ns, "/api/schema", token, kubeconfig, ct);
+        (int? status, string schema) = SplitStatus(
+            await AskAsync(pod, ns, "/api/schema", token, kubeconfig, ct));
 
-        // Whether the answer is the schema at all. Claiming "authenticated" because bytes came
-        // back was wrong: a 401 body is bytes too, and it reads as a schema with nothing in it.
-        if (Unauthorized(schema))
+        if (status is null)
         {
             return [new StalwartDnsFetch(
                 "", null,
-                "The mail server refused the token. The Keycloak service account exists, so what is "
-                + "missing is its standing with the server: the identity it maps to has to be the "
-                + "administrator, and that account has to carry the Admin role.",
+                "The request never reached the mail server, so there is no status to report. What "
+                + "the attempt produced is below.",
+                Truncate(schema))];
+        }
+
+        if (status is not 200)
+        {
+            return [new StalwartDnsFetch(
+                "", null,
+                status is 401 or 403
+                    ? $"The mail server refused the token ({status}). The Keycloak service account "
+                      + "exists and the request arrived, so what is missing is the token's standing "
+                      + "with it: the username it claims has to resolve to an account the directory "
+                      + "knows, that account has to carry the Admin role, and the audience and "
+                      + "scopes the server requires have to match."
+                    : $"The mail server answered {status} when asked for its schema.",
                 Truncate(schema))];
         }
 
@@ -158,10 +171,10 @@ public class StalwartDnsService(
 
         foreach (StalwartMailDomain domain in config.Domains.OrderBy(d => d.Name))
         {
-            string body = await AskAsync(
-                pod, ns, $"/api/object/{Uri.EscapeDataString(objectName)}", token, kubeconfig, ct);
+            (int? recordStatus, string body) = SplitStatus(await AskAsync(
+                pod, ns, $"/api/object/{Uri.EscapeDataString(objectName)}", token, kubeconfig, ct));
 
-            string? records = DkimLinesIn(body, domain.Name);
+            string? records = recordStatus is 200 ? DkimLinesIn(body, domain.Name) : null;
 
             if (records is not null)
             {
@@ -172,8 +185,11 @@ public class StalwartDnsService(
             {
                 results.Add(new StalwartDnsFetch(
                     domain.Name, null,
-                    $"Read {objectName} from the mail server but found no DKIM record for "
-                    + $"{domain.Name} in it.",
+                    recordStatus is 200
+                        ? $"Read {objectName} from the mail server but found no DKIM record for "
+                          + $"{domain.Name} in it."
+                        : $"Asking the mail server for {objectName} answered "
+                          + $"{recordStatus?.ToString() ?? "nothing"}.",
                     Truncate(body)));
             }
         }
@@ -268,11 +284,26 @@ public class StalwartDnsService(
             return null;
         }
 
+        // The administrator as the server knows it, which is a mailbox in a domain and not the
+        // bare word typed into the settings. Stalwart has no administrator concept of its own —
+        // only an account carrying the Admin role — and this directory is told a usernameDomain,
+        // so it resolves a claim with no domain by appending one. A token claiming "admin" is
+        // therefore resolved as "admin@somewhere" and matches no account, which is a 401 that
+        // looks exactly like a broken secret. The support mailbox has always claimed its full
+        // address for the same reason; this now does too.
+        List<StalwartMailDomain> domains = await db.StalwartMailDomains
+            .AsNoTracking().Where(d => d.ConfigId == config.Id).ToListAsync(ct);
+
+        if (StalwartService.ResolveAdminIdentity(config, domains) is not (_, _, string adminAddress))
+        {
+            return null;
+        }
+
         string clientId = $"entkube-mail-api-{componentId:N}"[..Math.Min(48, $"entkube-mail-api-{componentId:N}".Length)];
 
         (string id, string secret, string tokenEndpoint) =
             await keycloak.EnsureServiceAccountClientAsync(
-                tenantId, realmId, clientId, config.AdminUsername,
+                tenantId, realmId, clientId, adminAddress,
                 string.IsNullOrWhiteSpace(config.OidcRequireAudience)
                     ? "stalwart"
                     : config.OidcRequireAudience!.Trim(),
@@ -347,7 +378,39 @@ public class StalwartDnsService(
     public static string Query(string path) =>
         "read -r TOK; "
         + $"curl -sS --max-time 20 -H \"Authorization: Bearer $TOK\" "
+        // The server is configured to read the client's address from this header, and warns on
+        // every request arriving without one. Saying plainly that this came from loopback keeps
+        // that warning out of the log, where it otherwise appears once per fetch and looks, to
+        // whoever debugs next, like part of the problem.
+        + "-H \"X-Forwarded-For: 127.0.0.1\" "
+        // The status, written after the body. Without it every outcome looks alike from here: a
+        // refusal is JSON, an answer is JSON, and a body that is neither cannot be told from a
+        // request that never arrived. The server's log is no fallback — a rejected token and an
+        // accepted one leave identical traces there, which is what made this take as long as it did.
+        + $"-w \"\\n{StatusMarker}%{{http_code}}\" "
         + $"\"http://127.0.0.1:{StalwartPlanBuilder.HttpPort}{path}\"";
+
+    /// <summary>What <see cref="Query"/> writes before the status, so the two can be told apart.</summary>
+    public const string StatusMarker = "<<<entkube-http-status:";
+
+    /// <summary>Splits what curl wrote into the status the server gave and the body it sent.</summary>
+    /// <returns>
+    /// A null status means the request never got far enough to have one, which is a different
+    /// answer from any status and the one that used to be invisible.
+    /// </returns>
+    public static (int? Status, string Body) SplitStatus(string raw)
+    {
+        int marker = raw.LastIndexOf(StatusMarker, StringComparison.Ordinal);
+
+        if (marker < 0)
+        {
+            return (null, raw);
+        }
+
+        string tail = raw[(marker + StatusMarker.Length)..].Trim();
+
+        return (int.TryParse(tail, out int status) ? status : null, raw[..marker].TrimEnd());
+    }
 
     /// <summary>
     /// The name of the schema object that holds DKIM keys, or null when nothing looks like one.
@@ -405,6 +468,282 @@ public class StalwartDnsService(
                     }
 
                     break;
+            }
+        }
+    }
+
+    /// <summary>
+    /// The object holding DKIM keys, found in <c>describe</c>'s human-readable listing.
+    ///
+    /// <para>The CLI prints object names as text rather than JSON, so the structured reader finds
+    /// nothing in it. Same rule either way: the server names its own objects, and whichever says
+    /// "dkim" is the one to ask for. Guessing that name from documentation is what went wrong
+    /// twice, and a wrong name is indistinguishable from a server that has no such object.</para>
+    /// </summary>
+    public static string? DkimObjectInText(string described)
+    {
+        // What the server itself lists, asked live:
+        //   DkimReportSettings   Configures DKIM authentication failure report generation. [singleton]
+        //   DkimSignature        Defines a DKIM signature used to sign outgoing email messages.
+        // The first rule written here took the first name containing "dkim" and got the report
+        // settings, because alphabetical order put them first — a singleton about failure reports,
+        // with no key in it. The name alone is not enough to tell one from the other.
+        List<(string Name, string Description)> candidates = [];
+
+        foreach (string line in (described ?? "")
+                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int gap = line.IndexOf("  ", StringComparison.Ordinal);
+            string name = (gap > 0 ? line[..gap] : line).Trim();
+            string description = gap > 0 ? line[gap..].Trim() : "";
+
+            // Bare names only: snapshot rejects the view and variant slash forms, and describe
+            // accepts a name with or without the x: prefix.
+            int slash = name.IndexOf('/');
+            name = slash > 0 ? name[..slash] : name;
+            name = name.StartsWith("x:", StringComparison.OrdinalIgnoreCase) ? name[2..] : name;
+
+            if (name.Length > 0
+                && name.Contains("dkim", StringComparison.OrdinalIgnoreCase)
+                && name.All(c => char.IsLetterOrDigit(c) || c == '_'))
+            {
+                candidates.Add((name, description));
+            }
+        }
+
+        // The one that holds keys describes itself as signing, and is not a settings singleton.
+        // Ranked rather than filtered, so a server that words it differently still yields
+        // something rather than nothing.
+        return candidates
+            .OrderBy(c => c.Description.Contains("[singleton]", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+            .ThenBy(c => c.Name.Contains("Report", StringComparison.OrdinalIgnoreCase)
+                         || c.Name.Contains("Settings", StringComparison.OrdinalIgnoreCase) ? 1 : 0)
+            .ThenBy(c => c.Description.Contains("sign", StringComparison.OrdinalIgnoreCase) ? 0 : 1)
+            .Select(c => c.Name)
+            .FirstOrDefault();
+    }
+
+    /// <summary>
+    /// The objects worth snapshotting for a domain's DNS, beside whatever holds the keys.
+    ///
+    /// <para><c>Domain</c> is included because the server describes it as holding "its DNS, DKIM,
+    /// and TLS certificate settings" — so if the published form of a key lives anywhere but the
+    /// signature object, it is there. Snapshot takes several types at once, so asking for both
+    /// costs one run rather than two.</para>
+    /// </summary>
+    public static readonly string[] AlsoSnapshot = ["Domain"];
+
+    /// <summary>
+    /// Every object type the server lists, from <c>describe</c>'s own output.
+    ///
+    /// <para>One name per line, followed by its description. Read so that a snapshot can wave
+    /// through every reference it is not asking for, rather than discovering them one failed
+    /// apply at a time — this server has 117 types and the CLI names only the first one missing.</para>
+    /// </summary>
+    public static IReadOnlyList<string> ObjectNamesInText(string described)
+    {
+        List<string> names = [];
+
+        foreach (string line in (described ?? "")
+                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+        {
+            int gap = line.IndexOf("  ", StringComparison.Ordinal);
+            string name = (gap > 0 ? line[..gap] : line).Trim();
+
+            int slash = name.IndexOf('/');
+            name = slash > 0 ? name[..slash] : name;
+            name = name.StartsWith("x:", StringComparison.OrdinalIgnoreCase) ? name[2..] : name;
+
+            if (name.Length > 0 && char.IsLetter(name[0])
+                && name.All(c => char.IsLetterOrDigit(c) || c == '_'))
+            {
+                names.Add(name);
+            }
+        }
+
+        return [.. names.Distinct(StringComparer.Ordinal)];
+    }
+
+    /// <summary>
+    /// What to wave through when the server's own listing could not be read — the references seen
+    /// to be needed, rather than nothing at all.
+    /// </summary>
+    ///
+    /// <para>The CLI refuses to export a plan with a dangling reference — "DkimSignature
+    /// references Tenant but Tenant is not in the snapshot selection" — and offers two ways out:
+    /// add the type, or allow it to be unresolved. Allowing it <em>drops that reference from the
+    /// exported plan</em>, which is harmless for a tenant, a certificate or an ACME provider, and
+    /// would be fatal for <c>Domain</c>: the domain is how a key is matched to the zone it has to
+    /// be published in. So Domain is in the selection and never in this list.</para>
+    ///
+    /// <para>Named ahead of being asked for, because each missing type otherwise costs a whole
+    /// apply to discover. Every name here is one the server lists among its own object types.</para>
+    /// </summary>
+    public static readonly string[] SnapshotUnresolved =
+        ["Tenant", "Certificate", "AcmeProvider", "DnsServer"];
+
+    /// <summary>
+    /// The DNS value for a public key the server handed over, as it must be published.
+    ///
+    /// <para>The server returns PEM. A DKIM record carries the key as one unbroken base64 string
+    /// in <c>p=</c>, so the armour and the line breaks come off — and what remains differs by
+    /// algorithm. For RSA, <c>p=</c> is the SubjectPublicKeyInfo, which is exactly the PEM body.
+    /// For Ed25519, RFC 8463 says <c>p=</c> is the bare 32-byte key, not the structure around it,
+    /// so the DER prefix is dropped. Publishing an Ed25519 key in RSA's form produces a record
+    /// that looks right and verifies nothing.</para>
+    /// </summary>
+    /// <param name="pem">The PEM the server returned.</param>
+    /// <param name="algorithm">
+    /// The signature's variant — <c>Dkim1Ed25519Sha256</c> and the like. Null is treated as RSA,
+    /// which is what a record with no <c>k=</c> means to every verifier that defaults.
+    /// </param>
+    public static string? DnsValueForPublicKey(string? pem, string? algorithm)
+    {
+        if (string.IsNullOrWhiteSpace(pem))
+        {
+            return null;
+        }
+
+        string body = string.Concat(
+            pem.Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                .Where(l => !l.StartsWith("-----", StringComparison.Ordinal)));
+
+        if (body.Length == 0)
+        {
+            return null;
+        }
+
+        bool ed25519 = algorithm?.Contains("ed25519", StringComparison.OrdinalIgnoreCase) == true;
+
+        if (!ed25519)
+        {
+            return $"v=DKIM1; k=rsa; p={body}";
+        }
+
+        try
+        {
+            byte[] der = Convert.FromBase64String(body);
+
+            // The last 32 bytes of the SubjectPublicKeyInfo are the key itself; everything before
+            // them says what kind of key it is, which the record states as k=ed25519 instead.
+            return der.Length < 32
+                ? null
+                : $"v=DKIM1; k=ed25519; p={Convert.ToBase64String(der[^32..])}";
+        }
+        catch (FormatException)
+        {
+            return null;
+        }
+    }
+
+    /// <summary>
+    /// The published records for a domain, from what <c>query</c> returned.
+    ///
+    /// <para><b>Why query and not snapshot.</b> The public key is a server-set field, and a
+    /// snapshot exports only what can be applied again — so it leaves out the one field that
+    /// matters, and says so in a warning about secrets that reads like the whole story. Asked
+    /// for directly, the server hands it over: "PEM-encoded public key used to verify
+    /// signatures, derived from the private key".</para>
+    /// </summary>
+    /// <param name="signatures">What the signature query printed.</param>
+    /// <param name="domainsById">Domain names by their identifier, from the domain query.</param>
+    /// <param name="domain">The domain being asked about.</param>
+    public static string? DkimLinesInQuery(
+        string signatures, IReadOnlyDictionary<string, string> domainsById, string domain)
+    {
+        List<string> lines = [];
+
+        foreach (JsonElement record in JsonObjectsIn(signatures))
+        {
+            string? selector = Text(record, "selector");
+            string? pem = Text(record, "publicKey");
+            string? owner = Text(record, "domainId") is string id
+                && domainsById.TryGetValue(id.TrimStart('#'), out string? name) ? name : null;
+
+            if (selector is null
+                || owner is null
+                || !owner.Trim().TrimEnd('.').Equals(
+                    domain.Trim().TrimEnd('.'), StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            if (DnsValueForPublicKey(pem, Text(record, "@type") ?? Text(record, "type")) is string value)
+            {
+                lines.Add($"{selector} {value}");
+            }
+        }
+
+        return lines.Count == 0 ? null : string.Join('\n', lines.Distinct());
+    }
+
+    /// <summary>Domain names by identifier, from what the domain query printed.</summary>
+    public static IReadOnlyDictionary<string, string> DomainsInQuery(string domains)
+    {
+        Dictionary<string, string> byId = [];
+
+        foreach (JsonElement record in JsonObjectsIn(domains))
+        {
+            if (Text(record, "name") is string name
+                && (Text(record, "id") ?? Text(record, "_id")) is string id)
+            {
+                byId[id.TrimStart('#')] = name;
+            }
+        }
+
+        return byId;
+    }
+
+    /// <summary>
+    /// Every object in what the CLI printed, whether it came as one array, one object per line,
+    /// or an array wrapped in something — read leniently for the reason everything here is.
+    /// </summary>
+    private static IEnumerable<JsonElement> JsonObjectsIn(string output)
+    {
+        string whole = (output ?? "").Trim();
+
+        // One document when the whole thing is one — a query prints an array — and line by line
+        // when it is not, because a plan prints an object per line. Not both: an array read twice
+        // reports every record twice.
+        if (TryParse(whole) is JsonElement document)
+        {
+            foreach (JsonElement element in Candidates(document))
+            {
+                yield return element;
+            }
+
+            yield break;
+        }
+
+        foreach (string line in whole
+                 .Split(['\n', '\r'], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
+                 .Where(l => l.StartsWith('{') || l.StartsWith('[')))
+        {
+            if (TryParse(line) is JsonElement parsed)
+            {
+                foreach (JsonElement element in Candidates(parsed))
+                {
+                    yield return element;
+                }
+            }
+        }
+
+        static JsonElement? TryParse(string text)
+        {
+            if (text.Length == 0 || (!text.StartsWith('{') && !text.StartsWith('[')))
+            {
+                return null;
+            }
+
+            try
+            {
+                using JsonDocument doc = JsonDocument.Parse(text);
+                return doc.RootElement.Clone();
+            }
+            catch (JsonException)
+            {
+                // Progress chatter, not data.
+                return null;
             }
         }
     }

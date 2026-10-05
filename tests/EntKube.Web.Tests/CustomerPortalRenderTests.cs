@@ -35,7 +35,23 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
             new DateTime(year, month, day, hour, 0, 0, DateTimeKind.Unspecified),
             BusinessCalendar.SwedishTime);
 
-    private static DateTime Tue(int hour) => Swedish(2026, 9, 22, hour);
+    /// <summary>
+    /// A working Tuesday in the month the panel is showing.
+    ///
+    /// <para><b>Not a fixed date.</b> The hours panel opens on the current month, so a booking
+    /// pinned to one particular September stopped appearing the moment the calendar left it —
+    /// and these tests began failing overnight, with nothing changed. The second Tuesday is
+    /// always inside the month and always a working day, which is what the §9 clocks need.</para>
+    /// </summary>
+    private static DateTime Tue(int hour)
+    {
+        DateTime today = BusinessCalendar.ToLocal(DateTime.UtcNow);
+        DateTime first = new(today.Year, today.Month, 1);
+        int toTuesday = ((int)DayOfWeek.Tuesday - (int)first.DayOfWeek + 7) % 7;
+        DateTime second = first.AddDays(toTuesday + 7);
+
+        return Swedish(second.Year, second.Month, second.Day, hour);
+    }
 
     /// <summary>
     /// An hour booked inside the month the hours panel is showing.
