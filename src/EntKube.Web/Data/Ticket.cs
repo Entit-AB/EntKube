@@ -197,7 +197,23 @@ public class Ticket
 
     public DateTime? ClosedAt { get; set; }
 
+    /// <summary>
+    /// Who is holding it, for display and for the history. Still a free string, because an
+    /// assignment is not always an account: a subconsultant covering a shift, or a name
+    /// written down before anybody had a login.
+    /// </summary>
     public string? Assignee { get; set; }
+
+    /// <summary>
+    /// The account behind <see cref="Assignee"/>, when there is one.
+    ///
+    /// <para>Added because assigning a ticket now writes to the person: the name is for
+    /// people to read and this is the only thing that can be turned into an address. It is
+    /// also what the round-robin counts from — the rotation is "the next active technician
+    /// after whoever holds the most recently assigned ticket", so the cursor is the tickets
+    /// themselves and there is no counter anywhere to drift out of step with them.</para>
+    /// </summary>
+    public string? AssigneeUserId { get; set; }
 
     /// <summary>The person at the customer who raised it — who §14.1 says we keep informed.</summary>
     public string? RequestedBy { get; set; }

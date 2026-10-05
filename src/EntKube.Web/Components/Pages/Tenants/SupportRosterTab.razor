@@ -1,0 +1,242 @@
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Support
+@inject SupportDutyService Duty
+@inject CurrentActor ActorService
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   Who is taking support work. Two separate questions, deliberately
+   rendered as two: whether somebody is on the rota at all, and whether
+   they are taking work this week. Collapsing them would make "away
+   until March" and "has nothing to do with support" the same state,
+   and the second is the one that should never receive a P1 at 03:00.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<LoadingPanel Loading="@loading" Error="@error">
+@if (!loading)
+{
+    <div class="d-flex justify-content-between align-items-start mb-3">
+        <div>
+            <h6 class="mb-0">Support roster</h6>
+            <div class="text-muted small">
+                A new ticket goes to whoever's turn it is, by rotation, among those taking
+                work — and lands in their inbox, where replying answers the customer.
+            </div>
+        </div>
+    </div>
+
+    @if (active.Count == 0)
+    {
+        @* The state in which the whole feature does nothing, said out loud. A tenant with
+           an empty rota is not broken, but it should know that its tickets will arrive
+           unassigned rather than wonder why nobody was told. *@
+        <div class="alert alert-warning py-2 small">
+            <i class="bi bi-person-slash me-1"></i>
+            <strong>Nobody is taking support work.</strong>
+            New tickets will open unassigned and wait in the queue, exactly as they did
+            before the rota existed. Nothing is broken — but nobody is being told either.
+        </div>
+    }
+    else
+    {
+        <div class="alert alert-light border py-2 small">
+            <i class="bi bi-arrow-repeat me-1"></i>
+            Next in the rotation:
+            <strong>@(next?.Name ?? "nobody")</strong>
+            @if (active.Count > 1)
+            {
+                <span class="text-muted"> — @active.Count taking work</span>
+            }
+        </div>
+    }
+
+    <table class="table table-sm align-middle">
+        <thead>
+            <tr>
+                <th>Person</th>
+                <th>Where tickets go</th>
+                <th>Taking work</th>
+                <th class="text-end">On the rota</th>
+            </tr>
+        </thead>
+        <tbody>
+            @foreach (SupportTechnician technician in roster)
+            {
+                <tr class="@(technician.Enrolled ? "" : "opacity-50")">
+                    <td>
+                        @technician.Name
+                        @if (technician.Name == actor)
+                        {
+                            <span class="badge bg-light text-dark border ms-1">you</span>
+                        }
+                    </td>
+                    <td class="small">
+                        @if (string.IsNullOrWhiteSpace(technician.Email))
+                        {
+                            @* Enrolled with no address is the one combination that looks fine
+                               and cannot work: the rotation skips them, because a ticket
+                               assigned to a mailbox that does not exist reads as handled. *@
+                            <span class="text-danger">
+                                <i class="bi bi-exclamation-triangle me-1"></i>no address —
+                                cannot be given a ticket
+                            </span>
+                        }
+                        else
+                        {
+                            <span class="text-muted">@technician.Email</span>
+                        }
+                    </td>
+                    <td>
+                        @if (!technician.Enrolled)
+                        {
+                            <span class="text-muted small">—</span>
+                        }
+                        else if (technician.IsActive)
+                        {
+                            <AsyncButton CssClass="btn-sm btn-outline-secondary"
+                                         OnClick="@(() => StandDownAsync(technician))">
+                                <i class="bi bi-pause me-1"></i>Stand down
+                            </AsyncButton>
+                        }
+                        else
+                        {
+                            <div>
+                                <AsyncButton CssClass="btn-sm btn-outline-success"
+                                             OnClick="@(() => SetAsync(technician, true))">
+                                    <i class="bi bi-play me-1"></i>Taking work
+                                </AsyncButton>
+                                @if (!string.IsNullOrWhiteSpace(technician.Note))
+                                {
+                                    <div class="text-muted small mt-1">@technician.Note</div>
+                                }
+                            </div>
+                        }
+                    </td>
+                    <td class="text-end">
+                        @if (technician.Enrolled)
+                        {
+                            <AsyncButton CssClass="btn-sm btn-outline-danger"
+                                         OnClick="@(() => RemoveAsync(technician))">
+                                Remove
+                            </AsyncButton>
+                        }
+                        else
+                        {
+                            <AsyncButton CssClass="btn-sm btn-outline-primary"
+                                         OnClick="@(() => SetAsync(technician, true))">
+                                Add
+                            </AsyncButton>
+                        }
+                    </td>
+                </tr>
+            }
+        </tbody>
+    </table>
+
+    @if (standingDown is not null)
+    {
+        <div class="border rounded p-3">
+            <label class="form-label small">
+                Why @standingDown.Value.Name is not taking work — shown to colleagues on this
+                page, and to nobody outside.
+            </label>
+            <div class="d-flex gap-2">
+                <input class="form-control form-control-sm" @bind="standDownNote"
+                       placeholder="Parental leave until March" />
+                <AsyncButton CssClass="btn-sm btn-primary" OnClick="ConfirmStandDownAsync">
+                    Stand down
+                </AsyncButton>
+                <button class="btn btn-sm btn-outline-secondary"
+                        @onclick="@(() => standingDown = null)">Cancel</button>
+            </div>
+        </div>
+    }
+}
+</LoadingPanel>
+
+@code {
+    [Parameter] public Guid TenantId { get; set; }
+
+    private bool loading = true;
+    private string? error;
+    private string actor = "";
+
+    private List<SupportTechnician> roster = [];
+    private List<SupportTechnician> active = [];
+    private SupportTechnician? next;
+
+    private SupportTechnician? standingDown;
+    private string standDownNote = "";
+
+    protected override async Task OnParametersSetAsync()
+    {
+        actor = await ActorService.NameAsync();
+        await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        loading = true;
+        error = null;
+
+        try
+        {
+            roster = await Duty.GetRosterAsync(TenantId);
+            active = await Duty.GetActiveAsync(TenantId);
+            next = await Duty.NextAsync(TenantId);
+        }
+        catch (Exception ex)
+        {
+            error = ex.Message;
+        }
+        finally
+        {
+            loading = false;
+        }
+    }
+
+    private async Task SetAsync(SupportTechnician technician, bool isActive)
+    {
+        await Duty.SetDutyAsync(TenantId, technician.UserId, isActive, null, actor);
+        Toasts.Success(
+            isActive
+                ? $"{technician.Name} is taking work."
+                : $"{technician.Name} has stood down.");
+
+        await LoadAsync();
+    }
+
+    /// <summary>
+    /// Asks for a reason first. Standing down with no note leaves a colleague looking at a
+    /// name that is simply missing from the rotation, which is the thing this page exists
+    /// to stop.
+    /// </summary>
+    private Task StandDownAsync(SupportTechnician technician)
+    {
+        standingDown = technician;
+        standDownNote = technician.Note ?? "";
+        return Task.CompletedTask;
+    }
+
+    private async Task ConfirmStandDownAsync()
+    {
+        if (standingDown is not { } technician)
+        {
+            return;
+        }
+
+        await Duty.SetDutyAsync(TenantId, technician.UserId, false, standDownNote, actor);
+        standingDown = null;
+        Toasts.Info($"{technician.Name} has stood down.");
+
+        await LoadAsync();
+    }
+
+    private async Task RemoveAsync(SupportTechnician technician)
+    {
+        await Duty.RemoveAsync(TenantId, technician.UserId);
+        Toasts.Info($"{technician.Name} is off the roster.");
+
+        await LoadAsync();
+    }
+}

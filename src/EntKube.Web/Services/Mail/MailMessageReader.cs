@@ -52,6 +52,8 @@ public static class MailMessageReader
             ReceivedAt = receivedAt,
             SenderAuthenticity = SenderAuthentication.Of(message, trustedServer),
             IsMachineGenerated = LooksAutomated(message),
+            IsDeliveryReport = DeliveryReport.Is(message),
+            FailedRecipient = DeliveryReport.FailedRecipient(message),
             State = MailTriageState.Received,
         };
     }
@@ -84,6 +86,14 @@ public static class MailMessageReader
         // "auto-replied", "auto-generated" and whatever a vendor invented, so the test is
         // against the one value that means a person sent it rather than for a list of the
         // ones that mean they did not.
+        // The one answer here that cannot be wrong: a delivery report says what it is in
+        // its own content type, because the format requires it. Read first, since
+        // everything below is a signal a particular server may simply not send.
+        if (DeliveryReport.Is(message))
+        {
+            return true;
+        }
+
         string? submitted = Header(message, "Auto-Submitted");
 
         if (submitted is not null
@@ -250,6 +260,15 @@ public static class MailMessageReader
     /// </summary>
     public static string? ThreadParentOf(MimeMessage message)
     {
+        // A bounce, first. Most servers do not put the failed message's id in In-Reply-To —
+        // they return its headers in a part of the report instead — so without this a
+        // refused receipt threads onto nothing and the ticket whose customer never heard
+        // from us says nothing about it.
+        if (DeliveryReport.FailedMessageId(message) is string failed)
+        {
+            return failed;
+        }
+
         // One of ours anywhere in the chain wins. In a long conversation the immediate
         // parent is often a colleague's message, and answering "what is this a reply to"
         // with that loses the only thing in the thread that names a ticket.

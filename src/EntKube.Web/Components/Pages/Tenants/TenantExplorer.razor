@@ -508,7 +508,11 @@ else
         // among five others — which crowded a page about applications and gave no way to ask the
         // question an operator actually has, which is whose ticket runs out first across all of them.
         new("Tickets", "bi-life-preserver",
-        [ new("tickets", "Ticket queue", "bi-life-preserver") ]),
+        [ new("tickets", "Ticket queue", "bi-life-preserver"),
+          // Beside the queue because it is the question the queue raises: whose is this
+          // one. A rota nobody can find is a rota nobody is on, and an empty rota means
+          // every ticket opens unassigned.
+          new("support-roster", "Support roster", "bi-person-check") ]),
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast") ]),
         new("Incidents", "bi-exclamation-octagon",
@@ -1029,6 +1033,7 @@ else
             case "notifications": builder.OpenComponent<NotificationChannels>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "subconsultants": builder.OpenComponent<SubconsultantRegister>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "on-call": builder.OpenComponent<OnCallTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "support-roster": builder.OpenComponent<SupportRosterTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-inbox": builder.OpenComponent<SupportInbox>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-mailbox": builder.OpenComponent<SupportMailboxTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "mail-triage": builder.OpenComponent<MailTriageRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;

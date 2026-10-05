@@ -88,6 +88,7 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
         // The detail renders the time log, which wants its own service — one of the things
         // only a render finds, since nothing else knows the two are related.
         Services.AddSingleton(new TimeService(factory, contracts));
+        Services.AddSingleton(new SupportDutyService(factory));
         Services.AddSingleton(new ToastService());
         Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils"));
         Services.AddScoped<CurrentActor>();

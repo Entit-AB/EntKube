@@ -43,7 +43,8 @@ public class TicketAcknowledgementTests
         string? appName = "Journalportalen",
         DateTime? due = null) =>
         TicketAcknowledgement.For(
-            Reported(priority), window, appName, due ?? Swedish(2026, 9, 22, 13, 15));
+            Reported(priority), window, appName, due ?? Swedish(2026, 9, 22, 13, 15),
+            TestTicketReference.Instance.For(Reported(priority).Number));
 
     // ---- The reference ----------------------------------------------------------------------
 
@@ -57,13 +58,13 @@ public class TicketAcknowledgementTests
     {
         Acknowledgement receipt = Receipt();
 
-        receipt.Subject.Should().StartWith("[#1042]");
+        receipt.Subject.Should().StartWith(TestTicketReference.Instance.For(1042));
         receipt.Subject.Should().Contain("Journalen svarar inte");
     }
 
     [Fact]
     public void The_body_states_the_reference_they_should_quote() =>
-        Receipt().Body.Should().Contain("[#1042]");
+        Receipt().Body.Should().Contain(TestTicketReference.Instance.For(1042));
 
     // ---- What it must not claim ---------------------------------------------------------------
 
@@ -120,7 +121,8 @@ public class TicketAcknowledgementTests
     public void A_priority_with_no_target_promises_an_assessment_instead()
     {
         string body = TicketAcknowledgement.For(
-            Reported(TicketPriority.P4), SupportWindow.S1, null, responseDue: null).Body;
+            Reported(TicketPriority.P4), SupportWindow.S1, null, responseDue: null,
+            reference: TestTicketReference.Instance.For(Reported().Number)).Body;
 
         body.Should().Contain("no fixed response time");
         body.Should().NotContain("We will come back to you by");
@@ -168,7 +170,9 @@ public class TicketAcknowledgementTests
     {
         Receipt(appName: "Journalportalen").Body.Should().Contain("Journalportalen");
 
-        TicketAcknowledgement.For(Reported(), SupportWindow.S1, null, null)
+        TicketAcknowledgement.For(
+                Reported(), SupportWindow.S1, null, null,
+                TestTicketReference.Instance.For(Reported().Number))
             .Body.Should().NotContain("Application:");
     }
 
@@ -185,7 +189,9 @@ public class TicketAcknowledgementTests
     {
         string body = Receipt().Body;
 
-        body.Should().Contain("Please keep [#1042] in the subject line of everything you write");
+        body.Should().Contain(
+            $"Please keep {TestTicketReference.Instance.For(1042)} in the subject line of "
+            + "everything you write");
         body.Should().Contain("for as long as it is open");
 
         // And what happens if they do not, because an instruction with no consequence

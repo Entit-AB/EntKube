@@ -238,6 +238,7 @@ public class BackupService(
             AlertRoutingRules = await db.AlertRoutingRules.AsNoTracking().ToListAsync(),
             OnCallSchedules = await db.OnCallSchedules.AsNoTracking().ToListAsync(),
             OnCallShifts = await db.OnCallShifts.AsNoTracking().ToListAsync(),
+            SupportDuties = await db.SupportDuties.AsNoTracking().ToListAsync(),
             Dashboards = await db.Dashboards.AsNoTracking().ToListAsync(),
             RumSites = await db.RumSites.AsNoTracking().ToListAsync(),
             TelemetryAlertRules = await db.TelemetryAlertRules.AsNoTracking().ToListAsync(),
@@ -378,6 +379,7 @@ public class BackupService(
             await InsertEntities(db, db.SecretExpiryNotificationConfigs, bundle.SecretExpiryNotificationConfigs);
             await InsertEntities(db, db.OnCallSchedules, bundle.OnCallSchedules);
             await InsertEntities(db, db.OnCallShifts, bundle.OnCallShifts);
+            await InsertEntities(db, db.SupportDuties, bundle.SupportDuties);
             await InsertEntities(db, db.Dashboards, bundle.Dashboards);
             await InsertEntities(db, db.AdvisorDigestConfigs, bundle.AdvisorDigestConfigs);
             await InsertEntities(db, db.AdvisorFindingStates, bundle.AdvisorFindingStates);
