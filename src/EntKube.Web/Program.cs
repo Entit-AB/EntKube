@@ -12,6 +12,7 @@ using EntKube.Web.Client.Pages;
 using EntKube.Web.Components;
 using EntKube.Web.Components.Account;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services;
 using EntKube.Web.Services.Agents;
 using EntKube.Web.Services.Telemetry;
@@ -255,6 +256,11 @@ public class Program
                         .AddInterceptors(sp.GetRequiredService<KubeconfigMaterializationInterceptor>()));
                 break;
         }
+
+        // The per-module contexts, on the same connection and the same migration history.
+        // Each exposes only its own module's tables, so a service that takes one cannot
+        // query another module's — see docs/decomposition.md and ModuleDbContext.
+        builder.Services.AddModuleContexts(databaseProvider, connectionString);
 
         builder.Services.AddDatabaseDeveloperPageExceptionFilter();
 
