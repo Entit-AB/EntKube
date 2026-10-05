@@ -232,6 +232,7 @@ public static partial class ModuleMap
         [typeof(EntKube.Web.Services.Time.TimeService)] = Module.Support,
 
         // ---- Advisor ---------------------------------------------------------------
+        [typeof(Api.AdvisorApi)] = Module.Advisor,
         [typeof(AdvisorDigestConfigService)] = Module.Advisor,
         [typeof(AdvisorScanService)] = Module.Advisor,
         [typeof(AdvisorStateService)] = Module.Advisor,
