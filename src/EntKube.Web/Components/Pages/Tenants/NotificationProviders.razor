@@ -1,17 +1,11 @@
-@page "/admin/notifications"
-@using Microsoft.AspNetCore.Authorization
 @using System.Text.Json
 @using System.Security.Claims
 @using EntKube.Web.Data
 @using EntKube.Web.Services
-@rendermode InteractiveServer
-@attribute [Authorize(Roles = "Admin")]
 
 @inject NotificationProviderConfigService ProviderConfigService
 @inject AuthenticationStateProvider AuthState
 @inject ToastService Toasts
-
-<PageTitle>Notification Settings</PageTitle>
 
 <ConfirmDialog Visible="@(pendingConfirm is not null)"
                Message="@(pendingConfirm?.Message ?? "")"
@@ -20,10 +14,14 @@
                OnConfirm="RunPendingConfirmAsync"
                OnCancel="() => pendingConfirm = null" />
 
-<div class="d-flex align-items-center justify-content-between mb-4">
+<div class="d-flex align-items-center justify-content-between mb-3">
     <div>
-        <h1 class="mb-0"><i class="bi bi-bell-fill me-2 text-primary"></i>Notification Settings</h1>
-        <p class="text-muted small mb-0 mt-1">Configure global notification providers used by tenant alert channels.</p>
+        <h6 class="mb-0">Notification providers</h6>
+        <p class="text-muted small mb-0 mt-1">
+            The SMTP server and Microsoft Graph app registration this tenant's notification
+            channels send through. Each tenant has its own — credentials are never shared
+            between them.
+        </p>
     </div>
 </div>
 
@@ -264,6 +262,8 @@ else
     private string? teamsError;
     private string? teamsSuccess;
 
+    [Parameter] public required Guid TenantId { get; set; }
+
     protected override async Task OnInitializedAsync()
     {
         AuthenticationState authState = await AuthState.GetAuthenticationStateAsync();
@@ -275,8 +275,8 @@ else
 
     private async Task LoadAsync()
     {
-        smtpConfig = await ProviderConfigService.GetAsync(NotificationProviderType.Smtp);
-        teamsConfig = await ProviderConfigService.GetAsync(NotificationProviderType.MsTeamsGraph);
+        smtpConfig = await ProviderConfigService.GetAsync(TenantId, NotificationProviderType.Smtp);
+        teamsConfig = await ProviderConfigService.GetAsync(TenantId, NotificationProviderType.MsTeamsGraph);
 
         if (smtpConfig is not null)
         {
@@ -332,7 +332,7 @@ else
                 enableSsl = smtpEnableSsl
             });
 
-            await ProviderConfigService.SaveAsync(NotificationProviderType.Smtp, configJson, smtpEnabled, currentUserId);
+            await ProviderConfigService.SaveAsync(TenantId, NotificationProviderType.Smtp, configJson, smtpEnabled, currentUserId);
             smtpSuccess = "SMTP configuration saved.";
             await LoadAsync();
         }
@@ -396,7 +396,7 @@ else
         smtpSuccess = null;
         try
         {
-            await ProviderConfigService.DeleteAsync(NotificationProviderType.Smtp);
+            await ProviderConfigService.DeleteAsync(TenantId, NotificationProviderType.Smtp);
             smtpHost = ""; smtpPort = 587; smtpFrom = ""; smtpUsername = ""; smtpPassword = ""; smtpEnableSsl = true; smtpEnabled = true;
             await LoadAsync();
             smtpSuccess = "SMTP configuration removed.";
@@ -446,7 +446,7 @@ else
                 clientSecret = secret
             });
 
-            await ProviderConfigService.SaveAsync(NotificationProviderType.MsTeamsGraph, configJson, teamsEnabled, currentUserId);
+            await ProviderConfigService.SaveAsync(TenantId, NotificationProviderType.MsTeamsGraph, configJson, teamsEnabled, currentUserId);
             teamsSuccess = "Teams Graph configuration saved.";
             await LoadAsync();
         }
@@ -513,7 +513,7 @@ else
         teamsSuccess = null;
         try
         {
-            await ProviderConfigService.DeleteAsync(NotificationProviderType.MsTeamsGraph);
+            await ProviderConfigService.DeleteAsync(TenantId, NotificationProviderType.MsTeamsGraph);
             teamsTenantId = ""; teamsClientId = ""; teamsClientSecret = ""; teamsEnabled = true;
             await LoadAsync();
             teamsSuccess = "Teams Graph configuration removed.";

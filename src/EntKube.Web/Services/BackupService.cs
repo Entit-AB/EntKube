@@ -337,10 +337,9 @@ public class BackupService(
                 await db.Database.ExecuteSqlRawAsync(@"TRUNCATE ""Tenants"" CASCADE");
                 await db.Database.ExecuteSqlRawAsync(@"TRUNCATE ""AspNetUsers"" CASCADE");
                 await db.Database.ExecuteSqlRawAsync(@"TRUNCATE ""AspNetRoles"" CASCADE");
-                // NotificationProviderConfig is global (no TenantId), so it is NOT reached by the
-                // TRUNCATE ... CASCADE above. Clear it explicitly, otherwise re-inserting the bundle's
-                // rows would collide with the unique index on ProviderType.
-                await db.Database.ExecuteSqlRawAsync(@"TRUNCATE ""NotificationProviderConfigs""");
+                // NotificationProviderConfig used to need clearing here: it was global, so the
+                // CASCADE above could not reach it. It now hangs off Tenants by FK, so the
+                // TRUNCATE ""Tenants"" CASCADE takes it with everything else.
                 db.ChangeTracker.Clear();
             }
 
@@ -383,7 +382,7 @@ public class BackupService(
             await InsertEntities(db, db.Dashboards, bundle.Dashboards);
             await InsertEntities(db, db.AdvisorDigestConfigs, bundle.AdvisorDigestConfigs);
             await InsertEntities(db, db.AdvisorFindingStates, bundle.AdvisorFindingStates);
-            // NotificationProviderConfig is a global singleton set (no TenantId).
+            // Notification providers are tenant-owned, so they go in after Tenants (above).
             await InsertEntities(db, db.NotificationProviderConfigs, bundle.NotificationProviderConfigs);
             // Cluster blueprints — blueprint before its steps/variables; values reference Environments (inserted above).
             await InsertEntities(db, db.ClusterBlueprints, bundle.ClusterBlueprints);

@@ -160,7 +160,7 @@ public class BackupBundle
     public List<AdvisorFindingState> AdvisorFindingStates { get; set; } = [];
 
     // Notification & secret-expiry provider config
-    // NotificationProviderConfig is a GLOBAL singleton set (no TenantId) — see wipe handling on restore.
+    // NotificationProviderConfig is tenant-owned; the tenant wipe reaches it by FK cascade.
     public List<NotificationProviderConfig> NotificationProviderConfigs { get; set; } = [];
     public List<SecretExpiryNotificationConfig> SecretExpiryNotificationConfigs { get; set; } = [];
 

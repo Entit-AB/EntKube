@@ -7,31 +7,45 @@ using EntKube.Web.Data;
 
 namespace EntKube.Web.Services;
 
+/// <summary>
+/// Reads and writes one tenant's notification provider rows.
+///
+/// <para>Every method takes the tenant explicitly. There is no "the SMTP provider" any more —
+/// asking for one without saying whose would quietly hand back some other tenant's mail
+/// credentials, so the parameter is required rather than optional.</para>
+/// </summary>
 public class NotificationProviderConfigService(IDbContextFactory<ApplicationDbContext> dbFactory)
 {
-    public async Task<NotificationProviderConfig?> GetAsync(NotificationProviderType type, CancellationToken ct = default)
+    public async Task<NotificationProviderConfig?> GetAsync(
+        Guid tenantId, NotificationProviderType type, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.NotificationProviderConfigs
-            .FirstOrDefaultAsync(c => c.ProviderType == type, ct);
+            .FirstOrDefaultAsync(c => c.TenantId == tenantId && c.ProviderType == type, ct);
     }
 
-    public async Task<List<NotificationProviderConfig>> GetAllAsync(CancellationToken ct = default)
+    public async Task<List<NotificationProviderConfig>> GetAllAsync(
+        Guid tenantId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        return await db.NotificationProviderConfigs.ToListAsync(ct);
+        return await db.NotificationProviderConfigs
+            .Where(c => c.TenantId == tenantId)
+            .ToListAsync(ct);
     }
 
-    public async Task SaveAsync(NotificationProviderType type, string configJson, bool isEnabled, string? userId, CancellationToken ct = default)
+    public async Task SaveAsync(
+        Guid tenantId, NotificationProviderType type, string configJson, bool isEnabled,
+        string? userId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         NotificationProviderConfig? existing = await db.NotificationProviderConfigs
-            .FirstOrDefaultAsync(c => c.ProviderType == type, ct);
+            .FirstOrDefaultAsync(c => c.TenantId == tenantId && c.ProviderType == type, ct);
 
         if (existing is null)
         {
             db.NotificationProviderConfigs.Add(new NotificationProviderConfig
             {
+                TenantId = tenantId,
                 ProviderType = type,
                 ConfigurationJson = configJson,
                 IsEnabled = isEnabled,
@@ -50,11 +64,12 @@ public class NotificationProviderConfigService(IDbContextFactory<ApplicationDbCo
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task DeleteAsync(NotificationProviderType type, CancellationToken ct = default)
+    public async Task DeleteAsync(
+        Guid tenantId, NotificationProviderType type, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         NotificationProviderConfig? config = await db.NotificationProviderConfigs
-            .FirstOrDefaultAsync(c => c.ProviderType == type, ct);
+            .FirstOrDefaultAsync(c => c.TenantId == tenantId && c.ProviderType == type, ct);
         if (config is not null)
         {
             db.NotificationProviderConfigs.Remove(config);

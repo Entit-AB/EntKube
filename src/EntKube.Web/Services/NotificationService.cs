@@ -438,7 +438,7 @@ public class NotificationService(
         {
             string teamId = teamIdEl.GetString() ?? throw new InvalidOperationException("teamId is empty");
             string channelId = channelIdEl.GetString() ?? throw new InvalidOperationException("channelId is empty");
-            return await SendTeamsViaGraphAsync(message, teamId, channelId, isFiring, ct);
+            return await SendTeamsViaGraphAsync(message, channel.TenantId, teamId, channelId, isFiring, ct);
         }
 
         string webhookUrl = config.RootElement.GetProperty("webhookUrl").GetString()
@@ -446,18 +446,30 @@ public class NotificationService(
         return await SendTeamsViaWebhookAsync(message, webhookUrl, isFiring, ct);
     }
 
+    /// <param name="ownerTenantId">
+    /// The <em>EntKube</em> tenant owning the channel — whose Graph app registration to post
+    /// with. Not to be confused with the Entra directory id inside that registration, which
+    /// this method also reads and calls <c>tenantId</c>; they are different tenancies and
+    /// swapping them posts into the wrong directory.
+    /// </param>
     private async Task<bool> SendTeamsViaGraphAsync(
-        NotificationMessage message, string teamId, string channelId, bool isFiring, CancellationToken ct)
+        NotificationMessage message, Guid ownerTenantId, string teamId, string channelId,
+        bool isFiring, CancellationToken ct)
     {
         NotificationProviderConfig? providerConfig;
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
+            // The app registration belongs to the tenant that owns the channel. Posting with
+            // another tenant's Graph credentials would be a cross-tenant leak, not a fallback.
             providerConfig = await db.NotificationProviderConfigs
-                .FirstOrDefaultAsync(c => c.ProviderType == NotificationProviderType.MsTeamsGraph, ct);
+                .FirstOrDefaultAsync(
+                    c => c.TenantId == ownerTenantId
+                      && c.ProviderType == NotificationProviderType.MsTeamsGraph, ct);
         }
 
         if (providerConfig is null || !providerConfig.IsEnabled)
-            throw new InvalidOperationException("MS Teams Graph provider is not configured or disabled");
+            throw new InvalidOperationException(
+                "MS Teams Graph provider is not configured or disabled for this tenant");
 
         using JsonDocument graphConfig = JsonDocument.Parse(providerConfig.ConfigurationJson);
         string tenantId = graphConfig.RootElement.GetProperty("tenantId").GetString()
@@ -566,7 +578,9 @@ public class NotificationService(
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
             NotificationProviderConfig? providerConfig = await db.NotificationProviderConfigs
-                .FirstOrDefaultAsync(c => c.ProviderType == NotificationProviderType.Smtp);
+                .FirstOrDefaultAsync(
+                    c => c.TenantId == channel.TenantId
+                      && c.ProviderType == NotificationProviderType.Smtp);
 
             if (providerConfig?.IsEnabled == true)
             {
