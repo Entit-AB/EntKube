@@ -71,13 +71,21 @@ public class TicketNotifier(
 
             string from = await SenderAddressAsync(db, ticket, settings, ct);
 
+            // Whose support desk this is, for the From line. The tenant's own name, because
+            // the customer knows who they bought the service from.
+            string senderName = await db.Tenants.AsNoTracking()
+                .Where(t => t.Id == ticket.TenantId).Select(t => t.Name).FirstOrDefaultAsync(ct)
+                is string tenant && !string.IsNullOrWhiteSpace(tenant)
+                    ? $"{tenant} support"
+                    : "Support";
+
             Acknowledgement receipt =
                 TicketAcknowledgement.For(ticket, window, appName, responseDue);
 
             // ── The reporter ──
             if (!string.IsNullOrWhiteSpace(ticket.RequestedByEmail))
             {
-                await SendAsync(settings, from, ticket.RequestedByEmail, receipt, ticket, ct);
+                await SendAsync(settings, from, ticket.RequestedByEmail, receipt, ticket, senderName, ct);
             }
             else
             {
@@ -91,7 +99,7 @@ public class TicketNotifier(
             {
                 if (!address.Equals(ticket.RequestedByEmail, StringComparison.OrdinalIgnoreCase))
                 {
-                    await SendAsync(settings, from, address, receipt, ticket, ct);
+                    await SendAsync(settings, from, address, receipt, ticket, senderName, ct);
                 }
             }
 
@@ -100,7 +108,9 @@ public class TicketNotifier(
 
             if (!string.IsNullOrWhiteSpace(shift?.AssigneeEmail))
             {
-                await SendAsync(settings, from, shift.AssigneeEmail, Internal(ticket, appName, responseDue), ticket, ct);
+                await SendAsync(
+                    settings, from, shift.AssigneeEmail,
+                    Internal(ticket, appName, responseDue), ticket, senderName, ct);
             }
         }
         catch (Exception ex)
@@ -186,12 +196,20 @@ public class TicketNotifier(
 
     private async Task SendAsync(
         SmtpSettings settings, string from, string to, Acknowledgement message, Ticket ticket,
-        CancellationToken ct)
+        string senderName, CancellationToken ct)
     {
         try
         {
             MimeMessage mail = new();
-            mail.From.Add(MailboxAddress.Parse(from));
+
+            // With a name on it. A bare address in From is a small thing on its own and a
+            // consistent one across every signal a filter weighs — and the person reading
+            // this on a phone sees who it is from before they see anything else.
+            MailboxAddress sender = MailboxAddress.Parse(from);
+            mail.From.Add(string.IsNullOrWhiteSpace(sender.Name)
+                ? new MailboxAddress(senderName, sender.Address)
+                : sender);
+
             mail.To.Add(MailboxAddress.Parse(to));
             mail.Subject = message.Subject;
             mail.Body = new TextPart("plain") { Text = message.Body };
@@ -200,7 +218,13 @@ public class TicketNotifier(
             // the ticket even where the subject has been mangled by a client or a forward.
             // SupportMessageId is the only thing that writes this format and the only thing
             // that reads it.
-            mail.MessageId = SupportMessageId.For(ticket.Number);
+            //
+            // Built from the sending address, so its right-hand side is a domain that
+            // exists and matches the From. It used to be the bare word "entkube", which
+            // resolves to nothing and matches nothing — a cheap, old signal to a filter
+            // that a message came from something which does not send much mail, spent at
+            // the moment a receipt is judged by a mailbox that has never heard of us.
+            mail.MessageId = SupportMessageId.For(ticket.Number, from);
 
             // We say what we are, in the two places a mail system looks. RFC 3834's header
             // is what stops the recipient's out-of-office answering this, and Exchange reads

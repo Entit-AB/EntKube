@@ -870,6 +870,25 @@ public static class StalwartManifestBuilder
             $"        app: {ApplyJobName(releaseName)}",
             "    spec:",
             "      restartPolicy: Never",
+
+            // On the node's network, not the pod network, and this is load-bearing.
+            //
+            // Stalwart demands a PROXY header from every peer matching proxyTrustedNetworks, on
+            // every listener, with no way to exempt a port. A list that reaches the pod CIDR —
+            // easy to write, since the obvious candidates all contain it — therefore locks out
+            // this Job, which is the one client that could put the list right again. The server
+            // becomes unconfigurable by the thing that configures it, and the symptom is a
+            // connection that never completes: no error, nothing in the server's log, and every
+            // screen healthy. (It happened. The list covered 100.64.0.0/10.)
+            //
+            // The node network is the one source an operator cannot plausibly put in that list —
+            // it is neither the balancer's subnet nor anything inside the cluster — so running
+            // here keeps the repair path open whatever the list says. Measured on a live server:
+            // from a pod a plain request is dropped and one with a PROXY greeting is answered,
+            // and from the node network it is exactly the other way round.
+            "      hostNetwork: true",
+            // Without this the node's own resolver is used and the Service name does not resolve.
+            "      dnsPolicy: ClusterFirstWithHostNet",
             "      containers:",
             "        - name: apply",
             $"          image: {CliImage}",

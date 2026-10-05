@@ -7221,6 +7221,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<bool>("RspamdTempFailOnError")
                         .HasColumnType("boolean");
 
+                    b.Property<string>("SendingIpAddresses")
+                        .HasColumnType("text");
+
                     b.Property<bool>("SmtpEnabled")
                         .HasColumnType("boolean");
 
@@ -7330,6 +7333,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<string>("Description")
                         .HasMaxLength(500)
                         .HasColumnType("character varying(500)");
+
+                    b.Property<string>("DkimDnsRecords")
+                        .HasColumnType("text");
 
                     b.Property<bool>("IsPrimary")
                         .HasColumnType("boolean");
