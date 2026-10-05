@@ -110,8 +110,8 @@ else
                             int errPx = b.Count > 0 ? (int)Math.Round(b.Errors * (double)barPx / b.Count) : 0;
                             string tip = $"{b.Start.ToLocalTime():HH:mm} · {b.Count} req ({b.Errors} err) · p95 {FormatMs(b.P95Ms)}";
                             <div style="flex:1 1 0;display:flex;flex-direction:column;justify-content:flex-end;height:32px" title="@tip">
-                                <div style="background:#f48771;height:@(errPx)px"></div>
-                                <div style="background:#4a90d9;height:@(barPx - errPx)px"></div>
+                                <div class="chart-bar-error" style="height:@(errPx)px"></div>
+                                <div class="chart-bar" style="height:@(barPx - errPx)px"></div>
                             </div>
                         }
                     </div>
@@ -235,7 +235,7 @@ else
                                 <div class="text-truncate" style="width:38%;padding-left:@(depth * 12)px">
                                     <span class="text-muted">@s.Service</span> @s.Name
                                 </div>
-                                <div style="position:relative;flex:1 1 0;height:14px;background:#f1f3f5;border-radius:3px">
+                                <div class="chart-track" style="position:relative;flex:1 1 0;height:14px">
                                     <div style="position:absolute;left:@(leftPct)%;width:@(widthPct)%;height:14px;border-radius:3px;background:@barColor"
                                          title="@spanTip"></div>
                                 </div>
@@ -249,11 +249,11 @@ else
                     </div>
                     @if (traceLogs.Count > 0)
                     {
-                        <div class="border rounded font-monospace" style="background:#1e1e1e;max-height:280px;overflow-y:auto">
+                        <div class="border rounded font-monospace console"  style="max-height:280px;overflow-y:auto">
                             @foreach (LokiLogEntry e in traceLogs)
                             {
-                                <div class="px-2 py-0" style="line-height:1.4;border-bottom:1px solid #2d2d2d">
-                                    <span style="color:#888;font-size:.72rem;user-select:none">@e.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")</span>
+                                <div class="px-2 py-0 console-line" >
+                                    <span class="console-gutter">@e.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")</span>
                                     <span class="ms-2" style="@LineStyle(e.DetectedLevel);font-size:.78rem;white-space:pre-wrap;word-break:break-all">@e.Line</span>
                                 </div>
                             }
@@ -280,7 +280,7 @@ else
                                         and nothing outside your own app has to change. These are all picked
                                         up automatically:
                                     </p>
-<pre class="border rounded p-2 mb-2" style="background:#1e1e1e;color:#d4d4d4;font-size:.75rem">{"level":"error","trace_id":"4bf92f35…","msg":"checkout failed"}
+<pre class="border rounded p-2 mb-2 console"  style="font-size:.75rem">{"level":"error","trace_id":"4bf92f35…","msg":"checkout failed"}
 level=error trace_id=4bf92f35… msg="checkout failed"
 ERROR checkout failed trace-id: 4bf92f35…</pre>
                                     <p class="mb-2">

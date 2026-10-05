@@ -145,6 +145,18 @@
             </ul>
 
             <ul class="navbar-nav ms-auto mb-2 mb-lg-0">
+                @* Plain onclick, not @onclick: the handler is the one defined in App.razor's
+                   head script, so the control works on a statically rendered page and before
+                   a circuit exists. Which icon shows is decided in CSS by data-bs-theme, so
+                   there is no Blazor state to go stale. *@
+                <li class="nav-item">
+                    <button type="button" class="nav-link entit-theme-toggle" onclick="entkubeToggleTheme()"
+                            title="Switch between light and dark" aria-label="Switch between light and dark">
+                        <i class="bi bi-moon-stars theme-when-light" aria-hidden="true"></i>
+                        <i class="bi bi-sun theme-when-dark" aria-hidden="true"></i>
+                    </button>
+                </li>
+
                 <AuthorizeView>
                     <Authorized>
                         <li class="nav-item dropdown">

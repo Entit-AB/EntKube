@@ -177,8 +177,8 @@ else
                     int errPx = b.Total > 0 ? (int)Math.Round(b.Errors * (double)barPx / b.Total) : 0;
                     <div style="flex:1 1 0;display:flex;flex-direction:column;justify-content:flex-end;height:44px"
                          title="@b.Start.ToLocalTime().ToString("HH:mm:ss") · @b.Total logs (@b.Errors err)">
-                        <div style="background:#f48771;height:@(errPx)px"></div>
-                        <div style="background:#4a90d9;height:@(barPx - errPx)px"></div>
+                        <div class="chart-bar-error" style="height:@(errPx)px"></div>
+                        <div class="chart-bar" style="height:@(barPx - errPx)px"></div>
                     </div>
                 }
             </div>
@@ -186,11 +186,11 @@ else
 
         @if (allEntries.Count > 0)
         {
-            <div class="border rounded font-monospace" style="background:#1e1e1e;max-height:500px;overflow-y:auto">
+            <div class="border rounded font-monospace console"  style="max-height:500px;overflow-y:auto">
                 @foreach (LokiLogEntry entry in FilteredEntries)
                 {
-                    <div class="px-3 py-0" style="line-height:1.4;border-bottom:1px solid #2d2d2d">
-                        <span style="color:#888;font-size:0.72rem;user-select:none">
+                    <div class="px-3 py-0 console-line" >
+                        <span class="console-gutter">
                             @entry.Timestamp.ToLocalTime().ToString("HH:mm:ss.fff")
                         </span>
                         <span class="ms-2" style="@LineStyle(entry.DetectedLevel); font-size:0.8rem; white-space:pre-wrap; word-break:break-all">@entry.Line</span>
