@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 
 namespace EntKube.Web.Services;
 
@@ -9,7 +10,7 @@ namespace EntKube.Web.Services;
 /// configuration, so existing behavior is preserved until someone customizes it.
 /// </summary>
 public class AdvisorDigestConfigService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<AdvisorDbContext> dbFactory,
     IConfiguration configuration)
 {
     private DigestFrequency DefaultFrequency =>
@@ -26,7 +27,7 @@ public class AdvisorDigestConfigService(
     /// <summary>The tenant's saved config, or the global-default config (not persisted) if none.</summary>
     public async Task<AdvisorDigestConfig> GetAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using AdvisorDbContext db = dbFactory.CreateDbContext();
         return await db.AdvisorDigestConfigs.FirstOrDefaultAsync(c => c.TenantId == tenantId, ct)
                ?? Default(tenantId);
     }
@@ -34,7 +35,7 @@ public class AdvisorDigestConfigService(
     /// <summary>All saved configs keyed by tenant (used by the scan; missing tenants use defaults).</summary>
     public async Task<Dictionary<Guid, AdvisorDigestConfig>> GetAllAsync(CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using AdvisorDbContext db = dbFactory.CreateDbContext();
         return await db.AdvisorDigestConfigs.ToDictionaryAsync(c => c.TenantId, ct);
     }
 
@@ -43,7 +44,7 @@ public class AdvisorDigestConfigService(
     public async Task SaveAsync(
         Guid tenantId, DigestFrequency frequency, int hourUtc, DayOfWeek weeklyDay, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using AdvisorDbContext db = dbFactory.CreateDbContext();
         AdvisorDigestConfig? c = await db.AdvisorDigestConfigs.FirstOrDefaultAsync(x => x.TenantId == tenantId, ct);
         if (c is null)
         {
@@ -59,7 +60,7 @@ public class AdvisorDigestConfigService(
 
     public async Task MarkSentAsync(Guid tenantId, DateTime when, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using AdvisorDbContext db = dbFactory.CreateDbContext();
         AdvisorDigestConfig? c = await db.AdvisorDigestConfigs.FirstOrDefaultAsync(x => x.TenantId == tenantId, ct);
         if (c is null)
         {
