@@ -390,6 +390,13 @@ else
 @code {
     [Parameter] public Guid TenantId { get; set; }
 
+    /// <summary>
+    /// Open straight onto one customer's apps (level 2) instead of the list. Set when the
+    /// tenant tree's Customers heading selects a customer; left null when the whole list is
+    /// what was asked for, which is what <c>?section=customers</c> does.
+    /// </summary>
+    [Parameter] public Guid? InitialCustomerId { get; set; }
+
     // --- Level 1: Customer list ---
     private List<Customer>? customers;
     private Dictionary<Guid, int> appCounts = new();
@@ -430,6 +437,12 @@ else
     protected override async Task OnInitializedAsync()
     {
         await LoadCustomers();
+
+        if (InitialCustomerId is Guid wanted
+            && customers?.FirstOrDefault(c => c.Id == wanted) is { } customer)
+        {
+            await OpenCustomer(customer);
+        }
     }
 
     // ──────────────── Level 1 ────────────────
