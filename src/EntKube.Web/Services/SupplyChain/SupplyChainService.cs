@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.SupplyChain;
@@ -91,7 +92,7 @@ public sealed record SupplyChainReport
 /// Read-only. It never triggers a scan and never mutates a cluster or registry.
 /// </summary>
 public class SupplyChainService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<CatalogDbContext> dbFactory,
     WorkloadService workloads,
     HarborService harbor,
     ILogger<SupplyChainService> logger)
@@ -108,7 +109,7 @@ public class SupplyChainService(
     {
         List<string> warnings = [];
 
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using CatalogDbContext db = await dbFactory.CreateDbContextAsync(ct);
         var clusters = await db.KubernetesClusters
             .AsNoTracking()
             .Where(c => c.TenantId == tenantId)

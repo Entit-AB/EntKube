@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Mail;
@@ -13,7 +14,7 @@ namespace EntKube.Web.Services.Mail;
 /// that deletes a phrase must not have it quietly reappear because it is still in the
 /// code.</para>
 /// </summary>
-public class MailTriageRuleService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class MailTriageRuleService(IDbContextFactory<SupportDbContext> dbFactory)
 {
     /// <summary>The rules in force: the tenant's own if it has any, otherwise the built-ins.</summary>
     public async Task<MailTriageRuleSet> GetEffectiveAsync(Guid tenantId, CancellationToken ct = default)
@@ -26,14 +27,14 @@ public class MailTriageRuleService(IDbContextFactory<ApplicationDbContext> dbFac
     /// <summary>Whether this tenant has taken the rules over, or is still on the built-ins.</summary>
     public async Task<bool> IsConfiguredAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.MailTriageRules.AnyAsync(r => r.TenantId == tenantId, ct);
     }
 
     public async Task<List<MailTriageRule>> ListAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.MailTriageRules.AsNoTracking()
             .Where(r => r.TenantId == tenantId)
@@ -49,7 +50,7 @@ public class MailTriageRuleService(IDbContextFactory<ApplicationDbContext> dbFac
     /// </summary>
     public async Task<int> AdoptBuiltInAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         if (await db.MailTriageRules.AnyAsync(r => r.TenantId == tenantId, ct))
         {
@@ -75,7 +76,7 @@ public class MailTriageRuleService(IDbContextFactory<ApplicationDbContext> dbFac
 
     public async Task<MailTriageRule> SaveAsync(MailTriageRule rule, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         rule.Phrase = rule.Phrase.Trim();
         rule.UpdatedAt = DateTime.UtcNow;
@@ -104,7 +105,7 @@ public class MailTriageRuleService(IDbContextFactory<ApplicationDbContext> dbFac
 
     public async Task DeleteAsync(Guid ruleId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         MailTriageRule? rule = await db.MailTriageRules.FindAsync([ruleId], ct);
 

@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
@@ -54,16 +55,22 @@ public class KubeconfigResolverTests : IDisposable
     private readonly VaultService vault;
 
     /// <summary>A factory that opens a fresh connection per context, as production does.</summary>
-    private sealed class PerConnectionDbContextFactory(string connectionString) : IDbContextFactory<ApplicationDbContext>
+    private sealed class PerConnectionDbContextFactory(string connectionString)
+        : IDbContextFactory<ApplicationDbContext>, IDbContextFactory<SecretsDbContext>
     {
-        public ApplicationDbContext CreateDbContext()
-        {
-            DbContextOptions<ApplicationDbContext> options = new DbContextOptionsBuilder<ApplicationDbContext>()
-                .UseSqlite(connectionString)
-                .ConfigureWarnings(w => w.Ignore(CoreEventId.ManyServiceProvidersCreatedWarning))
-                .Options;
-            return new ApplicationDbContext(options);
-        }
+        public ApplicationDbContext CreateDbContext() => Create<ApplicationDbContext>();
+
+        // VaultService moved onto the Secrets module context; the resolver under test still
+        // wants the whole thing. One factory serves both — see TestDbContextFactory.
+        SecretsDbContext IDbContextFactory<SecretsDbContext>.CreateDbContext() => Create<SecretsDbContext>();
+
+        private TContext Create<TContext>() where TContext : DbContext
+            => (TContext)Activator.CreateInstance(
+                typeof(TContext),
+                new DbContextOptionsBuilder<TContext>()
+                    .UseSqlite(connectionString)
+                    .ConfigureWarnings(w => w.Ignore(CoreEventId.ManyServiceProvidersCreatedWarning))
+                    .Options)!;
     }
 
     public KubeconfigResolverTests()
@@ -75,10 +82,13 @@ public class KubeconfigResolverTests : IDisposable
         db.Database.EnsureCreated();
 
         encryption = new VaultEncryptionService(TestRootKey);
-        IDbContextFactory<ApplicationDbContext> dbFactory = new PerConnectionDbContextFactory(ConnectionString);
+        PerConnectionDbContextFactory dbFactory = new(ConnectionString);
 
+        // Registered under each interface explicitly: AddSingleton(dbFactory) would bind it
+        // to the concrete factory type, and the resolver asks for the interface.
         ServiceProvider sp = new ServiceCollection()
-            .AddSingleton(dbFactory)
+            .AddSingleton<IDbContextFactory<ApplicationDbContext>>(dbFactory)
+            .AddSingleton<IDbContextFactory<SecretsDbContext>>(dbFactory)
             .BuildServiceProvider();
 
         resolver = new KubeconfigResolver(sp, encryption);

@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Tickets.Bridge;
@@ -18,12 +19,12 @@ public readonly record struct BridgeConnectionSummary(
 /// issued, and never again — so the form has to be honest that copying it now is the only
 /// chance, and reissuing it has to be easy, because somebody will lose it.</para>
 /// </summary>
-public class TicketBridgeAdmin(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class TicketBridgeAdmin(IDbContextFactory<SupportDbContext> dbFactory)
 {
     public async Task<List<BridgeConnectionSummary>> ListAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         List<TicketBridgeConnection> connections = await db.TicketBridgeConnections
             .AsNoTracking()
@@ -53,7 +54,7 @@ public class TicketBridgeAdmin(IDbContextFactory<ApplicationDbContext> dbFactory
 
     public async Task<TicketBridgeConnection?> GetAsync(Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.TicketBridgeConnections.AsNoTracking()
             .FirstOrDefaultAsync(c => c.Id == id, ct);
@@ -66,7 +67,7 @@ public class TicketBridgeAdmin(IDbContextFactory<ApplicationDbContext> dbFactory
     public async Task<TicketBridgeConnection> SaveAsync(
         TicketBridgeConnection settings, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         TicketBridgeConnection? existing = settings.Id == Guid.Empty
             ? null
@@ -108,7 +109,7 @@ public class TicketBridgeAdmin(IDbContextFactory<ApplicationDbContext> dbFactory
     /// </summary>
     public async Task<string?> IssueSecretAsync(Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         TicketBridgeConnection? connection = await db.TicketBridgeConnections
             .FirstOrDefaultAsync(c => c.Id == id, ct);
@@ -136,7 +137,7 @@ public class TicketBridgeAdmin(IDbContextFactory<ApplicationDbContext> dbFactory
     /// </summary>
     public async Task<string?> DeleteAsync(Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         TicketBridgeConnection? connection = await db.TicketBridgeConnections
             .FirstOrDefaultAsync(c => c.Id == id, ct);

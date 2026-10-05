@@ -60,7 +60,7 @@ public sealed class ProductionBaselineTests
     {
         using SqliteConnection connection = new("DataSource=:memory:");
         connection.Open();
-        IDbContextFactory<ApplicationDbContext> dbFactory = new TestDbContextFactory(connection);
+        TestDbContextFactory dbFactory = new(connection);
         ClusterBlueprintService sut = new(dbFactory);
 
         Guid tenantId = Guid.NewGuid();
@@ -104,7 +104,7 @@ public sealed class ProductionBaselineTests
     {
         using SqliteConnection connection = new("DataSource=:memory:");
         connection.Open();
-        IDbContextFactory<ApplicationDbContext> dbFactory = new TestDbContextFactory(connection);
+        TestDbContextFactory dbFactory = new(connection);
         ClusterBlueprintService sut = new(dbFactory);
         using (ApplicationDbContext db = dbFactory.CreateDbContext()) { db.Database.EnsureCreated(); }
 

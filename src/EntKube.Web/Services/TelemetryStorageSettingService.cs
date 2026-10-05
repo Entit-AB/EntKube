@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -12,7 +13,7 @@ namespace EntKube.Web.Services;
 /// picked up without a restart. Registered as a singleton (its only dependency, the DbContext factory, is
 /// a singleton).
 /// </summary>
-public sealed class TelemetryStorageSettingService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public sealed class TelemetryStorageSettingService(IDbContextFactory<TelemetryDbContext> dbFactory)
 {
     private readonly ConcurrentDictionary<Guid, Guid?> _cache = new();
 
@@ -21,7 +22,7 @@ public sealed class TelemetryStorageSettingService(IDbContextFactory<Application
     {
         if (_cache.TryGetValue(tenantId, out Guid? cached)) return cached;
 
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using TelemetryDbContext db = await dbFactory.CreateDbContextAsync(ct);
         TelemetryStorageSetting? row = await db.TelemetryStorageSettings.AsNoTracking()
             .FirstOrDefaultAsync(s => s.TenantId == tenantId, ct);
         Guid? value = row?.StorageLinkId;
@@ -32,7 +33,7 @@ public sealed class TelemetryStorageSettingService(IDbContextFactory<Application
     /// <summary>Sets a tenant's telemetry storage link (null = fall back to per-tenant prefix on flat/local) and invalidates the cache.</summary>
     public async Task SetStorageLinkIdAsync(Guid tenantId, Guid? linkId, string? userId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using TelemetryDbContext db = await dbFactory.CreateDbContextAsync(ct);
         TelemetryStorageSetting? row = await db.TelemetryStorageSettings.FirstOrDefaultAsync(s => s.TenantId == tenantId, ct);
         if (row is null)
         {

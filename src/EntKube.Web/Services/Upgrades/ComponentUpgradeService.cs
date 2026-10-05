@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Upgrades;
@@ -86,7 +87,7 @@ public sealed record UpgradeReport
 /// component apply path, so there is exactly one route that mutates a cluster.
 /// </summary>
 public class ComponentUpgradeService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<CatalogDbContext> dbFactory,
     HelmRepoIndexClient indexClient,
     ILogger<ComponentUpgradeService> logger)
 {
@@ -96,7 +97,7 @@ public class ComponentUpgradeService(
     public async Task<UpgradeReport> GetTenantReportAsync(
         Guid tenantId, DateTime now, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using CatalogDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         var tracked = await db.ClusterComponents
             .AsNoTracking()

@@ -90,28 +90,38 @@ public class ModuleContractTests
     }
 
     /// <summary>
-    /// How many services each module still routes through <see cref="ApplicationDbContext"/>,
-    /// as it stood when the first module contract was written — <b>117 of 176</b>.
+    /// How many services each module still routes through <see cref="ApplicationDbContext"/>.
+    /// <b>59 of 176</b>, down from 117 when the first module contract was written.
     ///
-    /// <para>This is the decomposition's actual remaining work, as a number. Every one of
-    /// these is a service that can still read any table in the product. Moving one onto its
-    /// module's context is what makes the boundary real for that service, and the number
-    /// here comes down with it.</para>
+    /// <para>The 58 that came off needed no contract at all. Two kinds: services touching only
+    /// their own module's tables, and services whose only reach outside it was a read of one of
+    /// the four hubs — which every module context already exposes read-only. Neither is a
+    /// behaviour change, because the model is identical whichever context you hold.</para>
+    ///
+    /// <para><b>Secrets is at zero</b> — the first module entirely off the all-seeing context.
+    /// What remains elsewhere is the harder half: services that genuinely read another module's
+    /// non-hub tables and so need its contract to exist first. <c>DataServices</c> (13) has not
+    /// moved at all for exactly that reason — every one of its services reaches into Fleet,
+    /// Catalog or Delivery.</para>
+    ///
+    /// <para>The measurement that names the next contracts: of the remaining cross-module
+    /// reads, <c>ClusterComponent</c> (Catalog) is read by 36 services and <c>AppDeployment</c>
+    /// (Delivery) by 22. Two contracts would unblock most of what is left.</para>
     /// </summary>
     private static readonly Dictionary<Module, int> Baseline = new()
     {
-        [Module.Telemetry] = 21,
-        [Module.Support] = 15,
         [Module.DataServices] = 13,
-        [Module.Identity] = 12,
-        [Module.Fleet] = 12,
-        [Module.Catalog] = 12,
-        [Module.Delivery] = 12,
-        [Module.Connectivity] = 11,
-        [Module.Cost] = 4,
+        [Module.Telemetry] = 11,
+        [Module.Connectivity] = 8,
+        [Module.Support] = 7,
+        [Module.Catalog] = 6,
+        [Module.Delivery] = 4,
+        [Module.Identity] = 4,
+        [Module.Fleet] = 2,
         [Module.Mail] = 2,
-        [Module.Secrets] = 2,
+        [Module.Cost] = 1,
         [Module.Advisor] = 1,
+        [Module.Secrets] = 0,
     };
 
     [Fact]

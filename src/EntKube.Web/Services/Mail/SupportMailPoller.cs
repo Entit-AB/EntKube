@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Mail;
@@ -19,7 +20,7 @@ namespace EntKube.Web.Services.Mail;
 /// fixing the password is enough to start it.</para>
 /// </summary>
 public class SupportMailPoller(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<SupportDbContext> dbFactory,
     IServiceScopeFactory scopes,
     ILogger<SupportMailPoller> logger) : BackgroundService
 {
@@ -109,7 +110,7 @@ public class SupportMailPoller(
     /// </summary>
     private async Task<List<Guid>> DueTenantsAsync(CancellationToken ct)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         List<SupportMailbox> enabled = await db.SupportMailboxes.AsNoTracking()
             .Where(m => m.IsEnabled

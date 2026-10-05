@@ -1,6 +1,7 @@
 using System.Collections.Concurrent;
 using System.Security.Cryptography;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -14,7 +15,7 @@ public sealed record RumSiteInfo(
 /// unknown keys) so the public ingest endpoint doesn't hit the DB on every browser beacon, and provides the
 /// admin CRUD for <see cref="RumSite"/>s. Singleton; cache is per management-plane instance.
 /// </summary>
-public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFactory, IConfiguration config)
+public sealed class RumSiteService(IDbContextFactory<TelemetryDbContext> dbFactory, IConfiguration config)
 {
     // Lower Rum:SiteCacheTtlSeconds for faster propagation of a disable/rotate across instances (at the cost
     // of more resolve DB hits); the default trades ~30s of staleness for far fewer lookups.
@@ -31,7 +32,7 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
         if (_cache.TryGetValue(publicKey, out (RumSiteInfo? Info, DateTime Expiry) hit) && hit.Expiry > now)
             return hit.Info;
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         RumSite? site = await db.RumSites.AsNoTracking().FirstOrDefaultAsync(s => s.PublicKey == publicKey, ct);
         RumSiteInfo? info = site is null
             ? null
@@ -54,7 +55,7 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
 
     public async Task<List<RumSite>> ListAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         return await db.RumSites.Where(s => s.TenantId == tenantId).OrderBy(s => s.Name).ToListAsync(ct);
     }
 
@@ -67,7 +68,7 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
         Guid tenantId, IReadOnlyCollection<Guid> appIds, CancellationToken ct = default)
     {
         if (appIds.Count == 0) return [];
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         return await db.RumSites
             .Where(s => s.TenantId == tenantId && s.AppId != null && appIds.Contains(s.AppId.Value))
             .OrderBy(s => s.Name)
@@ -78,7 +79,7 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
         Guid tenantId, string name, Guid? clusterId, string allowedOrigins, double sampleRate,
         CancellationToken ct = default, Guid? appId = null)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         DateTime now = DateTime.UtcNow;
         RumSite site = new()
         {
@@ -103,7 +104,7 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
         Guid tenantId, Guid id, string name, Guid? clusterId, string allowedOrigins, double sampleRate, bool isEnabled,
         CancellationToken ct = default, Guid? appId = null)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         RumSite? site = await db.RumSites.FirstOrDefaultAsync(s => s.Id == id && s.TenantId == tenantId, ct);
         if (site is null) return;
         site.Name = name.Trim();
@@ -120,7 +121,7 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
     /// <summary>Rotates the public key (invalidating the old snippet embed).</summary>
     public async Task<string?> RotateKeyAsync(Guid tenantId, Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         RumSite? site = await db.RumSites.FirstOrDefaultAsync(s => s.Id == id && s.TenantId == tenantId, ct);
         if (site is null) return null;
         site.PublicKey = NewPublicKey();
@@ -132,7 +133,7 @@ public sealed class RumSiteService(IDbContextFactory<ApplicationDbContext> dbFac
 
     public async Task DeleteAsync(Guid tenantId, Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
 
         // Clean up RUM alert rules bound to this site (there's no FK cascade), resolving any incidents they
         // raised — otherwise a deleted site leaves orphaned rules evaluating against a gone site and, worse,

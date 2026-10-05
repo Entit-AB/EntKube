@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -35,13 +36,13 @@ public class DeploymentSyncService(
     {
         using IServiceScope scope = scopeFactory.CreateScope();
 
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
         var opsService = scope.ServiceProvider.GetRequiredService<KubernetesOperationsService>();
         var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
 
         List<Guid> deploymentIds;
 
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (DeliveryDbContext db = dbFactory.CreateDbContext())
         {
             deploymentIds = await db.AppDeployments
                 .Include(d => d.Cluster)

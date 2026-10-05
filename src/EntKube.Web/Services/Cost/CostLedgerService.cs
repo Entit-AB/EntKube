@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Cost;
@@ -177,7 +178,7 @@ public sealed record CostMonth
 /// double it. That exclusion is applied here, once, rather than left to each caller —
 /// this is the class where forgetting it would silently double an invoice.</para>
 /// </summary>
-public class CostLedgerService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
 {
     /// <summary>
     /// Whether the ledger holds anything at all for this tenant. Distinguishes "nothing
@@ -187,14 +188,14 @@ public class CostLedgerService(IDbContextFactory<ApplicationDbContext> dbFactory
     /// </summary>
     public async Task<bool> HasAnyAsync(Guid tenantId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
         return await db.CostLedgerEntries.AnyAsync(e => e.TenantId == tenantId, ct);
     }
 
     /// <summary>The first day the ledger recorded anything for this tenant.</summary>
     public async Task<DateTime?> GetLedgerStartAsync(Guid tenantId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.CostLedgerEntries
             .Where(e => e.TenantId == tenantId)
@@ -231,7 +232,7 @@ public class CostLedgerService(IDbContextFactory<ApplicationDbContext> dbFactory
         int days = (int)(end - start).TotalDays + 1;
         DateTime previousStart = start.AddDays(-days);
 
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         // Both windows in one pass — the previous period is only ever used as a
         // comparison, and a second round trip to fetch it would double the cost of every
@@ -364,7 +365,7 @@ public class CostLedgerService(IDbContextFactory<ApplicationDbContext> dbFactory
         DateTime firstMonth = new DateTime(now.Year, now.Month, 1, 0, 0, 0, DateTimeKind.Utc)
             .AddMonths(-(Math.Max(1, months) - 1));
 
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         var costs = await db.CostLedgerEntries
             .AsNoTracking()
@@ -431,7 +432,7 @@ public class CostLedgerService(IDbContextFactory<ApplicationDbContext> dbFactory
     /// every window's first day complete regardless of what was actually measured.
     /// </summary>
     private static async Task<Dictionary<Guid, DateTime>> OpeningDaysAsync(
-        ApplicationDbContext db, Guid tenantId, CancellationToken ct)
+        CostDbContext db, Guid tenantId, CancellationToken ct)
     {
         var rows = await db.CostLedgerCoverages
             .AsNoTracking()

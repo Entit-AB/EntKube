@@ -1,5 +1,6 @@
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -111,7 +112,7 @@ public record WorkloadSnapshot
 /// (RBAC, transient error) becomes a warning and the rest of the page still renders.
 /// </summary>
 public class WorkloadService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<FleetDbContext> dbFactory,
     IKubernetesClientFactory k8s,
     ILogger<WorkloadService> logger)
 {
@@ -126,7 +127,7 @@ public class WorkloadService(
     public async Task<WorkloadSnapshot> LoadAsync(Guid clusterId, string? ns = null, CancellationToken ct = default)
     {
         KubernetesCluster? cluster;
-        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        await using (FleetDbContext db = await dbFactory.CreateDbContextAsync(ct))
         {
             cluster = await db.KubernetesClusters.FirstOrDefaultAsync(c => c.Id == clusterId, ct);
         }
@@ -193,7 +194,7 @@ public class WorkloadService(
     public async Task<List<string>> ListNamespacesAsync(Guid clusterId, CancellationToken ct = default)
     {
         KubernetesCluster? cluster;
-        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        await using (FleetDbContext db = await dbFactory.CreateDbContextAsync(ct))
         {
             cluster = await db.KubernetesClusters.FirstOrDefaultAsync(c => c.Id == clusterId, ct);
         }

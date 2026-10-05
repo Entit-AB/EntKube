@@ -1,5 +1,6 @@
 using System.Security.Cryptography;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.PublicApi;
@@ -32,7 +33,7 @@ public sealed record CreatedApiToken
 /// single indexed read rather than a scan-and-compare over every row.
 /// </summary>
 public class ApiTokenService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<IdentityDbContext> dbFactory,
     ILogger<ApiTokenService> logger)
 {
     /// <summary>
@@ -79,7 +80,7 @@ public class ApiTokenService(
             ExpiresAt = expiresAt,
         };
 
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using IdentityDbContext db = await dbFactory.CreateDbContextAsync(ct);
         db.ApiTokens.Add(token);
         await db.SaveChangesAsync(ct);
 
@@ -104,7 +105,7 @@ public class ApiTokenService(
 
         string hash = Hash(presented.Trim());
 
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using IdentityDbContext db = await dbFactory.CreateDbContextAsync(ct);
         ApiToken? token = await db.ApiTokens.FirstOrDefaultAsync(t => t.TokenHash == hash, ct);
 
         if (token is null || token.RevokedAt is not null)
@@ -149,7 +150,7 @@ public class ApiTokenService(
 
     public async Task<List<ApiToken>> ListAsync(Guid tenantId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using IdentityDbContext db = await dbFactory.CreateDbContextAsync(ct);
         return await db.ApiTokens
             .AsNoTracking()
             .Where(t => t.TenantId == tenantId)
@@ -163,7 +164,7 @@ public class ApiTokenService(
     /// </summary>
     public async Task<bool> RevokeAsync(Guid tenantId, Guid tokenId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using IdentityDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         // Scoped by tenant as well as id so a tenant can never revoke another's token.
         ApiToken? token = await db.ApiTokens

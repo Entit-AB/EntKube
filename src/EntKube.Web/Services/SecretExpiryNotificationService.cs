@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -34,11 +35,11 @@ public class SecretExpiryNotificationService(
         try
         {
             using IServiceScope scope = scopeFactory.CreateScope();
-            var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+            var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<SecretsDbContext>>();
             var expiry = scope.ServiceProvider.GetRequiredService<SecretExpiryService>();
 
             List<(Guid TenantId, Guid? CustomerId)> scopes;
-            using (ApplicationDbContext db = dbFactory.CreateDbContext())
+            using (SecretsDbContext db = dbFactory.CreateDbContext())
             {
                 // Prune very old history to bound table growth.
                 DateTime cutoff = DateTime.UtcNow - HistoryRetention;

@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.Contracts;
 using EntKube.Web.Services.Support;
 using Microsoft.EntityFrameworkCore;
@@ -73,7 +74,7 @@ public readonly record struct TicketSlaStatus(
 /// edits an event after the fact.</para>
 /// </summary>
 public class TicketService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<SupportDbContext> dbFactory,
     ContractService contracts,
     // Required, not optional, and called from inside CreateAsync rather than left to
     // callers. A ticket arrives by three routes — the portal, the mailbox and monitoring —
@@ -150,7 +151,7 @@ public class TicketService(
             AlertIncidentId = alertIncidentId,
         };
 
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         ticket.Number = await NextNumberAsync(db, ct);
 
@@ -301,7 +302,7 @@ public class TicketService(
         DateTime at,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
 
@@ -431,7 +432,7 @@ public class TicketService(
 
     /// <summary>Where a ticket sits, in the words the history should use.</summary>
     private static async Task<string> DescribeWhereAsync(
-        ApplicationDbContext db, Ticket ticket, CancellationToken ct)
+        SupportDbContext db, Ticket ticket, CancellationToken ct)
     {
         string tenant = await db.Tenants.AsNoTracking()
             .Where(t => t.Id == ticket.TenantId).Select(t => t.Name).FirstOrDefaultAsync(ct)
@@ -459,7 +460,7 @@ public class TicketService(
         Guid ticketId, TicketPriority priority, string reason, string? actor,
         DateTime at, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
         if (ticket is null)
@@ -519,7 +520,7 @@ public class TicketService(
             throw new ArgumentException("A reply to the customer cannot be empty.", nameof(said));
         }
 
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
 
@@ -570,7 +571,7 @@ public class TicketService(
     public async Task<Ticket?> RecordResponseAsync(
         Guid ticketId, string? actor, DateTime at, string? note = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
         if (ticket is null || ticket.FirstResponseAt is not null)
@@ -597,7 +598,7 @@ public class TicketService(
         Guid ticketId, WaitingOn waitingOn, string? party, string reason, string? actor,
         DateTime at, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets
             .Include(t => t.Pauses)
@@ -638,7 +639,7 @@ public class TicketService(
     public async Task<Ticket?> EndPauseAsync(
         Guid ticketId, string? actor, DateTime at, string? note = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets
             .Include(t => t.Pauses)
@@ -672,7 +673,7 @@ public class TicketService(
     public async Task<Ticket?> ResolveAsync(
         Guid ticketId, string resolution, string? actor, DateTime at, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets
             .Include(t => t.Pauses)
@@ -705,7 +706,7 @@ public class TicketService(
     public async Task<Ticket?> CloseAsync(
         Guid ticketId, string? actor, DateTime at, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
         if (ticket is null)
@@ -731,7 +732,7 @@ public class TicketService(
     public async Task<Ticket?> RejectAsync(
         Guid ticketId, string reason, string? actor, DateTime at, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
         if (ticket is null)
@@ -763,7 +764,7 @@ public class TicketService(
     public async Task<Ticket?> ReopenAsync(
         Guid ticketId, string reason, string? actor, DateTime at, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
         if (ticket is null)
@@ -788,7 +789,7 @@ public class TicketService(
         Guid ticketId, TicketEventKind kind, string detail, string? actor, DateTime at,
         bool customerVisible = true, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         db.TicketEvents.Add(Event(ticketId, kind, at, actor, detail, customerVisible));
         await db.SaveChangesAsync(ct);
@@ -801,7 +802,7 @@ public class TicketService(
     public async Task<Ticket?> ExcludeFromSlaAsync(
         Guid ticketId, string reason, string? actor, DateTime at, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
         if (ticket is null)
@@ -849,7 +850,7 @@ public class TicketService(
         SupportWindow? window = null, DateTime? responseDue = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
 
@@ -911,7 +912,7 @@ public class TicketService(
     public async Task<Ticket?> RecordIncidentReportAsync(
         Guid ticketId, string actor, DateTime at, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
 
@@ -933,7 +934,7 @@ public class TicketService(
 
     public async Task<Ticket?> GetAsync(Guid ticketId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.Tickets
             .Include(t => t.Events)
@@ -990,7 +991,7 @@ public class TicketService(
     public async Task<List<TicketSlaStatus>> GetOpenQueueAsync(
         Guid customerId, DateTime now, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         List<Ticket> open = await db.Tickets
             .Include(t => t.Pauses)
@@ -1021,7 +1022,7 @@ public class TicketService(
     public async Task<List<TicketSlaStatus>> GetTenantQueueAsync(
         Guid tenantId, DateTime now, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         List<Ticket> open = await db.Tickets
             .Include(t => t.Pauses)
@@ -1047,7 +1048,7 @@ public class TicketService(
     public async Task<List<TicketSlaStatus>> GetForPeriodAsync(
         Guid customerId, DateTime from, DateTime to, DateTime now, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         List<Ticket> tickets = await db.Tickets
             .Include(t => t.Pauses)
@@ -1119,7 +1120,7 @@ public class TicketService(
     /// than sharing numbers, which would cost the reference its meaning.</para>
     /// </summary>
     private static async Task<int> NextNumberAsync(
-        ApplicationDbContext db, CancellationToken ct)
+        SupportDbContext db, CancellationToken ct)
     {
         int highest = await db.Tickets
             .Select(t => (int?)t.Number)
