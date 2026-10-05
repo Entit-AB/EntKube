@@ -1,45 +1,153 @@
 /* ==========================================================================
-   Entit brand — see https://www.entit.se/brand/brand-guide.html
-   Navy is text/ink & dark surfaces; accent blue drives actions, links & focus.
+   Design tokens — shadcn/ui's token set, carrying the Entit brand.
+
+   shadcn/ui itself is React + Radix + Tailwind and cannot be installed into a
+   Blazor app, but the part worth having is not the components: it is the token
+   layer and the flat, 1px-bordered "new-york" treatment built on top of it.
+   Both port onto Bootstrap, because Bootstrap 5.3 drives every component from
+   --bs-* custom properties. So this file defines shadcn's tokens, maps them
+   onto Bootstrap's, and restyles the components to match — and the ~12,000
+   Bootstrap class usages across the app inherit all of it untouched.
+
+   Token names and the HSL-triplet convention (hsl(var(--token))) are shadcn's,
+   so a shadcn example or a tweakcn theme can be read against this file. The
+   VALUES are Entit's: the accent stays #3A63F0 and the ink stays the brand
+   navy, because a design system is the form, not the hue.
+   See https://www.entit.se/brand/brand-guide.html
    Type: Space Grotesk (headings) + DM Sans (body).
+
+   Colours belong here, as tokens, and not in component stylesheets. Every
+   hard-coded hex in a .razor.css is a value that cannot follow the theme.
    ========================================================================== */
 :root {
-    /* Brand palette */
-    --entit-navy: #2C3A5A;
-    --entit-navy-deep: #232E47;
-    --entit-accent: #3A63F0;
-    --entit-accent-hover: #2E4EBE;
-    --entit-accent-darker: #2743A3;
-    --entit-accent-light: #8FA6FF;
-    --entit-muted: #F4F6FA;
-    --entit-border: #E6E9F1;
-    --entit-text: #232E47;
-    --entit-text-muted: #5B6478;
+    /* ── shadcn tokens ─────────────────────────────────────────────────── */
+    --background: 0 0% 100%;
+    --foreground: 222 34% 21%;        /* Entit navy-deep #232E47 */
+    --card: 0 0% 100%;
+    --card-foreground: 222 34% 21%;
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 34% 21%;
+    --primary: 227 86% 58%;           /* Entit accent #3A63F0 */
+    --primary-foreground: 0 0% 100%;
+    --primary-hover: 227 61% 46%;     /* #2E4EBE */
+    --primary-active: 227 61% 40%;    /* #2743A3 */
+    --secondary: 220 38% 97%;         /* Entit muted #F4F6FA */
+    --secondary-foreground: 222 34% 21%;
+    --muted: 220 38% 97%;
+    --muted-foreground: 221 14% 41%;  /* Entit text-muted #5B6478 */
+    --accent: 220 38% 97%;
+    --accent-foreground: 222 34% 21%;
+    --destructive: 354 70% 54%;
+    --destructive-foreground: 0 0% 100%;
+    --success: 152 69% 31%;
+    --warning: 45 100% 51%;
+    --border: 224 28% 92%;            /* Entit border #E6E9F1 */
+    --input: 224 28% 92%;
+    --ring: 227 86% 58%;
+    --radius: 0.5rem;
+
+    /* Surfaces one step off --background: a tree's gutter, a table head. Named
+       for depth rather than colour so dark mode can invert the relationship. */
+    --surface-sunken: 220 38% 98%;
+    --surface-raised: 0 0% 100%;
+
+    /* ── Brand ─────────────────────────────────────────────────────────── */
+    /* The type stacks stay named for the brand because that is what they are.
+       The brand COLOUR variables are gone: their hues are the tokens above, and
+       keeping both spellings meant two places to change one colour. The navy
+       below survives only because the signed-out hero's gradient is brand
+       identity rather than a themeable surface. */
     --entit-sans: "DM Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
     --entit-heading: "Space Grotesk", system-ui, sans-serif;
+    --entit-navy: 222 34% 26%;        /* #2C3A5A — hero gradient only */
 
-    /* Map the brand onto Bootstrap's theme tokens */
-    --bs-primary: #3A63F0;
+    /* ── Bootstrap mapping ─────────────────────────────────────────────── */
+    /* Everything below is what makes the tokens reach existing markup. */
+    --bs-primary: hsl(var(--primary));
     --bs-primary-rgb: 58, 99, 240;
-    --bs-primary-text-emphasis: #2743A3;
-    --bs-primary-bg-subtle: #DFE6FD;
-    --bs-primary-border-subtle: #C6D2FB;
-    --bs-link-color: #3A63F0;
+    --bs-primary-text-emphasis: hsl(var(--primary-active));
+    --bs-primary-bg-subtle: hsl(var(--primary) / .12);
+    --bs-primary-border-subtle: hsl(var(--primary) / .28);
+    --bs-link-color: hsl(var(--primary));
     --bs-link-color-rgb: 58, 99, 240;
-    --bs-link-hover-color: #2E4EBE;
+    --bs-link-hover-color: hsl(var(--primary-hover));
     --bs-link-hover-color-rgb: 46, 78, 190;
-    --bs-body-color: #232E47;
+    --bs-body-bg: hsl(var(--background));
+    --bs-body-color: hsl(var(--foreground));
     --bs-body-color-rgb: 35, 46, 71;
-    --bs-emphasis-color: #232E47;
+    --bs-emphasis-color: hsl(var(--foreground));
     --bs-body-font-family: var(--entit-sans);
-    --bs-heading-color: #232E47;
-    --bs-border-color: #E6E9F1;
-    --bs-border-color-translucent: rgba(35, 46, 71, 0.14);
+    --bs-heading-color: hsl(var(--foreground));
+    --bs-border-color: hsl(var(--border));
+    --bs-border-color-translucent: hsl(var(--border));
+    --bs-secondary-color: hsl(var(--muted-foreground));
+    --bs-secondary-bg: hsl(var(--muted));
+    --bs-tertiary-bg: hsl(var(--surface-sunken));
+    --bs-tertiary-color: hsl(var(--muted-foreground));
+
+    /* One radius for everything, as shadcn does — Bootstrap ships four sizes
+       and the difference between them is noise at this scale. */
+    --bs-border-radius: var(--radius);
+    --bs-border-radius-sm: calc(var(--radius) - 2px);
+    --bs-border-radius-lg: calc(var(--radius) + 2px);
+    --bs-border-radius-xl: calc(var(--radius) + 4px);
+    --bs-border-radius-2xl: calc(var(--radius) + 8px);
+
+    /* Flat and close to the surface. Bootstrap's defaults are blurrier and
+       darker, which reads as depth the layout is not using. */
+    --bs-box-shadow-sm: 0 1px 2px 0 hsl(var(--foreground) / .05);
+    --bs-box-shadow: 0 1px 3px 0 hsl(var(--foreground) / .1), 0 1px 2px -1px hsl(var(--foreground) / .1);
+    --bs-box-shadow-lg: 0 10px 15px -3px hsl(var(--foreground) / .1), 0 4px 6px -4px hsl(var(--foreground) / .1);
+}
+
+/* Dark mode is written out but nothing switches to it yet: Bootstrap 5.3 reads
+   data-bs-theme natively, so turning it on is an attribute on <html> plus a pass
+   over the inline style="…#hex" still left in a handful of components. Keeping
+   the two halves side by side is the only way the second one stays true —
+   filling it in later means reading every rule again.
+
+   Every colour token above is redefined here except three, and they are absent
+   on purpose rather than overlooked: --destructive-foreground is white on a red
+   fill in either theme, and --entit-navy belongs to the hero gradient, which
+   must not invert. Nothing else may be left out. */
+[data-bs-theme="dark"] {
+    --background: 222 34% 11%;
+    --foreground: 220 38% 97%;
+    --card: 222 34% 14%;
+    --card-foreground: 220 38% 97%;
+    --popover: 222 34% 14%;
+    --popover-foreground: 220 38% 97%;
+    --primary: 228 100% 72%;
+    --primary-foreground: 222 34% 11%;
+    --primary-hover: 228 100% 78%;
+    --primary-active: 228 100% 82%;
+    --secondary: 222 24% 20%;
+    --secondary-foreground: 220 38% 97%;
+    --muted: 222 24% 20%;
+    --muted-foreground: 220 16% 68%;
+    --accent: 222 24% 22%;
+    --accent-foreground: 220 38% 97%;
+    --destructive: 354 70% 60%;
+    --success: 152 55% 45%;
+    --warning: 45 95% 58%;
+    --border: 222 24% 24%;
+    --input: 222 24% 24%;
+    --ring: 228 100% 72%;
+    --surface-sunken: 222 34% 9%;
+    --surface-raised: 222 34% 14%;
+    --bs-primary-rgb: 143, 166, 255;
+    --bs-link-color-rgb: 143, 166, 255;
+    --bs-body-color-rgb: 244, 246, 250;
 }
 
 html, body {
     font-family: var(--entit-sans);
     height: 100%;
+}
+
+body {
+    background: hsl(var(--background));
+    color: hsl(var(--foreground));
 }
 
 h1, h2, h3, h4, h5, h6,
@@ -50,40 +158,492 @@ h1, h2, h3, h4, h5, h6,
 }
 
 a, .btn-link {
-    color: var(--entit-accent);
+    color: hsl(var(--primary));
+}
+
+/* ==========================================================================
+   Buttons — shadcn's weight and height, Bootstrap's class names.
+   ========================================================================== */
+.btn {
+    --bs-btn-border-radius: var(--radius);
+    --bs-btn-font-weight: 500;
+    --bs-btn-padding-x: .875rem;
+    --bs-btn-padding-y: .4375rem;
+    transition: background-color .15s ease, border-color .15s ease, color .15s ease;
+}
+
+.btn-sm {
+    --bs-btn-border-radius: calc(var(--radius) - 2px);
+    --bs-btn-padding-x: .625rem;
+    --bs-btn-padding-y: .25rem;
+}
+
+.btn-lg {
+    --bs-btn-border-radius: calc(var(--radius) + 2px);
+    --bs-btn-padding-x: 1.125rem;
+    --bs-btn-padding-y: .5625rem;
 }
 
 .btn-primary {
-    --bs-btn-color: #fff;
-    --bs-btn-bg: var(--entit-accent);
-    --bs-btn-border-color: var(--entit-accent);
-    --bs-btn-hover-color: #fff;
-    --bs-btn-hover-bg: var(--entit-accent-hover);
-    --bs-btn-hover-border-color: var(--entit-accent-hover);
-    --bs-btn-active-color: #fff;
-    --bs-btn-active-bg: var(--entit-accent-hover);
-    --bs-btn-active-border-color: var(--entit-accent-darker);
-    --bs-btn-disabled-color: #fff;
-    --bs-btn-disabled-bg: var(--entit-accent);
-    --bs-btn-disabled-border-color: var(--entit-accent);
-    --bs-btn-focus-shadow-rgb: 58, 99, 240;
+    --bs-btn-color: hsl(var(--primary-foreground));
+    --bs-btn-bg: hsl(var(--primary));
+    --bs-btn-border-color: hsl(var(--primary));
+    --bs-btn-hover-color: hsl(var(--primary-foreground));
+    --bs-btn-hover-bg: hsl(var(--primary-hover));
+    --bs-btn-hover-border-color: hsl(var(--primary-hover));
+    --bs-btn-active-color: hsl(var(--primary-foreground));
+    --bs-btn-active-bg: hsl(var(--primary-active));
+    --bs-btn-active-border-color: hsl(var(--primary-active));
+    --bs-btn-disabled-color: hsl(var(--primary-foreground));
+    --bs-btn-disabled-bg: hsl(var(--primary) / .5);
+    --bs-btn-disabled-border-color: transparent;
 }
 
 .btn-outline-primary {
-    --bs-btn-color: var(--entit-accent);
-    --bs-btn-border-color: var(--entit-accent);
-    --bs-btn-hover-bg: var(--entit-accent);
-    --bs-btn-hover-border-color: var(--entit-accent);
-    --bs-btn-active-bg: var(--entit-accent);
-    --bs-btn-active-border-color: var(--entit-accent);
-    --bs-btn-focus-shadow-rgb: 58, 99, 240;
+    --bs-btn-color: hsl(var(--primary));
+    --bs-btn-border-color: hsl(var(--primary));
+    --bs-btn-hover-color: hsl(var(--primary-foreground));
+    --bs-btn-hover-bg: hsl(var(--primary));
+    --bs-btn-hover-border-color: hsl(var(--primary));
+    --bs-btn-active-color: hsl(var(--primary-foreground));
+    --bs-btn-active-bg: hsl(var(--primary-active));
+    --bs-btn-active-border-color: hsl(var(--primary-active));
 }
 
-.btn:focus, .btn:active:focus, .btn-link.nav-link:focus, .form-control:focus, .form-check-input:focus, .form-select:focus {
-  border-color: var(--entit-accent-light);
-  box-shadow: 0 0 0 0.1rem white, 0 0 0 0.25rem var(--entit-accent);
+/* shadcn's "secondary" and "outline" variants, which Bootstrap spells as a grey
+   fill and a grey border. Both were reading as disabled against the new palette. */
+.btn-secondary {
+    --bs-btn-color: hsl(var(--secondary-foreground));
+    --bs-btn-bg: hsl(var(--secondary));
+    --bs-btn-border-color: hsl(var(--border));
+    --bs-btn-hover-color: hsl(var(--secondary-foreground));
+    --bs-btn-hover-bg: hsl(var(--accent));
+    --bs-btn-hover-border-color: hsl(var(--border));
+    --bs-btn-active-color: hsl(var(--secondary-foreground));
+    --bs-btn-active-bg: hsl(var(--accent));
+    --bs-btn-active-border-color: hsl(var(--border));
 }
 
+.btn-outline-secondary {
+    --bs-btn-color: hsl(var(--foreground));
+    --bs-btn-border-color: hsl(var(--border));
+    --bs-btn-hover-color: hsl(var(--accent-foreground));
+    --bs-btn-hover-bg: hsl(var(--accent));
+    --bs-btn-hover-border-color: hsl(var(--border));
+    --bs-btn-active-color: hsl(var(--accent-foreground));
+    --bs-btn-active-bg: hsl(var(--accent));
+    --bs-btn-active-border-color: hsl(var(--border));
+}
+
+/* A light button, which is what the two places using it mean: the pair to the
+   primary call-to-action on the signed-out hero's dark gradient, and the expand
+   control on the YAML editor. Deliberately NOT shadcn's transparent "ghost" —
+   on the navy hero a ghost renders as ink-on-ink and the second action all but
+   disappears. It stays opaque so it works on either surface. */
+.btn-light {
+    --bs-btn-color: hsl(222 34% 21%);
+    --bs-btn-bg: hsl(0 0% 100%);
+    --bs-btn-border-color: hsl(0 0% 100%);
+    --bs-btn-hover-color: hsl(222 34% 21%);
+    --bs-btn-hover-bg: hsl(220 38% 94%);
+    --bs-btn-hover-border-color: hsl(220 38% 94%);
+    --bs-btn-active-color: hsl(222 34% 21%);
+    --bs-btn-active-bg: hsl(220 38% 90%);
+    --bs-btn-active-border-color: hsl(220 38% 90%);
+}
+
+.btn-danger {
+    --bs-btn-color: hsl(var(--destructive-foreground));
+    --bs-btn-bg: hsl(var(--destructive));
+    --bs-btn-border-color: hsl(var(--destructive));
+    --bs-btn-hover-color: hsl(var(--destructive-foreground));
+    --bs-btn-hover-bg: hsl(var(--destructive) / .88);
+    --bs-btn-hover-border-color: hsl(var(--destructive) / .88);
+    --bs-btn-active-bg: hsl(var(--destructive) / .8);
+    --bs-btn-active-border-color: hsl(var(--destructive) / .8);
+}
+
+.btn-outline-danger {
+    --bs-btn-color: hsl(var(--destructive));
+    --bs-btn-border-color: hsl(var(--destructive) / .5);
+    --bs-btn-hover-color: hsl(var(--destructive-foreground));
+    --bs-btn-hover-bg: hsl(var(--destructive));
+    --bs-btn-hover-border-color: hsl(var(--destructive));
+    --bs-btn-active-bg: hsl(var(--destructive) / .88);
+    --bs-btn-active-border-color: hsl(var(--destructive) / .88);
+}
+
+/* ==========================================================================
+   Focus — one ring, on :focus-visible only.
+
+   Bootstrap's focus is a wide blurred glow on :focus, so it fires on every
+   mouse click as well. shadcn's is a hard 2px ring offset from the surface,
+   shown only when the browser judges it wanted: keyboard navigation, and text
+   inputs whether clicked or not.
+   ========================================================================== */
+/* Bootstrap puts its own glow on :focus, which fires for mouse clicks too. Drop
+   it only where no ring is coming — `:not(:focus-visible)` rather than a blanket
+   `:focus`, because a blanket one matches everything :focus-visible does, wins on
+   source order at equal specificity, and silently removes the ring below. That is
+   not a cosmetic slip: it leaves keyboard users with no focus indication at all. */
+.btn:focus:not(:focus-visible),
+.btn:active:focus:not(:focus-visible),
+.form-control:focus:not(:focus-visible),
+.form-select:focus:not(:focus-visible),
+.form-check-input:focus:not(:focus-visible) {
+    box-shadow: none;
+}
+
+.btn:focus-visible,
+.btn-link.nav-link:focus-visible,
+.form-check-input:focus-visible,
+.page-link:focus-visible,
+.dropdown-item:focus-visible,
+.nav-link:focus-visible,
+[tabindex]:not([tabindex="-1"]):focus-visible {
+    outline: none;
+    box-shadow: 0 0 0 2px hsl(var(--background)), 0 0 0 4px hsl(var(--ring));
+}
+
+/* A field marks itself focused with its border as well as the ring, so the ring
+   can be the softer of the two without the focus becoming ambiguous. */
+.form-control:focus,
+.form-select:focus {
+    border-color: hsl(var(--ring));
+}
+
+.form-control:focus-visible,
+.form-select:focus-visible {
+    outline: none;
+    border-color: hsl(var(--ring));
+    box-shadow: 0 0 0 3px hsl(var(--ring) / .25);
+}
+
+/* ==========================================================================
+   Cards — a 1px border and a shadow you have to look for.
+   ========================================================================== */
+.card {
+    --bs-card-bg: hsl(var(--card));
+    --bs-card-color: hsl(var(--card-foreground));
+    --bs-card-border-color: hsl(var(--border));
+    --bs-card-border-radius: var(--radius);
+    --bs-card-inner-border-radius: calc(var(--radius) - 1px);
+    --bs-card-cap-bg: transparent;
+    box-shadow: 0 1px 2px 0 hsl(var(--foreground) / .05);
+}
+
+.card-header {
+    border-bottom: 1px solid hsl(var(--border));
+    font-weight: 500;
+}
+
+/* Written all over the app to mean "a header with no fill", which is now the
+   default — kept so the explicit spelling does not undo it. */
+.card-header.bg-white {
+    background: transparent;
+    border-bottom: 1px solid hsl(var(--border));
+}
+
+.card-footer {
+    border-top: 1px solid hsl(var(--border));
+    background: transparent;
+}
+
+/* ==========================================================================
+   Forms
+   ========================================================================== */
+.form-control,
+.form-select {
+    border-color: hsl(var(--input));
+    border-radius: var(--radius);
+    background-color: hsl(var(--background));
+    color: hsl(var(--foreground));
+}
+
+.form-control::placeholder {
+    color: hsl(var(--muted-foreground) / .7);
+}
+
+.form-control:disabled,
+.form-select:disabled {
+    background-color: hsl(var(--muted));
+    color: hsl(var(--muted-foreground));
+}
+
+.form-control-sm, .form-select-sm {
+    border-radius: calc(var(--radius) - 2px);
+}
+
+.form-check-input {
+    border-color: hsl(var(--input));
+}
+
+.form-check-input:checked {
+    background-color: hsl(var(--primary));
+    border-color: hsl(var(--primary));
+}
+
+/* A checkbox on a white card needs a darker edge than one on a grey field. Was
+   a hard-coded grey; the token tracks the theme. */
+.darker-border-checkbox.form-check-input {
+    border-color: hsl(var(--muted-foreground) / .6);
+}
+
+.form-label {
+    font-weight: 500;
+    font-size: .875rem;
+    margin-bottom: .375rem;
+}
+
+.form-text {
+    color: hsl(var(--muted-foreground));
+}
+
+.input-group-text {
+    background: hsl(var(--muted));
+    border-color: hsl(var(--input));
+    color: hsl(var(--muted-foreground));
+}
+
+.form-floating > .form-control-plaintext::placeholder, .form-floating > .form-control::placeholder {
+    color: hsl(var(--muted-foreground) / .7);
+    text-align: end;
+}
+
+.form-floating > .form-control-plaintext:focus::placeholder, .form-floating > .form-control:focus::placeholder {
+    text-align: start;
+}
+
+/* ==========================================================================
+   Tables — borderless rows under a recessive head, as shadcn renders them.
+   ========================================================================== */
+.table {
+    --bs-table-bg: transparent;
+    --bs-table-color: hsl(var(--foreground));
+    --bs-table-border-color: hsl(var(--border));
+    --bs-table-striped-bg: hsl(var(--muted) / .6);
+    --bs-table-hover-bg: hsl(var(--accent) / .7);
+    --bs-table-accent-bg: transparent;
+}
+
+.table > thead {
+    color: hsl(var(--muted-foreground));
+}
+
+.table > thead th {
+    font-weight: 500;
+    font-size: .75rem;
+    letter-spacing: .03em;
+    text-transform: uppercase;
+    border-bottom-color: hsl(var(--border));
+}
+
+.table > tbody > tr > * {
+    border-bottom-color: hsl(var(--border));
+}
+
+/* The last row's rule doubles the container's own border. */
+.table:not(.table-bordered) > tbody > tr:last-child > * {
+    border-bottom-width: 0;
+}
+
+.table-light > :not(caption) > * > * {
+    background-color: hsl(var(--muted));
+    color: hsl(var(--muted-foreground));
+}
+
+/* ==========================================================================
+   Badges — shadcn's pill set. Bootstrap's bg-* utilities are what the markup
+   uses, so the variants are reached through those.
+   ========================================================================== */
+.badge {
+    --bs-badge-border-radius: 999px;
+    --bs-badge-font-weight: 500;
+    --bs-badge-padding-x: .5rem;
+    --bs-badge-padding-y: .25rem;
+    font-size: .75rem;
+    border: 1px solid transparent;
+}
+
+.badge.bg-primary { background-color: hsl(var(--primary)) !important; }
+.badge.bg-secondary {
+    background-color: hsl(var(--secondary)) !important;
+    border-color: hsl(var(--border));
+    color: hsl(var(--secondary-foreground)) !important;
+}
+.badge.bg-danger { background-color: hsl(var(--destructive)) !important; }
+.badge.bg-success { background-color: hsl(var(--success)) !important; }
+.badge.bg-warning { background-color: hsl(var(--warning)) !important; }
+.badge.bg-light {
+    background-color: hsl(var(--muted)) !important;
+    border-color: hsl(var(--border));
+    color: hsl(var(--muted-foreground)) !important;
+}
+
+/* ==========================================================================
+   Popovers — one treatment for every floating surface.
+   ========================================================================== */
+.dropdown-menu {
+    --bs-dropdown-bg: hsl(var(--popover));
+    --bs-dropdown-color: hsl(var(--popover-foreground));
+    --bs-dropdown-border-color: hsl(var(--border));
+    --bs-dropdown-border-radius: var(--radius);
+    --bs-dropdown-link-hover-bg: hsl(var(--accent));
+    --bs-dropdown-link-hover-color: hsl(var(--accent-foreground));
+    --bs-dropdown-link-active-bg: hsl(var(--accent));
+    --bs-dropdown-link-active-color: hsl(var(--accent-foreground));
+    --bs-dropdown-divider-bg: hsl(var(--border));
+    box-shadow: 0 4px 6px -1px hsl(var(--foreground) / .1), 0 2px 4px -2px hsl(var(--foreground) / .1);
+    padding: .25rem;
+}
+
+.dropdown-item {
+    border-radius: calc(var(--radius) - 2px);
+    font-size: .875rem;
+}
+
+.modal-content {
+    background: hsl(var(--popover));
+    color: hsl(var(--popover-foreground));
+    border: 1px solid hsl(var(--border));
+    border-radius: calc(var(--radius) + 2px);
+    box-shadow: 0 25px 50px -12px hsl(var(--foreground) / .25);
+}
+
+.modal-header, .modal-footer {
+    border-color: hsl(var(--border));
+}
+
+.tooltip-inner {
+    background: hsl(var(--foreground));
+    color: hsl(var(--background));
+    border-radius: calc(var(--radius) - 2px);
+    font-size: .75rem;
+}
+
+.offcanvas {
+    background: hsl(var(--popover));
+    color: hsl(var(--popover-foreground));
+    border-color: hsl(var(--border));
+}
+
+.list-group {
+    --bs-list-group-bg: hsl(var(--card));
+    --bs-list-group-color: hsl(var(--card-foreground));
+    --bs-list-group-border-color: hsl(var(--border));
+    --bs-list-group-border-radius: var(--radius);
+    --bs-list-group-action-hover-bg: hsl(var(--accent));
+    --bs-list-group-active-bg: hsl(var(--primary));
+    --bs-list-group-active-border-color: hsl(var(--primary));
+}
+
+/* ==========================================================================
+   Tabs — shadcn's underline. Bootstrap draws a box with a notch in it.
+   ========================================================================== */
+.nav-tabs {
+    --bs-nav-tabs-border-color: hsl(var(--border));
+    --bs-nav-tabs-link-active-color: hsl(var(--primary));
+    --bs-nav-tabs-link-active-bg: transparent;
+    --bs-nav-tabs-link-active-border-color: transparent transparent hsl(var(--primary));
+    --bs-nav-link-color: hsl(var(--muted-foreground));
+    --bs-nav-link-hover-color: hsl(var(--foreground));
+    --bs-nav-tabs-border-radius: 0;
+}
+
+.nav-tabs .nav-link {
+    border-width: 0 0 2px;
+    border-color: transparent;
+    font-weight: 500;
+    margin-bottom: -1px;
+}
+
+.nav-tabs .nav-link:hover:not(.active) {
+    border-bottom-color: hsl(var(--border));
+    background: transparent;
+}
+
+.nav-pills {
+    --bs-nav-pills-border-radius: calc(var(--radius) - 2px);
+    --bs-nav-pills-link-active-bg: hsl(var(--primary));
+    --bs-nav-link-color: hsl(var(--muted-foreground));
+    --bs-nav-link-hover-color: hsl(var(--foreground));
+}
+
+/* Was a hand-rolled copy of the rules above, from before they existed. */
+.tenant-category-nav .nav-link {
+    font-weight: 500;
+}
+
+/* ==========================================================================
+   Callouts — Bootstrap's alert as shadcn draws it: tinted, bordered, flat.
+   ========================================================================== */
+.alert {
+    --bs-alert-border-radius: var(--radius);
+    border-width: 1px;
+    font-size: .9rem;
+}
+
+.alert-primary {
+    --bs-alert-color: hsl(var(--primary-active));
+    --bs-alert-bg: hsl(var(--primary) / .08);
+    --bs-alert-border-color: hsl(var(--primary) / .25);
+}
+
+.alert-info {
+    --bs-alert-color: hsl(var(--primary-active));
+    --bs-alert-bg: hsl(var(--primary) / .06);
+    --bs-alert-border-color: hsl(var(--primary) / .2);
+}
+
+.alert-danger {
+    --bs-alert-color: hsl(var(--destructive) / 1);
+    --bs-alert-bg: hsl(var(--destructive) / .08);
+    --bs-alert-border-color: hsl(var(--destructive) / .25);
+}
+
+.alert-warning {
+    --bs-alert-color: hsl(38 92% 32%);
+    --bs-alert-bg: hsl(var(--warning) / .12);
+    --bs-alert-border-color: hsl(var(--warning) / .35);
+}
+
+.alert-success {
+    --bs-alert-color: hsl(var(--success));
+    --bs-alert-bg: hsl(var(--success) / .08);
+    --bs-alert-border-color: hsl(var(--success) / .25);
+}
+
+.alert-secondary, .alert-light {
+    --bs-alert-color: hsl(var(--muted-foreground));
+    --bs-alert-bg: hsl(var(--muted));
+    --bs-alert-border-color: hsl(var(--border));
+}
+
+.progress {
+    --bs-progress-bg: hsl(var(--muted));
+    --bs-progress-border-radius: 999px;
+    --bs-progress-bar-bg: hsl(var(--primary));
+}
+
+hr {
+    border-color: hsl(var(--border));
+    opacity: 1;
+}
+
+code, kbd, samp, pre {
+    font-variant-ligatures: none;
+}
+
+:not(pre) > code {
+    background: hsl(var(--muted));
+    color: hsl(var(--foreground));
+    padding: .125rem .3rem;
+    border-radius: calc(var(--radius) - 3px);
+}
+
+/* ==========================================================================
+   App chrome
+   ========================================================================== */
 .content {
     padding-top: 1.1rem;
 }
@@ -93,15 +653,16 @@ h1:focus {
 }
 
 .valid.modified:not([type=checkbox]) {
-    outline: 1px solid #26b050;
+    outline: 1px solid hsl(var(--success));
 }
 
 .invalid {
-    outline: 1px solid #e50000;
+    outline: 1px solid hsl(var(--destructive));
 }
 
 .validation-message {
-    color: #e50000;
+    color: hsl(var(--destructive));
+    font-size: .8125rem;
 }
 
 .blazor-error-boundary {
@@ -113,19 +674,6 @@ h1:focus {
     .blazor-error-boundary::after {
         content: "An error has occurred."
     }
-
-.darker-border-checkbox.form-check-input {
-    border-color: #929292;
-}
-
-.form-floating > .form-control-plaintext::placeholder, .form-floating > .form-control::placeholder {
-    color: var(--bs-secondary-color);
-    text-align: end;
-}
-
-.form-floating > .form-control-plaintext:focus::placeholder, .form-floating > .form-control:focus::placeholder {
-    text-align: start;
-}
 
 @keyframes spin {
     from { transform: rotate(0deg); }
@@ -139,13 +687,14 @@ h1:focus {
 
 /* Home page feature cards */
 .home-card {
-    transition: transform 0.15s ease, box-shadow 0.15s ease;
+    transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
     cursor: pointer;
 }
 
 .home-card:hover {
     transform: translateY(-2px);
-    box-shadow: 0 .5rem 1rem rgba(0,0,0,.15) !important;
+    border-color: hsl(var(--primary) / .35);
+    box-shadow: 0 10px 15px -3px hsl(var(--foreground) / .1), 0 4px 6px -4px hsl(var(--foreground) / .1) !important;
 }
 
 .home-card-icon {
@@ -159,14 +708,31 @@ h1:focus {
 
 /* ==========================================================================
    Landing / marketing hero (signed-out home page)
+
+   The gradient is brand identity rather than a themeable surface, so it must
+   stay the brand navy in both themes — which is exactly why its three stops are
+   spelled out here instead of reaching for --foreground and --primary-active.
+   Those happen to hold the same values in light mode and would invert in dark,
+   taking the hero with them.
    ========================================================================== */
 .landing-hero {
     position: relative;
     overflow: hidden;
-    border-radius: 1rem;
+    /* MainLayout's article.content is a column flex container, so this is a flex
+       item — and `overflow: hidden` (which the mesh glow below needs) sets an
+       item's automatic minimum size to zero. The hero was therefore shrinking to
+       exactly its padding while the headline, the paragraph and both buttons
+       overflowed and were clipped away: on the signed-out landing page, nothing
+       but the eyebrow pill was visible. Every other block on the page escapes
+       this only by having `overflow: visible`. */
+    flex: none;
+    border-radius: calc(var(--radius) * 2);
     padding: 4rem 1.5rem;
     color: #fff;
-    background: linear-gradient(135deg, var(--entit-navy-deep) 0%, var(--entit-navy) 45%, var(--entit-accent-darker) 100%);
+    background: linear-gradient(135deg,
+        hsl(222 34% 21%) 0%,
+        hsl(var(--entit-navy)) 45%,
+        hsl(227 61% 40%) 100%);
 }
 
 .landing-hero::after {
@@ -175,14 +741,23 @@ h1:focus {
     position: absolute;
     inset: 0;
     background:
-        radial-gradient(40rem 20rem at 85% -10%, rgba(143, 166, 255, .35), transparent 60%),
-        radial-gradient(30rem 18rem at 5% 120%, rgba(58, 99, 240, .35), transparent 60%);
+        radial-gradient(40rem 20rem at 85% -10%, hsl(228 100% 78% / .35), transparent 60%),
+        radial-gradient(30rem 18rem at 5% 120%, hsl(227 86% 58% / .35), transparent 60%);
     pointer-events: none;
 }
 
 .landing-hero > * {
     position: relative;
     z-index: 1;
+}
+
+/* Bootstrap gives every heading `color: var(--bs-heading-color)`, which is a real
+   declaration on the h1 and therefore beats the white this hero merely passes down
+   by inheritance. The headline was rendering in the ink navy on the navy gradient:
+   present in the markup, invisible on the page, and on the signed-out landing page
+   at that. Anything on a dark surface has to opt back in to inheriting. */
+.landing-hero :is(h1, h2, h3, h4, h5, h6, .display-1, .display-2, .display-3, .display-4) {
+    color: inherit;
 }
 
 .landing-hero .display-4 {
@@ -196,7 +771,7 @@ h1:focus {
     align-items: center;
     gap: .4rem;
     padding: .3rem .75rem;
-    border-radius: 2rem;
+    border-radius: 999px;
     font-size: .8rem;
     font-weight: 600;
     letter-spacing: .03em;
@@ -213,16 +788,16 @@ h1:focus {
 
 .landing-feature {
     height: 100%;
-    border: 1px solid var(--entit-border);
-    border-radius: .75rem;
-    background: #fff;
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
+    background: hsl(var(--card));
     transition: transform 0.15s ease, box-shadow 0.15s ease, border-color 0.15s ease;
 }
 
 .landing-feature:hover {
     transform: translateY(-3px);
-    border-color: var(--bs-primary-border-subtle);
-    box-shadow: 0 .5rem 1.25rem rgba(44, 58, 90, .12);
+    border-color: hsl(var(--primary) / .35);
+    box-shadow: 0 10px 15px -3px hsl(var(--foreground) / .1), 0 4px 6px -4px hsl(var(--foreground) / .1);
 }
 
 .landing-feature-icon {
@@ -231,7 +806,7 @@ h1:focus {
     display: flex;
     align-items: center;
     justify-content: center;
-    border-radius: .625rem;
+    border-radius: var(--radius);
     font-size: 1.25rem;
     flex-shrink: 0;
 }
@@ -240,12 +815,12 @@ h1:focus {
     display: inline-block;
     padding: .35rem .7rem;
     margin: .2rem;
-    border-radius: 2rem;
+    border-radius: 999px;
     font-size: .8rem;
     font-weight: 500;
-    color: var(--entit-text);
-    background: var(--entit-muted);
-    border: 1px solid var(--entit-border);
+    color: hsl(var(--foreground));
+    background: hsl(var(--muted));
+    border: 1px solid hsl(var(--border));
 }
 
 .landing-stat-value {
@@ -253,21 +828,7 @@ h1:focus {
     font-weight: 700;
     font-size: 2rem;
     line-height: 1;
-    color: var(--bs-primary);
-}
-
-/* Tenant detail category/sub-tab hierarchy */
-.tenant-category-nav .nav-link {
-    font-weight: 600;
-}
-
-.tenant-category-nav .nav-link:not(.active) {
-    color: #495057;
-}
-
-/* Consistent card header style */
-.card-header.bg-white {
-    border-bottom: 1px solid rgba(0, 0, 0, .075);
+    color: hsl(var(--primary));
 }
 
 /* In-app toast notifications (ToastHost) */
@@ -302,7 +863,7 @@ h1:focus {
     align-items: flex-end;
     font-size: 0.66rem;
     line-height: 1;
-    color: var(--bs-secondary-color, #6c757d);
+    color: hsl(var(--muted-foreground));
     padding: 1px 0;
     white-space: nowrap;
 }
@@ -312,9 +873,10 @@ h1:focus {
     justify-content: space-between;
     font-size: 0.66rem;
     line-height: 1;
-    color: var(--bs-secondary-color, #6c757d);
+    color: hsl(var(--muted-foreground));
     padding-top: 3px;
 }
+
 /* ═══════════════════════════════════════════════════════════════════
    Split pane — a navigator beside the thing it selects.
 
@@ -331,17 +893,17 @@ h1:focus {
     display: flex;
     align-items: stretch;
     min-height: 34rem;
-    border: 1px solid rgba(0, 0, 0, .09);
-    border-radius: 10px;
+    border: 1px solid hsl(var(--border));
+    border-radius: var(--radius);
     overflow: hidden;
-    background: #fff;
+    background: hsl(var(--card));
 }
 
 .pane-nav {
     width: 260px;
     flex: none;
-    border-right: 1px solid rgba(0, 0, 0, .09);
-    background: #fbfcfe;
+    border-right: 1px solid hsl(var(--border));
+    background: hsl(var(--surface-sunken));
     display: flex;
     flex-direction: column;
     max-height: 46rem;
@@ -357,7 +919,7 @@ h1:focus {
     font-weight: 700;
     letter-spacing: .06em;
     text-transform: uppercase;
-    color: #8595a8;
+    color: hsl(var(--muted-foreground) / .85);
     padding: .75rem .55rem .3rem;
 }
 
@@ -369,18 +931,19 @@ h1:focus {
     text-align: left;
     border: none;
     background: transparent;
-    border-radius: 7px;
+    border-radius: calc(var(--radius) - 2px);
     padding: .4rem .55rem;
-    color: #1b2a3d;
+    color: hsl(var(--foreground));
     line-height: 1.25;
 }
 
 .pane-item:hover {
-    background: rgba(13, 110, 253, .06);
+    background: hsl(var(--accent));
 }
 
 .pane-item.selected {
-    background: rgba(13, 110, 253, .11);
+    background: hsl(var(--primary) / .11);
+    color: hsl(var(--primary-active));
     font-weight: 600;
 }
 
@@ -388,12 +951,12 @@ h1:focus {
     flex: none;
     width: 1rem;
     text-align: center;
-    color: #6c8199;
+    color: hsl(var(--muted-foreground));
     margin-top: .1rem;
 }
 
 .pane-item.selected .ico {
-    color: #0d6efd;
+    color: hsl(var(--primary));
 }
 
 .pane-item-body {
@@ -410,7 +973,7 @@ h1:focus {
 
 .pane-item-sub {
     font-size: .72rem;
-    color: #8595a8;
+    color: hsl(var(--muted-foreground));
     overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
@@ -423,16 +986,16 @@ h1:focus {
     width: .45rem;
     height: .45rem;
     border-radius: 50%;
-    background: #ffc107;
+    background: hsl(var(--warning));
 }
 
 .pane-dot.critical {
-    background: #dc3545;
+    background: hsl(var(--destructive));
 }
 
 .pane-count {
     font-size: .7rem;
-    color: #8595a8;
+    color: hsl(var(--muted-foreground));
     margin-left: auto;
     padding-left: .35rem;
 }
@@ -447,7 +1010,7 @@ h1:focus {
 
 .pane-head {
     padding: .7rem .95rem;
-    border-bottom: 1px solid rgba(0, 0, 0, .07);
+    border-bottom: 1px solid hsl(var(--border));
     display: flex;
     align-items: flex-start;
     justify-content: space-between;
@@ -462,15 +1025,15 @@ h1:focus {
 .pane-meter {
     height: .4rem;
     border-radius: 999px;
-    background: rgba(0, 0, 0, .07);
+    background: hsl(var(--muted));
     overflow: hidden;
 }
 
 .pane-meter-fill {
     height: 100%;
-    background: #198754;
+    background: hsl(var(--success));
     transition: width .2s ease;
 }
 
-.pane-meter-fill.partial { background: #ffc107; }
-.pane-meter-fill.poor { background: #dc3545; }
+.pane-meter-fill.partial { background: hsl(var(--warning)); }
+.pane-meter-fill.poor { background: hsl(var(--destructive)); }
