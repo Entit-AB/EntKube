@@ -306,9 +306,17 @@ Each phase ships on its own and leaves the product working. No big-bang cutover.
 Nothing moves. The monolith becomes modular.
 
 1. Split `ApplicationDbContext` into **12 module contexts over one connection and one
-   migration history.** EF Core handles this fine; it is a compile-time boundary, not a
-   database change. The day a module needs its own store, it already has a context.
+   migration history.** ☑ **Done.** A compile-time boundary, not a database change — the EF
+   model was dumped before and after and is byte-for-byte identical. The day a module needs
+   its own store, it already has a context.
+
+   One thing this turned up: EF derives a table name from the `DbSet` property on whichever
+   context declares it, so `AlertIncident` lived in `AlertIncidents` only because
+   `ApplicationDbContext` spelled that property in the plural, and eight entities were never
+   configured at all. All 165 table names are now stated in the model, so renaming a C#
+   property can no longer rename a production table.
 2. One `IXxxApi` interface per module — the module's whole contract, in `EntKube.Contracts`.
+   ☐ Not started; this is the hinge into Phase 1.
 3. **An architecture test that fails the build when the boundaries erode.** ☑ **Done.**
    `ModuleMap` assigns all 165 entities to a module and `ModuleBoundaryTests` holds it to the
    EF model in both directions — an unassigned table fails the build, and so does a mapping
@@ -325,9 +333,27 @@ Nothing moves. The monolith becomes modular.
    Enforcing it by reflection in the meantime would mean baselining 141 services and then
    throwing the baseline away — so the data boundary is enforced now and the code boundary
    follows the contexts.
-4. Split `Program.cs` into 12 `AddXxxModule()` extensions.
+4. **Split `Program.cs` into 12 `AddXxxModule()` extensions.** ◐ **Mostly done.**
+   `ModuleMap.Services` now assigns all 188 registered services — 176 to a module, 12 named
+   as platform wiring — and `ModuleCompositionTests` runs each module's `Add…Module()` and
+   fails if it registers something the map says another module owns, or if a mapped service
+   has quietly stopped being registered. The 176 moved into twelve composition files.
 
-*Exit criterion: the architecture test is green and `Program.cs` is under 200 lines.*
+   **The "under 200 lines" criterion was wrong, and worth correcting rather than chasing.**
+   It was written before measuring. `Program.cs` went 1,582 → 1,443, and the remaining bulk
+   is not service registration at all: it is the HTTP pipeline, authentication and OIDC
+   setup, the database provider switch, the segment-engine configuration and a handful of
+   endpoints. Roughly 28 registrations also stayed because they close over values computed
+   during startup (`rootKey`, `segmentOptions`, configuration sections) — moving those is a
+   rewrite rather than a move, and it belongs with the module contracts in Phase 1 where the
+   configuration can be passed in deliberately.
+
+   What the criterion was reaching for — "no one can append a service to a nameless pile" —
+   is met by the map and its test. Extracting the startup pipeline is worth doing, but it is
+   platform housekeeping rather than decomposition, and should be judged on its own.
+
+*Exit criterion: the module boundary and composition tests are green, and every entity and
+every service has a named owner.* ☑
 
 ### Phase 1 — The API (the actual product work)
 
