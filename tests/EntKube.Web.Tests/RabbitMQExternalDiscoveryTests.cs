@@ -33,7 +33,13 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         db = testDb.CreateContext();
         vaultService = testDb.CreateVaultService();
         k8s = new Mock<IKubernetesClientFactory>();
-        sut = new RabbitMQService(testDb.Factory, k8s.Object, vaultService);
+        // Real factory over the intercepting test database: the vault-seeded kubeconfig resolves
+        // as production resolves it, then reaches the same mock — so the existing k8s assertions
+        // keep working and additionally prove the delegation.
+        sut = new RabbitMQService(
+            testDb.Factory,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
+            vaultService);
     }
 
     public void Dispose()

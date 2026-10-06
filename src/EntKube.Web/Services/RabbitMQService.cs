@@ -156,10 +156,22 @@ public class RabbitMQOperatorStatus
 /// </summary>
 public class RabbitMQService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    IKubernetesClientFactory k8s,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     VaultService vaultService,
     ILogger<RabbitMQService>? logger = null)
 {
+    /// <summary>
+    /// A client for one of the tenant's clusters, or a refusal that says why. Keeps the cluster
+    /// credential inside Fleet — see docs/decomposition.md §4.0.1. Named clusterAccess rather
+    /// than clusters because a local of that name already exists in this file.
+    /// </summary>
+    private async Task<Clusters.IClusterClient> ClusterFor(
+        Guid tenantId, Guid clusterId, CancellationToken ct)
+        => await clusterAccess.ForAsync(tenantId, clusterId, ct)
+           ?? throw new InvalidOperationException(
+               "The cluster has no stored kubeconfig, or does not belong to this tenant, "
+               + "so nothing can be applied to it.");
+
     // ── Topology capability ───────────────────────────────────────────────────
 
     /// <summary>
@@ -200,8 +212,8 @@ public class RabbitMQService(
         try
         {
             // CRDs are cluster-scoped; the namespace argument is ignored by kubectl here.
-            await k8s.GetJsonAsync(
-                "crd/vhosts.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!, ct: ct);
+            await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+                "crd/vhosts.rabbitmq.com", cluster.Namespace, ct: ct);
             present = true;
         }
         catch
@@ -331,10 +343,10 @@ public class RabbitMQService(
         {
             KubernetesCluster k8sCluster = await db.KubernetesClusters
                 .FirstAsync(c => c.Id == kubernetesClusterId, ct);
-            string kubeconfig = k8sCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct);
 
-            await k8s.EnsureNamespaceAsync(ns, kubeconfig, ct);
-            await k8s.ApplyManifestAsync(BuildClusterManifest(cluster), kubeconfig, ct);
+            await client.EnsureNamespaceAsync(ns, ct);
+            await client.ApplyManifestAsync(BuildClusterManifest(cluster), ct);
 
             cluster.Status = RabbitMQClusterStatus.Running;
         }
@@ -392,7 +404,7 @@ public class RabbitMQService(
 
         try
         {
-            await k8s.ApplyManifestAsync(BuildClusterManifest(cluster), cluster.KubernetesCluster.Kubeconfig!, ct);
+            await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(BuildClusterManifest(cluster), ct);
         }
         catch (Exception ex)
         {
@@ -432,8 +444,8 @@ public class RabbitMQService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
-            await k8s.DeleteManifestAsync("rabbitmqcluster", cluster.Name, cluster.Namespace, kubeconfig, ct);
+            Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
+            await client.DeleteManifestAsync("rabbitmqcluster", cluster.Name, cluster.Namespace, ct);
         }
         catch (Exception ex)
         {
@@ -495,8 +507,8 @@ public class RabbitMQService(
             string? crJson = null;
             try
             {
-                crJson = await k8s.GetJsonAllNamespacesAsync(
-                    "rabbitmqclusters.rabbitmq.com", k.Kubeconfig!, ct: ct);
+                crJson = await (await ClusterFor(k.TenantId, k.Id, ct)).GetJsonAllNamespacesAsync(
+                    "rabbitmqclusters.rabbitmq.com", ct: ct);
             }
             catch
             {
@@ -519,7 +531,7 @@ public class RabbitMQService(
             string stsJson;
             try
             {
-                stsJson = await k8s.GetJsonAllNamespacesAsync("statefulsets", k.Kubeconfig!, ct: ct);
+                stsJson = await (await ClusterFor(k.TenantId, k.Id, ct)).GetJsonAllNamespacesAsync("statefulsets", ct: ct);
             }
             catch
             {
@@ -881,21 +893,21 @@ public class RabbitMQService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
 
             // External brokers have no CR to read conditions from; readiness comes straight
             // off the StatefulSet instead.
             if (!cluster.IsOperatorManaged)
             {
-                string stsJson = await k8s.GetJsonAsync(
+                string stsJson = await client.GetJsonAsync(
                     $"statefulset/{cluster.StatefulSetName ?? cluster.Name}",
-                    cluster.Namespace, kubeconfig, ct: ct);
+                    cluster.Namespace, ct: ct);
 
                 return ParseStatefulSetStatus(stsJson, cluster.Name, cluster.Namespace);
             }
 
-            string json = await k8s.GetJsonAsync(
-                $"rabbitmqcluster/{cluster.Name}", cluster.Namespace, kubeconfig, ct: ct);
+            string json = await client.GetJsonAsync(
+                $"rabbitmqcluster/{cluster.Name}", cluster.Namespace, ct: ct);
 
             return ParseClusterStatus(json, cluster.Name, cluster.Namespace);
         }
@@ -984,14 +996,14 @@ public class RabbitMQService(
             .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("RabbitMQ cluster not found.");
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
 
         if (cluster.IsOperatorManaged)
         {
             string secretName = $"{cluster.Name}-default-user";
 
-            string? opUsername = await k8s.GetSecretValueAsync(secretName, "username", cluster.Namespace, kubeconfig, ct);
-            string? opPassword = await k8s.GetSecretValueAsync(secretName, "password", cluster.Namespace, kubeconfig, ct);
+            string? opUsername = await client.GetSecretValueAsync(secretName, "username", cluster.Namespace, ct);
+            string? opPassword = await client.GetSecretValueAsync(secretName, "password", cluster.Namespace, ct);
 
             if (opUsername is null || opPassword is null) return null;
             return (opUsername, opPassword);
@@ -1000,14 +1012,14 @@ public class RabbitMQService(
         if (cluster.CredentialsSecretName is null || cluster.CredentialsPasswordKey is null)
             return null;
 
-        string? password = await k8s.GetSecretValueAsync(
-            cluster.CredentialsSecretName, cluster.CredentialsPasswordKey, cluster.Namespace, kubeconfig, ct);
+        string? password = await client.GetSecretValueAsync(
+            cluster.CredentialsSecretName, cluster.CredentialsPasswordKey, cluster.Namespace, ct);
 
         if (password is null) return null;
 
         string? username = cluster.CredentialsUsernameKey is not null
-            ? await k8s.GetSecretValueAsync(
-                cluster.CredentialsSecretName, cluster.CredentialsUsernameKey, cluster.Namespace, kubeconfig, ct)
+            ? await client.GetSecretValueAsync(
+                cluster.CredentialsSecretName, cluster.CredentialsUsernameKey, cluster.Namespace, ct)
             : cluster.AdminUsername;
 
         // Neither a secret key nor an inline value — the chart relied on the image default.
@@ -1100,14 +1112,13 @@ public class RabbitMQService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
             string primaryPod = cluster.PrimaryPodName;
 
             // rabbitmqctl export_definitions - writes the JSON definitions to stdout.
-            string json = await k8s.RunCommandOnPodAsync(
+            string json = await client.RunCommandOnPodAsync(
                 primaryPod, cluster.Namespace,
-                ["rabbitmqctl", "export_definitions", "-"],
-                kubeconfig, ct: ct);
+                ["rabbitmqctl", "export_definitions", "-"], ct: ct);
 
             byte[] data = Encoding.UTF8.GetBytes(json);
             await UploadToS3Async(tenantId, storageLink, backup.ObjectKey, data, ct);
@@ -1162,14 +1173,14 @@ public class RabbitMQService(
         byte[] data = await DownloadFromS3Async(tenantId, backup.StorageLink, backup.ObjectKey, ct);
         string json = Encoding.UTF8.GetString(data);
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
         string primaryPod = cluster.PrimaryPodName;
 
         // rabbitmqctl import_definitions - reads JSON from stdin.
-        await k8s.RunCommandOnPodWithStdinAsync(
+        await client.RunCommandOnPodWithStdinAsync(
             primaryPod, cluster.Namespace,
             ["rabbitmqctl", "import_definitions", "-"],
-            json, kubeconfig, ct);
+            json, ct);
     }
 
     public async Task DeleteBackupAsync(Guid tenantId, Guid backupId, CancellationToken ct = default)
@@ -1244,7 +1255,7 @@ public class RabbitMQService(
                   scrapeTimeout: 14s
             """;
 
-        await k8s.ApplyManifestAsync(manifest, cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     // ── External brokers: rabbitmqctl control channel ─────────────────────────
@@ -1268,9 +1279,9 @@ public class RabbitMQService(
         int timeoutSeconds = 60)
     {
         List<string> command = ["rabbitmqctl", .. args];
-        return await k8s.RunCommandOnPodAsync(
+        return await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).RunCommandOnPodAsync(
             cluster.PrimaryPodName, cluster.Namespace, command,
-            cluster.KubernetesCluster.Kubeconfig!, ct: ct, timeoutSeconds: timeoutSeconds);
+             ct: ct, timeoutSeconds: timeoutSeconds);
     }
 
     /// <summary>
@@ -1307,10 +1318,10 @@ public class RabbitMQService(
     private async Task ImportPartialDefinitionsAsync(
         RabbitMQCluster cluster, string definitionsJson, CancellationToken ct)
     {
-        await k8s.RunCommandOnPodWithStdinAsync(
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).RunCommandOnPodWithStdinAsync(
             cluster.PrimaryPodName, cluster.Namespace,
             ["rabbitmqctl", "import_definitions", "-"],
-            definitionsJson, cluster.KubernetesCluster.Kubeconfig!, ct);
+            definitionsJson, ct);
     }
 
     private async Task<List<string>> ListExternalVhostsAsync(RabbitMQCluster cluster, CancellationToken ct)
@@ -1378,8 +1389,8 @@ public class RabbitMQService(
                 })];
         }
 
-        string json = await k8s.GetJsonAsync(
-            "vhosts.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!,
+        string json = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+            "vhosts.rabbitmq.com", cluster.Namespace,
             $"rabbitmq.com/cluster={cluster.Name}", ct);
         return ParseTopologyItems(json, item =>
         {
@@ -1415,7 +1426,7 @@ public class RabbitMQService(
                 name: {cluster.Name}
                 namespace: {cluster.Namespace}
             """;
-        await k8s.ApplyManifestAsync(manifest, cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     public async Task DeleteVhostAsync(
@@ -1430,8 +1441,8 @@ public class RabbitMQService(
             return;
         }
 
-        await k8s.DeleteManifestAsync("vhost", k8sName, cluster.Namespace,
-            cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).DeleteManifestAsync("vhost", k8sName, cluster.Namespace,
+             ct);
     }
 
     // ── Topology — Queues ─────────────────────────────────────────────────────
@@ -1465,8 +1476,8 @@ public class RabbitMQService(
             return queues;
         }
 
-        string json = await k8s.GetJsonAsync(
-            "queues.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!,
+        string json = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+            "queues.rabbitmq.com", cluster.Namespace,
             $"rabbitmq.com/cluster={cluster.Name}", ct);
         return ParseTopologyItems(json, item => new RabbitMQQueueInfo
         {
@@ -1595,7 +1606,7 @@ public class RabbitMQService(
                 name: {cluster.Name}
                 namespace: {cluster.Namespace}
             """;
-        await k8s.ApplyManifestAsync(manifest, cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     public async Task DeleteQueueAsync(
@@ -1610,8 +1621,8 @@ public class RabbitMQService(
             return;
         }
 
-        await k8s.DeleteManifestAsync("queue", k8sName, cluster.Namespace,
-            cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).DeleteManifestAsync("queue", k8sName, cluster.Namespace,
+             ct);
     }
 
     // ── Topology — Exchanges ──────────────────────────────────────────────────
@@ -1648,8 +1659,8 @@ public class RabbitMQService(
             return exchanges;
         }
 
-        string json = await k8s.GetJsonAsync(
-            "exchanges.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!,
+        string json = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+            "exchanges.rabbitmq.com", cluster.Namespace,
             $"rabbitmq.com/cluster={cluster.Name}", ct);
         return ParseTopologyItems(json, item => new RabbitMQExchangeInfo
         {
@@ -1709,7 +1720,7 @@ public class RabbitMQService(
                 name: {cluster.Name}
                 namespace: {cluster.Namespace}
             """;
-        await k8s.ApplyManifestAsync(manifest, cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     public async Task DeleteExchangeAsync(
@@ -1719,8 +1730,8 @@ public class RabbitMQService(
 
         if (!await UseTopologyCrdsAsync(cluster, ct)) throw NoCliVerb("delete an exchange");
 
-        await k8s.DeleteManifestAsync("exchange", k8sName, cluster.Namespace,
-            cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).DeleteManifestAsync("exchange", k8sName, cluster.Namespace,
+             ct);
     }
 
     // ── Topology — Routing bindings (exchange→queue/exchange) ─────────────────
@@ -1759,8 +1770,8 @@ public class RabbitMQService(
             return bindings;
         }
 
-        string json = await k8s.GetJsonAsync(
-            "bindings.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!,
+        string json = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+            "bindings.rabbitmq.com", cluster.Namespace,
             $"rabbitmq.com/cluster={cluster.Name}", ct);
         return ParseTopologyItems(json, item => new RabbitMQRoutingBindingInfo
         {
@@ -1821,7 +1832,7 @@ public class RabbitMQService(
                 name: {cluster.Name}
                 namespace: {cluster.Namespace}
             """;
-        await k8s.ApplyManifestAsync(manifest, cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     public async Task DeleteRoutingBindingAsync(
@@ -1831,8 +1842,8 @@ public class RabbitMQService(
 
         if (!await UseTopologyCrdsAsync(cluster, ct)) throw NoCliVerb("unbind a queue or exchange");
 
-        await k8s.DeleteManifestAsync("binding", k8sName, cluster.Namespace,
-            cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).DeleteManifestAsync("binding", k8sName, cluster.Namespace,
+             ct);
     }
 
     // ── Cascade delete ────────────────────────────────────────────────────────
@@ -1898,7 +1909,7 @@ public class RabbitMQService(
         IReadOnlyList<RabbitMQCascadeItem> dependents, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
 
         if (!await UseTopologyCrdsAsync(cluster, ct))
         {
@@ -1923,9 +1934,9 @@ public class RabbitMQService(
         }
 
         foreach (RabbitMQCascadeItem dep in dependents)
-            await k8s.DeleteManifestAsync(dep.Kind, dep.K8sName, cluster.Namespace, kubeconfig, ct);
+            await client.DeleteManifestAsync(dep.Kind, dep.K8sName, cluster.Namespace, ct);
 
-        await k8s.DeleteManifestAsync(targetKind, targetK8sName, cluster.Namespace, kubeconfig, ct);
+        await client.DeleteManifestAsync(targetKind, targetK8sName, cluster.Namespace, ct);
     }
 
     // ── Topology — Users ──────────────────────────────────────────────────────
@@ -1934,7 +1945,7 @@ public class RabbitMQService(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         RabbitMQCluster cluster = await LoadClusterAsync(tenantId, clusterId, ct);
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
 
         if (!await UseTopologyCrdsAsync(cluster, ct))
         {
@@ -1950,8 +1961,8 @@ public class RabbitMQService(
             })];
         }
 
-        string json = await k8s.GetJsonAsync(
-            "users.rabbitmq.com", cluster.Namespace, kubeconfig,
+        string json = await client.GetJsonAsync(
+            "users.rabbitmq.com", cluster.Namespace,
             $"rabbitmq.com/cluster={cluster.Name}", ct);
 
         List<RabbitMQUserInfo> users = ParseTopologyItems(json, item =>
@@ -1980,8 +1991,8 @@ public class RabbitMQService(
         {
             try
             {
-                string? actualUsername = await k8s.GetSecretValueAsync(
-                    $"{u.K8sName}-credentials", "username", cluster.Namespace, kubeconfig, ct);
+                string? actualUsername = await client.GetSecretValueAsync(
+                    $"{u.K8sName}-credentials", "username", cluster.Namespace, ct);
                 if (actualUsername is not null)
                     u.Username = actualUsername;
             }
@@ -2026,7 +2037,7 @@ public class RabbitMQService(
               username: {B64(username)}
               password: {B64(password)}
             """;
-        await k8s.ApplyManifestAsync(credSecret, cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(credSecret, ct);
 
         string tagsYaml = tags.Any()
             ? "\n  tags:\n" + string.Join("\n", tags.Select(t => $"    - {t}"))
@@ -2047,7 +2058,7 @@ public class RabbitMQService(
                 name: {cluster.Name}
                 namespace: {cluster.Namespace}
             """;
-        await k8s.ApplyManifestAsync(manifest, cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     public async Task DeleteUserAsync(
@@ -2062,13 +2073,13 @@ public class RabbitMQService(
             return;
         }
 
-        await k8s.DeleteManifestAsync("user", k8sName, cluster.Namespace,
-            cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).DeleteManifestAsync("user", k8sName, cluster.Namespace,
+             ct);
         // Best-effort cleanup of the credentials secret.
         try
         {
-            await k8s.DeleteManifestAsync("secret", $"{k8sName}-credentials",
-                cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!, ct);
+            await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).DeleteManifestAsync("secret", $"{k8sName}-credentials",
+                cluster.Namespace, ct);
         }
         catch { }
     }
@@ -2107,8 +2118,8 @@ public class RabbitMQService(
             return permissions;
         }
 
-        string json = await k8s.GetJsonAsync(
-            "permissions.rabbitmq.com", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!,
+        string json = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+            "permissions.rabbitmq.com", cluster.Namespace,
             $"rabbitmq.com/cluster={cluster.Name}", ct);
 
         return ParseTopologyItems(json, item =>
@@ -2166,7 +2177,7 @@ public class RabbitMQService(
                 name: {cluster.Name}
                 namespace: {cluster.Namespace}
             """;
-        await k8s.ApplyManifestAsync(manifest, cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     // ── App bindings (MessagingBinding) ───────────────────────────────────────
@@ -2237,10 +2248,10 @@ public class RabbitMQService(
         // Best-effort: remove the K8s secret from the app's namespace.
         try
         {
-            string kubeconfig = binding.AppDeployment.Cluster.Kubeconfig!;
-            await k8s.DeleteManifestAsync(
+            Clusters.IClusterClient client = await ClusterFor(binding.TenantId, binding.AppDeployment.ClusterId, ct);
+            await client.DeleteManifestAsync(
                 "secret", binding.KubernetesSecretName,
-                binding.AppDeployment.Namespace, kubeconfig, ct);
+                binding.AppDeployment.Namespace, ct);
         }
         catch { }
 
@@ -2249,10 +2260,10 @@ public class RabbitMQService(
         {
             string appUsername = BindingUsername(bindingId);
             string k8sUserName = ToK8sName(binding.Cluster.Name, "u", appUsername);
-            string rmqKubeconfig = binding.Cluster.KubernetesCluster.Kubeconfig!;
-            await k8s.DeleteManifestAsync("user", k8sUserName, binding.Cluster.Namespace, rmqKubeconfig, ct);
-            await k8s.DeleteManifestAsync("secret", $"{k8sUserName}-credentials",
-                binding.Cluster.Namespace, rmqKubeconfig, ct);
+            Clusters.IClusterClient rmqCluster = await ClusterFor(binding.TenantId, binding.Cluster.KubernetesClusterId, ct);
+            await rmqCluster.DeleteManifestAsync("user", k8sUserName, binding.Cluster.Namespace, ct);
+            await rmqCluster.DeleteManifestAsync("secret", $"{k8sUserName}-credentials",
+                binding.Cluster.Namespace, ct);
         }
         catch { }
 
@@ -2314,8 +2325,8 @@ public class RabbitMQService(
         if (!string.IsNullOrEmpty(binding.ExchangeName))
             secretData.AppendLine($"  RABBITMQ_EXCHANGE: {B64(binding.ExchangeName)}");
 
-        string appKubeconfig = binding.AppDeployment.Cluster.Kubeconfig!;
-        await k8s.EnsureNamespaceAsync(binding.AppDeployment.Namespace, appKubeconfig, ct);
+        Clusters.IClusterClient appCluster = await ClusterFor(binding.TenantId, binding.AppDeployment.ClusterId, ct);
+        await appCluster.EnsureNamespaceAsync(binding.AppDeployment.Namespace, ct);
 
         string secretManifest = $"""
             apiVersion: v1
@@ -2331,7 +2342,7 @@ public class RabbitMQService(
             {secretData}
             """;
 
-        await k8s.ApplyManifestAsync(secretManifest, appKubeconfig, ct);
+        await appCluster.ApplyManifestAsync(secretManifest, ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
         using ApplicationDbContext db2 = dbFactory.CreateDbContext();
@@ -2602,7 +2613,7 @@ public class RabbitMQService(
         cluster.MaxBackups = maxBackups;
         await db.SaveChangesAsync(ct);
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
         string cronName = $"{cluster.Name}-scheduled-backup";
 
         if (!string.IsNullOrWhiteSpace(cluster.BackupSchedule) && cluster.StorageLink is not null)
@@ -2616,20 +2627,22 @@ public class RabbitMQService(
                     + "so it cannot schedule backups. On-demand backups still work.");
 
             string s3SecretName = $"{cluster.Name}-s3-credentials";
-            await EnsureStorageSecretsInK8sAsync(tenantId, cluster.StorageLink, s3SecretName, cluster.Namespace, kubeconfig, ct);
-            await k8s.ApplyManifestAsync(
-                BuildScheduledBackupCronJobManifest(cluster, cluster.StorageLink, s3SecretName), kubeconfig, ct);
+            await EnsureStorageSecretsInK8sAsync(
+                tenantId, cluster.StorageLink, s3SecretName, cluster.Namespace, client, ct);
+            await client.ApplyManifestAsync(
+                BuildScheduledBackupCronJobManifest(cluster, cluster.StorageLink, s3SecretName), ct);
         }
         else
         {
-            try { await k8s.DeleteManifestAsync("cronjob", cronName, cluster.Namespace, kubeconfig, ct); }
+            try { await client.DeleteManifestAsync("cronjob", cronName, cluster.Namespace, ct); }
             catch { /* CronJob may not exist — ignore. */ }
         }
     }
 
     /// <summary>Creates/updates a K8s Secret holding the storage link's S3 credentials for the CronJob.</summary>
     private async Task EnsureStorageSecretsInK8sAsync(
-        Guid tenantId, StorageLink link, string secretName, string ns, string kubeconfig, CancellationToken ct)
+        Guid tenantId, StorageLink link, string secretName, string ns,
+        Clusters.IClusterClient client, CancellationToken ct)
     {
         string? accessKey = await vaultService.GetStorageLinkSecretValueAsync(tenantId, link.Id, "ACCESS_KEY", ct);
         string? secretKey = await vaultService.GetStorageLinkSecretValueAsync(tenantId, link.Id, "SECRET_KEY", ct);
@@ -2647,7 +2660,7 @@ public class RabbitMQService(
               ACCESS_KEY: {B64(accessKey)}
               SECRET_KEY: {B64(secretKey)}
             """;
-        await k8s.ApplyManifestAsync(manifest, kubeconfig, ct);
+        await client.ApplyManifestAsync(manifest, ct);
     }
 
     /// <summary>
