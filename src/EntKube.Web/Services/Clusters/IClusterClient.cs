@@ -20,7 +20,8 @@ public interface IClusterClient
     /// <summary>The cluster's name, for messages that need to say which one.</summary>
     string ClusterName { get; }
 
-    Task ApplyManifestAsync(string manifest, CancellationToken ct = default);
+    /// <returns>kubectl's output, so a caller can log what happened.</returns>
+    Task<string> ApplyManifestAsync(string manifest, CancellationToken ct = default);
 
     Task DeleteManifestAsync(string kind, string name, string ns, CancellationToken ct = default);
 

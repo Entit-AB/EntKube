@@ -24,7 +24,7 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// Applies a YAML manifest by writing it to a temp file and running kubectl apply.
     /// The kubeconfig is written to a separate temp file for authentication.
     /// </summary>
-    public async Task ApplyManifestAsync(string manifest, string kubeconfig, CancellationToken ct = default)
+    public async Task<string> ApplyManifestAsync(string manifest, string kubeconfig, CancellationToken ct = default)
     {
         await _gate.AcknowledgeAsync(new PlannedClusterChange
         {
@@ -41,7 +41,7 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
             await File.WriteAllTextAsync(manifestPath, manifest, ct);
 
-            string result = await RunKubectlAsync(
+            return await RunKubectlAsync(
                 $"apply -f {manifestPath} --kubeconfig={kubeconfigPath}", ct);
         }
         finally

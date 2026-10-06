@@ -20,6 +20,7 @@ public sealed record TrustSourceView(CaTrustBundleSource Source, CertificateInfo
 /// </summary>
 public class TrustBundleService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     IClusterChangeGate gate,
     ILogger<TrustBundleService> logger)
 {
@@ -210,7 +211,7 @@ public class TrustBundleService(
             Manifest = manifest,
         }, ct);
 
-        (bool ok, string output) = await RunKubectlApplyAsync(manifest, cluster.Kubeconfig!, ct);
+        (bool ok, string output) = await ApplyThroughClusterAsync(cluster, manifest, ct);
         if (ok)
             logger.LogInformation("Trust bundle {Name} applied to {Cluster}", bundle.TargetName, cluster.Name);
         else
@@ -343,19 +344,6 @@ public class TrustBundleService(
 
     // ── kubectl plumbing ───────────────────────────────────────────────────────
 
-    private static async Task<(bool, string)> RunKubectlApplyAsync(string manifest, string kubeconfig, CancellationToken ct)
-    {
-        string manifestPath = Path.Combine(Path.GetTempPath(), $"entkube-trust-{Guid.NewGuid():N}.yaml");
-        try
-        {
-            await File.WriteAllTextAsync(manifestPath, manifest, ct);
-            return await RunKubectlAsync($"apply -f {manifestPath}", kubeconfig, manifestPath, ct);
-        }
-        finally
-        {
-            if (File.Exists(manifestPath)) File.Delete(manifestPath);
-        }
-    }
 
     private static async Task<(bool, string)> RunKubectlAsync(
         string arguments, string kubeconfig, string? extraTempToDelete, CancellationToken ct)
@@ -417,5 +405,39 @@ public class TrustBundleService(
         while (result.Contains("--")) result = result.Replace("--", "-");
         if (result.Length > 63) result = result[..63].Trim('-');
         return result.Length == 0 ? fallback : result;
+    }
+
+    /// <summary>
+    /// Applies a manifest through the cluster client, keeping the <c>(ok, output)</c> shape this
+    /// service reports with.
+    ///
+    /// <para>This replaced a local copy of kubectl plumbing — write the manifest to a temp file,
+    /// write the kubeconfig next to it, spawn a process, read both streams, delete both files.
+    /// The only reason it existed is that <c>ApplyManifestAsync</c> used to discard kubectl's
+    /// output, and this service logs it. Now that the factory returns it, the copy is redundant
+    /// and the credential stops passing through here.</para>
+    /// </summary>
+    private async Task<(bool Ok, string Output)> ApplyThroughClusterAsync(
+        KubernetesCluster cluster, string manifest, CancellationToken ct)
+    {
+        Clusters.IClusterClient? target =
+            await clusterAccess.ForAsync(cluster.TenantId, cluster.Id, ct);
+
+        if (target is null)
+        {
+            return (false, "The cluster has no stored kubeconfig.");
+        }
+
+        try
+        {
+            return (true, await target.ApplyManifestAsync(manifest, ct));
+        }
+        catch (Exception ex)
+        {
+            // kubectl failure arrives as an exception from the factory; this service has always
+            // reported it as a value, and its callers aggregate across clusters rather than
+            // abandoning the sweep at the first bad one.
+            return (false, ex.Message);
+        }
     }
 }

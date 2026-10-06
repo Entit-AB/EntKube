@@ -32,12 +32,20 @@ public class ClusterCredentialCustodyTests
     /// <summary>
     /// Places that take a cluster's credential out of the row, measured 2026-10-06.
     ///
-    /// <para><b>294 and falling</b>, from 508 once the count was corrected (below):
+    /// <para><b>288 and falling</b>, from 508 once the count was corrected (below):
     /// <c>RedisService</c> 9, <c>CnpgService</c> 48, <c>ElasticsearchService</c> 42,
     /// <c>RabbitMQService</c> 37, <c>MongoService</c> 47, then <c>KafkaService</c> 15 and
     /// <c>RegisteredPostgresService</c> 16. None of those seven injects
     /// <see cref="IKubernetesClientFactory"/> any more, which is the clearest evidence a service
     /// is done: it cannot reach the raw-credential API even if a later change wanted to.</para>
+    ///
+    /// <para><c>TrustBundleService</c> and <c>CertificateDistributionService</c> each kept a local
+    /// copy of kubectl plumbing purely because <c>ApplyManifestAsync</c> discarded kubectl's
+    /// output and they log it. The factory now returns it, so both copies are gone. Their
+    /// remaining sites are the change gate's: <c>PlannedClusterChange</c> <em>requires</em> a
+    /// kubeconfig, so every gated call site must hold one. Fixing that is the next unit and needs
+    /// a diff capability on the seam — the gate shells out to <c>kubectl diff</c>, which is not
+    /// among the factory's eighteen methods.</para>
     ///
     /// <para>By module: Fleet 102 (unremarkable — it owns clusters, and
     /// <c>KubernetesOperationsService</c> alone is 72), Catalog 52, Telemetry 28, Delivery 26,
@@ -50,7 +58,7 @@ public class ClusterCredentialCustodyTests
     /// the credential read inside the seam. Ten services had hand-rolled the same four lines;
     /// <c>DatabaseService</c> is the first to drop its copy.</para>
     ///
-    private const int BaselineOccurrences = 290;
+    private const int BaselineOccurrences = 288;
 
     /// <summary>Files doing so. A file that has stopped should not be able to start again quietly.</summary>
     private const int BaselineFiles = 49;

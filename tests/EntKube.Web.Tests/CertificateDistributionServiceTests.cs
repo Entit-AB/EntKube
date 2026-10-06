@@ -5,6 +5,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services;
 using EntKube.Web.Services.ClusterChanges;
 using FluentAssertions;
+using Moq;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -39,7 +40,11 @@ public sealed class CertificateDistributionServiceTests : IDisposable
         VaultEncryptionService encryption = new(TestRootKey);
         VaultService vault = new(dbFactory, encryption);
         ClusterChangeGate gate = new(new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
-        sut = new CertificateDistributionService(dbFactory, vault, gate, NullLogger<CertificateDistributionService>.Instance);
+        sut = new CertificateDistributionService(
+            dbFactory, vault,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(
+                dbFactory, new Mock<IKubernetesClientFactory>().Object),
+            gate, NullLogger<CertificateDistributionService>.Instance);
     }
 
     // ── Secret manifest generation ────────────────────────────────────────────

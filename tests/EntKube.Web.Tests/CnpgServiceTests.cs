@@ -128,7 +128,7 @@ public class CnpgServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         // Act — create a new managed CNPG cluster.
 
@@ -161,7 +161,7 @@ public class CnpgServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         // Act — create without backup configuration.
 
@@ -225,7 +225,7 @@ public class CnpgServiceTests : IDisposable
                 appliedManifests.Add(manifest);
                 appliedKubeconfig = kubeconfig;
             })
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         // Act
 
@@ -318,7 +318,7 @@ public class CnpgServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         // Act — minor version bump within the same major
 
@@ -400,7 +400,7 @@ public class CnpgServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         k8sFactory.Setup(f => f.DeleteManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
@@ -500,7 +500,7 @@ public class CnpgServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         // Act
 
@@ -575,7 +575,7 @@ public class CnpgServiceTests : IDisposable
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((manifest, _, _) => appliedManifest = manifest)
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         DateTime targetTime = new(2026, 5, 17, 10, 30, 0, DateTimeKind.Utc);
 
@@ -799,7 +799,7 @@ public class CnpgServiceTests : IDisposable
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((manifest, _, _) => appliedManifests.Add(manifest))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         // Act
 
@@ -827,7 +827,7 @@ public class CnpgServiceTests : IDisposable
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((manifest, _, _) => appliedManifests.Add(manifest))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         // Act
 
@@ -924,7 +924,7 @@ public class CnpgServiceTests : IDisposable
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((manifest, _, _) => appliedManifest = manifest)
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         CnpgDatabase database = await sut.CreateDatabaseAsync(tenant.Id, cnpg.Id, "syncdb");
 
@@ -961,7 +961,7 @@ public class CnpgServiceTests : IDisposable
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((manifest, _, _) => appliedManifests.Add(manifest))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.CreateClusterAsync(
             tenant.Id, cluster.Id, "metrics-pg", "databases", 1, "5Gi", storageLink.Id, null);
@@ -994,7 +994,7 @@ public class CnpgServiceTests : IDisposable
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((manifest, _, _) => appliedManifests.Add(manifest))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.RestoreAsync(tenant.Id, source.Id, "restored-metrics-pg",
             new DateTime(2026, 5, 17, 10, 30, 0, DateTimeKind.Utc));
@@ -1030,7 +1030,7 @@ public class CnpgServiceTests : IDisposable
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((manifest, _, _) => appliedManifests.Add(manifest))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.ReapplyClusterSpecAsync(tenant.Id, existing.Id);
 

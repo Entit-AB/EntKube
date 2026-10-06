@@ -19,7 +19,7 @@ public sealed class ClusterClient(
 
     public string ClusterName => clusterName;
 
-    public Task ApplyManifestAsync(string manifest, CancellationToken ct = default)
+    public Task<string> ApplyManifestAsync(string manifest, CancellationToken ct = default)
         => inner.ApplyManifestAsync(manifest, kubeconfig, ct);
 
     public Task DeleteManifestAsync(string kind, string name, string ns, CancellationToken ct = default)

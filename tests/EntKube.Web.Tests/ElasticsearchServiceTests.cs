@@ -518,7 +518,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchCluster c = SampleCluster();
         c.TenantId = tenantId;
@@ -890,7 +890,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
 
@@ -915,7 +915,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, "prod", "0 30 1 * * ?", 30, 5, 50);
 
@@ -946,7 +946,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
 
@@ -1063,7 +1063,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchCluster edited = SampleCluster();
         edited.Id = c.Id;
@@ -1151,7 +1151,7 @@ public class ElasticsearchServiceTests : IDisposable
         (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
         await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
 
         // There is only one set of cluster settings, so "alongside" is not a thing it can be.
@@ -1168,7 +1168,7 @@ public class ElasticsearchServiceTests : IDisposable
         (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
         await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
 
         Func<Task> act = () => sut.RestoreSnapshotAsync(
@@ -1184,7 +1184,7 @@ public class ElasticsearchServiceTests : IDisposable
         (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
         await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
 
         await sut.RestoreSnapshotAsync(
@@ -1299,7 +1299,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchUser user = await sut.CreateUserAsync(
             tenantId, c.Id, "orders", "logs-orders-*", ElasticsearchAccess.Writer);
@@ -1327,7 +1327,7 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchCluster c = await SeedPlainClusterAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchUser user = await sut.CreateUserAsync(
             tenantId, c.Id, "orders", "logs-orders-*", ElasticsearchAccess.Writer);
@@ -1344,7 +1344,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<(string Manifest, string Kubeconfig)> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, kc, _) => applied.Add((m, kc)))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.CreateBindingAsync(tenantId, c.Id, deployment.Id, user.Id, "elasticsearch");
 
@@ -1365,7 +1365,7 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchCluster c = await SeedPlainClusterAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchUser user = await sut.CreateUserAsync(
             tenantId, c.Id, "orders", "logs-*", ElasticsearchAccess.Writer);
@@ -1386,7 +1386,7 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchCluster c = await SeedPlainClusterAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
         k8s.Setup(x => x.GetSecretValueAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync("pw");
@@ -1813,7 +1813,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.UpgradeAsync(tenantId, c.Id, "9.5.1", "nils", acceptBlockers: true);
 
@@ -1890,7 +1890,7 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchCluster c = await SeedPlainClusterAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
         k8s.Setup(x => x.GetSecretValueAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync("whatever-is-in-the-secret");
@@ -1926,7 +1926,7 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchCluster c = await SeedPlainClusterAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchUser user = await sut.CreateUserAsync(
             tenantId, c.Id, "orders", "logs-*", ElasticsearchAccess.Writer);
@@ -1952,7 +1952,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchUser user = await sut.CreateUserAsync(
             tenantId, c.Id, "nils", "logs-*", ElasticsearchAccess.Viewer, ElasticsearchKibanaAccess.Read);
@@ -2102,7 +2102,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         string note = await sut.EnableMonitoringAsync(tenantId, c.Id, indexMetrics: false);
 
@@ -2238,7 +2238,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.CreateSpaceAsync(tenantId, c.Id, "orders", "Orders team", "The order pipeline");
 
@@ -2256,7 +2256,7 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchCluster c = await SeedPlainClusterAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchKibanaSpace space = await sut.CreateSpaceAsync(tenantId, c.Id, "orders", "Orders team", null);
         await sut.CreateUserAsync(tenantId, c.Id, "nils", "logs-*", ElasticsearchAccess.Viewer,
@@ -2276,7 +2276,7 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchCluster c = await SeedPlainClusterAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchKibanaSpace space = await sut.CreateSpaceAsync(tenantId, c.Id, "orders", "Orders team", null);
 
@@ -2426,7 +2426,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         string note = await sut.CreateRemoteLinkAsync(tenantId, local.Id, remote.Id, "prod", "logs-*");
 
@@ -2446,7 +2446,7 @@ public class ElasticsearchServiceTests : IDisposable
     {
         (ElasticsearchCluster local, ElasticsearchCluster remote) = await SeedTwoClustersAsync();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.CreateRemoteLinkAsync(tenantId, local.Id, remote.Id, "prod", "*");
 
@@ -2460,7 +2460,7 @@ public class ElasticsearchServiceTests : IDisposable
     {
         (ElasticsearchCluster local, ElasticsearchCluster remote) = await SeedTwoClustersAsync();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.CreateRemoteLinkAsync(tenantId, local.Id, remote.Id, "prod", "*");
         ElasticsearchRemoteLink link = await db.ElasticsearchRemoteLinks.AsNoTracking().SingleAsync();
@@ -2468,7 +2468,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.DeleteRemoteLinkAsync(tenantId, link.Id);
 
@@ -2633,7 +2633,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchIngestPipeline p = SamplePipeline();
         p.TenantId = tenantId;
@@ -2655,7 +2655,7 @@ public class ElasticsearchServiceTests : IDisposable
         await db.SaveChangesAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchIngestPipeline p = SamplePipeline();
         p.TenantId = tenantId;
@@ -2705,7 +2705,7 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchCluster c = await SeedPlainClusterAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchIngestPipeline p = SamplePipeline();
         p.TenantId = tenantId;
@@ -2846,7 +2846,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         string note = await sut.EnableMonitoringAsync(tenantId, c.Id, indexMetrics: false);
 
@@ -2957,7 +2957,7 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchCluster c = await SeedPlainClusterAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.CreateSpaceAsync(tenantId, c.Id, "orders", "Orders", null);
         await sut.CreateDataViewAsync(tenantId, c.Id, null, "logs-*", null, "@timestamp");
@@ -2980,7 +2980,7 @@ public class ElasticsearchServiceTests : IDisposable
         List<string> applied = [];
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchDataView view = await sut.CreateDataViewAsync(
             tenantId, c.Id, null, "logs-orders-*", "Orders", "@timestamp");
@@ -2999,7 +2999,7 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchCluster c = await SeedPlainClusterAsync();
         ArrangeSucceedingJob();
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         ElasticsearchDataView view = await sut.CreateDataViewAsync(
             tenantId, c.Id, null, "logs-orders-*", null, "@timestamp");
