@@ -363,7 +363,7 @@ public class TrustBundleService(
         string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-trust-{Guid.NewGuid():N}.kubeconfig");
         try
         {
-            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
 
             System.Diagnostics.ProcessStartInfo psi = new("kubectl", $"{arguments} --kubeconfig {kubeconfigPath}")
             {

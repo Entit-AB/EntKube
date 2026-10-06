@@ -409,7 +409,7 @@ public class NodeManagementService(
                 cluster!.Kubeconfig!, cluster.Name,
                 $"Drain Node/{nodeName} (cordon + evict all evictable pods)", null, ct);
 
-            await File.WriteAllTextAsync(tempKubeconfig, cluster!.Kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, cluster!.Kubeconfig, ct);
 
             List<string> args = ["drain", nodeName,
                 $"--grace-period={gracePeriodSeconds}",

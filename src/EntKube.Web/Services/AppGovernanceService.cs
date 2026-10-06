@@ -588,7 +588,7 @@ public class AppGovernanceService(
 
         try
         {
-            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
             await File.WriteAllTextAsync(manifestPath, yaml, ct);
 
             System.Diagnostics.ProcessStartInfo psi = new("kubectl",

@@ -398,7 +398,7 @@ public class KedaScalerService(
         string manifestPath   = Path.Combine(Path.GetTempPath(), $"entkube-keda-{Guid.NewGuid():N}.yaml");
         try
         {
-            await File.WriteAllTextAsync(kubeconfigPath, cluster.Kubeconfig, ct);
+            await SecretFile.WriteAsync(kubeconfigPath, cluster.Kubeconfig, ct);
             await File.WriteAllTextAsync(manifestPath, yaml, ct);
 
             // -n {ns} targets the app's namespace; manifests omit an explicit namespace so

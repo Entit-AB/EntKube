@@ -1120,7 +1120,7 @@ public class ComponentLifecycleService(
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, cluster.Kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, cluster.Kubeconfig, ct);
 
             // Try IP first — most cloud providers and MetalLB set .ingress[0].ip
             HelmExecutionResult ipResult = await RunProcessAsync("kubectl",
@@ -1453,7 +1453,7 @@ public class ComponentLifecycleService(
 
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, component.Cluster.Kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, component.Cluster.Kubeconfig, ct);
 
             foreach (IGrouping<(string SecretName, string Namespace), VaultSecret> group in groups)
             {
@@ -1605,7 +1605,7 @@ public class ComponentLifecycleService(
 
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, component.Cluster.Kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, component.Cluster.Kubeconfig, ct);
 
             // Route to the appropriate executor based on operation type.
 
@@ -1651,7 +1651,7 @@ public class ComponentLifecycleService(
 
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, cluster.Kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, cluster.Kubeconfig, ct);
             await File.WriteAllTextAsync(tempManifest, manifestYaml, ct);
 
             string operation = delete ? "delete" : "apply";
@@ -1894,7 +1894,7 @@ public class ComponentLifecycleService(
 
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, component.Cluster.Kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, component.Cluster.Kubeconfig, ct);
 
             // On Istio, a backend port that serves TLS needs the gateway to originate TLS to it.
             // Without that the gateway connects in plaintext, the backend drops the connection and
@@ -2321,7 +2321,7 @@ public class ComponentLifecycleService(
         string manifestPath = Path.Combine(Path.GetTempPath(), $"entkube-pull-{Guid.NewGuid()}.yaml");
         try
         {
-            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
             // Written to a file rather than passed as --from-literal: process arguments are readable by
             // any process on the host and routinely end up in logs.
             await File.WriteAllTextAsync(manifestPath, manifest, ct);
@@ -2599,7 +2599,7 @@ public class ComponentLifecycleService(
 
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, cluster.Kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, cluster.Kubeconfig, ct);
 
             HelmExecutionResult result = await RunProcessAsync(
                 "kubectl",
