@@ -23,11 +23,12 @@ public static class TestServices
     /// drive any Keycloak behaviour.
     /// </summary>
     public static KeycloakService BuildKeycloak(
-        IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService)
+        TestDbContextFactory dbFactory, VaultService vaultService)
     {
         IKubernetesClientFactory k8sFactory = new Mock<IKubernetesClientFactory>().Object;
         IHttpClientFactory httpFactory = new Mock<IHttpClientFactory>().Object;
-        CnpgService cnpgService = new(dbFactory, vaultService, k8sFactory);
+        CnpgService cnpgService = new(dbFactory, vaultService,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory));
         return new KeycloakService(dbFactory, vaultService, httpFactory, cnpgService, k8sFactory);
     }
 
@@ -55,7 +56,7 @@ public static class TestServices
     /// in-memory configuration, for tests that do not drive collector behaviour.
     /// </summary>
     public static ComponentLifecycleService BuildLifecycle(
-        IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService,
+        TestDbContextFactory dbFactory, VaultService vaultService,
         string? publicIngestUrl = null)
     {
         IConfiguration config = TestConfiguration(publicIngestUrl);

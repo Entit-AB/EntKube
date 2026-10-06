@@ -18,8 +18,23 @@ namespace EntKube.Web.Services;
 public class CnpgService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
-    IKubernetesClientFactory k8sFactory)
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusters)
 {
+    /// <summary>
+    /// A client for one of the tenant's clusters, or a refusal that says why.
+    ///
+    /// <para>Everything here used to read the cluster row's stored credential and hand it to
+    /// the factory. Going through <see cref="Clusters.IClusterClientFactory"/>
+    /// keeps it inside Fleet, and makes the tenant part of the question rather than something
+    /// each call site remembered to filter on. See docs/decomposition.md §4.0.1.</para>
+    /// </summary>
+    private async Task<Clusters.IClusterClient> ClusterFor(
+        Guid tenantId, Guid clusterId, CancellationToken ct)
+        => await clusters.ForAsync(tenantId, clusterId, ct)
+           ?? throw new InvalidOperationException(
+               "The cluster has no stored kubeconfig, or does not belong to this tenant, "
+               + "so nothing can be applied to it.");
+
     // ──────── Cluster Lifecycle ────────
 
     /// <summary>
@@ -110,17 +125,18 @@ public class CnpgService(
 
         // Ensure the target namespace exists before applying any resources.
 
-        await k8sFactory.EnsureNamespaceAsync(ns, k8sCluster.Kubeconfig!, ct);
+        await (await ClusterFor(tenantId, k8sCluster.Id, ct)).EnsureNamespaceAsync(ns, ct);
 
         // Now that the namespace exists, create the S3 credentials Secret.
 
         if (storageLink is not null && s3SecretName is not null)
         {
             await EnsureStorageSecretsInK8sAsync(
-                tenantId, storageLink, s3SecretName, ns, k8sCluster.Kubeconfig!, ct);
+                tenantId, storageLink, s3SecretName, ns,
+                await ClusterFor(tenantId, k8sCluster.Id, ct), ct);
         }
 
-        await k8sFactory.ApplyManifestAsync(manifest, k8sCluster.Kubeconfig!, ct);
+        await (await ClusterFor(tenantId, k8sCluster.Id, ct)).ApplyManifestAsync(manifest, ct);
 
         // If backup storage is configured, apply the ObjectStore then the ScheduledBackup
         // as separate calls so each failure surfaces a precise error.
@@ -131,7 +147,7 @@ public class CnpgService(
 
             try
             {
-                await k8sFactory.ApplyManifestAsync(objectStoreManifest, k8sCluster.Kubeconfig!, ct);
+                await (await ClusterFor(tenantId, k8sCluster.Id, ct)).ApplyManifestAsync(objectStoreManifest, ct);
             }
             catch (InvalidOperationException ex) when (ex.Message.Contains("no matches for kind"))
             {
@@ -148,7 +164,7 @@ public class CnpgService(
 
                 try
                 {
-                    await k8sFactory.ApplyManifestAsync(scheduledBackupManifest, k8sCluster.Kubeconfig!, ct);
+                    await (await ClusterFor(tenantId, k8sCluster.Id, ct)).ApplyManifestAsync(scheduledBackupManifest, ct);
                 }
                 catch (InvalidOperationException ex)
                 {
@@ -183,19 +199,18 @@ public class CnpgService(
 
         try
         {
-            await k8sFactory.DeleteManifestAsync(
-                "clusters.postgresql.cnpg.io", cnpg.Name, cnpg.Namespace,
-                cnpg.KubernetesCluster.Kubeconfig!, ct);
+            await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).DeleteManifestAsync(
+                "clusters.postgresql.cnpg.io", cnpg.Name, cnpg.Namespace, ct);
 
-            await k8sFactory.DeleteManifestAsync(
+            await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).DeleteManifestAsync(
                 "objectstores.barmancloud.cnpg.io", $"{cnpg.Name}-object-store",
-                cnpg.Namespace, cnpg.KubernetesCluster.Kubeconfig!, ct);
+                cnpg.Namespace, ct);
 
             if (!string.IsNullOrWhiteSpace(cnpg.BackupSchedule))
             {
-                await k8sFactory.DeleteManifestAsync(
+                await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).DeleteManifestAsync(
                     "scheduledbackups.postgresql.cnpg.io", $"{cnpg.Name}-scheduled",
-                    cnpg.Namespace, cnpg.KubernetesCluster.Kubeconfig!, ct);
+                    cnpg.Namespace, ct);
             }
         }
         catch (Exception)
@@ -243,8 +258,8 @@ public class CnpgService(
 
         try
         {
-            string clusterJson = await k8sFactory.GetJsonAsync(
-                $"cluster.postgresql.cnpg.io/{name}", ns, k8sCluster.Kubeconfig!, ct: ct);
+            string clusterJson = await (await ClusterFor(tenantId, k8sCluster.Id, ct)).GetJsonAsync(
+                $"cluster.postgresql.cnpg.io/{name}", ns, ct: ct);
 
             using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(clusterJson);
             System.Text.Json.JsonElement root = doc.RootElement;
@@ -360,8 +375,8 @@ public class CnpgService(
             ORDER BY datname;
             """;
 
-        string output = await k8sFactory.ExecuteSqlInCnpgDatabaseWithOutputAsync(
-            cnpg.Name, cnpg.Namespace, "postgres", sql, cnpg.KubernetesCluster.Kubeconfig!, ct);
+        string output = await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlInCnpgDatabaseWithOutputAsync(
+            cnpg.Name, cnpg.Namespace, "postgres", sql, ct);
 
         List<(string Name, string Owner)> result = [];
 
@@ -459,7 +474,7 @@ public class CnpgService(
         string s3SecretName = cnpg.StorageLinkId.HasValue ? $"{cnpg.Name}-s3-credentials" : null!;
         string manifest = BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName);
 
-        await k8sFactory.ApplyManifestAsync(manifest, cnpg.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     /// <summary>
@@ -490,16 +505,15 @@ public class CnpgService(
             .FirstOrDefaultAsync(c => c.Id == cnpgClusterId && c.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("CNPG cluster not found.");
 
-        if (string.IsNullOrWhiteSpace(cnpg.KubernetesCluster.Kubeconfig))
-            throw new InvalidOperationException("Cluster has no kubeconfig configured.");
+        // ClusterFor refuses for the same reason the explicit guard here used to, and says so.
+        Clusters.IClusterClient reapplyTo = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
 
         // Same secret-name convention as every other apply path, so the rebuilt manifest matches
         // the live spec everywhere except the parts this version of EntKube changed.
         string? s3SecretName = cnpg.StorageLinkId.HasValue ? $"{cnpg.Name}-s3-credentials" : null;
 
-        await k8sFactory.ApplyManifestAsync(
-            BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName),
-            cnpg.KubernetesCluster.Kubeconfig, ct);
+        await reapplyTo.ApplyManifestAsync(
+            BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName), ct);
     }
 
     public async Task RestartClusterAsync(
@@ -515,9 +529,9 @@ public class CnpgService(
         string patch =
             $"{{\"metadata\":{{\"annotations\":{{\"kubectl.kubernetes.io/restartedAt\":\"{DateTime.UtcNow:O}\"}}}}}}";
 
-        await k8sFactory.PatchJsonAsync(
+        await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).PatchJsonAsync(
             "cluster.postgresql.cnpg.io", cnpg.Name, cnpg.Namespace, patch,
-            cnpg.KubernetesCluster.Kubeconfig!, ct);
+             ct);
     }
 
     /// <summary>
@@ -572,7 +586,7 @@ public class CnpgService(
 
         string backupName = $"{source.Name}-pre-upgrade-{DateTime.UtcNow:yyyyMMddHHmmss}";
         string backupManifest = BuildBackupManifest(backupName, source.Name, source.Namespace);
-        await k8sFactory.ApplyManifestAsync(backupManifest, source.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(backupManifest, ct);
 
         // Step 2: Create the new cluster with a temporary name, targeting the new major version.
         // It bootstraps from the source's Barman backup (latest point in time).
@@ -599,18 +613,19 @@ public class CnpgService(
 
         string s3SecretName = $"{tempName}-s3-credentials";
         await EnsureStorageSecretsInK8sAsync(
-            tenantId, source.StorageLink, s3SecretName, source.Namespace, source.KubernetesCluster.Kubeconfig!, ct);
+            tenantId, source.StorageLink, s3SecretName, source.Namespace,
+            await ClusterFor(tenantId, source.KubernetesClusterId, ct), ct);
 
         // Use current time as recovery target — we want the very latest state.
 
         string restoreManifest = BuildRestoreManifest(upgraded, source, DateTime.UtcNow, s3SecretName);
         restoreManifest += "\n---\n" + BuildObjectStoreManifest(tempName, source.Namespace, source.StorageLink, s3SecretName, source.RetentionDays);
-        await k8sFactory.ApplyManifestAsync(restoreManifest, source.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(restoreManifest, ct);
 
         // Step 3: Delete the old cluster from Kubernetes to free the name.
 
-        await k8sFactory.DeleteManifestAsync(
-            "Cluster", source.Name, source.Namespace, source.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).DeleteManifestAsync(
+            "Cluster", source.Name, source.Namespace, ct);
 
         // Step 4: Transfer databases and remove the old cluster record from the DB.
         // Must happen before renaming the new cluster, because the unique index
@@ -629,8 +644,8 @@ public class CnpgService(
         // CNPG doesn't support renaming a running cluster, so we delete the temp
         // and re-apply with the original name.
 
-        await k8sFactory.DeleteManifestAsync(
-            "Cluster", tempName, source.Namespace, source.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).DeleteManifestAsync(
+            "Cluster", tempName, source.Namespace, ct);
 
         upgraded.Name = source.Name;
         upgraded.Status = CnpgClusterStatus.Running;
@@ -639,7 +654,7 @@ public class CnpgService(
         string s3SecretFinal = $"{source.Name}-s3-credentials";
         string finalManifest = BuildClusterManifest(upgraded, source.StorageLink, s3SecretFinal);
         finalManifest += "\n---\n" + BuildObjectStoreManifest(source.Name, source.Namespace, source.StorageLink, s3SecretFinal, source.RetentionDays);
-        await k8sFactory.ApplyManifestAsync(finalManifest, source.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(finalManifest, ct);
 
         return upgraded;
     }
@@ -675,28 +690,26 @@ public class CnpgService(
         if (cnpg.StorageLink is null)
             return;
 
-        string kubeconfig = cnpg.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
         string s3SecretName = $"{cnpg.Name}-s3-credentials";
 
         // Re-apply ObjectStore so the updated retentionPolicy reaches Barman.
-        await k8sFactory.ApplyManifestAsync(
-            BuildObjectStoreManifest(cnpg.Name, cnpg.Namespace, cnpg.StorageLink, s3SecretName, cnpg.RetentionDays),
-            kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildObjectStoreManifest(cnpg.Name, cnpg.Namespace, cnpg.StorageLink, s3SecretName, cnpg.RetentionDays), ct);
 
         if (!string.IsNullOrWhiteSpace(cnpg.BackupSchedule))
         {
-            await k8sFactory.ApplyManifestAsync(
-                BuildScheduledBackupManifest(cnpg.Name, cnpg.Namespace, cnpg.BackupSchedule),
-                kubeconfig, ct);
+            await client.ApplyManifestAsync(
+                BuildScheduledBackupManifest(cnpg.Name, cnpg.Namespace, cnpg.BackupSchedule), ct);
         }
         else
         {
             // Schedule was removed — delete the ScheduledBackup CR if it exists.
             try
             {
-                await k8sFactory.DeleteManifestAsync(
+                await client.DeleteManifestAsync(
                     "scheduledbackups.postgresql.cnpg.io", $"{cnpg.Name}-scheduled",
-                    cnpg.Namespace, kubeconfig, ct);
+                    cnpg.Namespace, ct);
             }
             catch { /* CR may not exist — non-fatal */ }
         }
@@ -738,9 +751,9 @@ public class CnpgService(
         {
             try
             {
-                await k8sFactory.DeleteManifestAsync(
+                await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).DeleteManifestAsync(
                     "backups.postgresql.cnpg.io", backup.Name,
-                    cnpg.Namespace, cnpg.KubernetesCluster.Kubeconfig!, ct);
+                    cnpg.Namespace, ct);
 
                 // Also remove from DB if present.
                 CnpgBackup? dbRow = await db.CnpgBackups
@@ -792,7 +805,7 @@ public class CnpgService(
 
         try
         {
-            await k8sFactory.ApplyManifestAsync(manifest, cnpg.KubernetesCluster.Kubeconfig!, ct);
+            await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
         }
         catch (InvalidOperationException ex)
         {
@@ -821,7 +834,7 @@ public class CnpgService(
                 "Backup storage is not configured for this cluster. Assign an S3 bucket first.");
         }
 
-        string kubeconfig = cnpg.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
 
         // Re-apply the cluster manifest before every on-demand backup. This is a
         // best-effort idempotent reconcile that picks up any config changes (e.g.
@@ -830,8 +843,8 @@ public class CnpgService(
         try
         {
             string s3SecretName = $"{cnpg.Name}-s3-credentials";
-            await k8sFactory.ApplyManifestAsync(
-                BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName), kubeconfig, ct);
+            await client.ApplyManifestAsync(
+                BuildClusterManifest(cnpg, cnpg.StorageLink, s3SecretName), ct);
         }
         catch { /* non-fatal */ }
 
@@ -854,7 +867,7 @@ public class CnpgService(
         // Apply the Backup CR to trigger Barman.
 
         string manifest = BuildBackupManifest(backupName, cnpg.Name, cnpg.Namespace);
-        await k8sFactory.ApplyManifestAsync(manifest, kubeconfig, ct);
+        await client.ApplyManifestAsync(manifest, ct);
 
         return backup;
     }
@@ -886,7 +899,7 @@ public class CnpgService(
                 "Source cluster has no backup storage configured. Cannot restore without backups.");
         }
 
-        string kubeconfig = source.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, source.KubernetesClusterId, ct);
 
         // Step 1: Persist the new cluster record immediately so it appears in the UI.
         // Skip the empty-cluster-then-delete pattern: CNPG clusters have finalizers, so
@@ -914,33 +927,30 @@ public class CnpgService(
         db.CnpgClusters.Add(restored);
         await db.SaveChangesAsync(ct);
 
-        await k8sFactory.EnsureNamespaceAsync(source.Namespace, kubeconfig, ct);
+        await client.EnsureNamespaceAsync(source.Namespace, ct);
 
         // Set up the new cluster's S3 credentials and ObjectStore so they exist
         // before the recovery Cluster CR is applied (CNPG validates the ObjectStore
         // reference at reconcile time).
         string s3SecretName = $"{newClusterName}-s3-credentials";
         await EnsureStorageSecretsInK8sAsync(
-            tenantId, source.StorageLink, s3SecretName, source.Namespace, kubeconfig, ct);
-        await k8sFactory.ApplyManifestAsync(
-            BuildObjectStoreManifest(newClusterName, source.Namespace, source.StorageLink, s3SecretName, source.RetentionDays),
-            kubeconfig, ct);
+            tenantId, source.StorageLink, s3SecretName, source.Namespace, client, ct);
+        await client.ApplyManifestAsync(
+            BuildObjectStoreManifest(newClusterName, source.Namespace, source.StorageLink, s3SecretName, source.RetentionDays), ct);
 
         // Ensure the SOURCE cluster's ObjectStore and S3 credentials are present so
         // the recovery externalClusters reference can reach the backup archive.
         string sourceS3SecretName = $"{source.Name}-s3-credentials";
         await EnsureStorageSecretsInK8sAsync(
-            tenantId, source.StorageLink, sourceS3SecretName, source.Namespace, kubeconfig, ct);
-        await k8sFactory.ApplyManifestAsync(
-            BuildObjectStoreManifest(source.Name, source.Namespace, source.StorageLink, sourceS3SecretName, source.RetentionDays),
-            kubeconfig, ct);
+            tenantId, source.StorageLink, sourceS3SecretName, source.Namespace, client, ct);
+        await client.ApplyManifestAsync(
+            BuildObjectStoreManifest(source.Name, source.Namespace, source.StorageLink, sourceS3SecretName, source.RetentionDays), ct);
 
         // Step 2: Apply the recovery Cluster CR directly. CNPG's bootstrap.recovery is
         // only evaluated on initial cluster creation, so this must be applied to a name
         // that has no existing Cluster CR or PVCs in K8s.
-        await k8sFactory.ApplyManifestAsync(
-            BuildRestoreManifest(restored, source, targetTime, s3SecretName, barmanBackupId: barmanBackupId),
-            kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildRestoreManifest(restored, source, targetTime, s3SecretName, barmanBackupId: barmanBackupId), ct);
 
         return restored;
     }
@@ -972,9 +982,8 @@ public class CnpgService(
         // references the existing ObjectStore to locate WAL archives in S3.
         try
         {
-            await k8sFactory.DeleteManifestAsync(
-                "clusters.postgresql.cnpg.io", source.Name, source.Namespace,
-                source.KubernetesCluster.Kubeconfig!, ct);
+            await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).DeleteManifestAsync(
+                "clusters.postgresql.cnpg.io", source.Name, source.Namespace, ct);
         }
         catch { }
 
@@ -984,20 +993,20 @@ public class CnpgService(
         string s3SecretName = $"{source.Name}-s3-credentials";
         await EnsureStorageSecretsInK8sAsync(
             tenantId, source.StorageLink, s3SecretName, source.Namespace,
-            source.KubernetesCluster.Kubeconfig!, ct);
+            await ClusterFor(tenantId, source.KubernetesClusterId, ct), ct);
 
         // Re-apply the ObjectStore before the Cluster so CNPG finds it immediately.
         // The source ObjectStore already exists, so this is effectively a no-op update,
         // but applying it first ensures the Cluster CRD is never processed without it.
-        await k8sFactory.ApplyManifestAsync(
+        await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(
             BuildObjectStoreManifest(source.Name, source.Namespace, source.StorageLink, s3SecretName, source.RetentionDays),
-            source.KubernetesCluster.Kubeconfig!, ct);
+             ct);
 
         // Use "backup-source" as the external cluster alias so the manifest does not
         // reference the cluster by its own name (CNPG rejects self-referential bootstraps).
-        await k8sFactory.ApplyManifestAsync(
+        await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(
             BuildRestoreManifest(source, source, targetTime, s3SecretName, sourceAlias: "backup-source"),
-            source.KubernetesCluster.Kubeconfig!, ct);
+             ct);
 
         return source;
     }
@@ -1043,8 +1052,8 @@ public class CnpgService(
             CREATE DATABASE "{databaseName}" OWNER "{owner}";
             """;
 
-        await k8sFactory.ExecuteSqlAsync(
-            cnpg.Name, cnpg.Namespace, sql, cnpg.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlAsync(
+            cnpg.Name, cnpg.Namespace, sql, ct);
 
         // Mark as ready.
 
@@ -1097,8 +1106,8 @@ public class CnpgService(
                 DROP ROLE IF EXISTS "{database.Owner}";
                 """;
 
-            await k8sFactory.ExecuteSqlAsync(
-                cnpg.Name, cnpg.Namespace, sql, cnpg.KubernetesCluster.Kubeconfig!, ct);
+            await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlAsync(
+                cnpg.Name, cnpg.Namespace, sql, ct);
         }
         catch (InvalidOperationException)
         {
@@ -1111,11 +1120,11 @@ public class CnpgService(
         // cluster doesn't block the cleanup.
 
         string primarySecretName = $"{cnpg.Name}-{database.Name}-credentials";
-        string kubeconfig = cnpg.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
 
         try
         {
-            await k8sFactory.DeleteManifestAsync("Secret", primarySecretName, cnpg.Namespace, kubeconfig, ct);
+            await client.DeleteManifestAsync("Secret", primarySecretName, cnpg.Namespace, ct);
         }
         catch { }
 
@@ -1129,12 +1138,12 @@ public class CnpgService(
         {
             try
             {
-                await k8sFactory.DeleteManifestAsync(
-                    "Secret",
-                    binding.KubernetesSecretName,
-                    binding.AppDeployment.Namespace,
-                    binding.AppDeployment.Cluster.Kubeconfig!,
-                    ct);
+                await (await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct))
+                    .DeleteManifestAsync(
+                        "Secret",
+                        binding.KubernetesSecretName,
+                        binding.AppDeployment.Namespace,
+                        ct);
             }
             catch { }
         }
@@ -1207,10 +1216,10 @@ public class CnpgService(
         // Sync to the primary namespace (the cluster's own namespace).
 
         string primarySecretName = $"{cnpg.Name}-{database.Name}-credentials";
-        string primaryKubeconfig = cnpg.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient primary = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
 
         await ApplyCredentialSecretAsync(
-            credentials, primarySecretName, cnpg.Namespace, primaryKubeconfig, ct);
+            credentials, primarySecretName, cnpg.Namespace, primary, ct);
 
         // Mark vault secrets as synced so the UI reflects the current state.
 
@@ -1231,11 +1240,11 @@ public class CnpgService(
 
         foreach (DatabaseBinding binding in bindings)
         {
-            string kubeconfig = binding.AppDeployment.Cluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct);
             string ns = binding.AppDeployment.Namespace;
 
-            await k8sFactory.EnsureNamespaceAsync(ns, kubeconfig, ct);
-            await ApplyCredentialSecretAsync(credentials, binding.KubernetesSecretName, ns, kubeconfig, ct);
+            await client.EnsureNamespaceAsync(ns, ct);
+            await ApplyCredentialSecretAsync(credentials, binding.KubernetesSecretName, ns, client, ct);
 
             binding.LastSyncedAt = DateTime.UtcNow;
         }
@@ -1249,7 +1258,7 @@ public class CnpgService(
     /// </summary>
     private async Task ApplyCredentialSecretAsync(
         Dictionary<string, string> credentials,
-        string secretName, string ns, string kubeconfig,
+        string secretName, string ns, Clusters.IClusterClient client,
         CancellationToken ct)
     {
         StringBuilder sb = new();
@@ -1271,7 +1280,7 @@ public class CnpgService(
             sb.AppendLine($"  {kvp.Key}: {encoded}");
         }
 
-        await k8sFactory.ApplyManifestAsync(sb.ToString(), kubeconfig, ct);
+        await client.ApplyManifestAsync(sb.ToString(), ct);
     }
 
     // ──────── Password rotation ────────
@@ -1298,10 +1307,10 @@ public class CnpgService(
 
         string newPassword = GeneratePassword();
 
-        await k8sFactory.ExecuteSqlAsync(
+        await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlAsync(
             cnpg.Name, cnpg.Namespace,
             $"ALTER ROLE \"{database.Owner}\" PASSWORD '{newPassword}';",
-            cnpg.KubernetesCluster.Kubeconfig!, ct);
+             ct);
 
         string k8sSecretName = $"{cnpg.Name}-{database.Name}-credentials";
 
@@ -1330,10 +1339,10 @@ public class CnpgService(
             ?? throw new InvalidOperationException("CNPG cluster not found.");
 
         string secretName = $"{cnpg.Name}-superuser";
-        string kubeconfig = cnpg.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
 
-        string? username = await k8sFactory.GetSecretValueAsync(secretName, "username", cnpg.Namespace, kubeconfig, ct);
-        string? password = await k8sFactory.GetSecretValueAsync(secretName, "password", cnpg.Namespace, kubeconfig, ct);
+        string? username = await client.GetSecretValueAsync(secretName, "username", cnpg.Namespace, ct);
+        string? password = await client.GetSecretValueAsync(secretName, "password", cnpg.Namespace, ct);
 
         if (string.IsNullOrWhiteSpace(password))
         {
@@ -1380,9 +1389,9 @@ public class CnpgService(
               AND tableowner != '{database.Owner}';
             """;
 
-        string result = await k8sFactory.ExecuteSqlInCnpgDatabaseWithOutputAsync(
+        string result = await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlInCnpgDatabaseWithOutputAsync(
             cnpg.Name, cnpg.Namespace, database.Name, sql,
-            cnpg.KubernetesCluster.Kubeconfig!, ct);
+             ct);
 
         return result.Trim() == "ok";
     }
@@ -1413,16 +1422,20 @@ public class CnpgService(
         CnpgDatabase? database = await db.CnpgDatabases
             .FirstOrDefaultAsync(d => d.Id == databaseId && d.CnpgClusterId == cnpgClusterId, ct);
 
-        if (cnpg?.KubernetesCluster.Kubeconfig is null || database is null) return null;
+        if (cnpg is null || database is null) return null;
+
+        Clusters.IClusterClient? reachable =
+            await clusters.ForAsync(cnpg.TenantId, cnpg.KubernetesClusterId, ct);
+
+        if (reachable is null) return null;
 
         const string sql = "SELECT version || '|' || dirty FROM schema_migrations LIMIT 1;";
 
         string output;
         try
         {
-            output = await k8sFactory.ExecuteSqlInCnpgDatabaseWithOutputAsync(
-                cnpg.Name, cnpg.Namespace, database.Name, sql,
-                cnpg.KubernetesCluster.Kubeconfig!, ct);
+            output = await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlInCnpgDatabaseWithOutputAsync(
+                cnpg.Name, cnpg.Namespace, database.Name, sql, ct);
         }
         catch (Exception)
         {
@@ -1498,9 +1511,9 @@ public class CnpgService(
             END $$;
             """;
 
-        await k8sFactory.ExecuteSqlInCnpgDatabaseAsync(
+        await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlInCnpgDatabaseAsync(
             cnpg.Name, cnpg.Namespace, database.Name, sql,
-            cnpg.KubernetesCluster.Kubeconfig!, ct);
+             ct);
     }
 
     public async Task ReleaseLiquibaseLockAsync(
@@ -1523,9 +1536,9 @@ public class CnpgService(
              WHERE id = 1;
             """;
 
-        await k8sFactory.ExecuteSqlInCnpgDatabaseAsync(
+        await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlInCnpgDatabaseAsync(
             cnpg.Name, cnpg.Namespace, database.Name, sql,
-            cnpg.KubernetesCluster.Kubeconfig!, ct);
+             ct);
     }
 
     public async Task FixKeycloakRealmFrontendUrlAsync(
@@ -1557,9 +1570,9 @@ public class CnpgService(
              WHERE client_id IN ('security-admin-console', 'account', 'account-console', 'broker');
             """;
 
-        await k8sFactory.ExecuteSqlInCnpgDatabaseAsync(
+        await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlInCnpgDatabaseAsync(
             cnpg.Name, cnpg.Namespace, database.Name, sql,
-            cnpg.KubernetesCluster.Kubeconfig!, ct);
+             ct);
     }
 
     // ──────── DatabaseBinding management ────────
@@ -1692,16 +1705,16 @@ public class CnpgService(
         {
             // Query the CNPG Cluster CRD status for phase and primary info.
 
-            string clusterJson = await k8sFactory.GetJsonAsync(
+            string clusterJson = await (await ClusterFor(tenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
                 $"cluster.postgresql.cnpg.io/{cluster.Name}",
-                cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!, ct: ct);
+                cluster.Namespace, ct: ct);
 
             ParseClusterStatus(clusterJson, detail);
 
             // Query pods belonging to this CNPG cluster via label selector.
 
-            string podsJson = await k8sFactory.GetJsonAsync(
-                "pods", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!,
+            string podsJson = await (await ClusterFor(tenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+                "pods", cluster.Namespace,
                 $"cnpg.io/cluster={cluster.Name}", ct);
 
             detail.Pods = ParsePodList(podsJson, detail.CurrentPrimary);
@@ -1758,22 +1771,21 @@ public class CnpgService(
     /// </summary>
     private async Task ReconcileClusterManifestsAsync(CnpgCluster cluster, CancellationToken ct)
     {
-        if (cluster.StorageLink is null || cluster.KubernetesCluster.Kubeconfig is null)
+        if (cluster.StorageLink is null)
             return;
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig;
+            Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
             string s3SecretName = $"{cluster.Name}-s3-credentials";
 
-            await k8sFactory.ApplyManifestAsync(
-                BuildClusterManifest(cluster, cluster.StorageLink, s3SecretName), kubeconfig, ct);
+            await client.ApplyManifestAsync(
+                BuildClusterManifest(cluster, cluster.StorageLink, s3SecretName), ct);
 
             if (!string.IsNullOrWhiteSpace(cluster.BackupSchedule))
             {
-                await k8sFactory.ApplyManifestAsync(
-                    BuildScheduledBackupManifest(cluster.Name, cluster.Namespace, cluster.BackupSchedule),
-                    kubeconfig, ct);
+                await client.ApplyManifestAsync(
+                    BuildScheduledBackupManifest(cluster.Name, cluster.Namespace, cluster.BackupSchedule), ct);
             }
         }
         catch { /* non-fatal */ }
@@ -1829,10 +1841,9 @@ public class CnpgService(
         {
             // Query all Backup CRs in the namespace without a label selector so we are
             // not sensitive to label differences across CNPG versions or plugin configurations.
-            string backupsJson = await k8sFactory.GetJsonAsync(
+            string backupsJson = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
                 "backups.postgresql.cnpg.io",
                 cluster.Namespace,
-                cluster.KubernetesCluster.Kubeconfig!,
                 ct: ct);
 
             using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(backupsJson);
@@ -2009,7 +2020,7 @@ public class CnpgService(
     /// </summary>
     private async Task EnsureStorageSecretsInK8sAsync(
         Guid tenantId, StorageLink storageLink, string secretName, string ns,
-        string kubeconfig, CancellationToken ct)
+        Clusters.IClusterClient client, CancellationToken ct)
     {
         // Retrieve the S3 credentials from the vault and physically create a
         // Kubernetes Secret in the target namespace. The CNPG ObjectStore references
@@ -2057,7 +2068,7 @@ public class CnpgService(
         sb.AppendLine($"  ACCESS_KEY: {accessKeyB64}");
         sb.AppendLine($"  SECRET_KEY: {secretKeyB64}");
 
-        await k8sFactory.ApplyManifestAsync(sb.ToString(), kubeconfig, ct);
+        await client.ApplyManifestAsync(sb.ToString(), ct);
     }
 
     /// <summary>
