@@ -32,7 +32,7 @@ public class ClusterCredentialCustodyTests
     /// <summary>
     /// Places that take a cluster's credential out of the row, measured 2026-10-06.
     ///
-    /// <para><b>284 and falling</b>, from 508 once the count was corrected (below):
+    /// <para><b>275 and falling</b>, from 508 once the count was corrected (below):
     /// <c>RedisService</c> 9, <c>CnpgService</c> 48, <c>ElasticsearchService</c> 42,
     /// <c>RabbitMQService</c> 37, <c>MongoService</c> 47, then <c>KafkaService</c> 15 and
     /// <c>RegisteredPostgresService</c> 16. None of those seven injects
@@ -51,18 +51,23 @@ public class ClusterCredentialCustodyTests
     /// <c>KubernetesOperationsService</c> alone is 72), Catalog 52, Telemetry 28, Delivery 26,
     /// Connectivity 23, DataServices 18, then single figures elsewhere.</para>
     ///
-    /// <para><b>There are five ways to reach a cluster here, and the seam models two.</b> Worth
-    /// knowing before planning the remainder, because "convert the next service" has twice turned
-    /// out to mean something other than expected. By sites, and a file may use several: a
-    /// hand-rolled process spawn 152, the typed Kubernetes SDK 145, <c>helm</c> 97,
-    /// <see cref="IKubernetesClientFactory"/> 80, an HTTP proxy pool 29, and 28 that only hand the
-    /// credential to someone else.</para>
+    /// <para><b>What the remaining sites actually do</b>, classified per site rather than per file —
+    /// two earlier attempts to plan this inferred a site's purpose from its file's contents and were
+    /// wrong both times. Of 275: a <b>reachability guard</b> 96 (<c>IsNullOrWhiteSpace(cluster
+    /// .Kubeconfig)</c>, which is not use of the credential at all — <c>ForAsync</c> returning null
+    /// already answers that question), handed to <b>one of the service's own helpers</b> 70,
+    /// <b>building an SDK client</b> 31, a <b>local assignment</b> 16, the <b>gate's model</b> 16,
+    /// and an actual <b>factory call</b> 13.</para>
     ///
-    /// <para><see cref="Clusters.IClusterClient"/> covers the factory, and the SDK through
-    /// <c>CreateSdkClient()</c> — ten services had hand-rolled those four lines. It has
-    /// <em>no</em> helm operations at all, nothing for the proxy pool, and nothing for a service
-    /// that wants to spawn its own process. Those need new capabilities on the seam or a rewrite
-    /// of the call sites, and either is a design decision rather than more substitution.</para>
+    /// <para>So the bulk is not exotic transports. It is guards that become a resolution, and
+    /// private helpers whose signatures take a credential because their callers had one. Both are
+    /// the ordinary conversion this work has been doing.</para>
+    ///
+    /// <para><b>helm is 8 invocations in 2 files</b>, not the 97 an earlier count suggested — that
+    /// figure was credential sites in files that merely mention helm. The two files are
+    /// <c>KubernetesOperationsService</c> and <c>ComponentLifecycleService</c>, which between them
+    /// hold <b>88 of the 275</b> and use the SDK, their own process spawning and helm. That one
+    /// file at 72 is the centre of gravity of everything left.</para>
     ///
     /// <para><b>The change gate comes last, not next.</b> <c>PlannedClusterChange</c> requires a
     /// kubeconfig, so every gated call site holds one — but the gate is invoked from inside
@@ -72,10 +77,10 @@ public class ClusterCredentialCustodyTests
     /// rather than a refactor. The gate can only change once its callers already route through
     /// the seam.</para>
     ///
-    private const int BaselineOccurrences = 284;
+    private const int BaselineOccurrences = 275;
 
     /// <summary>Files doing so. A file that has stopped should not be able to start again quietly.</summary>
-    private const int BaselineFiles = 48;
+    private const int BaselineFiles = 45;
 
     private static (int Occurrences, int Files) Measure()
     {
@@ -95,7 +100,7 @@ public class ClusterCredentialCustodyTests
                               && !p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}")
                               && !p.Contains($"{Path.DirectorySeparatorChar}Migrations{Path.DirectorySeparatorChar}")))
         {
-            int n = Credential.Matches(File.ReadAllText(path)).Count;
+            int n = CodeOccurrences(File.ReadAllText(path));
 
             if (n > 0)
             {
@@ -105,6 +110,34 @@ public class ClusterCredentialCustodyTests
         }
 
         return (occurrences, files);
+    }
+
+    /// <summary>
+    /// Occurrences in code, ignoring comments and doc prose.
+    ///
+    /// <para>Nine of the 284 this used to report were sentences about the credential rather than
+    /// uses of it — including one in a comment this very test's author had written, which had to
+    /// be reworded to get the number down. A security metric that a paragraph can move is a
+    /// metric nobody should trust, so prose is now excluded and the figure means what it says.</para>
+    /// </summary>
+    private static int CodeOccurrences(string text)
+    {
+        int n = 0;
+
+        foreach (string line in text.Split('\n'))
+        {
+            string trimmed = line.TrimStart();
+
+            if (trimmed.StartsWith("//", StringComparison.Ordinal)
+                || trimmed.StartsWith('*'))
+            {
+                continue;
+            }
+
+            n += Credential.Matches(line).Count;
+        }
+
+        return n;
     }
 
     /// <summary>
