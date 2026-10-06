@@ -11,7 +11,7 @@ namespace EntKube.Web.Services.Clusters;
 /// instead of by the caller. Nothing about how EntKube talks to a cluster changes; what
 /// changes is who has to be holding the kubeconfig to ask.</para>
 /// </summary>
-internal sealed class ClusterClient(
+public sealed class ClusterClient(
     IKubernetesClientFactory inner, Guid clusterId, string clusterName, string kubeconfig)
     : IClusterClient
 {

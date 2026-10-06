@@ -22,7 +22,7 @@ public class CnpgServiceTests : IDisposable
 
     private readonly InterceptingTestDb testDb;
     private readonly ApplicationDbContext db;
-    private readonly IDbContextFactory<ApplicationDbContext> dbFactory;
+    private readonly InterceptingTestDb.InterceptingFactory dbFactory;
     private readonly VaultService vaultService;
     private readonly Mock<IKubernetesClientFactory> k8sFactory;
     private readonly CnpgService sut;
@@ -36,7 +36,11 @@ public class CnpgServiceTests : IDisposable
 
         vaultService = testDb.CreateVaultService();
         k8sFactory = new Mock<IKubernetesClientFactory>();
-        sut = new CnpgService(dbFactory, vaultService, k8sFactory.Object);
+        // The real factory, over the real interceptor: the kubeconfig these tests seed into the
+        // vault is resolved the way production resolves it, and then handed to the mock. So the
+        // existing k8sFactory assertions keep working and additionally prove the delegation.
+        sut = new CnpgService(dbFactory, vaultService,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory.Object));
     }
 
     public void Dispose()
