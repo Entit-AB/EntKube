@@ -32,35 +32,30 @@ public class ClusterCredentialCustodyTests
     /// <summary>
     /// Places that take a cluster's credential out of the row, measured 2026-10-06.
     ///
-    /// <para><b>325 and falling.</b> 508 after the count was corrected (below), then 499
-    /// (<c>RedisService</c>), 451 (<c>CnpgService</c>), 409 (<c>ElasticsearchService</c>), 372
-    /// (<c>RabbitMQService</c>) and 325 (<c>MongoService</c>). None of the five takes
+    /// <para><b>294 and falling</b>, from 508 once the count was corrected (below):
+    /// <c>RedisService</c> 9, <c>CnpgService</c> 48, <c>ElasticsearchService</c> 42,
+    /// <c>RabbitMQService</c> 37, <c>MongoService</c> 47, then <c>KafkaService</c> 15 and
+    /// <c>RegisteredPostgresService</c> 16. None of those seven injects
     /// <see cref="IKubernetesClientFactory"/> any more, which is the clearest evidence a service
     /// is done: it cannot reach the raw-credential API even if a later change wanted to.</para>
     ///
-    /// <para>By module, what is left: Fleet 102 (unremarkable — it owns clusters, and
-    /// <c>KubernetesOperationsService</c> alone is 72), Catalog 52, <b>DataServices 49</b>,
-    /// Telemetry 28, Delivery 26, Connectivity 23, then single and double figures elsewhere.</para>
+    /// <para>By module: Fleet 102 (unremarkable — it owns clusters, and
+    /// <c>KubernetesOperationsService</c> alone is 72), Catalog 52, Telemetry 28, Delivery 26,
+    /// Connectivity 23, DataServices 18, then single figures elsewhere.</para>
     ///
-    /// <para><b>DataServices is not finished</b>, which is worth stating plainly because the five
-    /// conversions so far took its four <em>largest</em> files and it is easy to mistake that for
-    /// the module being done. <c>RegisteredPostgresService</c> (16), <c>KafkaService</c> (15),
-    /// <c>StorageService</c> (8) and <c>DatabaseService</c> (4) are still holding credentials.</para>
+    /// <para><b>The seam cannot finish this on its own, and that is the thing to know before
+    /// picking up the remainder.</b> <see cref="Clusters.IClusterClient"/> wraps
+    /// <see cref="IKubernetesClientFactory"/>, which shells out to kubectl. Roughly 167 of the
+    /// remaining sites are in files that build a typed <c>Kubernetes</c> SDK client instead —
+    /// <c>KubernetesOperationsService</c>, <c>ComponentLifecycleService</c>,
+    /// <c>DatabaseService</c> and others — and the seam has nothing to offer them. Those need
+    /// either a cluster-bound way to hand out an SDK client, or a move to kubectl-style calls,
+    /// and that is a design decision rather than more of the same mechanical work.</para>
     ///
-    /// <para><b>508, corrected down from the 534 first reported.</b> The first count matched
-    /// <c>.Kubeconfig</c> as plain text, which also caught <c>.KubeconfigSecretId</c> — a
-    /// foreign key, not a credential — and <c>VaultSecretType.Kubeconfig</c>, an enum member.
-    /// Thirty of the original number were those. Overstating the problem is no better than
-    /// understating it, so the match now requires the property itself.</para>
-    ///
-    /// <para>Where it concentrates: <c>KubernetesOperationsService</c> 72, <c>CnpgService</c>
-    /// 48, <c>MongoService</c> 47, <c>ElasticsearchService</c> 42, <c>RabbitMQService</c> 37.
-    /// Five files hold nearly half of it, which is also where converting pays best.</para>
-    /// </summary>
-    private const int BaselineOccurrences = 325;
+    private const int BaselineOccurrences = 294;
 
     /// <summary>Files doing so. A file that has stopped should not be able to start again quietly.</summary>
-    private const int BaselineFiles = 52;
+    private const int BaselineFiles = 50;
 
     private static (int Occurrences, int Files) Measure()
     {

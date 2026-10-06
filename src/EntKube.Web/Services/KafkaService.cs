@@ -45,9 +45,20 @@ public class KafkaClusterDetail
 /// </summary>
 public class KafkaService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    IKubernetesClientFactory k8s,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     VaultService vaultService)
 {
+    /// <summary>
+    /// A client for one of the tenant's clusters, or a refusal that says why — keeping the
+    /// credential inside Fleet. See docs/decomposition.md §4.0.1.
+    /// </summary>
+    private async Task<Clusters.IClusterClient> ClusterFor(
+        Guid tenantId, Guid clusterId, CancellationToken ct)
+        => await clusterAccess.ForAsync(tenantId, clusterId, ct)
+           ?? throw new InvalidOperationException(
+               "The cluster has no stored kubeconfig, or does not belong to this tenant, "
+               + "so nothing can be applied to it.");
+
     // ── Queries ───────────────────────────────────────────────────────────────
 
     public async Task<List<KafkaCluster>> GetClustersAsync(
@@ -132,14 +143,14 @@ public class KafkaService(
         {
             KubernetesCluster k8sCluster = await db.KubernetesClusters
                 .FirstAsync(c => c.Id == kubernetesClusterId, ct);
-            string kubeconfig = k8sCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct);
 
             await vaultService.SetKafkaClusterSecretAsync(
                 tenantId, cluster.Id, "KAFKA_BOOTSTRAP_SERVERS", cluster.BootstrapAddress, ct);
 
-            await k8s.EnsureNamespaceAsync(ns, kubeconfig, ct);
-            await k8s.ApplyManifestAsync(BuildNodePoolManifest(cluster), kubeconfig, ct);
-            await k8s.ApplyManifestAsync(BuildClusterManifest(cluster), kubeconfig, ct);
+            await client.EnsureNamespaceAsync(ns, ct);
+            await client.ApplyManifestAsync(BuildNodePoolManifest(cluster), ct);
+            await client.ApplyManifestAsync(BuildClusterManifest(cluster), ct);
         }
         catch (Exception ex)
         {
@@ -184,9 +195,9 @@ public class KafkaService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
-            await k8s.ApplyManifestAsync(BuildNodePoolManifest(cluster), kubeconfig, ct);
-            await k8s.ApplyManifestAsync(BuildClusterManifest(cluster), kubeconfig, ct);
+            Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
+            await client.ApplyManifestAsync(BuildNodePoolManifest(cluster), ct);
+            await client.ApplyManifestAsync(BuildClusterManifest(cluster), ct);
         }
         catch (Exception ex)
         {
@@ -213,10 +224,10 @@ public class KafkaService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
             // Deleting the Kafka CR cascades to broker pods/PVCs; remove the node pool too.
-            await k8s.DeleteManifestAsync("kafka", cluster.Name, cluster.Namespace, kubeconfig, ct);
-            await k8s.DeleteManifestAsync("kafkanodepool", $"{cluster.Name}-pool", cluster.Namespace, kubeconfig, ct);
+            await client.DeleteManifestAsync("kafka", cluster.Name, cluster.Namespace, ct);
+            await client.DeleteManifestAsync("kafkanodepool", $"{cluster.Name}-pool", cluster.Namespace, ct);
         }
         catch (Exception ex)
         {
@@ -247,14 +258,14 @@ public class KafkaService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
 
-            string crdJson = await k8s.GetJsonAsync(
-                $"kafka.kafka.strimzi.io/{cluster.Name}", cluster.Namespace, kubeconfig, ct: ct);
+            string crdJson = await client.GetJsonAsync(
+                $"kafka.kafka.strimzi.io/{cluster.Name}", cluster.Namespace, ct: ct);
             detail.Ready = ParseReadyCondition(crdJson);
 
-            string podsJson = await k8s.GetJsonAsync(
-                "pods", cluster.Namespace, kubeconfig, $"strimzi.io/cluster={cluster.Name}", ct);
+            string podsJson = await client.GetJsonAsync(
+                "pods", cluster.Namespace, $"strimzi.io/cluster={cluster.Name}", ct);
             detail.Pods = ParsePodList(podsJson);
 
             int readyPods = detail.Pods.Count(p => p.Ready);
@@ -308,12 +319,15 @@ public class KafkaService(
 
         foreach (KafkaCluster cluster in clusters)
         {
-            if (string.IsNullOrWhiteSpace(cluster.KubernetesCluster.Kubeconfig)) continue;
+            Clusters.IClusterClient? reachable =
+                await clusterAccess.ForAsync(cluster.TenantId, cluster.KubernetesClusterId, ct);
+
+            if (reachable is null) continue;
             try
             {
-                string crdJson = await k8s.GetJsonAsync(
+                string crdJson = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
                     $"kafka.kafka.strimzi.io/{cluster.Name}", cluster.Namespace,
-                    cluster.KubernetesCluster.Kubeconfig!, ct: ct);
+                     ct: ct);
                 await ReconcileStatusAsync(cluster.Id, ParseReadyCondition(crdJson), ct);
             }
             catch { /* cluster unreachable — leave status as-is */ }
@@ -357,7 +371,7 @@ public class KafkaService(
             RetentionMs = retentionMs
         };
 
-        await k8s.ApplyManifestAsync(BuildTopicManifest(cluster, topic), cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(BuildTopicManifest(cluster, topic), ct);
 
         db.KafkaTopics.Add(topic);
         await db.SaveChangesAsync(ct);
@@ -375,8 +389,8 @@ public class KafkaService(
 
         try
         {
-            await k8s.DeleteManifestAsync("kafkatopic", TopicResourceName(topic),
-                topic.KafkaCluster.Namespace, topic.KafkaCluster.KubernetesCluster.Kubeconfig!, ct);
+            await (await ClusterFor(topic.KafkaCluster.TenantId, topic.KafkaCluster.KubernetesClusterId, ct)).DeleteManifestAsync("kafkatopic", TopicResourceName(topic),
+                topic.KafkaCluster.Namespace, ct);
         }
         catch { /* best-effort; remove local record regardless */ }
 
@@ -427,7 +441,7 @@ public class KafkaService(
             SuperUser = superUser
         };
 
-        await k8s.ApplyManifestAsync(BuildUserManifest(cluster, user), cluster.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(BuildUserManifest(cluster, user), ct);
 
         db.KafkaUsers.Add(user);
         await db.SaveChangesAsync(ct);
@@ -445,8 +459,8 @@ public class KafkaService(
 
         try
         {
-            await k8s.DeleteManifestAsync("kafkauser", user.Username,
-                user.KafkaCluster.Namespace, user.KafkaCluster.KubernetesCluster.Kubeconfig!, ct);
+            await (await ClusterFor(user.KafkaCluster.TenantId, user.KafkaCluster.KubernetesClusterId, ct)).DeleteManifestAsync("kafkauser", user.Username,
+                user.KafkaCluster.Namespace, ct);
         }
         catch { /* best-effort */ }
 
@@ -463,8 +477,8 @@ public class KafkaService(
             .FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId, ct);
         if (user is null) return null;
 
-        return await k8s.GetSecretValueAsync(user.CredentialsSecretName, "password",
-            user.KafkaCluster.Namespace, user.KafkaCluster.KubernetesCluster.Kubeconfig!, ct);
+        return await (await ClusterFor(user.KafkaCluster.TenantId, user.KafkaCluster.KubernetesClusterId, ct)).GetSecretValueAsync(user.CredentialsSecretName, "password",
+            user.KafkaCluster.Namespace, ct);
     }
 
     // ── App bindings ────────────────────────────────────────────────────────────
@@ -541,8 +555,9 @@ public class KafkaService(
 
         try
         {
-            await k8s.DeleteManifestAsync("secret", binding.KubernetesSecretName,
-                binding.AppDeployment.Namespace, binding.AppDeployment.Cluster.Kubeconfig!, ct);
+            await (await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct))
+                .DeleteManifestAsync(
+                    "secret", binding.KubernetesSecretName, binding.AppDeployment.Namespace, ct);
         }
         catch { }
 
@@ -562,7 +577,7 @@ public class KafkaService(
             ?? throw new InvalidOperationException("Kafka binding not found.");
 
         KafkaCluster cluster = binding.KafkaCluster;
-        string appKubeconfig = binding.AppDeployment.Cluster.Kubeconfig!;
+        Clusters.IClusterClient appCluster = await ClusterFor(cluster.TenantId, binding.AppDeployment.ClusterId, ct);
         string appNs = binding.AppDeployment.Namespace;
 
         Dictionary<string, string> data = new()
@@ -576,15 +591,15 @@ public class KafkaService(
                 throw new InvalidOperationException(
                     "This cluster requires SASL authentication — select a Kafka user for the binding.");
 
-            string? password = await k8s.GetSecretValueAsync(
+            string? password = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetSecretValueAsync(
                 binding.KafkaUser.CredentialsSecretName, "password",
-                cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!, ct)
+                cluster.Namespace, ct)
                 ?? throw new InvalidOperationException(
                     "The Kafka user's password secret is not available yet — the user may still be provisioning.");
 
-            string? caCert = await k8s.GetSecretValueAsync(
+            string? caCert = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetSecretValueAsync(
                 $"{cluster.Name}-cluster-ca-cert", "ca.crt",
-                cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!, ct);
+                cluster.Namespace, ct);
 
             data["KAFKA_SECURITY_PROTOCOL"] = "SASL_SSL";
             data["KAFKA_SASL_MECHANISM"] = "SCRAM-SHA-512";
@@ -597,8 +612,8 @@ public class KafkaService(
             data["KAFKA_SECURITY_PROTOCOL"] = "PLAINTEXT";
         }
 
-        await k8s.EnsureNamespaceAsync(appNs, appKubeconfig, ct);
-        await k8s.ApplyManifestAsync(BuildBindingSecretManifest(binding.KubernetesSecretName, appNs, data), appKubeconfig, ct);
+        await appCluster.EnsureNamespaceAsync(appNs, ct);
+        await appCluster.ApplyManifestAsync(BuildBindingSecretManifest(binding.KubernetesSecretName, appNs, data), ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);

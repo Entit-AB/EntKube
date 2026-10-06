@@ -15,10 +15,21 @@ namespace EntKube.Web.Services;
 public class RegisteredPostgresService(
     IDbContextFactory<DataServicesDbContext> dbFactory,
     VaultService vaultService,
-    IKubernetesClientFactory k8sFactory,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     StorageBrowserService storageBrowserService,
     ILogger<RegisteredPostgresService> logger)
 {
+    /// <summary>
+    /// A client for one of the tenant's clusters, or a refusal that says why — keeping the
+    /// credential inside Fleet. See docs/decomposition.md §4.0.1.
+    /// </summary>
+    private async Task<Clusters.IClusterClient> ClusterFor(
+        Guid tenantId, Guid clusterId, CancellationToken ct)
+        => await clusterAccess.ForAsync(tenantId, clusterId, ct)
+           ?? throw new InvalidOperationException(
+               "The cluster has no stored kubeconfig, or does not belong to this tenant, "
+               + "so nothing can be applied to it.");
+
     // ──────── Instance Queries ────────
 
     /// <summary>
@@ -66,7 +77,9 @@ public class RegisteredPostgresService(
 
         if (testConnection)
         {
-            await TestConnectionCoreAsync(adminPodName, ns, adminUsername, adminPassword, k8sCluster.Kubeconfig!, ct);
+            await TestConnectionCoreAsync(
+                adminPodName, ns, adminUsername, adminPassword,
+                await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct), ct);
         }
 
         RegisteredPostgresInstance instance = new()
@@ -103,7 +116,7 @@ public class RegisteredPostgresService(
 
         await TestConnectionCoreAsync(
             instance.AdminPodName, instance.Namespace, instance.AdminUsername,
-            adminPassword, cluster.Kubeconfig!, ct);
+            adminPassword, await ClusterFor(tenantId, cluster.Id, ct), ct);
     }
 
     /// <summary>
@@ -119,8 +132,8 @@ public class RegisteredPostgresService(
         // Run SQL that outputs one database name per line, excluding system templates.
         const string sql = "SELECT datname FROM pg_database WHERE datname NOT IN ('template0','template1') ORDER BY datname;";
 
-        string output = await k8sFactory.ExecuteSqlOnPodWithOutputAsync(
-            instance.AdminPodName, instance.Namespace, sql, cluster.Kubeconfig!,
+        string output = await (await ClusterFor(cluster.TenantId, cluster.Id, ct)).ExecuteSqlOnPodWithOutputAsync(
+            instance.AdminPodName, instance.Namespace, sql,
             instance.AdminUsername, adminPassword, ct);
 
         return ParsePsqlColumnOutput(output);
@@ -212,8 +225,8 @@ public class RegisteredPostgresService(
             CREATE DATABASE "{databaseName}" OWNER "{owner}";
             """;
 
-        await k8sFactory.ExecuteSqlOnPodAsync(
-            instance.AdminPodName, instance.Namespace, sql, cluster.Kubeconfig!,
+        await (await ClusterFor(cluster.TenantId, cluster.Id, ct)).ExecuteSqlOnPodAsync(
+            instance.AdminPodName, instance.Namespace, sql,
             instance.AdminUsername, adminPassword, ct);
 
         database.Status = RegisteredPostgresDatabaseStatus.Ready;
@@ -295,8 +308,8 @@ public class RegisteredPostgresService(
                 DROP ROLE IF EXISTS "{database.Owner}";
                 """;
 
-            await k8sFactory.ExecuteSqlOnPodAsync(
-                instance.AdminPodName, instance.Namespace, sql, cluster.Kubeconfig!,
+            await (await ClusterFor(cluster.TenantId, cluster.Id, ct)).ExecuteSqlOnPodAsync(
+                instance.AdminPodName, instance.Namespace, sql,
                 instance.AdminUsername, adminPassword, ct);
         }
         catch (InvalidOperationException)
@@ -308,11 +321,11 @@ public class RegisteredPostgresService(
         // Delete K8s secrets from the instance namespace and bound app namespaces.
 
         string primarySecretName = $"{instance.ServiceName}-{database.Name}-credentials";
-        string kubeconfig = cluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.Id, ct);
 
         try
         {
-            await k8sFactory.DeleteManifestAsync("Secret", primarySecretName, instance.Namespace, kubeconfig, ct);
+            await client.DeleteManifestAsync("Secret", primarySecretName, instance.Namespace, ct);
         }
         catch { }
 
@@ -326,10 +339,10 @@ public class RegisteredPostgresService(
         {
             try
             {
-                await k8sFactory.DeleteManifestAsync(
+                await (await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct)).DeleteManifestAsync(
                     "Secret", binding.KubernetesSecretName,
                     binding.AppDeployment.Namespace,
-                    binding.AppDeployment.Cluster.Kubeconfig!, ct);
+                     ct);
             }
             catch { }
         }
@@ -435,9 +448,9 @@ public class RegisteredPostgresService(
             throw new InvalidOperationException("No credentials found in the vault for this database.");
 
         string primarySecretName = $"{instance.ServiceName}-{database.Name}-credentials";
-        string kubeconfig = instance.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(instance.TenantId, instance.KubernetesClusterId, ct);
 
-        await ApplyCredentialSecretAsync(credentials, primarySecretName, instance.Namespace, kubeconfig, ct);
+        await ApplyCredentialSecretAsync(credentials, primarySecretName, instance.Namespace, client, ct);
 
         List<VaultSecret> vaultSecrets = await vaultService.GetRegisteredPostgresDatabaseSecretsAsync(tenantId, databaseId, ct);
         foreach (VaultSecret s in vaultSecrets)
@@ -453,10 +466,10 @@ public class RegisteredPostgresService(
 
         foreach (DatabaseBinding binding in bindings)
         {
-            await k8sFactory.EnsureNamespaceAsync(binding.AppDeployment.Namespace, binding.AppDeployment.Cluster.Kubeconfig!, ct);
+            await (await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct)).EnsureNamespaceAsync(binding.AppDeployment.Namespace, ct);
             await ApplyCredentialSecretAsync(
-                credentials, binding.KubernetesSecretName,
-                binding.AppDeployment.Namespace, binding.AppDeployment.Cluster.Kubeconfig!, ct);
+                credentials, binding.KubernetesSecretName, binding.AppDeployment.Namespace,
+                await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct), ct);
             binding.LastSyncedAt = DateTime.UtcNow;
         }
 
@@ -481,10 +494,10 @@ public class RegisteredPostgresService(
 
         string newPassword = GeneratePassword();
 
-        await k8sFactory.ExecuteSqlOnPodAsync(
+        await (await ClusterFor(cluster.TenantId, cluster.Id, ct)).ExecuteSqlOnPodAsync(
             instance.AdminPodName, instance.Namespace,
             $"ALTER ROLE \"{database.Owner}\" PASSWORD '{newPassword}';",
-            cluster.Kubeconfig!, instance.AdminUsername, adminPassword, ct);
+             instance.AdminUsername, adminPassword, ct);
 
         string k8sSecretName = $"{instance.ServiceName}-{database.Name}-credentials";
 
@@ -529,10 +542,9 @@ public class RegisteredPostgresService(
         StorageLink storageLink = await db.StorageLinks
             .FirstAsync(sl => sl.Id == storageLinkId, ct);
 
-        string dumpSql = await k8sFactory.RunCommandOnPodAsync(
+        string dumpSql = await (await ClusterFor(tenantId, cluster.Id, ct)).RunCommandOnPodAsync(
             instance.AdminPodName, instance.Namespace,
             ["pg_dump", "--format=plain", "-U", instance.AdminUsername, "-h", "127.0.0.1", "-d", database.Name],
-            cluster.Kubeconfig!,
             new Dictionary<string, string> { ["PGPASSWORD"] = adminPassword },
             ct);
 
@@ -629,7 +641,7 @@ public class RegisteredPostgresService(
             .FirstAsync(d => d.Id == databaseId, ct);
 
         logger.LogInformation("Migrate→CNPG: running pg_dump of '{DbName}' on pod {Pod}", database.Name, instance.AdminPodName);
-        string dumpSql = await k8sFactory.RunCommandOnPodAsync(
+        string dumpSql = await (await ClusterFor(tenantId, cluster.Id, ct)).RunCommandOnPodAsync(
             instance.AdminPodName, instance.Namespace,
             [
                 "pg_dump", "--format=plain", "--no-owner", "--no-privileges",
@@ -640,7 +652,6 @@ public class RegisteredPostgresService(
                 "-w", "--lock-wait-timeout=30000",
                 "-U", instance.AdminUsername, "-h", "127.0.0.1", "-d", database.Name
             ],
-            cluster.Kubeconfig!,
             new Dictionary<string, string>
             {
                 ["PGPASSWORD"] = adminPassword,
@@ -665,28 +676,27 @@ public class RegisteredPostgresService(
     private async Task RestoreSqlToCnpgAsync(
         Guid tenantId, string dumpSql, CnpgCluster cnpgCluster, string newDatabaseName, CancellationToken ct)
     {
-        string kubeconfig = cnpgCluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cnpgCluster.KubernetesClusterId, ct);
         string owner = $"{newDatabaseName}_owner";
         string password = GeneratePassword();
 
         // Create the owner role and the database on the CNPG cluster.
         logger.LogInformation("Migrate→CNPG: creating role+database '{NewName}' on cluster {Cluster}", newDatabaseName, cnpgCluster.Name);
-        await k8sFactory.ExecuteSqlAsync(
+        await client.ExecuteSqlAsync(
             cnpgCluster.Name, cnpgCluster.Namespace,
             $"""
             CREATE ROLE "{owner}" WITH LOGIN PASSWORD '{password}';
             CREATE DATABASE "{newDatabaseName}" OWNER "{owner}";
-            """,
-            kubeconfig, ct);
+            """, ct);
         logger.LogInformation("Migrate→CNPG: role+database created, restoring dump ({Bytes} bytes)", dumpSql.Length);
 
         // Restore the dump connected directly to the new database.
         // Using ExecuteSqlInCnpgDatabaseAsync (psql -d {db}) instead of \c avoids
         // the silent failure that occurs when \c cannot reconnect in stdin mode
         // (psql continues reading in the wrong database and exits with code 0).
-        await k8sFactory.ExecuteSqlInCnpgDatabaseAsync(
+        await client.ExecuteSqlInCnpgDatabaseAsync(
             cnpgCluster.Name, cnpgCluster.Namespace,
-            newDatabaseName, dumpSql, kubeconfig, ct);
+            newDatabaseName, dumpSql, ct);
         logger.LogInformation("Migrate→CNPG: dump restored into '{NewName}', registering database", newDatabaseName);
 
         // Register the database in EntKube so it appears in the UI and credentials
@@ -736,12 +746,12 @@ public class RegisteredPostgresService(
 
     private async Task TestConnectionCoreAsync(
         string podName, string ns, string username, string password,
-        string kubeconfig, CancellationToken ct)
+        Clusters.IClusterClient client, CancellationToken ct)
     {
         try
         {
-            await k8sFactory.ExecuteSqlOnPodAsync(
-                podName, ns, "SELECT 1;", kubeconfig, username, password, ct);
+            await client.ExecuteSqlOnPodAsync(
+                podName, ns, "SELECT 1;", username, password, ct);
         }
         catch (Exception ex)
         {
@@ -767,7 +777,7 @@ public class RegisteredPostgresService(
 
     private async Task ApplyCredentialSecretAsync(
         Dictionary<string, string> credentials, string secretName, string ns,
-        string kubeconfig, CancellationToken ct)
+        Clusters.IClusterClient client, CancellationToken ct)
     {
         StringBuilder sb = new();
         sb.AppendLine("apiVersion: v1");
@@ -788,7 +798,7 @@ public class RegisteredPostgresService(
             sb.AppendLine($"  {kvp.Key}: {encoded}");
         }
 
-        await k8sFactory.ApplyManifestAsync(sb.ToString(), kubeconfig, ct);
+        await client.ApplyManifestAsync(sb.ToString(), ct);
     }
 
     private static List<string> ParsePsqlColumnOutput(string output) =>
@@ -832,16 +842,20 @@ public class RegisteredPostgresService(
             .Include(i => i.KubernetesCluster)
             .FirstOrDefaultAsync(i => i.Id == instanceId && i.TenantId == tenantId, ct);
 
-        if (instance is null || string.IsNullOrWhiteSpace(instance.KubernetesCluster.Kubeconfig))
+        if (instance is null)
             return [];
 
-        string kubeconfig = instance.KubernetesCluster.Kubeconfig;
+        Clusters.IClusterClient? client =
+            await clusterAccess.ForAsync(instance.TenantId, instance.KubernetesClusterId, ct);
+
+        if (client is null)
+            return [];
         string adminPodJson;
 
         try
         {
-            adminPodJson = await k8sFactory.GetJsonAsync(
-                $"pod/{instance.AdminPodName}", instance.Namespace, kubeconfig, ct: ct);
+            adminPodJson = await client.GetJsonAsync(
+                $"pod/{instance.AdminPodName}", instance.Namespace, ct: ct);
         }
         catch
         {
@@ -857,8 +871,8 @@ public class RegisteredPostgresService(
             if (helmInstance is not null && helmName is not null)
             {
                 string selector = $"app.kubernetes.io/instance={helmInstance},app.kubernetes.io/name={helmName}";
-                string podsJson = await k8sFactory.GetJsonAsync(
-                    "pods", instance.Namespace, kubeconfig, selector, ct);
+                string podsJson = await client.GetJsonAsync(
+                    "pods", instance.Namespace, selector, ct);
                 List<CnpgPodInfo> helmPods = ParsePodList(podsJson, isList: true);
                 if (helmPods.Count > 0)
                     return helmPods;
@@ -872,15 +886,15 @@ public class RegisteredPostgresService(
             string? stsName = GetStatefulSetOwnerName(adminPodJson);
             if (stsName is not null)
             {
-                string stsJson = await k8sFactory.GetJsonAsync(
-                    $"statefulset/{stsName}", instance.Namespace, kubeconfig, ct: ct);
+                string stsJson = await client.GetJsonAsync(
+                    $"statefulset/{stsName}", instance.Namespace, ct: ct);
                 int replicas = GetStatefulSetReplicas(stsJson);
 
                 if (replicas > 1)
                 {
                     Task<string>[] tasks = Enumerable.Range(0, replicas)
-                        .Select(i => k8sFactory.GetJsonAsync(
-                            $"pod/{stsName}-{i}", instance.Namespace, kubeconfig, ct: ct))
+                        .Select(i => client.GetJsonAsync(
+                            $"pod/{stsName}-{i}", instance.Namespace, ct: ct))
                         .ToArray();
                     string[] podJsons = await Task.WhenAll(tasks);
 
