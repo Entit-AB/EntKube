@@ -109,6 +109,27 @@ public class ClusterClientFactoryTests : IDisposable
         (await factory.ForAsync(ourTenant, bareCluster)).Should().BeNull();
     }
 
+    /// <summary>
+    /// The typed-SDK capability is what lets the ten services that build their own
+    /// <c>Kubernetes</c> client stop handling a credential. If it produced a client that could
+    /// not actually reach anything, those conversions would look fine and fail in production.
+    /// </summary>
+    [Fact]
+    public async Task A_client_can_hand_out_a_configured_sdk_client()
+    {
+        (IClusterClientFactory factory, _) = Build();
+
+        IClusterClient cluster = (await factory.ForAsync(ourTenant, ourCluster))!;
+
+        using k8s.Kubernetes sdk = cluster.CreateSdkClient();
+
+        sdk.Should().NotBeNull();
+        sdk.BaseUri.Should().NotBeNull(
+            "a client built from the seeded kubeconfig should be pointed at that cluster's API server");
+        sdk.BaseUri!.ToString().Should().StartWith("https://k8s.example.com",
+            "the server in TestKubeconfig.Valid — proof the credential was read, not merely held");
+    }
+
     [Fact]
     public async Task The_resolved_credential_reaches_the_underlying_call()
     {

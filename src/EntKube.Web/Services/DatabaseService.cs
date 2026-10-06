@@ -61,7 +61,9 @@ public class DatabaseOperatorStatus
 /// - CloudNativePG: Cluster CRD (postgresql.cnpg.io/v1)
 /// - MongoDB Community Operator: MongoDBCommunity CRD (mongodbcommunity.mongodb.com/v1)
 /// </summary>
-public class DatabaseService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class DatabaseService(
+    IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess)
 {
     // ──────── Operator Availability ────────
 
@@ -186,14 +188,17 @@ public class DatabaseService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
         foreach (KubernetesCluster cluster in clusters)
         {
-            if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            Clusters.IClusterClient? reachable =
+                await clusterAccess.ForAsync(cluster.TenantId, cluster.Id, ct);
+
+            if (reachable is null)
             {
                 continue;
             }
 
             try
             {
-                List<DatabaseClusterInfo> clusterDbs = await QueryCnpgClustersAsync(cluster, ct);
+                List<DatabaseClusterInfo> clusterDbs = await QueryCnpgClustersAsync(reachable, cluster, ct);
                 results.AddRange(clusterDbs);
             }
             catch
@@ -209,9 +214,9 @@ public class DatabaseService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// Queries a single K8s cluster for CNPG Cluster custom resources.
     /// </summary>
     private static async Task<List<DatabaseClusterInfo>> QueryCnpgClustersAsync(
-        KubernetesCluster cluster, CancellationToken ct)
+        Clusters.IClusterClient reachable, KubernetesCluster cluster, CancellationToken ct)
     {
-        using Kubernetes client = CreateClient(cluster.Kubeconfig!);
+        using Kubernetes client = reachable.CreateSdkClient();
 
         // List all CNPG Cluster CRs across all namespaces.
 
@@ -343,14 +348,17 @@ public class DatabaseService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
         foreach (KubernetesCluster cluster in clusters)
         {
-            if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            Clusters.IClusterClient? reachable =
+                await clusterAccess.ForAsync(cluster.TenantId, cluster.Id, ct);
+
+            if (reachable is null)
             {
                 continue;
             }
 
             try
             {
-                List<DatabaseClusterInfo> clusterDbs = await QueryMongoDbClustersAsync(cluster, ct);
+                List<DatabaseClusterInfo> clusterDbs = await QueryMongoDbClustersAsync(reachable, cluster, ct);
                 results.AddRange(clusterDbs);
             }
             catch
@@ -366,9 +374,9 @@ public class DatabaseService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// Queries a single K8s cluster for MongoDBCommunity custom resources.
     /// </summary>
     private static async Task<List<DatabaseClusterInfo>> QueryMongoDbClustersAsync(
-        KubernetesCluster cluster, CancellationToken ct)
+        Clusters.IClusterClient reachable, KubernetesCluster cluster, CancellationToken ct)
     {
-        using Kubernetes client = CreateClient(cluster.Kubeconfig!);
+        using Kubernetes client = reachable.CreateSdkClient();
 
         object response = await client.CustomObjects.ListClusterCustomObjectAsync(
             group: "mongodbcommunity.mongodb.com",
@@ -458,10 +466,4 @@ public class DatabaseService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     // ──────── Internal ────────
 
-    private static Kubernetes CreateClient(string kubeconfig)
-    {
-        using MemoryStream stream = new(System.Text.Encoding.UTF8.GetBytes(kubeconfig));
-        KubernetesClientConfiguration config = KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
-        return new Kubernetes(config);
-    }
 }

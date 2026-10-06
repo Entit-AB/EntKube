@@ -65,6 +65,25 @@ public interface IClusterClient
 
     Task<string> RunCommandOnPodWithStdinAsync(string podName, string ns, IReadOnlyList<string> command,
         string stdin, CancellationToken ct = default, string? container = null);
+
+    /// <summary>
+    /// An authenticated client for the typed Kubernetes SDK, bound to this cluster. The caller
+    /// disposes it, which is how the ten hand-rolled copies of this already worked.
+    ///
+    /// <para><b>Why this exists.</b> The methods above all go through <c>kubectl</c>, and a good
+    /// deal of EntKube does not: ten services build their own <c>Kubernetes</c> client from a
+    /// kubeconfig, which accounts for roughly 167 of the places still taking a credential out of
+    /// a cluster row. Without this they could not use a cluster client at all, so the custody
+    /// work would have stopped at about half.</para>
+    ///
+    /// <para><b>What it does and does not achieve.</b> It takes the credential out of caller
+    /// code, puts the tenant check in one place, and replaces ten copies of the same five lines.
+    /// It does <em>not</em> make the credential unreachable — a client necessarily holds one, and
+    /// code determined to dig it out still can. The point is that reaching a cluster no longer
+    /// *requires* handling a credential, so doing it is now a deliberate act rather than the
+    /// ordinary way of working.</para>
+    /// </summary>
+    k8s.Kubernetes CreateSdkClient();
 }
 
 /// <summary>
