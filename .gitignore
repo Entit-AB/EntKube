@@ -452,3 +452,8 @@ src/EntKube.Web/keys/
 
 # Terraform provider build output (see scripts/release.sh terraform)
 artifacts/terraform-provider/
+
+# macOS directory metadata. Three of these were tracked, so every machine that
+# opened a folder in Finder produced a diff nobody meant to make.
+.DS_Store
+**/.DS_Store
