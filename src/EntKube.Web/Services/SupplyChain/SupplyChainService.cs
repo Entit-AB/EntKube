@@ -128,7 +128,7 @@ public class SupplyChainService(
             WorkloadSnapshot snapshot;
             try
             {
-                snapshot = await workloads.LoadAsync(cluster.Id, ns: null, ct);
+                snapshot = await workloads.LoadAsync(tenantId, cluster.Id, ns: null, ct: ct);
             }
             catch (Exception ex)
             {

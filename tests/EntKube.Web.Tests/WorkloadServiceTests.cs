@@ -38,7 +38,12 @@ public class WorkloadServiceTests : IDisposable
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync("""{"items":[]}""");
 
-        sut = new WorkloadService(testDb.Factory, k8s.Object, NullLogger<WorkloadService>.Instance);
+        // Real factory over the intercepting test database, so the vault-seeded kubeconfig
+        // resolves as production resolves it and then reaches the same mock.
+        sut = new WorkloadService(
+            testDb.Factory,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
+            NullLogger<WorkloadService>.Instance);
     }
 
     public void Dispose()
@@ -144,7 +149,7 @@ public class WorkloadServiceTests : IDisposable
     [Fact]
     public async Task LoadAsync_UnknownCluster_ReturnsError()
     {
-        WorkloadSnapshot snapshot = await sut.LoadAsync(Guid.NewGuid());
+        WorkloadSnapshot snapshot = await sut.LoadAsync(Guid.NewGuid(), Guid.NewGuid());
 
         snapshot.IsSuccess.Should().BeFalse();
         snapshot.Error.Should().Contain("not found");
@@ -155,7 +160,7 @@ public class WorkloadServiceTests : IDisposable
     {
         KubernetesCluster cluster = await SeedClusterAsync(withKubeconfig: false);
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         snapshot.IsSuccess.Should().BeFalse();
         snapshot.Error.Should().Contain("kubeconfig");
@@ -174,7 +179,7 @@ public class WorkloadServiceTests : IDisposable
             """{"metadata":{"name":"kube-system"}}""",
             """{"metadata":{"name":"acme-prod"}}"""));
 
-        List<string> namespaces = await sut.ListNamespacesAsync(cluster.Id);
+        List<string> namespaces = await sut.ListNamespacesAsync(cluster.TenantId, cluster.Id);
 
         namespaces.Should().Equal("acme-prod", "kube-system");
 
@@ -187,7 +192,7 @@ public class WorkloadServiceTests : IDisposable
     {
         // This runs ahead of the main load purely to make the filter usable; it must
         // never be the thing that breaks the page.
-        List<string> namespaces = await sut.ListNamespacesAsync(Guid.NewGuid());
+        List<string> namespaces = await sut.ListNamespacesAsync(Guid.NewGuid(), Guid.NewGuid());
 
         namespaces.Should().BeEmpty();
     }
@@ -201,7 +206,7 @@ public class WorkloadServiceTests : IDisposable
         SetupAllNamespaces("namespaces", Wrap("""{"metadata":{"name":"acme-prod"}}"""));
         SetupAllNamespaces("pods", Wrap(RunningPod()));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         snapshot.IsSuccess.Should().BeTrue();
         snapshot.Namespaces.Should().Equal("acme-prod");
@@ -225,7 +230,7 @@ public class WorkloadServiceTests : IDisposable
                 "daemonsets", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("forbidden"));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         snapshot.Workloads.Should().Contain(w => w.Kind == WorkloadKind.Pod);
         snapshot.Warnings.Should().ContainSingle(w => w.Contains("daemonsets"));
@@ -239,7 +244,7 @@ public class WorkloadServiceTests : IDisposable
         KubernetesCluster cluster = await SeedClusterAsync();
         SetupAllNamespaces("pods", Wrap(RunningPod()));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         WorkloadView pod = snapshot.Workloads.Should().ContainSingle(w => w.Kind == WorkloadKind.Pod).Subject;
         pod.Name.Should().Be("api-abc123");
@@ -262,7 +267,7 @@ public class WorkloadServiceTests : IDisposable
         KubernetesCluster cluster = await SeedClusterAsync();
         SetupAllNamespaces("pods", Wrap(CrashLoopPod()));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         WorkloadView pod = snapshot.Workloads.Single();
         pod.Health.Should().Be(HealthStatus.Degraded);
@@ -290,7 +295,7 @@ public class WorkloadServiceTests : IDisposable
         }
         """));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         WorkloadView pod = snapshot.Workloads.Single();
         pod.Health.Should().Be(HealthStatus.Progressing);
@@ -315,7 +320,7 @@ public class WorkloadServiceTests : IDisposable
         }
         """));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         WorkloadView pod = snapshot.Workloads.Single();
         pod.Health.Should().Be(HealthStatus.Suspended);
@@ -340,7 +345,7 @@ public class WorkloadServiceTests : IDisposable
         }
         """));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         snapshot.Workloads.Single().StatusText.Should().Be("Terminating");
         snapshot.Workloads.Single().Health.Should().Be(HealthStatus.Progressing);
@@ -358,7 +363,7 @@ public class WorkloadServiceTests : IDisposable
         }
         """));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         WorkloadView pod = snapshot.Workloads.Single();
         // "0/2", not a misleading "0/0" that would render as fully ready.
@@ -389,7 +394,7 @@ public class WorkloadServiceTests : IDisposable
         }
         """));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         WorkloadView pod = snapshot.Workloads.Single();
         pod.StatusText.Should().Be("ImagePullBackOff");
@@ -410,7 +415,7 @@ public class WorkloadServiceTests : IDisposable
             DeploymentJson("rolling", "apps", replicas: 3, ready: 0),
             DeploymentJson("scaled-down", "apps", replicas: 0, ready: 0)));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         Dictionary<string, WorkloadView> byName = snapshot.Workloads.ToDictionary(w => w.Name);
         byName["full"].Health.Should().Be(HealthStatus.Healthy);
@@ -429,7 +434,7 @@ public class WorkloadServiceTests : IDisposable
         KubernetesCluster cluster = await SeedClusterAsync();
         SetupAllNamespaces("deployments", Wrap(DeploymentJson("implicit", "apps", replicas: null, ready: 1)));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         WorkloadView deployment = snapshot.Workloads.Single();
         deployment.Desired.Should().Be(1);
@@ -451,7 +456,7 @@ public class WorkloadServiceTests : IDisposable
         }
         """));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         WorkloadView rs = snapshot.Workloads.Single();
         rs.Kind.Should().Be(WorkloadKind.ReplicaSet);
@@ -474,7 +479,7 @@ public class WorkloadServiceTests : IDisposable
         }
         """));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         WorkloadView sts = snapshot.Workloads.Single();
         sts.Kind.Should().Be(WorkloadKind.StatefulSet);
@@ -497,7 +502,7 @@ public class WorkloadServiceTests : IDisposable
         }
         """));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         WorkloadView ds = snapshot.Workloads.Single();
         ds.Kind.Should().Be(WorkloadKind.DaemonSet);
@@ -517,7 +522,7 @@ public class WorkloadServiceTests : IDisposable
         SetupNamespaced("pods", "apps", Wrap(RunningPod()));
         SetupNamespaced("pods", "other", Wrap(RunningPod("other-pod", "other")));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id, "apps");
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id, "apps");
 
         snapshot.Workloads.Should().ContainSingle().Which.Namespace.Should().Be("apps");
         k8s.Verify(f => f.GetJsonAsync("pods", "apps", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()),
@@ -534,7 +539,7 @@ public class WorkloadServiceTests : IDisposable
             """{ "metadata": { "name": "kube-system" } }""",
             """{ "metadata": { "name": "apps" } }"""));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         // Sorted, and independent of which namespaces actually hold workloads.
         snapshot.Namespaces.Should().Equal("apps", "kube-system");
@@ -549,7 +554,7 @@ public class WorkloadServiceTests : IDisposable
                 "daemonsets", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("Error from server (Forbidden): daemonsets is forbidden\nmore detail"));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         snapshot.IsSuccess.Should().BeTrue();
         snapshot.Workloads.Should().ContainSingle(w => w.Kind == WorkloadKind.Pod);
@@ -563,7 +568,7 @@ public class WorkloadServiceTests : IDisposable
         KubernetesCluster cluster = await SeedClusterAsync();
         SetupAllNamespaces("pods", "not json at all");
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         snapshot.IsSuccess.Should().BeTrue();
         snapshot.Workloads.Should().BeEmpty();
@@ -582,7 +587,7 @@ public class WorkloadServiceTests : IDisposable
         }
         """));
 
-        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.Id);
+        WorkloadSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
         snapshot.Workloads.Select(w => $"{w.Namespace}/{w.Kind}/{w.Name}").Should().Equal(
             "apps/Pod/alpha",
