@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -12,7 +13,7 @@ namespace EntKube.Web.Services;
 /// on the admin pod, using credentials stored in the vault.
 /// </summary>
 public class RegisteredPostgresService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DataServicesDbContext> dbFactory,
     VaultService vaultService,
     IKubernetesClientFactory k8sFactory,
     StorageBrowserService storageBrowserService,
@@ -27,7 +28,7 @@ public class RegisteredPostgresService(
     public async Task<List<RegisteredPostgresInstance>> GetInstancesAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.RegisteredPostgresInstances
             .Include(i => i.KubernetesCluster)
@@ -58,7 +59,7 @@ public class RegisteredPostgresService(
         bool testConnection = true,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KubernetesCluster k8sCluster = await db.KubernetesClusters
             .FirstAsync(k => k.Id == kubernetesClusterId, ct);
@@ -134,7 +135,7 @@ public class RegisteredPostgresService(
         string? name = null, string? notes = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresInstance instance = await db.RegisteredPostgresInstances
             .FirstOrDefaultAsync(i => i.Id == instanceId && i.TenantId == tenantId, ct)
@@ -161,7 +162,7 @@ public class RegisteredPostgresService(
     /// </summary>
     public async Task DeleteInstanceAsync(Guid tenantId, Guid instanceId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresInstance instance = await db.RegisteredPostgresInstances
             .Include(i => i.Databases)
@@ -202,7 +203,7 @@ public class RegisteredPostgresService(
             Status = RegisteredPostgresDatabaseStatus.Creating
         };
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         db.RegisteredPostgresDatabases.Add(database);
         await db.SaveChangesAsync(ct);
 
@@ -240,7 +241,7 @@ public class RegisteredPostgresService(
         string databaseName, string ownerRole, string ownerPassword,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresInstance instance = await db.RegisteredPostgresInstances
             .Include(i => i.KubernetesCluster)
@@ -281,7 +282,7 @@ public class RegisteredPostgresService(
         (RegisteredPostgresInstance instance, KubernetesCluster cluster, string adminPassword) =
             await LoadInstanceAsync(tenantId, instanceId, ct);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresDatabase database = await db.RegisteredPostgresDatabases
             .FirstOrDefaultAsync(d => d.Id == databaseId && d.RegisteredPostgresInstanceId == instance.Id, ct)
@@ -347,7 +348,7 @@ public class RegisteredPostgresService(
     public async Task UnregisterDatabaseAsync(
         Guid tenantId, Guid instanceId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresInstance instance = await db.RegisteredPostgresInstances
             .Include(i => i.KubernetesCluster)
@@ -399,7 +400,7 @@ public class RegisteredPostgresService(
         Guid appDeploymentId, Guid registeredPostgresDatabaseId, string kubernetesSecretName,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         DatabaseBinding binding = new()
         {
@@ -417,7 +418,7 @@ public class RegisteredPostgresService(
     public async Task SyncCredentialsToK8sAsync(
         Guid tenantId, Guid instanceId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresInstance instance = await db.RegisteredPostgresInstances
             .Include(i => i.KubernetesCluster)
@@ -472,7 +473,7 @@ public class RegisteredPostgresService(
         (RegisteredPostgresInstance instance, KubernetesCluster cluster, string adminPassword) =
             await LoadInstanceAsync(tenantId, instanceId, ct);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresDatabase database = await db.RegisteredPostgresDatabases
             .FirstOrDefaultAsync(d => d.Id == databaseId && d.RegisteredPostgresInstanceId == instance.Id, ct)
@@ -501,7 +502,7 @@ public class RegisteredPostgresService(
     public async Task<List<RegisteredPostgresDump>> GetDumpsAsync(
         Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.RegisteredPostgresDumps
             .Include(d => d.StorageLink)
@@ -520,7 +521,7 @@ public class RegisteredPostgresService(
         (RegisteredPostgresInstance instance, KubernetesCluster cluster, string adminPassword) =
             await LoadInstanceAsync(tenantId, instanceId, ct);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresDatabase database = await db.RegisteredPostgresDatabases
             .FirstAsync(d => d.Id == databaseId, ct);
@@ -560,7 +561,7 @@ public class RegisteredPostgresService(
     /// </summary>
     public async Task DeleteDumpAsync(Guid dumpId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresDump dump = await db.RegisteredPostgresDumps
             .Include(d => d.StorageLink)
@@ -584,7 +585,7 @@ public class RegisteredPostgresService(
     public async Task RestoreDumpToCnpgAsync(
         Guid dumpId, Guid cnpgClusterId, string newDatabaseName, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresDump dump = await db.RegisteredPostgresDumps
             .Include(d => d.StorageLink)
@@ -622,7 +623,7 @@ public class RegisteredPostgresService(
             await LoadInstanceAsync(tenantId, instanceId, ct);
         logger.LogInformation("Migrate→CNPG: loaded instance pod={Pod} ns={Ns}", instance.AdminPodName, instance.Namespace);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresDatabase database = await db.RegisteredPostgresDatabases
             .FirstAsync(d => d.Id == databaseId, ct);
@@ -690,7 +691,7 @@ public class RegisteredPostgresService(
 
         // Register the database in EntKube so it appears in the UI and credentials
         // can be managed and synced to Kubernetes Secrets.
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgDatabase cnpgDb = new()
         {
@@ -720,7 +721,7 @@ public class RegisteredPostgresService(
     private async Task<(RegisteredPostgresInstance instance, KubernetesCluster cluster, string adminPassword)>
         LoadInstanceAsync(Guid tenantId, Guid instanceId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresInstance instance = await db.RegisteredPostgresInstances
             .Include(i => i.KubernetesCluster)
@@ -825,7 +826,7 @@ public class RegisteredPostgresService(
     public async Task<List<CnpgPodInfo>> GetPodsAsync(
         Guid tenantId, Guid instanceId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresInstance? instance = await db.Set<RegisteredPostgresInstance>()
             .Include(i => i.KubernetesCluster)

@@ -38,13 +38,6 @@ public class DeliveryDbContext(DbContextOptions<DeliveryDbContext> options) : Mo
     public DbSet<GitKnownHost> GitKnownHosts => Set<GitKnownHost>();
     public DbSet<CustomerGitCredential> CustomerGitCredentials => Set<CustomerGitCredential>();
     public DbSet<CustomerGitRepoPolicy> CustomerGitRepoPolicies => Set<CustomerGitRepoPolicy>();
-    public DbSet<CacheBinding> CacheBindings => Set<CacheBinding>();
-    public DbSet<DatabaseBinding> DatabaseBindings => Set<DatabaseBinding>();
-    public DbSet<ElasticsearchBinding> ElasticsearchBindings => Set<ElasticsearchBinding>();
-    public DbSet<KafkaBinding> KafkaBindings => Set<KafkaBinding>();
-    public DbSet<MessagingBinding> MessagingBindings => Set<MessagingBinding>();
-    public DbSet<StorageBinding> StorageBindings => Set<StorageBinding>();
-    public DbSet<IdentityBinding> IdentityBindings => Set<IdentityBinding>();
 
     // ---- Hubs owned by other modules -------------------------------------------------
     // The measurement in docs/decomposition.md §4.0 found 70 of 164 cross-module foreign
