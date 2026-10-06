@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services;
 using EntKube.Web.Services.Jit;
 using FluentAssertions;
@@ -52,7 +53,11 @@ public class JitGrantReaperTests : IDisposable
             .ReturnsAsync("""{"items":[]}""");
 
         ServiceCollection collection = new();
-        collection.AddSingleton<IDbContextFactory<ApplicationDbContext>>(new TestDbContextFactory(connection));
+        TestDbContextFactory factory = new(connection);
+        collection.AddSingleton<IDbContextFactory<ApplicationDbContext>>(factory);
+        // The reaper moved onto the Identity module context and resolves that factory from
+        // the provider; production registers all twelve via AddModuleContexts.
+        collection.AddSingleton<IDbContextFactory<IdentityDbContext>>(factory);
         collection.AddSingleton<IJitProvisioner>(provisioner);
         collection.AddSingleton(k8s.Object);
         services = collection.BuildServiceProvider();

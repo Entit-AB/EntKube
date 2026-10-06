@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -12,7 +13,7 @@ namespace EntKube.Web.Services;
 /// The management plane's <see cref="IClusterTenantResolver"/>: it knows every cluster. The in-cluster
 /// indexer and querier use <see cref="FixedClusterTenantResolver"/> instead, since a pod serves one.
 /// </summary>
-public sealed class ClusterTenantResolver(IDbContextFactory<ApplicationDbContext> dbFactory)
+public sealed class ClusterTenantResolver(IDbContextFactory<FleetDbContext> dbFactory)
     : IClusterTenantResolver
 {
     private static readonly ConcurrentDictionary<Guid, Guid> Cache = new();
@@ -21,7 +22,7 @@ public sealed class ClusterTenantResolver(IDbContextFactory<ApplicationDbContext
     {
         if (Cache.TryGetValue(clusterId, out Guid cached)) return cached;
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         Guid? tenantId = await db.KubernetesClusters
             .Where(c => c.Id == clusterId)
             .Select(c => (Guid?)c.TenantId)

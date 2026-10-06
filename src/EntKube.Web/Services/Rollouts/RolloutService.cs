@@ -1,6 +1,7 @@
 using System.Diagnostics;
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.Telemetry;
 using Microsoft.EntityFrameworkCore;
 
@@ -39,7 +40,7 @@ public sealed class NoOpRolloutStarter : IRolloutStarter
 /// window would make the feature unusable in exactly the pipelines it exists to protect.
 /// </summary>
 public class RolloutService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DeliveryDbContext> dbFactory,
     PrometheusService prometheus,
     ITraceQueryService traces,
     ErrorBudgetService errorBudgets,
@@ -52,7 +53,7 @@ public class RolloutService(
     public async Task<DeploymentRollout?> OpenAsync(
         Guid deploymentId, string? triggeredBy, DateTime now, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         RolloutPolicy? policy = await db.RolloutPolicies
             .AsNoTracking()
@@ -113,7 +114,7 @@ public class RolloutService(
         // ── Readiness, from the health snapshots already being collected ──
         try
         {
-            await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+            await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
             var snapshot = await db.DeploymentHealthSnapshots
                 .AsNoTracking()
                 .Where(s => s.DeploymentId == deployment.Id && s.SnapshotAt >= windowStart)
@@ -182,7 +183,7 @@ public class RolloutService(
         {
             try
             {
-                await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+                await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
                 Guid tenantId = await db.Apps
                     .Where(a => a.Id == deployment.AppId)
                     .Select(a => a.Customer.TenantId)
@@ -276,7 +277,7 @@ public class RolloutService(
         Guid rolloutId, DeploymentRolloutStatus status, string verdict, RolloutSignals signals,
         DateTime now, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         DeploymentRollout? rollout = await db.DeploymentRollouts.FirstOrDefaultAsync(r => r.Id == rolloutId, ct);
         if (rollout is null)

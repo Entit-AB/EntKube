@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -15,7 +16,7 @@ namespace EntKube.Web.Services;
 /// for each deployment (sync status, health status, resource hierarchy).
 /// </summary>
 public class DeploymentService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DeliveryDbContext> dbFactory,
     AuditService auditService,
     DeploymentStatusNotifier statusNotifier,
     ILogger<DeploymentService> logger)
@@ -43,7 +44,7 @@ public class DeploymentService(
         if (string.IsNullOrWhiteSpace(ns))
             throw new InvalidOperationException("A namespace is required.");
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
         AppEnvironment? ae = await db.AppEnvironments
             .FirstOrDefaultAsync(e => e.AppId == appId && e.EnvironmentId == environmentId, ct);
         if (ae?.Namespace is { Length: > 0 } locked
@@ -72,7 +73,7 @@ public class DeploymentService(
     {
         await EnforceNamespaceAsync(appId, environmentId, ns, ct);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         AppDeployment deployment = new()
         {
@@ -111,7 +112,7 @@ public class DeploymentService(
     /// </summary>
     public async Task<List<AppDeployment>> GetDeploymentsAsync(Guid appId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         return await db.AppDeployments
             .Include(d => d.Environment)
@@ -134,7 +135,7 @@ public class DeploymentService(
         string? helmChartVersion = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         AppDeployment? deployment = await db.AppDeployments.FindAsync([deploymentId], ct);
 
@@ -162,7 +163,7 @@ public class DeploymentService(
         bool gitAutoSync,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         AppDeployment? deployment = await db.AppDeployments.FindAsync([deploymentId], ct);
 
@@ -185,7 +186,7 @@ public class DeploymentService(
     /// </summary>
     public async Task DeleteDeploymentAsync(Guid deploymentId, string? performedBy = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         AppDeployment? deployment = await db.AppDeployments.FindAsync([deploymentId], ct);
 
@@ -217,7 +218,7 @@ public class DeploymentService(
         int sortOrder,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         DeploymentManifest manifest = new()
         {
@@ -241,7 +242,7 @@ public class DeploymentService(
     public async Task<List<DeploymentManifest>> GetManifestsAsync(
         Guid deploymentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         return await db.DeploymentManifests
             .Where(m => m.DeploymentId == deploymentId)
@@ -256,7 +257,7 @@ public class DeploymentService(
     public async Task UpdateManifestAsync(
         Guid manifestId, string yamlContent, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         DeploymentManifest? manifest = await db.DeploymentManifests.FindAsync([manifestId], ct);
 
@@ -273,7 +274,7 @@ public class DeploymentService(
     /// </summary>
     public async Task DeleteManifestAsync(Guid manifestId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         DeploymentManifest? manifest = await db.DeploymentManifests.FindAsync([manifestId], ct);
 
@@ -295,7 +296,7 @@ public class DeploymentService(
     public async Task UpdateHelmValuesAsync(
         Guid deploymentId, string valuesYaml, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         AppDeployment? deployment = await db.AppDeployments.FindAsync([deploymentId], ct);
 
@@ -321,7 +322,7 @@ public class DeploymentService(
         string? message = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         AppDeployment? deployment = await db.AppDeployments.FindAsync([deploymentId], ct);
 
@@ -359,7 +360,7 @@ public class DeploymentService(
         Guid? parentResourceId = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         // Look for an existing resource with the same identity.
         DeploymentResource? existing = await db.DeploymentResources
@@ -417,7 +418,7 @@ public class DeploymentService(
     public async Task<List<DeploymentResource>> GetResourceTreeAsync(
         Guid deploymentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         return await db.DeploymentResources
             .Include(r => r.ChildResources)

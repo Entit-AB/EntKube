@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+  </PropertyGroup>
+
+  <!--
+    Deliberately has no reference to EntKube.Web, and must never gain one.
+
+    This project is what a module's callers are allowed to know about it. If it could see
+    EntKube.Web it would see the EF entities, and the contracts would quietly become a
+    second name for the database — which is the thing the decomposition is trying to undo.
+    It is also what a separate deployable, the CLI, the MCP server and a generated HTTP
+    client will each reference, none of which can take the whole web application with them.
+  -->
+
+</Project>

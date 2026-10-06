@@ -1,5 +1,6 @@
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -13,7 +14,7 @@ namespace EntKube.Web.Services;
 /// can only see and mutate their own channels.
 /// </summary>
 public class CustomerNotificationService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<TelemetryDbContext> dbFactory,
     NotificationService notifications)
 {
     /// <summary>The channel types a customer is allowed to create/manage.</summary>
@@ -28,7 +29,7 @@ public class CustomerNotificationService(
     public async Task<List<NotificationChannel>> GetChannelsAsync(
         Guid tenantId, Guid customerId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         return await db.NotificationChannels
             .Where(c => c.TenantId == tenantId && c.CustomerId == customerId)
             .OrderBy(c => c.Name)
@@ -61,7 +62,7 @@ public class CustomerNotificationService(
             return (false, ex.Message);
         }
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
 
         if (channelId is Guid id)
         {
@@ -94,7 +95,7 @@ public class CustomerNotificationService(
 
     public async Task ToggleEnabledAsync(Guid tenantId, Guid customerId, Guid channelId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         NotificationChannel? ch = await db.NotificationChannels
             .FirstOrDefaultAsync(c => c.Id == channelId && c.TenantId == tenantId && c.CustomerId == customerId, ct);
         if (ch is null) return;
@@ -104,7 +105,7 @@ public class CustomerNotificationService(
 
     public async Task DeleteChannelAsync(Guid tenantId, Guid customerId, Guid channelId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         NotificationChannel? ch = await db.NotificationChannels
             .FirstOrDefaultAsync(c => c.Id == channelId && c.TenantId == tenantId && c.CustomerId == customerId, ct);
         if (ch is null) return;
@@ -116,7 +117,7 @@ public class CustomerNotificationService(
     public async Task TestChannelAsync(Guid tenantId, Guid customerId, Guid channelId, CancellationToken ct = default)
     {
         NotificationChannel? ch;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (TelemetryDbContext db = dbFactory.CreateDbContext())
         {
             ch = await db.NotificationChannels
                 .FirstOrDefaultAsync(c => c.Id == channelId && c.TenantId == tenantId && c.CustomerId == customerId, ct);

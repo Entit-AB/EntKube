@@ -40,6 +40,10 @@ internal static class AdvisorServices
         services.AddScoped<OperationsAdvisorService>();
         services.AddHostedService<AdvisorScanService>();
 
+        // The module's contract. See EntKube.Contracts for why callers get this rather
+        // than the services behind it.
+        services.AddScoped<EntKube.Contracts.Advisor.IAdvisorApi, EntKube.Web.Modules.Api.AdvisorApi>();
+
         return services;
     }
 }

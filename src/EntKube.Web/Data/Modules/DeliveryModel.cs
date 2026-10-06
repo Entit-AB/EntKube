@@ -37,29 +37,21 @@ internal static class DeliveryModel
         builder.Entity<AppRbacRule>().ToTable("AppRbacRules");
         builder.Entity<AppServiceDependency>().ToTable("AppServiceDependencies");
         builder.Entity<AppServicePort>().ToTable("AppServicePorts");
-        builder.Entity<CacheBinding>().ToTable("CacheBindings");
         builder.Entity<CustomerEnvironment>().ToTable("CustomerEnvironments");
         builder.Entity<CustomerGitCredential>().ToTable("CustomerGitCredentials");
         builder.Entity<CustomerGitRepoPolicy>().ToTable("CustomerGitRepoPolicies");
-        builder.Entity<DatabaseBinding>().ToTable("DatabaseBindings");
         builder.Entity<DeploymentAppliedResource>().ToTable("DeploymentAppliedResources");
         builder.Entity<DeploymentHealthSnapshot>().ToTable("DeploymentHealthSnapshots");
         builder.Entity<DeploymentManifest>().ToTable("DeploymentManifests");
         builder.Entity<DeploymentResource>().ToTable("DeploymentResources");
         builder.Entity<DeploymentRollout>().ToTable("DeploymentRollouts");
-        builder.Entity<ElasticsearchBinding>().ToTable("ElasticsearchBindings");
         builder.Entity<Data.Environment>().ToTable("Environments");
         builder.Entity<ExternalDependency>().ToTable("ExternalDependencies");
         builder.Entity<GitKnownHost>().ToTable("GitKnownHosts");
         builder.Entity<GitRepository>().ToTable("GitRepositories");
-        builder.Entity<IdentityBinding>().ToTable("IdentityBindings");
-        builder.Entity<KafkaBinding>().ToTable("KafkaBindings");
         builder.Entity<KedaScaler>().ToTable("KedaScalers");
         builder.Entity<KyvernoPolicy>().ToTable("KyvernoPolicies");
-        builder.Entity<MessagingBinding>().ToTable("MessagingBindings");
         builder.Entity<RolloutPolicy>().ToTable("RolloutPolicies");
-        builder.Entity<StorageBinding>().ToTable("StorageBindings");
-
         builder.Entity<AppServiceDependency>(entity =>
         {
             entity.HasKey(d => d.Id);

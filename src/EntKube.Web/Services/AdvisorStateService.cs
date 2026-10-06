@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 
 namespace EntKube.Web.Services;
 
@@ -9,7 +10,7 @@ namespace EntKube.Web.Services;
 /// used for aging and escalation. Everything is keyed by the finding's stable
 /// synthetic id so state survives across the 60s recomputations.
 /// </summary>
-public class AdvisorStateService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class AdvisorStateService(IDbContextFactory<AdvisorDbContext> dbFactory)
 {
     /// <summary>Stale state rows older than this (finding gone) are pruned so a recurrence starts fresh.</summary>
     private static readonly TimeSpan StaleAfter = TimeSpan.FromDays(3);
@@ -17,7 +18,7 @@ public class AdvisorStateService(IDbContextFactory<ApplicationDbContext> dbFacto
     public async Task<Dictionary<string, AdvisorFindingState>> GetStatesAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using AdvisorDbContext db = dbFactory.CreateDbContext();
         List<AdvisorFindingState> rows = await db.AdvisorFindingStates
             .Where(s => s.TenantId == tenantId)
             .ToListAsync(ct);
@@ -68,7 +69,7 @@ public class AdvisorStateService(IDbContextFactory<ApplicationDbContext> dbFacto
     /// </summary>
     public async Task ReconcileAsync(Guid tenantId, IReadOnlyCollection<string> currentKeys, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using AdvisorDbContext db = dbFactory.CreateDbContext();
         DateTime now = DateTime.UtcNow;
 
         List<AdvisorFindingState> existing = await db.AdvisorFindingStates
@@ -106,7 +107,7 @@ public class AdvisorStateService(IDbContextFactory<ApplicationDbContext> dbFacto
 
     private async Task MutateAsync(Guid tenantId, string key, Action<AdvisorFindingState> mutate, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using AdvisorDbContext db = dbFactory.CreateDbContext();
         AdvisorFindingState? s = await db.AdvisorFindingStates
             .FirstOrDefaultAsync(x => x.TenantId == tenantId && x.FindingKey == key, ct);
 

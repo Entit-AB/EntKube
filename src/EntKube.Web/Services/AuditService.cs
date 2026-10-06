@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -8,7 +9,7 @@ namespace EntKube.Web.Services;
 /// destructive operations so there is always a human-readable activity
 /// timeline attached to every deployment.
 /// </summary>
-public class AuditService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class AuditService(IDbContextFactory<IdentityDbContext> dbFactory)
 {
     public async Task RecordAsync(
         Guid? deploymentId,
@@ -19,7 +20,7 @@ public class AuditService(IDbContextFactory<ApplicationDbContext> dbFactory)
         string? performedBy = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         db.AuditEvents.Add(new AuditEvent
         {
@@ -42,7 +43,7 @@ public class AuditService(IDbContextFactory<ApplicationDbContext> dbFactory)
     public async Task<List<AuditEvent>> GetDeploymentEventsAsync(
         Guid deploymentId, int limit = 50, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         return await db.AuditEvents
             .Where(a => a.DeploymentId == deploymentId)

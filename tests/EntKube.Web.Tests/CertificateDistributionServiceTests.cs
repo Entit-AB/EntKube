@@ -23,7 +23,7 @@ public sealed class CertificateDistributionServiceTests : IDisposable
         "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
 
     private readonly SqliteConnection connection;
-    private readonly IDbContextFactory<ApplicationDbContext> dbFactory;
+    private readonly TestDbContextFactory dbFactory;
     private readonly CertificateDistributionService sut;
     private readonly Guid tenantId = Guid.NewGuid();
     private readonly Guid clusterId = Guid.NewGuid();

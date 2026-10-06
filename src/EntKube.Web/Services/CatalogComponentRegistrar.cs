@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.Telemetry;
 using Microsoft.EntityFrameworkCore;
 
@@ -18,7 +19,7 @@ namespace EntKube.Web.Services;
 /// install is driven separately by <see cref="ComponentInstallOrchestrator"/>.
 /// </summary>
 public class CatalogComponentRegistrar(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<CatalogDbContext> dbFactory,
     ComponentLifecycleService lifecycleService,
     VaultService vaultService,
     KeycloakService keycloakService,
@@ -58,7 +59,7 @@ public class CatalogComponentRegistrar(
         // cluster-wide facts (e.g. the ingress Gateway for letsencrypt-issuer), and
         // so we can detect whether this component already exists (update vs create).
         List<ClusterComponent> existing;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (CatalogDbContext db = dbFactory.CreateDbContext())
         {
             existing = await db.ClusterComponents
                 .Where(c => c.ClusterId == clusterId)
@@ -521,7 +522,7 @@ public class CatalogComponentRegistrar(
 
     private async Task<ClusterComponent?> GetComponentAsync(Guid componentId)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using CatalogDbContext db = dbFactory.CreateDbContext();
         return await db.ClusterComponents.FirstOrDefaultAsync(c => c.Id == componentId);
     }
 }

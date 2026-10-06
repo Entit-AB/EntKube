@@ -51,7 +51,7 @@ public sealed record RedisEndpointOption(
 /// </summary>
 public class RedisService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    IKubernetesClientFactory k8s,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     VaultService vaultService)
 {
     private const int RedisPort = 6379;
@@ -86,7 +86,7 @@ public class RedisService(
     /// and not the other.</para>
     /// </summary>
     public async Task<List<RedisEndpointOption>> DiscoverEndpointsAsync(
-        Guid kubernetesClusterId, CancellationToken ct = default)
+        Guid tenantId, Guid kubernetesClusterId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -113,13 +113,16 @@ public class RedisService(
                 ClusterMode: true));
         }
 
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig)) return options;
-
         // Then whatever else is listening. Best-effort by design: a cluster we cannot read right now
-        // should still offer the managed list and a free-text box, not an empty form.
+        // should still offer the managed list and a free-text box, not an empty form. A cluster with
+        // no stored credential is one of those cases, and ForAsync says so by returning null.
+        Clusters.IClusterClient? reachable = await clusters.ForAsync(tenantId, kubernetesClusterId, ct);
+
+        if (reachable is null) return options;
+
         try
         {
-            string json = await k8s.GetJsonAllNamespacesAsync("services", cluster.Kubeconfig!, ct: ct);
+            string json = await reachable.GetJsonAllNamespacesAsync("services", ct: ct);
             foreach (RedisEndpointOption found in ParseRedisServices(json))
             {
                 if (!options.Any(o => string.Equals(o.Host, found.Host, StringComparison.OrdinalIgnoreCase)))
@@ -271,7 +274,7 @@ public class RedisService(
     /// could not answer would be worse than the failure it prevents.</para>
     /// </summary>
     public async Task<bool?> InClusterServiceExistsAsync(
-        Guid kubernetesClusterId, string endpoint, CancellationToken ct = default)
+        Guid tenantId, Guid kubernetesClusterId, string endpoint, CancellationToken ct = default)
     {
         string host = (endpoint ?? "").Split(',')[0].Split(':')[0].Trim();
 
@@ -281,19 +284,16 @@ public class RedisService(
             return null;
         }
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        Clusters.IClusterClient? reachable = await clusters.ForAsync(tenantId, kubernetesClusterId, ct);
 
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .FirstOrDefaultAsync(c => c.Id == kubernetesClusterId, ct);
-
-        if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        if (reachable is null)
         {
             return null;
         }
 
         try
         {
-            string json = await k8s.GetJsonAllNamespacesAsync("services", cluster.Kubeconfig!, ct: ct);
+            string json = await reachable.GetJsonAllNamespacesAsync("services", ct: ct);
 
             // Every Service, not only the Redis-looking ones: the question here is whether the name
             // resolves at all, and a Redis on a non-standard port is still a Redis.
@@ -443,9 +443,9 @@ public class RedisService(
 
         try
         {
-            KubernetesCluster k8sCluster = await db.KubernetesClusters
-                .FirstAsync(c => c.Id == kubernetesClusterId, ct);
-            string kubeconfig = k8sCluster.Kubeconfig!;
+            Clusters.IClusterClient target = await clusters.ForAsync(tenantId, kubernetesClusterId, ct)
+                ?? throw new InvalidOperationException(
+                    "The target cluster has no stored kubeconfig, so nothing can be applied to it.");
 
             // Generate a strong auth password and persist it in the vault.
             string password = GeneratePassword();
@@ -457,15 +457,15 @@ public class RedisService(
             await vaultService.SetRedisClusterSecretAsync(
                 tenantId, cluster.Id, "REDIS_PORT", RedisPort.ToString(), ct);
 
-            await k8s.EnsureNamespaceAsync(ns, kubeconfig, ct);
+            await target.EnsureNamespaceAsync(ns, ct);
 
             // Create the auth Secret the operator reads at startup.
             string authSecretManifest = BuildAuthSecretManifest(name, ns, password);
-            await k8s.ApplyManifestAsync(authSecretManifest, kubeconfig, ct);
+            await target.ApplyManifestAsync(authSecretManifest, ct);
 
             // Apply the RedisCluster CRD.
             string clusterManifest = BuildClusterManifest(cluster);
-            await k8s.ApplyManifestAsync(clusterManifest, kubeconfig, ct);
+            await target.ApplyManifestAsync(clusterManifest, ct);
 
             // Leave status as Creating — GetClusterDetailAsync reconciles to Running
             // once the operator reports all pods ready.
@@ -497,8 +497,11 @@ public class RedisService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
-            await k8s.DeleteManifestAsync("rediscluster", cluster.Name, cluster.Namespace, kubeconfig, ct);
+            Clusters.IClusterClient target = await clusters.ForAsync(tenantId, cluster.KubernetesClusterId, ct)
+                ?? throw new InvalidOperationException(
+                    "The cluster has no stored kubeconfig, so the RedisCluster cannot be removed from it.");
+
+            await target.DeleteManifestAsync("rediscluster", cluster.Name, cluster.Namespace, ct);
         }
         catch (Exception ex)
         {
@@ -600,9 +603,14 @@ public class RedisService(
 
         try
         {
-            await k8s.DeleteManifestAsync(
-                "secret", binding.KubernetesSecretName,
-                binding.AppDeployment.Namespace, binding.AppDeployment.Cluster.Kubeconfig!, ct);
+            Clusters.IClusterClient? appCluster =
+                await clusters.ForAsync(tenantId, binding.AppDeployment.ClusterId, ct);
+
+            if (appCluster is not null)
+            {
+                await appCluster.DeleteManifestAsync(
+                    "secret", binding.KubernetesSecretName, binding.AppDeployment.Namespace, ct);
+            }
         }
         catch { }
 
@@ -629,8 +637,12 @@ public class RedisService(
 
         string redisUrl = $"redis://:{password}@{host}:{port}";
 
-        string appKubeconfig = binding.AppDeployment.Cluster.Kubeconfig!;
-        await k8s.EnsureNamespaceAsync(binding.AppDeployment.Namespace, appKubeconfig, ct);
+        Clusters.IClusterClient appCluster =
+            await clusters.ForAsync(tenantId, binding.AppDeployment.ClusterId, ct)
+            ?? throw new InvalidOperationException(
+                "The app's cluster has no stored kubeconfig, so the credential secret cannot be synced.");
+
+        await appCluster.EnsureNamespaceAsync(binding.AppDeployment.Namespace, ct);
 
         string secretManifest = $"""
             apiVersion: v1
@@ -649,7 +661,7 @@ public class RedisService(
               REDIS_URL: {B64(redisUrl)}
             """;
 
-        await k8s.ApplyManifestAsync(secretManifest, appKubeconfig, ct);
+        await appCluster.ApplyManifestAsync(secretManifest, ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
         using ApplicationDbContext db2 = dbFactory.CreateDbContext();
@@ -678,21 +690,26 @@ public class RedisService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient? target =
+                await clusters.ForAsync(tenantId, cluster.KubernetesClusterId, ct);
 
-            string crdJson = await k8s.GetJsonAsync(
+            if (target is null)
+            {
+                detail.Phase = "No kubeconfig stored for this cluster";
+                return detail;
+            }
+
+            string crdJson = await target.GetJsonAsync(
                 $"rediscluster.redis.redis.opstreelabs.in/{cluster.Name}",
-                cluster.Namespace, kubeconfig, ct: ct);
+                cluster.Namespace, ct: ct);
 
             ParseCrdStatus(crdJson, detail);
 
-            string leaderJson = await k8s.GetJsonAsync(
-                "pods", cluster.Namespace, kubeconfig,
-                $"app={cluster.Name}-leader", ct);
+            string leaderJson = await target.GetJsonAsync(
+                "pods", cluster.Namespace, $"app={cluster.Name}-leader", ct);
 
-            string followerJson = await k8s.GetJsonAsync(
-                "pods", cluster.Namespace, kubeconfig,
-                $"app={cluster.Name}-follower", ct);
+            string followerJson = await target.GetJsonAsync(
+                "pods", cluster.Namespace, $"app={cluster.Name}-follower", ct);
 
             detail.Pods =
             [

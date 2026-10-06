@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Telemetry;
@@ -12,11 +13,11 @@ namespace EntKube.Web.Services.Telemetry;
 /// query would pin a connection for the whole Lucene search. This is the property that keeps the segment
 /// engine clear of the Postgres connection exhaustion that motivated replacing the old row-per-event store.
 /// </summary>
-public sealed class EfSegmentCatalog(IDbContextFactory<ApplicationDbContext> dbFactory) : ISegmentCatalog
+public sealed class EfSegmentCatalog(IDbContextFactory<TelemetryDbContext> dbFactory) : ISegmentCatalog
 {
     public async Task AddAsync(TelemetrySegment segment, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using TelemetryDbContext db = await dbFactory.CreateDbContextAsync(ct);
         db.TelemetrySegments.Add(segment);
         await db.SaveChangesAsync(ct);
     }
@@ -24,7 +25,7 @@ public sealed class EfSegmentCatalog(IDbContextFactory<ApplicationDbContext> dbF
     public async Task<IReadOnlyList<TelemetrySegment>> ListOverlappingAsync(
         Guid tenantId, string signal, DateTime? from, DateTime? to, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using TelemetryDbContext db = await dbFactory.CreateDbContextAsync(ct);
         IQueryable<TelemetrySegment> q = db.TelemetrySegments.AsNoTracking()
             .Where(s => s.TenantId == tenantId && s.Signal == signal);
         // "Overlaps [from, to)" — a segment is in scope unless it ends before the window or starts after it.
@@ -36,7 +37,7 @@ public sealed class EfSegmentCatalog(IDbContextFactory<ApplicationDbContext> dbF
     public async Task<IReadOnlyList<TelemetrySegment>> RemoveExpiredAsync(
         Guid tenantId, string signal, DateTime cutoff, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using TelemetryDbContext db = await dbFactory.CreateDbContextAsync(ct);
         List<TelemetrySegment> expired = await db.TelemetrySegments
             .Where(s => s.TenantId == tenantId && s.Signal == signal && s.MaxTs < cutoff)
             .ToListAsync(ct);
@@ -52,7 +53,7 @@ public sealed class EfSegmentCatalog(IDbContextFactory<ApplicationDbContext> dbF
     {
         if (segmentIds.Count == 0) return [];
 
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using TelemetryDbContext db = await dbFactory.CreateDbContextAsync(ct);
         List<TelemetrySegment> rows = await db.TelemetrySegments
             .Where(s => s.TenantId == tenantId && s.Signal == signal && segmentIds.Contains(s.Id))
             .ToListAsync(ct);
@@ -65,7 +66,7 @@ public sealed class EfSegmentCatalog(IDbContextFactory<ApplicationDbContext> dbF
 
     public async Task<DateTime?> GetMinTsAsync(Guid tenantId, string signal, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using TelemetryDbContext db = await dbFactory.CreateDbContextAsync(ct);
         return await db.TelemetrySegments.AsNoTracking()
             .Where(s => s.TenantId == tenantId && s.Signal == signal)
             .MinAsync(s => (DateTime?)s.MinTs, ct);

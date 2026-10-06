@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Rollouts;
@@ -75,12 +76,12 @@ public class RolloutWatcherService(
         DateTime now = DateTime.UtcNow;
 
         using IServiceScope scope = scopeFactory.CreateScope();
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
         var rollouts = scope.ServiceProvider.GetRequiredService<RolloutService>();
         var notifications = scope.ServiceProvider.GetRequiredService<NotificationService>();
 
         List<Guid> due;
-        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        await using (DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct))
         {
             due = await db.DeploymentRollouts
                 .Where(r => r.Status == DeploymentRolloutStatus.Watching && r.DecideAt <= now)
@@ -107,7 +108,7 @@ public class RolloutWatcherService(
 
     private async Task DecideAsync(
         Guid rolloutId, DateTime now,
-        IDbContextFactory<ApplicationDbContext> dbFactory, RolloutService rollouts,
+        IDbContextFactory<DeliveryDbContext> dbFactory, RolloutService rollouts,
         NotificationService notifications, CancellationToken ct)
     {
         AppDeployment? deployment;
@@ -115,7 +116,7 @@ public class RolloutWatcherService(
         DateTime startedAt;
         DateTime decideAt;
 
-        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        await using (DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct))
         {
             DeploymentRollout? rollout = await db.DeploymentRollouts
                 .AsNoTracking()
@@ -238,7 +239,7 @@ public class RolloutWatcherService(
     /// muted along with it.
     /// </summary>
     private async Task NotifyAsync(
-        NotificationService notifications, IDbContextFactory<ApplicationDbContext> dbFactory,
+        NotificationService notifications, IDbContextFactory<DeliveryDbContext> dbFactory,
         AppDeployment deployment, DeploymentRolloutStatus outcome, string verdict, CancellationToken ct)
     {
         string? severity = NotificationSeverityFor(outcome);
@@ -251,7 +252,7 @@ public class RolloutWatcherService(
         try
         {
             Guid tenantId;
-            await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+            await using (DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct))
             {
                 tenantId = await db.Apps
                     .Where(a => a.Id == deployment.AppId)

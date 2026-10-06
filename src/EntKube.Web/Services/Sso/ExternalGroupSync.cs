@@ -1,5 +1,6 @@
 using System.Security.Claims;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Sso;
@@ -38,7 +39,7 @@ public sealed record GroupSyncResult
 /// of grant never touch each other.
 /// </summary>
 public class ExternalGroupSync(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<IdentityDbContext> dbFactory,
     ILogger<ExternalGroupSync> logger)
 {
     /// <summary>
@@ -92,7 +93,7 @@ public class ExternalGroupSync(
     {
         IReadOnlyList<string> asserted = ReadGroups(principal, groupsClaim);
 
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using IdentityDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         List<ExternalGroupMapping> mappings = await db.ExternalGroupMappings
             .AsNoTracking()

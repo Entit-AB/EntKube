@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -12,7 +13,7 @@ namespace EntKube.Web.Services;
 /// sync. Each operation unseals the vault transparently (auto-unseal via root key).
 /// </summary>
 public class VaultService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<SecretsDbContext> dbFactory,
     VaultEncryptionService encryption,
     // Optional: used only to evict the cached kubeconfig plaintext after an update. Absent in
     // unit tests, where there is no resolver cache to invalidate.
@@ -27,7 +28,7 @@ public class VaultService(
     /// </summary>
     public async Task<SecretVault> InitializeVaultAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         // If the tenant already has a vault, just return it.
         SecretVault? existing = await db.Set<SecretVault>()
@@ -60,7 +61,7 @@ public class VaultService(
     /// </summary>
     public async Task<SecretVault?> GetVaultAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<SecretVault>()
             .FirstOrDefaultAsync(v => v.TenantId == tenantId, ct);
@@ -76,7 +77,7 @@ public class VaultService(
         Guid tenantId, Guid appId, string name, string value,
         CancellationToken ct = default, Guid? environmentId = null)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         // Unseal the vault to get the tenant's DEK.
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
@@ -127,7 +128,7 @@ public class VaultService(
     public async Task<string?> GetAppSecretValueAsync(
         Guid tenantId, Guid appId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId && s.AppId == appId && s.Name == name, ct);
@@ -147,7 +148,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetAppSecretsAsync(
         Guid tenantId, Guid appId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.AppId == appId)
@@ -164,7 +165,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetAppSecretsForEnvironmentAsync(
         Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.AppId == appId
@@ -230,7 +231,7 @@ public class VaultService(
             return (false, validationError, null);
         }
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -296,7 +297,7 @@ public class VaultService(
         // Ensure the tenant has a vault (idempotent) before sealing the certificate.
         await InitializeVaultAsync(tenantId, ct);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -340,7 +341,7 @@ public class VaultService(
     public async Task<List<TenantCertificateInfo>> GetTenantCertificatesAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
         List<VaultSecret> secrets = await db.Set<VaultSecret>()
             .Include(s => s.Vault)
             .Where(s => s.Vault.TenantId == tenantId
@@ -367,7 +368,7 @@ public class VaultService(
     /// <summary>Deletes a tenant-scoped certificate. No-op if the id is not an app-less certificate.</summary>
     public async Task DeleteTenantCertificateAsync(Guid secretId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Id == secretId
                 && s.AppId == null && s.SecretType == VaultSecretType.Certificate, ct);
@@ -386,7 +387,7 @@ public class VaultService(
     /// </summary>
     public async Task<int> ConvertImportedTlsSecretsToCertificatesAsync(CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         List<VaultSecret> candidates = await db.Set<VaultSecret>()
             .Include(s => s.Vault)
@@ -482,7 +483,7 @@ public class VaultService(
     /// </summary>
     public async Task<CertificateBundle?> GetCertificateBundleByIdAsync(Guid secretId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .Include(s => s.Vault)
@@ -538,7 +539,7 @@ public class VaultService(
             return (false, validationError);
         }
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -587,7 +588,7 @@ public class VaultService(
     /// </summary>
     public async Task<OAuthClientBundle?> GetOAuthClientBundleByIdAsync(Guid secretId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .Include(s => s.Vault)
@@ -654,7 +655,7 @@ public class VaultService(
         // A kubeconfig may be the first secret a tenant ever stores, so ensure the vault exists.
         await InitializeVaultAsync(tenantId, ct);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -717,7 +718,7 @@ public class VaultService(
     /// </summary>
     public async Task<KubeconfigBundle?> GetKubeconfigBundleByIdAsync(Guid secretId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .Include(s => s.Vault)
@@ -750,7 +751,7 @@ public class VaultService(
     /// </summary>
     public async Task<List<VaultSecret>> GetClusterKubeconfigSecretsAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Include(s => s.OwnerCluster)
@@ -771,7 +772,7 @@ public class VaultService(
     {
         await InitializeVaultAsync(tenantId, ct);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -815,7 +816,7 @@ public class VaultService(
     public async Task<string?> GetClusterSecretValueAsync(
         Guid tenantId, Guid clusterId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
@@ -843,7 +844,7 @@ public class VaultService(
     {
         await InitializeVaultAsync(tenantId, ct);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -903,7 +904,7 @@ public class VaultService(
     private async Task<string?> GetSupportMailboxSecretAsync(
         Guid tenantId, Guid mailboxId, string name, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
@@ -923,7 +924,7 @@ public class VaultService(
     public async Task<bool> HasSupportMailboxPasswordAsync(
         Guid tenantId, Guid mailboxId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>().AnyAsync(s => s.Vault.TenantId == tenantId
             && s.SupportMailboxId == mailboxId
@@ -940,7 +941,7 @@ public class VaultService(
     public async Task DeleteSupportMailboxPasswordAsync(
         Guid tenantId, Guid mailboxId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         List<VaultSecret> stored = await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId
@@ -977,7 +978,7 @@ public class VaultService(
     public async Task<List<ExpiringSecretInfo>> GetExpiringSecretCandidatesAsync(
         Guid tenantId, Guid? customerId = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         SecretVault? vault = await db.Set<SecretVault>()
             .FirstOrDefaultAsync(v => v.TenantId == tenantId, ct);
@@ -1075,7 +1076,7 @@ public class VaultService(
         CancellationToken ct = default,
         string? k8sSecretName = null, string? k8sNamespace = null)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -1126,7 +1127,7 @@ public class VaultService(
     public async Task<string?> GetComponentSecretValueAsync(
         Guid tenantId, Guid componentId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId && s.ComponentId == componentId && s.Name == name, ct);
@@ -1146,7 +1147,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetComponentSecretsAsync(
         Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.ComponentId == componentId)
@@ -1162,7 +1163,7 @@ public class VaultService(
     public async Task<VaultSecret> SetStorageLinkSecretAsync(
         Guid tenantId, Guid storageLinkId, string name, string value, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -1204,7 +1205,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetStorageLinkSecretsAsync(
         Guid tenantId, Guid storageLinkId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.StorageLinkId == storageLinkId)
@@ -1219,7 +1220,7 @@ public class VaultService(
     public async Task<string?> GetStorageLinkSecretValueAsync(
         Guid tenantId, Guid storageLinkId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId && s.StorageLinkId == storageLinkId && s.Name == name, ct);
@@ -1241,7 +1242,7 @@ public class VaultService(
     public async Task<VaultSecret> SetOpenStackSecretAsync(
         Guid tenantId, Guid openStackConnectionId, string name, string value, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -1283,7 +1284,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetOpenStackSecretsAsync(
         Guid tenantId, Guid openStackConnectionId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.OpenStackConnectionId == openStackConnectionId)
@@ -1297,7 +1298,7 @@ public class VaultService(
     public async Task<string?> GetOpenStackSecretValueAsync(
         Guid tenantId, Guid openStackConnectionId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId && s.OpenStackConnectionId == openStackConnectionId && s.Name == name, ct);
@@ -1322,7 +1323,7 @@ public class VaultService(
         Guid tenantId, Guid cnpgDatabaseId, string name, string value,
         string k8sSecretName, string k8sNamespace, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -1370,7 +1371,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetCnpgDatabaseSecretsAsync(
         Guid tenantId, Guid cnpgDatabaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.CnpgDatabaseId == cnpgDatabaseId)
@@ -1381,7 +1382,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetMongoDatabaseSecretsAsync(
         Guid tenantId, Guid mongoDatabaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.MongoDatabaseId == mongoDatabaseId)
@@ -1396,7 +1397,7 @@ public class VaultService(
     public async Task<string?> GetCnpgDatabasePasswordAsync(
         Guid tenantId, Guid cnpgDatabaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
@@ -1417,7 +1418,7 @@ public class VaultService(
     public async Task<VaultSecret> SetCnpgDatabaseAdminSecretAsync(
         Guid tenantId, Guid cnpgDatabaseId, string name, string value, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -1465,7 +1466,7 @@ public class VaultService(
     public async Task<string?> GetCnpgDatabaseAdminSecretValueAsync(
         Guid tenantId, Guid cnpgDatabaseId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
@@ -1481,7 +1482,7 @@ public class VaultService(
     public async Task<VaultSecret> SetCnpgClusterSecretAsync(
         Guid tenantId, Guid cnpgClusterId, string name, string value, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -1523,7 +1524,7 @@ public class VaultService(
     public async Task<string?> GetCnpgClusterSecretValueAsync(
         Guid tenantId, Guid cnpgClusterId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
@@ -1539,7 +1540,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetCnpgClusterSecretsAsync(
         Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.CnpgClusterId == cnpgClusterId)
@@ -1556,7 +1557,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetAllCnpgSecretsForClusterAsync(
         Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         List<VaultSecret> clusterSecrets = await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.CnpgClusterId == cnpgClusterId)
@@ -1578,7 +1579,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetAllMongoSecretsForClusterAsync(
         Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         List<VaultSecret> clusterSecrets = await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.MongoClusterId == mongoClusterId)
@@ -1600,7 +1601,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetAllRegisteredPostgresSecretsForInstanceAsync(
         Guid tenantId, Guid instanceId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Include(s => s.RegisteredPostgresDatabase)
@@ -1620,7 +1621,7 @@ public class VaultService(
         Guid tenantId, Guid mongoDatabaseId, string name, string value,
         string k8sSecretName, string k8sNamespace, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -1672,7 +1673,7 @@ public class VaultService(
         Guid tenantId, Guid mongoClusterId, string name, string value,
         string k8sSecretName, string k8sNamespace, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -1721,7 +1722,7 @@ public class VaultService(
     public async Task<string?> GetMongoClusterSecretValueAsync(
         Guid tenantId, Guid mongoClusterId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId && s.MongoClusterId == mongoClusterId && s.Name == name, ct);
@@ -1742,7 +1743,7 @@ public class VaultService(
         Guid tenantId, Guid registeredPostgresDatabaseId, string name, string value,
         string k8sSecretName, string k8sNamespace, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -1792,7 +1793,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetRegisteredPostgresDatabaseSecretsAsync(
         Guid tenantId, Guid registeredPostgresDatabaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId
@@ -1807,7 +1808,7 @@ public class VaultService(
     public async Task<string?> GetRegisteredPostgresDatabasePasswordAsync(
         Guid tenantId, Guid registeredPostgresDatabaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
@@ -1829,7 +1830,7 @@ public class VaultService(
     {
         await InitializeVaultAsync(tenantId, ct);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
         string secretName = AdminPasswordSecretName(instanceId);
@@ -1870,7 +1871,7 @@ public class VaultService(
     public async Task<string?> GetRegisteredPostgresAdminPasswordAsync(
         Guid tenantId, Guid instanceId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         string secretName = AdminPasswordSecretName(instanceId);
 
@@ -1894,7 +1895,7 @@ public class VaultService(
     /// </summary>
     public async Task<string?> GetSecretValueByIdAsync(Guid secretId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .Include(s => s.Vault)
@@ -1916,7 +1917,7 @@ public class VaultService(
     public async Task<bool> UpdateSecretValueAsync(
         Guid secretId, string newValue, string? updatedBy = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .Include(s => s.Vault)
@@ -1955,7 +1956,7 @@ public class VaultService(
     public async Task<(bool Ok, string? Reason)> ChangeAppSecretScopeAsync(
         Guid secretId, Guid? environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Id == secretId, ct);
@@ -2023,7 +2024,7 @@ public class VaultService(
     public async Task<List<VaultSecretVersion>> GetSecretVersionsAsync(
         Guid secretId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecretVersion>()
             .Where(v => v.SecretId == secretId)
@@ -2037,7 +2038,7 @@ public class VaultService(
     public async Task<string?> GetSecretVersionValueAsync(
         Guid secretId, Guid versionId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecretVersion? version = await db.Set<VaultSecretVersion>()
             .Include(v => v.Secret).ThenInclude(s => s.Vault)
@@ -2056,7 +2057,7 @@ public class VaultService(
     public async Task<bool> RollbackToVersionAsync(
         Guid secretId, Guid versionId, string? updatedBy = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .Include(s => s.Vault)
@@ -2085,7 +2086,7 @@ public class VaultService(
     public async Task<(bool CanDelete, string? Reason)> CanDeleteSecretAsync(
         Guid secretId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>().FindAsync([secretId], ct);
 
@@ -2117,7 +2118,7 @@ public class VaultService(
     /// </summary>
     public async Task<bool> DeleteSecretAsync(Guid secretId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>().FindAsync([secretId], ct);
 
@@ -2141,7 +2142,7 @@ public class VaultService(
         Guid secretId, bool syncEnabled, string? secretName, string? ns,
         CancellationToken ct = default, Guid? clusterId = null)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>().FindAsync([secretId], ct);
 
@@ -2176,7 +2177,7 @@ public class VaultService(
     /// </summary>
     public async Task<ClusterRefreshResult> RefreshAppSecretFromClusterAsync(Guid secretId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .Include(s => s.Vault)
@@ -2375,7 +2376,7 @@ public class VaultService(
     /// </summary>
     public async Task<List<Guid>> GetObservedAppSecretIdsAsync(CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.AppId != null
@@ -2462,7 +2463,7 @@ public class VaultService(
     public async Task<HelmExecutionResult> SyncAppSecretsToKubernetesAsync(
         Guid tenantId, Guid appId, CancellationToken ct = default, Guid? environmentId = null)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         // Load ALL sync-enabled secrets — including those missing a cluster reference,
         // so we can report them clearly instead of silently skipping. When scoped to
@@ -2846,7 +2847,7 @@ public class VaultService(
     public async Task<VaultSecret> SetGitRepositorySecretAsync(
         Guid tenantId, Guid gitRepositoryId, string name, string value, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -2891,7 +2892,7 @@ public class VaultService(
     public async Task<string?> GetGitRepositorySecretValueAsync(
         Guid tenantId, Guid gitRepositoryId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
@@ -2910,7 +2911,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetGitRepositorySecretsAsync(
         Guid tenantId, Guid gitRepositoryId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.GitRepositoryId == gitRepositoryId)
@@ -2927,7 +2928,7 @@ public class VaultService(
     public async Task<VaultSecret> SetCustomerGitCredentialSecretAsync(
         Guid tenantId, Guid credentialId, string name, string value, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -2972,7 +2973,7 @@ public class VaultService(
     public async Task<string?> GetCustomerGitCredentialSecretValueAsync(
         Guid tenantId, Guid credentialId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
@@ -3026,7 +3027,7 @@ public class VaultService(
     public async Task<ClusterComponent> CreateComponentAsync(
         Guid clusterId, string name, string componentType, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent component = new()
         {
@@ -3046,7 +3047,7 @@ public class VaultService(
     /// </summary>
     public async Task<List<ClusterComponent>> GetComponentsAsync(Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<ClusterComponent>()
             .Where(c => c.ClusterId == clusterId)
@@ -3059,7 +3060,7 @@ public class VaultService(
     /// </summary>
     public async Task<bool> DeleteComponentAsync(Guid componentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent? component = await db.Set<ClusterComponent>().FindAsync([componentId], ct);
 
@@ -3079,7 +3080,7 @@ public class VaultService(
     public async Task<VaultSecret> SetRabbitMQClusterSecretAsync(
         Guid tenantId, Guid rabbitMQClusterId, string name, string value, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -3121,7 +3122,7 @@ public class VaultService(
     public async Task<string?> GetRabbitMQClusterSecretValueAsync(
         Guid tenantId, Guid rabbitMQClusterId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
@@ -3137,7 +3138,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetRabbitMQClusterSecretsAsync(
         Guid tenantId, Guid rabbitMQClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.RabbitMQClusterId == rabbitMQClusterId)
@@ -3148,7 +3149,7 @@ public class VaultService(
     public async Task DeleteRabbitMQClusterSecretAsync(
         Guid tenantId, Guid rabbitMQClusterId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
@@ -3167,7 +3168,7 @@ public class VaultService(
     public async Task<VaultSecret> SetRedisClusterSecretAsync(
         Guid tenantId, Guid clusterId, string name, string value, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -3209,7 +3210,7 @@ public class VaultService(
     public async Task<string?> GetRedisClusterSecretValueAsync(
         Guid tenantId, Guid clusterId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
@@ -3225,7 +3226,7 @@ public class VaultService(
     public async Task<List<VaultSecret>> GetRedisClusterSecretsAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecret>()
             .Where(s => s.Vault.TenantId == tenantId && s.RedisClusterId == clusterId)
@@ -3238,7 +3239,7 @@ public class VaultService(
     public async Task<VaultSecret> SetKafkaClusterSecretAsync(
         Guid tenantId, Guid clusterId, string name, string value, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
@@ -3280,7 +3281,7 @@ public class VaultService(
     public async Task<string?> GetKafkaClusterSecretValueAsync(
         Guid tenantId, Guid clusterId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.Vault.TenantId == tenantId
@@ -3299,7 +3300,7 @@ public class VaultService(
         Guid tenantId, Guid endpointId, string name, string value,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
         (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, value);
@@ -3337,7 +3338,7 @@ public class VaultService(
     public async Task<string?> GetVpnRemoteEndpointSecretValueAsync(
         Guid tenantId, Guid endpointId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecret? secret = await db.Set<VaultSecret>()
             .FirstOrDefaultAsync(s => s.VpnRemoteEndpointId == endpointId && s.Name == name, ct);
@@ -3356,7 +3357,7 @@ public class VaultService(
     /// responsible for calling SaveChangesAsync after this returns.
     /// </summary>
     private static async Task ArchiveVersionAsync(
-        ApplicationDbContext db, VaultSecret secret, CancellationToken ct)
+        SecretsDbContext db, VaultSecret secret, CancellationToken ct)
     {
         int nextVersion = await db.Set<VaultSecretVersion>()
             .Where(v => v.SecretId == secret.Id)
@@ -3394,7 +3395,7 @@ public class VaultService(
     /// <summary>Unseals the tenant's vault and returns the decrypted DEK.</summary>
     private async Task<byte[]> UnsealVaultAsync(Guid tenantId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
 
         SecretVault vault = await db.Set<SecretVault>()
             .FirstAsync(v => v.TenantId == tenantId, ct);

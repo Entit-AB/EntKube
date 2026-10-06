@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -11,7 +12,7 @@ namespace EntKube.Web.Services;
 /// When a user visits the portal, this service determines which customers they
 /// can see and what actions they're allowed to perform.
 /// </summary>
-public class CustomerAccessService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class CustomerAccessService(IDbContextFactory<IdentityDbContext> dbFactory)
 {
     /// <summary>
     /// Grants a user access to a customer with a specific role. The default
@@ -24,7 +25,7 @@ public class CustomerAccessService(IDbContextFactory<ApplicationDbContext> dbFac
         CustomerAccessRole role = CustomerAccessRole.Viewer,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         bool exists = await db.CustomerAccesses.AnyAsync(
             a => a.UserId == userId && a.CustomerId == customerId, ct);
@@ -54,7 +55,7 @@ public class CustomerAccessService(IDbContextFactory<ApplicationDbContext> dbFac
     public async Task RevokeAccessAsync(
         string userId, Guid customerId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         CustomerAccess? access = await db.CustomerAccesses.FindAsync([userId, customerId], ct);
 
@@ -75,7 +76,7 @@ public class CustomerAccessService(IDbContextFactory<ApplicationDbContext> dbFac
         CustomerAccessRole newRole,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         CustomerAccess? access = await db.CustomerAccesses.FindAsync([userId, customerId], ct);
 
@@ -93,7 +94,7 @@ public class CustomerAccessService(IDbContextFactory<ApplicationDbContext> dbFac
     public async Task<CustomerAccess?> GetAccessAsync(
         string userId, Guid customerId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         return await db.CustomerAccesses.FindAsync([userId, customerId], ct);
     }
@@ -106,7 +107,7 @@ public class CustomerAccessService(IDbContextFactory<ApplicationDbContext> dbFac
     public async Task<List<Customer>> GetAccessibleCustomersAsync(
         string userId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         // Find all customer IDs this user has access to, then load the
         // customers with their apps in a single query.
@@ -132,7 +133,7 @@ public class CustomerAccessService(IDbContextFactory<ApplicationDbContext> dbFac
     public async Task<List<CustomerAccess>> GetCustomerUsersAsync(
         Guid customerId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         return await db.CustomerAccesses
             .Include(ca => ca.User)
