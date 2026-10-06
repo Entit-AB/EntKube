@@ -369,6 +369,13 @@ else if (snapshot is not null)
     /// <summary>Set instead of (or alongside) ClusterId to browse any of the tenant's clusters.</summary>
     [Parameter] public Guid? TenantId { get; set; }
 
+    /// <summary>
+    /// The tenant whose clusters may be read. WorkloadService now requires one, because it used
+    /// to answer about any cluster in the installation given its id. Empty when the component is
+    /// hosted without a tenant, which resolves to no cluster — failing closed rather than open.
+    /// </summary>
+    private Guid Tenant => TenantId ?? Guid.Empty;
+
     /// <summary>Namespace to preselect — lets callers deep-link into one namespace's workloads.</summary>
     [Parameter] public string? InitialNamespace { get; set; }
 
@@ -424,7 +431,7 @@ else if (snapshot is not null)
     {
         try
         {
-            namespaces = await WorkloadService.ListNamespacesAsync(ClusterId);
+            namespaces = await WorkloadService.ListNamespacesAsync(Tenant, ClusterId);
             StateHasChanged();
         }
         catch
@@ -452,7 +459,7 @@ else if (snapshot is not null)
         StateHasChanged();
         try
         {
-            WorkloadSnapshot result = await WorkloadService.LoadAsync(cluster, scope);
+            WorkloadSnapshot result = await WorkloadService.LoadAsync(Tenant, cluster, scope);
 
             if (request != loadSequence) return;   // superseded — the newer load owns the view
             snapshot = result;
@@ -486,7 +493,7 @@ else if (snapshot is not null)
     private async Task RefreshQuietlyAsync()
     {
         int request = ++loadSequence;
-        WorkloadSnapshot result = await WorkloadService.LoadAsync(ClusterId, selectedNamespace);
+        WorkloadSnapshot result = await WorkloadService.LoadAsync(Tenant, ClusterId, selectedNamespace);
 
         if (request == loadSequence) snapshot = result;
     }

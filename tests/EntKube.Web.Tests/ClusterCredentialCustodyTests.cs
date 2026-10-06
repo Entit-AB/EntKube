@@ -32,7 +32,7 @@ public class ClusterCredentialCustodyTests
     /// <summary>
     /// Places that take a cluster's credential out of the row, measured 2026-10-06.
     ///
-    /// <para><b>288 and falling</b>, from 508 once the count was corrected (below):
+    /// <para><b>284 and falling</b>, from 508 once the count was corrected (below):
     /// <c>RedisService</c> 9, <c>CnpgService</c> 48, <c>ElasticsearchService</c> 42,
     /// <c>RabbitMQService</c> 37, <c>MongoService</c> 47, then <c>KafkaService</c> 15 and
     /// <c>RegisteredPostgresService</c> 16. None of those seven injects
@@ -51,17 +51,31 @@ public class ClusterCredentialCustodyTests
     /// <c>KubernetesOperationsService</c> alone is 72), Catalog 52, Telemetry 28, Delivery 26,
     /// Connectivity 23, DataServices 18, then single figures elsewhere.</para>
     ///
-    /// <para><b>The seam can now reach the other half too.</b> Roughly 167 of the remaining
-    /// sites are in files that build a typed <c>Kubernetes</c> SDK client rather than shelling
-    /// out to kubectl, and <see cref="Clusters.IClusterClient"/> had nothing to offer them.
-    /// <c>CreateSdkClient()</c> is that answer: a configured client bound to the cluster, with
-    /// the credential read inside the seam. Ten services had hand-rolled the same four lines;
-    /// <c>DatabaseService</c> is the first to drop its copy.</para>
+    /// <para><b>There are five ways to reach a cluster here, and the seam models two.</b> Worth
+    /// knowing before planning the remainder, because "convert the next service" has twice turned
+    /// out to mean something other than expected. By sites, and a file may use several: a
+    /// hand-rolled process spawn 152, the typed Kubernetes SDK 145, <c>helm</c> 97,
+    /// <see cref="IKubernetesClientFactory"/> 80, an HTTP proxy pool 29, and 28 that only hand the
+    /// credential to someone else.</para>
     ///
-    private const int BaselineOccurrences = 288;
+    /// <para><see cref="Clusters.IClusterClient"/> covers the factory, and the SDK through
+    /// <c>CreateSdkClient()</c> — ten services had hand-rolled those four lines. It has
+    /// <em>no</em> helm operations at all, nothing for the proxy pool, and nothing for a service
+    /// that wants to spawn its own process. Those need new capabilities on the seam or a rewrite
+    /// of the call sites, and either is a design decision rather than more substitution.</para>
+    ///
+    /// <para><b>The change gate comes last, not next.</b> <c>PlannedClusterChange</c> requires a
+    /// kubeconfig, so every gated call site holds one — but the gate is invoked from inside
+    /// <see cref="IKubernetesClientFactory"/>, and not one of its eighteen methods receives a
+    /// cluster identity to put there instead. Moving the gating up into the seam early would let
+    /// every unconverted caller bypass the acknowledgment entirely, which is a safety regression
+    /// rather than a refactor. The gate can only change once its callers already route through
+    /// the seam.</para>
+    ///
+    private const int BaselineOccurrences = 284;
 
     /// <summary>Files doing so. A file that has stopped should not be able to start again quietly.</summary>
-    private const int BaselineFiles = 49;
+    private const int BaselineFiles = 48;
 
     private static (int Occurrences, int Files) Measure()
     {

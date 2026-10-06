@@ -113,7 +113,7 @@ public record WorkloadSnapshot
 /// </summary>
 public class WorkloadService(
     IDbContextFactory<FleetDbContext> dbFactory,
-    IKubernetesClientFactory k8s,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     ILogger<WorkloadService> logger)
 {
     /// <summary>Reasons that mean "still starting", not "broken" — a waiting pod with one of these is Progressing.</summary>
@@ -124,7 +124,8 @@ public class WorkloadService(
     /// Reads the workloads of one cluster. When <paramref name="ns"/> is null or empty
     /// all namespaces are listed; otherwise only that namespace is queried.
     /// </summary>
-    public async Task<WorkloadSnapshot> LoadAsync(Guid clusterId, string? ns = null, CancellationToken ct = default)
+    public async Task<WorkloadSnapshot> LoadAsync(
+        Guid tenantId, Guid clusterId, string? ns = null, CancellationToken ct = default)
     {
         KubernetesCluster? cluster;
         await using (FleetDbContext db = await dbFactory.CreateDbContextAsync(ct))
@@ -135,10 +136,10 @@ public class WorkloadService(
         if (cluster is null)
             return WorkloadSnapshot.Failure("Cluster not found.");
 
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return WorkloadSnapshot.Failure("Cluster has no kubeconfig configured.");
+        Clusters.IClusterClient? client = await clusterAccess.ForAsync(tenantId, clusterId, ct);
 
-        string kubeconfig = cluster.Kubeconfig;
+        if (client is null)
+            return WorkloadSnapshot.Failure("Cluster has no kubeconfig configured.");
         string? scope = string.IsNullOrWhiteSpace(ns) ? null : ns.Trim();
 
         // The six calls are independent of one another, and each is a round trip to the
@@ -146,18 +147,18 @@ public class WorkloadService(
         // slowest — and on a busy cluster listing pods and replicasets cluster-wide is
         // most of that on its own.
         Task<(List<string> Namespaces, List<string> Warnings)> namespacesTask =
-            GetNamespacesAsync(kubeconfig, ct);
+            GetNamespacesAsync(client, ct);
 
         Task<(List<WorkloadView> Rows, List<string> Warnings)>[] kinds =
         [
-            FetchAsync("pods", kubeconfig, scope, ParsePods, ct),
-            FetchAsync("deployments", kubeconfig, scope,
+            FetchAsync("pods", client, scope, ParsePods, ct),
+            FetchAsync("deployments", client, scope,
                 items => ParseReplicaController(items, WorkloadKind.Deployment), ct),
-            FetchAsync("statefulsets", kubeconfig, scope,
+            FetchAsync("statefulsets", client, scope,
                 items => ParseReplicaController(items, WorkloadKind.StatefulSet), ct),
-            FetchAsync("replicasets", kubeconfig, scope,
+            FetchAsync("replicasets", client, scope,
                 items => ParseReplicaController(items, WorkloadKind.ReplicaSet), ct),
-            FetchAsync("daemonsets", kubeconfig, scope, ParseDaemonSets, ct),
+            FetchAsync("daemonsets", client, scope, ParseDaemonSets, ct),
         ];
 
         await Task.WhenAll([namespacesTask, .. kinds.Cast<Task>()]);
@@ -191,7 +192,8 @@ public class WorkloadService(
     /// workload in every namespace had finished: the control for narrowing the query was
     /// unavailable for exactly as long as the unnarrowed query took.
     /// </summary>
-    public async Task<List<string>> ListNamespacesAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<List<string>> ListNamespacesAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         KubernetesCluster? cluster;
         await using (FleetDbContext db = await dbFactory.CreateDbContextAsync(ct))
@@ -199,21 +201,23 @@ public class WorkloadService(
             cluster = await db.KubernetesClusters.FirstOrDefaultAsync(c => c.Id == clusterId, ct);
         }
 
-        if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        if (cluster is null)
         {
             return [];
         }
 
-        return (await GetNamespacesAsync(cluster.Kubeconfig, ct)).Namespaces;
+        Clusters.IClusterClient? client = await clusterAccess.ForAsync(tenantId, clusterId, ct);
+
+        return client is null ? [] : (await GetNamespacesAsync(client, ct)).Namespaces;
     }
 
     /// <summary>Lists every namespace in the cluster. A failure here is a warning, not a fatal error.</summary>
     private async Task<(List<string> Namespaces, List<string> Warnings)> GetNamespacesAsync(
-        string kubeconfig, CancellationToken ct)
+        Clusters.IClusterClient client, CancellationToken ct)
     {
         try
         {
-            string json = await k8s.GetJsonAllNamespacesAsync("namespaces", kubeconfig, "", ct);
+            string json = await client.GetJsonAllNamespacesAsync("namespaces", "", ct);
             return ([.. EnumerateItems(json)
                 .Select(item => GetString(item, "metadata", "name"))
                 .OfType<string>()
@@ -237,14 +241,14 @@ public class WorkloadService(
     /// suspected the collection.
     /// </summary>
     private async Task<(List<WorkloadView> Rows, List<string> Warnings)> FetchAsync(
-        string resource, string kubeconfig, string? scope,
+        string resource, Clusters.IClusterClient client, string? scope,
         Func<IEnumerable<JsonElement>, List<WorkloadView>> parse, CancellationToken ct)
     {
         try
         {
             string json = scope is null
-                ? await k8s.GetJsonAllNamespacesAsync(resource, kubeconfig, "", ct)
-                : await k8s.GetJsonAsync(resource, scope, kubeconfig, "", ct);
+                ? await client.GetJsonAllNamespacesAsync(resource, "", ct)
+                : await client.GetJsonAsync(resource, scope, "", ct);
 
             return (parse(EnumerateItems(json)), []);
         }
