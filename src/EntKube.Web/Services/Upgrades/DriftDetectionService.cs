@@ -251,7 +251,7 @@ public class DriftDetectionService(
 
         try
         {
-            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
             await File.WriteAllTextAsync(manifestPath, desired, ct);
 
             using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -294,7 +294,7 @@ public class DriftDetectionService(
         string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-ver-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
 
             using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(TimeSpan.FromSeconds(20));

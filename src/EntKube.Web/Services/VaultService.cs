@@ -2398,7 +2398,7 @@ public class VaultService(
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
 
             HelmExecutionResult result = await RunProcessAsync(
                 "kubectl", $"get secret {secretName} -n {ns} --kubeconfig {tempKubeconfig} -o json", ct);
@@ -2544,7 +2544,7 @@ public class VaultService(
 
             try
             {
-                await File.WriteAllTextAsync(tempKubeconfig, cluster.Kubeconfig, ct);
+                await SecretFile.WriteAsync(tempKubeconfig, cluster.Kubeconfig, ct);
 
                 // Within this cluster, group OPAQUE secrets by (K8sSecretName, Namespace)
                 // so multiple values land as keys in one generic Secret. Certificate

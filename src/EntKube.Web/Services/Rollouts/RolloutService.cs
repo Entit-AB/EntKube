@@ -224,7 +224,7 @@ public class RolloutService(
 
         try
         {
-            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
 
             // Every Deployment in the namespace that EntKube applied for this release is
             // undone: a release is a set of workloads, and rolling back only one of them

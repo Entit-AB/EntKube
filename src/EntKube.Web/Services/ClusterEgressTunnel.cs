@@ -87,7 +87,7 @@ public sealed partial class ClusterEgressTunnel(ILogger<ClusterEgressTunnel> log
     private async Task<Tunnel> StartAsync(string kubeconfig, CancellationToken ct)
     {
         string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-egress-{Guid.NewGuid():N}.kubeconfig");
-        await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+        await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
 
         // Restrict the kubeconfig to this user — it is a live cluster credential
         // sitting on disk for as long as the forward runs.

@@ -924,7 +924,7 @@ public class KubernetesOperationsService(
 
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
 
             HelmExecutionResult result;
 
@@ -1123,7 +1123,7 @@ public class KubernetesOperationsService(
                 Manifest = combined,
             }, ct);
 
-            await File.WriteAllTextAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
             await File.WriteAllTextAsync(tempManifest, combined, ct);
 
             HelmExecutionResult result = await RunCliAsync(
@@ -1454,7 +1454,7 @@ public class KubernetesOperationsService(
             await RequireAckAsync(ChangeVerb.Delete, kubeconfig, dr.AppDeployment.Cluster.Name, ns,
                 $"Delete HTTPRoute/{routeName} for {hostname}", ct: ct);
 
-            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
 
             HelmExecutionResult deleteResult = await RunCliAsync(
                 "kubectl",
@@ -2079,7 +2079,7 @@ public class KubernetesOperationsService(
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
             HelmExecutionResult result = await RunCliAsync(
                 "kubectl",
                 $"get gateway {ExternalRouteService.L4GatewayName} --namespace {gwNamespace} " +
@@ -2099,7 +2099,7 @@ public class KubernetesOperationsService(
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
             HelmExecutionResult result = await RunCliAsync(
                 "kubectl",
                 $"get crd {crdName} --kubeconfig {tempKubeconfig} --ignore-not-found -o name",
@@ -2129,7 +2129,7 @@ public class KubernetesOperationsService(
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
             await RunCliAsync(
                 "kubectl",
                 $"delete {kind} {name} --namespace {ns} --kubeconfig {tempKubeconfig} --ignore-not-found",
@@ -2228,7 +2228,7 @@ public class KubernetesOperationsService(
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
             HelmExecutionResult res = await RunCliAsync(
                 "kubectl",
                 $"delete {target} {r.Name}{nsArg} --kubeconfig {tempKubeconfig} --ignore-not-found",
@@ -2279,7 +2279,7 @@ public class KubernetesOperationsService(
 
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
 
             foreach (string ns in namespaces)
             {
@@ -2322,7 +2322,7 @@ public class KubernetesOperationsService(
 
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
             await File.WriteAllTextAsync(tempManifest, yaml, ct);
 
             HelmExecutionResult result = await RunCliAsync(
@@ -2388,7 +2388,7 @@ public class KubernetesOperationsService(
 
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
 
             // Register and update the Helm repo if a URL is given.
             string chartRef = deployment.HelmChartName;
@@ -3143,7 +3143,7 @@ public class KubernetesOperationsService(
             await RequireAckAsync(ChangeVerb.Apply, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
                 deployment.Namespace, $"Create Job/{jobName} from CronJob/{cronJobName}", ct: ct);
 
-            await File.WriteAllTextAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
             HelmExecutionResult result = await RunCliAsync(
                 "kubectl",
                 $"create job {jobName} --from=cronjob/{cronJobName}" +
@@ -3280,7 +3280,7 @@ public class KubernetesOperationsService(
         int refreshed = 0, missing = 0;
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, deployment.Cluster!.Kubeconfig!, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster!.Kubeconfig!, ct);
 
             foreach (DeploymentManifest m in manifests)
             {
@@ -3336,7 +3336,7 @@ public class KubernetesOperationsService(
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
+            await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
             HelmExecutionResult result = await RunCliAsync(
                 "kubectl",
                 $"get {kind.ToLowerInvariant()} {name} -n {deployment.Namespace}" +
