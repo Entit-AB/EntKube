@@ -43,19 +43,17 @@ public class ClusterCredentialCustodyTests
     /// <c>KubernetesOperationsService</c> alone is 72), Catalog 52, Telemetry 28, Delivery 26,
     /// Connectivity 23, DataServices 18, then single figures elsewhere.</para>
     ///
-    /// <para><b>The seam cannot finish this on its own, and that is the thing to know before
-    /// picking up the remainder.</b> <see cref="Clusters.IClusterClient"/> wraps
-    /// <see cref="IKubernetesClientFactory"/>, which shells out to kubectl. Roughly 167 of the
-    /// remaining sites are in files that build a typed <c>Kubernetes</c> SDK client instead —
-    /// <c>KubernetesOperationsService</c>, <c>ComponentLifecycleService</c>,
-    /// <c>DatabaseService</c> and others — and the seam has nothing to offer them. Those need
-    /// either a cluster-bound way to hand out an SDK client, or a move to kubectl-style calls,
-    /// and that is a design decision rather than more of the same mechanical work.</para>
+    /// <para><b>The seam can now reach the other half too.</b> Roughly 167 of the remaining
+    /// sites are in files that build a typed <c>Kubernetes</c> SDK client rather than shelling
+    /// out to kubectl, and <see cref="Clusters.IClusterClient"/> had nothing to offer them.
+    /// <c>CreateSdkClient()</c> is that answer: a configured client bound to the cluster, with
+    /// the credential read inside the seam. Ten services had hand-rolled the same four lines;
+    /// <c>DatabaseService</c> is the first to drop its copy.</para>
     ///
-    private const int BaselineOccurrences = 294;
+    private const int BaselineOccurrences = 290;
 
     /// <summary>Files doing so. A file that has stopped should not be able to start again quietly.</summary>
-    private const int BaselineFiles = 50;
+    private const int BaselineFiles = 49;
 
     private static (int Occurrences, int Files) Measure()
     {

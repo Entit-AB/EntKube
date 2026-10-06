@@ -235,12 +235,21 @@ public sealed class InterceptingTestDb : IDisposable
     }
 }
 
-/// <summary>A kubeconfig that satisfies <see cref="KubeconfigHelper.Validate"/> for use in tests.</summary>
+/// <summary>
+/// A kubeconfig usable in tests.
+///
+/// <para>It satisfies <see cref="KubeconfigHelper.Validate"/> and — since
+/// <c>current-context</c> was added — can also be built into a real <c>Kubernetes</c> SDK client.
+/// Without that line the SDK refuses with "cannot infer server host url", which is a confusing
+/// way to learn that a kubeconfig can be valid enough for EntKube's own check and not valid
+/// enough for the client library.</para>
+/// </summary>
 public static class TestKubeconfig
 {
     public const string Valid = """
         apiVersion: v1
         kind: Config
+        current-context: test
         clusters:
         - name: test
           cluster:

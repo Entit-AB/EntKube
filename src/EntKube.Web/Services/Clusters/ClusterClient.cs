@@ -82,6 +82,18 @@ public sealed class ClusterClient(
     public Task<string> RunCommandOnPodWithStdinAsync(string podName, string ns, IReadOnlyList<string> command,
         string stdin, CancellationToken ct = default, string? container = null)
         => inner.RunCommandOnPodWithStdinAsync(podName, ns, command, stdin, kubeconfig, ct, container);
+
+    /// <summary>
+    /// The same four lines that were copied into ten services, in one place. The kubeconfig is
+    /// read from here rather than passed in, which is the whole point.
+    /// </summary>
+    public k8s.Kubernetes CreateSdkClient()
+    {
+        using MemoryStream stream = new(System.Text.Encoding.UTF8.GetBytes(kubeconfig));
+
+        return new k8s.Kubernetes(
+            k8s.KubernetesClientConfiguration.BuildConfigFromConfigFile(stream));
+    }
 }
 
 /// <summary>
