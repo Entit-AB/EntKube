@@ -171,11 +171,23 @@ public sealed record ElasticsearchRemoteRef(
 /// </summary>
 public class ElasticsearchService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    IKubernetesClientFactory k8s,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     VaultService vaultService,
     AuditService auditService,
     ILogger<ElasticsearchService> logger)
 {
+    /// <summary>
+    /// A client for one of the tenant's clusters, or a refusal that says why. Keeps the
+    /// cluster credential inside Fleet instead of handing it to every call here — see
+    /// docs/decomposition.md §4.0.1.
+    /// </summary>
+    private async Task<Clusters.IClusterClient> ClusterFor(
+        Guid tenantId, Guid clusterId, CancellationToken ct)
+        => await clusterAccess.ForAsync(tenantId, clusterId, ct)
+           ?? throw new InvalidOperationException(
+               "The cluster has no stored kubeconfig, or does not belong to this tenant, "
+               + "so nothing can be applied to it.");
+
     /// <summary>Above this share of committed memory the cluster is warned about, not refused.</summary>
     public const double MemoryPressureWarnThreshold = 0.80;
 
@@ -300,7 +312,11 @@ public class ElasticsearchService(
         KubernetesCluster? k8sCluster = await db.KubernetesClusters
             .FirstOrDefaultAsync(c => c.Id == kubernetesClusterId, ct);
 
-        if (k8sCluster is null || string.IsNullOrWhiteSpace(k8sCluster.Kubeconfig))
+        Clusters.IClusterClient? reachable = k8sCluster is null
+            ? null
+            : await clusterAccess.ForAsync(k8sCluster.TenantId, k8sCluster.Id, ct);
+
+        if (reachable is null)
         {
             check.Warnings.Add("The Kubernetes cluster has no kubeconfig, so its free capacity could not be read. The topology below is what will be requested.");
             return check;
@@ -308,8 +324,8 @@ public class ElasticsearchService(
 
         try
         {
-            string nodesJson = await k8s.GetJsonAllNamespacesAsync("nodes", k8sCluster.Kubeconfig!, ct: ct);
-            string podsJson = await k8s.GetJsonAllNamespacesAsync("pods", k8sCluster.Kubeconfig!, ct: ct);
+            string nodesJson = await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).GetJsonAllNamespacesAsync("nodes", ct: ct);
+            string podsJson = await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).GetJsonAllNamespacesAsync("pods", ct: ct);
 
             Dictionary<string, (long Cpu, long Mem)> allocatable = ParseNodeAllocatable(nodesJson);
             Dictionary<string, (long Cpu, long Mem)> committed = ParsePodRequestsByNode(podsJson);
@@ -424,13 +440,13 @@ public class ElasticsearchService(
         {
             KubernetesCluster k8sCluster = await db.KubernetesClusters
                 .FirstAsync(c => c.Id == cluster.KubernetesClusterId, ct);
-            string kubeconfig = k8sCluster.Kubeconfig
-                ?? throw new InvalidOperationException("The Kubernetes cluster has no kubeconfig.");
+            Clusters.IClusterClient client =
+                await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct);
 
-            await k8s.EnsureNamespaceAsync(cluster.Namespace, kubeconfig, ct);
-            await ApplyClusterAsync(db, cluster, kubeconfig, ct);
+            await client.EnsureNamespaceAsync(cluster.Namespace, ct);
+            await ApplyClusterAsync(db, cluster, client, ct);
             if (cluster.KibanaEnabled)
-                await k8s.ApplyManifestAsync(BuildKibanaManifest(cluster), kubeconfig, ct);
+                await client.ApplyManifestAsync(BuildKibanaManifest(cluster), ct);
         }
         catch (Exception ex)
         {
@@ -476,13 +492,13 @@ public class ElasticsearchService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
-            await ApplyClusterAsync(db, cluster, kubeconfig, ct);
+            Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
+            await ApplyClusterAsync(db, cluster, client, ct);
 
             if (cluster.KibanaEnabled)
-                await k8s.ApplyManifestAsync(BuildKibanaManifest(cluster), kubeconfig, ct);
+                await client.ApplyManifestAsync(BuildKibanaManifest(cluster), ct);
             else if (before.KibanaEnabled)
-                await k8s.DeleteManifestAsync("kibana", cluster.Name, cluster.Namespace, kubeconfig, ct);
+                await client.DeleteManifestAsync("kibana", cluster.Name, cluster.Namespace, ct);
 
             cluster.LastError = null;
         }
@@ -526,8 +542,8 @@ public class ElasticsearchService(
         {
             try
             {
-                await k8s.DeleteManifestAsync("secret", binding.KubernetesSecretName,
-                    binding.AppDeployment.Namespace, binding.AppDeployment.Cluster.Kubeconfig!, ct);
+                await (await ClusterFor(cluster.TenantId, binding.AppDeployment.ClusterId, ct)).DeleteManifestAsync("secret", binding.KubernetesSecretName,
+                    binding.AppDeployment.Namespace, ct);
             }
             catch (Exception ex)
             {
@@ -540,10 +556,10 @@ public class ElasticsearchService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
             if (cluster.KibanaEnabled)
-                await k8s.DeleteManifestAsync("kibana", cluster.Name, cluster.Namespace, kubeconfig, ct);
-            await k8s.DeleteManifestAsync("elasticsearch", cluster.Name, cluster.Namespace, kubeconfig, ct);
+                await client.DeleteManifestAsync("kibana", cluster.Name, cluster.Namespace, ct);
+            await client.DeleteManifestAsync("elasticsearch", cluster.Name, cluster.Namespace, ct);
 
             // The lifecycle ConfigMaps only exist if policies were ever applied, so their absence
             // is normal and must not fail a delete that has already removed the cluster itself.
@@ -551,7 +567,7 @@ public class ElasticsearchService(
             {
                 try
                 {
-                    await k8s.DeleteManifestAsync(kindLabel, name, cluster.Namespace, kubeconfig, ct);
+                    await client.DeleteManifestAsync(kindLabel, name, cluster.Namespace, ct);
                 }
                 catch (Exception ex)
                 {
@@ -588,18 +604,18 @@ public class ElasticsearchService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
 
-            string crJson = await k8s.GetJsonAsync(
-                $"elasticsearch.elasticsearch.k8s.elastic.co/{cluster.Name}", cluster.Namespace, kubeconfig, ct: ct);
+            string crJson = await client.GetJsonAsync(
+                $"elasticsearch.elasticsearch.k8s.elastic.co/{cluster.Name}", cluster.Namespace, ct: ct);
 
             (string? health, string? phase, int available) = ParseElasticsearchStatus(crJson);
             detail.Health = health;
             detail.AvailableNodes = available;
             detail.Ready = string.Equals(phase, "Ready", StringComparison.OrdinalIgnoreCase);
 
-            string podsJson = await k8s.GetJsonAsync(
-                "pods", cluster.Namespace, kubeconfig,
+            string podsJson = await client.GetJsonAsync(
+                "pods", cluster.Namespace,
                 $"elasticsearch.k8s.elastic.co/cluster-name={cluster.Name}", ct);
             detail.Pods = ParsePodList(podsJson);
 
@@ -607,12 +623,12 @@ public class ElasticsearchService(
             {
                 try
                 {
-                    string kbJson = await k8s.GetJsonAsync(
-                        $"kibana.kibana.k8s.elastic.co/{cluster.Name}", cluster.Namespace, kubeconfig, ct: ct);
+                    string kbJson = await client.GetJsonAsync(
+                        $"kibana.kibana.k8s.elastic.co/{cluster.Name}", cluster.Namespace, ct: ct);
                     detail.KibanaHealth = ParseKibanaHealth(kbJson);
 
-                    string kbPodsJson = await k8s.GetJsonAsync(
-                        "pods", cluster.Namespace, kubeconfig,
+                    string kbPodsJson = await client.GetJsonAsync(
+                        "pods", cluster.Namespace,
                         $"kibana.k8s.elastic.co/name={cluster.Name}", ct);
                     detail.Pods.AddRange(ParsePodList(kbPodsJson, "kibana"));
                 }
@@ -691,14 +707,17 @@ public class ElasticsearchService(
 
         foreach (ElasticsearchCluster cluster in clusters)
         {
-            if (string.IsNullOrWhiteSpace(cluster.KubernetesCluster.Kubeconfig)) continue;
+            Clusters.IClusterClient? reachable =
+                await clusterAccess.ForAsync(cluster.TenantId, cluster.KubernetesClusterId, ct);
+
+            if (reachable is null) continue;
 
             bool ready = false;
             try
             {
-                string json = await k8s.GetJsonAsync(
+                string json = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
                     $"elasticsearch.elasticsearch.k8s.elastic.co/{cluster.Name}", cluster.Namespace,
-                    cluster.KubernetesCluster.Kubeconfig!, ct: ct);
+                     ct: ct);
                 (string? health, string? phase, _) = ParseElasticsearchStatus(json);
                 ready = string.Equals(phase, "Ready", StringComparison.OrdinalIgnoreCase);
                 await ReconcileStatusAsync(cluster.Id, ready, health, ct);
@@ -737,9 +756,9 @@ public class ElasticsearchService(
             .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
         if (cluster is null) return null;
 
-        return await k8s.GetSecretValueAsync(
+        return await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetSecretValueAsync(
             cluster.ElasticUserSecretName, "elastic", cluster.Namespace,
-            cluster.KubernetesCluster.Kubeconfig!, ct);
+             ct);
     }
 
     // ── Index lifecycle policies ───────────────────────────────────────────────
@@ -827,15 +846,15 @@ public class ElasticsearchService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
             string jobName = JobName(cluster, "ilm-delete");
             string script = BuildIlmDeleteScript(cluster, policy);
 
-            await k8s.ApplyManifestAsync(
-                BuildScriptConfigMap(cluster, IlmConfigMapName(cluster, "delete"), script), kubeconfig, ct);
-            await k8s.ApplyManifestAsync(
-                BuildElasticsearchJobManifest(cluster, jobName, IlmConfigMapName(cluster, "delete")), kubeconfig, ct);
-            await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+            await client.ApplyManifestAsync(
+                BuildScriptConfigMap(cluster, IlmConfigMapName(cluster, "delete"), script), ct);
+            await client.ApplyManifestAsync(
+                BuildElasticsearchJobManifest(cluster, jobName, IlmConfigMapName(cluster, "delete")), ct);
+            await WaitForJobAsync(cluster, jobName, client, ct);
         }
         catch (Exception ex)
         {
@@ -870,7 +889,7 @@ public class ElasticsearchService(
 
         if (policies.Count == 0) return;
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string configMap = IlmConfigMapName(cluster);
         string jobName = JobName(cluster, "ilm-apply");
 
@@ -879,9 +898,9 @@ public class ElasticsearchService(
 
         try
         {
-            await k8s.ApplyManifestAsync(BuildIlmConfigMapManifest(cluster, policies), kubeconfig, ct);
-            await k8s.ApplyManifestAsync(BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
-            (outcome, log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+            await client.ApplyManifestAsync(BuildIlmConfigMapManifest(cluster, policies), ct);
+            await client.ApplyManifestAsync(BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
+            (outcome, log) = await WaitForJobAsync(cluster, jobName, client, ct);
         }
         catch (Exception ex)
         {
@@ -1012,15 +1031,15 @@ public class ElasticsearchService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
             string configMap = SnapshotConfigMapName(cluster, $"dataview-del-{view.Id:N}");
             string jobName = JobName(cluster, $"dataview-del-{view.Id:N}"[..Math.Min(40, $"dataview-del-{view.Id:N}".Length)]);
 
-            await k8s.ApplyManifestAsync(
-                BuildScriptConfigMap(cluster, configMap, BuildDataViewDeleteScript(cluster, view)), kubeconfig, ct);
-            await k8s.ApplyManifestAsync(
-                BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
-            await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+            await client.ApplyManifestAsync(
+                BuildScriptConfigMap(cluster, configMap, BuildDataViewDeleteScript(cluster, view)), ct);
+            await client.ApplyManifestAsync(
+                BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
+            await WaitForJobAsync(cluster, jobName, client, ct);
         }
         catch (Exception ex)
         {
@@ -1034,16 +1053,16 @@ public class ElasticsearchService(
     private async Task ApplyDataViewInternalAsync(
         ApplicationDbContext db, ElasticsearchCluster cluster, ElasticsearchDataView view, CancellationToken ct)
     {
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
         string configMap = SnapshotConfigMapName(cluster, $"dataview-{view.Id:N}");
         string jobName = JobName(cluster, "dataview");
 
-        await k8s.ApplyManifestAsync(
-            BuildScriptConfigMap(cluster, configMap, BuildDataViewApplyScript(cluster, view)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildDataViewApplyScript(cluster, view)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
 
         view.LastError = outcome == JobOutcome.Succeeded ? null : Truncate(log, 2000);
         if (outcome == JobOutcome.Succeeded) view.LastAppliedAt = DateTime.UtcNow;
@@ -1111,16 +1130,16 @@ public class ElasticsearchService(
 
         await db.SaveChangesAsync(ct);
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
         string configMap = SnapshotConfigMapName(cluster, $"pipeline-{existing.Name}");
         string jobName = JobName(cluster, $"pipeline-{existing.Name}");
 
-        await k8s.ApplyManifestAsync(
-            BuildScriptConfigMap(cluster, configMap, BuildPipelineApplyScript(cluster, existing)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildPipelineApplyScript(cluster, existing)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
 
         existing.LastError = outcome == JobOutcome.Succeeded ? null : Truncate(log, 2000);
         if (outcome == JobOutcome.Succeeded) existing.LastAppliedAt = DateTime.UtcNow;
@@ -1162,15 +1181,15 @@ public class ElasticsearchService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
             string configMap = SnapshotConfigMapName(cluster, $"pipeline-del-{pipeline.Name}");
             string jobName = JobName(cluster, $"pipeline-del-{pipeline.Name}");
 
-            await k8s.ApplyManifestAsync(
-                BuildScriptConfigMap(cluster, configMap, BuildPipelineDeleteScript(cluster, pipeline)), kubeconfig, ct);
-            await k8s.ApplyManifestAsync(
-                BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
-            await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+            await client.ApplyManifestAsync(
+                BuildScriptConfigMap(cluster, configMap, BuildPipelineDeleteScript(cluster, pipeline)), ct);
+            await client.ApplyManifestAsync(
+                BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
+            await WaitForJobAsync(cluster, jobName, client, ct);
         }
         catch (Exception ex)
         {
@@ -1211,17 +1230,17 @@ public class ElasticsearchService(
         }
 
         ElasticsearchCluster cluster = pipeline.ElasticsearchCluster;
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string configMap = SnapshotConfigMapName(cluster, $"pipeline-sim-{pipeline.Name}");
         string jobName = JobName(cluster, $"pipeline-sim-{pipeline.Name}");
 
-        await k8s.ApplyManifestAsync(
+        await client.ApplyManifestAsync(
             BuildScriptConfigMap(cluster, configMap,
-                BuildPipelineSimulateScript(cluster, pipeline, sampleDocumentJson)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+                BuildPipelineSimulateScript(cluster, pipeline, sampleDocumentJson)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
 
         if (outcome != JobOutcome.Succeeded)
             throw new InvalidOperationException("The simulation failed:\n" + Truncate(log, 1200));
@@ -1344,12 +1363,12 @@ public class ElasticsearchService(
 
         try
         {
-            string kubeconfig = local.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(tenantId, local.KubernetesClusterId, ct);
 
             // The remote first: the local cluster's connection has nothing to land on until the
             // remote cluster server is open.
-            await ApplyClusterAsync(db, remote, kubeconfig, ct);
-            await ApplyClusterAsync(db, local, kubeconfig, ct);
+            await ApplyClusterAsync(db, remote, client, ct);
+            await ApplyClusterAsync(db, local, client, ct);
 
             link.LastAppliedAt = DateTime.UtcNow;
             link.LastError = null;
@@ -1386,7 +1405,8 @@ public class ElasticsearchService(
         db.ElasticsearchRemoteLinks.Remove(link);
         await db.SaveChangesAsync(ct);
 
-        await ApplyClusterAsync(db, local, local.KubernetesCluster.Kubeconfig!, ct);
+        await ApplyClusterAsync(
+            db, local, await ClusterFor(local.TenantId, local.KubernetesClusterId, ct), ct);
     }
 
     /// <summary>The clusters a given one could be linked to — same Kubernetes cluster, new enough, not itself.</summary>
@@ -1442,15 +1462,15 @@ public class ElasticsearchService(
 
     /// <summary>Re-applies one cluster's CR with everything currently true of it.</summary>
     private async Task ApplyClusterAsync(
-        ApplicationDbContext db, ElasticsearchCluster cluster, string kubeconfig, CancellationToken ct)
+        ApplicationDbContext db, ElasticsearchCluster cluster,
+        Clusters.IClusterClient client, CancellationToken ct)
     {
-        await k8s.ApplyManifestAsync(
+        await client.ApplyManifestAsync(
             BuildElasticsearchManifest(
                 cluster,
                 await ResolveS3Async(db, cluster, ct),
                 await ResolveRemotesAsync(db, cluster, ct),
-                await IsSearchedRemotelyAsync(db, cluster, ct)),
-            kubeconfig, ct);
+                await IsSearchedRemotelyAsync(db, cluster, ct)), ct);
     }
 
     private static async Task<List<ElasticsearchRemoteRef>> ResolveRemotesAsync(
@@ -1521,16 +1541,16 @@ public class ElasticsearchService(
             Description = string.IsNullOrWhiteSpace(description) ? null : description!.Trim()
         };
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string configMap = SnapshotConfigMapName(cluster, $"space-{spaceId}");
         string jobName = JobName(cluster, $"space-{spaceId}");
 
-        await k8s.ApplyManifestAsync(
-            BuildScriptConfigMap(cluster, configMap, BuildSpaceApplyScript(cluster, space)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildSpaceApplyScript(cluster, space)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
 
         space.LastError = outcome == JobOutcome.Succeeded ? null : Truncate(log, 2000);
         if (outcome == JobOutcome.Succeeded) space.LastAppliedAt = DateTime.UtcNow;
@@ -1559,16 +1579,16 @@ public class ElasticsearchService(
             ?? throw new InvalidOperationException("Space not found.");
 
         ElasticsearchCluster cluster = space.ElasticsearchCluster;
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string configMap = SnapshotConfigMapName(cluster, $"space-{space.SpaceId}");
         string jobName = JobName(cluster, $"space-{space.SpaceId}");
 
-        await k8s.ApplyManifestAsync(
-            BuildScriptConfigMap(cluster, configMap, BuildSpaceApplyScript(cluster, space)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildSpaceApplyScript(cluster, space)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
 
         space.LastError = outcome == JobOutcome.Succeeded ? null : Truncate(log, 2000);
         if (outcome == JobOutcome.Succeeded) space.LastAppliedAt = DateTime.UtcNow;
@@ -1616,15 +1636,15 @@ public class ElasticsearchService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
             string configMap = SnapshotConfigMapName(cluster, $"space-del-{space.SpaceId}");
             string jobName = JobName(cluster, $"space-del-{space.SpaceId}");
 
-            await k8s.ApplyManifestAsync(
-                BuildScriptConfigMap(cluster, configMap, BuildSpaceDeleteScript(cluster, space)), kubeconfig, ct);
-            await k8s.ApplyManifestAsync(
-                BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
-            await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+            await client.ApplyManifestAsync(
+                BuildScriptConfigMap(cluster, configMap, BuildSpaceDeleteScript(cluster, space)), ct);
+            await client.ApplyManifestAsync(
+                BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
+            await WaitForJobAsync(cluster, jobName, client, ct);
         }
         catch (Exception ex)
         {
@@ -1696,12 +1716,12 @@ public class ElasticsearchService(
     /// reporting an error.</para>
     /// </summary>
     public async Task<PrometheusSelector> ReadPrometheusSelectorAsync(
-        string kubeconfig, CancellationToken ct = default)
+        Clusters.IClusterClient client, CancellationToken ct = default)
     {
         try
         {
-            string json = await k8s.GetJsonAllNamespacesAsync(
-                "prometheuses.monitoring.coreos.com", kubeconfig, ct: ct);
+            string json = await client.GetJsonAllNamespacesAsync(
+                "prometheuses.monitoring.coreos.com", ct: ct);
             return ParsePrometheusSelector(json);
         }
         catch (Exception ex)
@@ -1763,37 +1783,37 @@ public class ElasticsearchService(
             .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string password = GeneratePassword();
 
         // The exporter gets its own account with cluster monitor and nothing else — the metrics it
         // reads are all read-only operations, and this credential sits in a pod for years.
-        await k8s.ApplyManifestAsync(
-            BuildExporterCredentialsSecret(cluster, password), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildExporterCredentialsSecret(cluster, password), ct);
 
         string configMap = SnapshotConfigMapName(cluster, "exporter-user");
         string jobName = JobName(cluster, "exporter-user");
 
-        await k8s.ApplyManifestAsync(
-            BuildScriptConfigMap(cluster, configMap, BuildExporterUserScript(cluster)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap, cluster.ExporterSecretName), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildExporterUserScript(cluster)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap, cluster.ExporterSecretName), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
         if (outcome == JobOutcome.Failed)
             throw new InvalidOperationException(
                 "Creating the exporter's Elasticsearch account failed:\n" + Truncate(log, 1200));
 
-        PrometheusSelector selector = await ReadPrometheusSelectorAsync(kubeconfig, ct);
+        PrometheusSelector selector = await ReadPrometheusSelectorAsync(client, ct);
 
         cluster.MonitoringEnabled = true;
         cluster.MonitoringIndexMetrics = indexMetrics;
         cluster.MonitoringSelectorNote = DescribeSelector(selector, cluster.Namespace);
 
-        await k8s.ApplyManifestAsync(BuildExporterDeployment(cluster), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(BuildExporterService(cluster), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(BuildExporterServiceMonitor(cluster, selector.MatchLabels), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(BuildExporterPrometheusRule(cluster, selector.RuleLabels), kubeconfig, ct);
+        await client.ApplyManifestAsync(BuildExporterDeployment(cluster), ct);
+        await client.ApplyManifestAsync(BuildExporterService(cluster), ct);
+        await client.ApplyManifestAsync(BuildExporterServiceMonitor(cluster, selector.MatchLabels), ct);
+        await client.ApplyManifestAsync(BuildExporterPrometheusRule(cluster, selector.RuleLabels), ct);
 
         await db.SaveChangesAsync(ct);
         return cluster.MonitoringSelectorNote!;
@@ -1809,7 +1829,7 @@ public class ElasticsearchService(
             .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
 
         foreach ((string kind, string name) in new[]
         {
@@ -1822,7 +1842,7 @@ public class ElasticsearchService(
         {
             try
             {
-                await k8s.DeleteManifestAsync(kind, name, cluster.Namespace, kubeconfig, ct);
+                await client.DeleteManifestAsync(kind, name, cluster.Namespace, ct);
             }
             catch (Exception ex)
             {
@@ -2055,14 +2075,14 @@ public class ElasticsearchService(
 
         try
         {
-            string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+            Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
 
             // Elasticsearch first. ECK holds Kibana at its current version until the cluster it is
             // associated with can serve it, so applying both is safe and saves a second visit.
-            await ApplyClusterAsync(db, cluster, kubeconfig, ct);
+            await ApplyClusterAsync(db, cluster, client, ct);
 
             if (cluster.KibanaEnabled)
-                await k8s.ApplyManifestAsync(BuildKibanaManifest(cluster), kubeconfig, ct);
+                await client.ApplyManifestAsync(BuildKibanaManifest(cluster), ct);
 
             cluster.LastError = null;
         }
@@ -2150,25 +2170,24 @@ public class ElasticsearchService(
     public async Task<string> QueryAsync(
         ElasticsearchCluster cluster, string path, CancellationToken ct = default)
     {
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig
-            ?? throw new InvalidOperationException("The Kubernetes cluster has no kubeconfig.");
+        Clusters.IClusterClient client =
+            await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
 
-        string podsJson = await k8s.GetJsonAsync(
-            "pods", cluster.Namespace, kubeconfig,
+        string podsJson = await client.GetJsonAsync(
+            "pods", cluster.Namespace,
             $"elasticsearch.k8s.elastic.co/cluster-name={cluster.Name}", ct);
 
         string pod = FirstReadyPodName(podsJson)
             ?? throw new InvalidOperationException(
                 $"No Ready Elasticsearch pod in '{cluster.Namespace}' to ask — the cluster may still be starting.");
 
-        string password = await k8s.GetSecretValueAsync(
-            cluster.ElasticUserSecretName, "elastic", cluster.Namespace, kubeconfig, ct)
+        string password = await client.GetSecretValueAsync(
+            cluster.ElasticUserSecretName, "elastic", cluster.Namespace, ct)
             ?? throw new InvalidOperationException(
                 $"The '{cluster.ElasticUserSecretName}' Secret is not readable, so there is no way to authenticate.");
 
-        return await k8s.RunCommandOnPodWithStdinAsync(
-            pod, cluster.Namespace, ["sh", "-c", BuildQueryCommand(path)], password + "\n",
-            kubeconfig, ct, "elasticsearch");
+        return await client.RunCommandOnPodWithStdinAsync(
+            pod, cluster.Namespace, ["sh", "-c", BuildQueryCommand(path)], password + "\n", ct, "elasticsearch");
     }
 
     /// <summary>
@@ -2242,7 +2261,12 @@ public class ElasticsearchService(
             .Include(c => c.KubernetesCluster)
             .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
 
-        if (cluster is null || string.IsNullOrWhiteSpace(cluster.KubernetesCluster.Kubeconfig)) return;
+        if (cluster is null) return;
+
+        Clusters.IClusterClient? reachable =
+            await clusterAccess.ForAsync(cluster.TenantId, cluster.KubernetesClusterId, ct);
+
+        if (reachable is null) return;
 
         try
         {
@@ -2473,20 +2497,20 @@ public class ElasticsearchService(
             PasswordSetAt = DateTime.UtcNow
         };
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string password = GeneratePassword();
 
-        await k8s.ApplyManifestAsync(BuildUserCredentialsSecret(cluster, user, password), kubeconfig, ct);
+        await client.ApplyManifestAsync(BuildUserCredentialsSecret(cluster, user, password), ct);
 
         string configMap = UserConfigMapName(cluster, user);
         string jobName = JobName(cluster, $"user-{username}");
 
-        await k8s.ApplyManifestAsync(
-            BuildScriptConfigMap(cluster, configMap, BuildUserApplyScript(cluster, user)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap, user.CredentialsSecretName), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildUserApplyScript(cluster, user)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap, user.CredentialsSecretName), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
 
         user.LastError = outcome == JobOutcome.Succeeded ? null : Truncate(log, 2000);
         if (outcome == JobOutcome.Succeeded) user.LastAppliedAt = DateTime.UtcNow;
@@ -2515,16 +2539,16 @@ public class ElasticsearchService(
             ?? throw new InvalidOperationException("User not found.");
 
         ElasticsearchCluster cluster = user.ElasticsearchCluster;
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string configMap = UserConfigMapName(cluster, user);
         string jobName = JobName(cluster, $"user-{user.Username}");
 
-        await k8s.ApplyManifestAsync(
-            BuildScriptConfigMap(cluster, configMap, BuildUserApplyScript(cluster, user)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap, user.CredentialsSecretName), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildUserApplyScript(cluster, user)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap, user.CredentialsSecretName), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
 
         user.LastError = outcome == JobOutcome.Succeeded ? null : Truncate(log, 2000);
         if (outcome == JobOutcome.Succeeded) user.LastAppliedAt = DateTime.UtcNow;
@@ -2580,7 +2604,7 @@ public class ElasticsearchService(
             ?? throw new InvalidOperationException("User not found.");
 
         ElasticsearchCluster cluster = user.ElasticsearchCluster;
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string password = GeneratePassword();
 
         await auditService.RecordAsync(
@@ -2592,17 +2616,17 @@ public class ElasticsearchService(
             performedBy: performedBy,
             ct: ct);
 
-        await k8s.ApplyManifestAsync(BuildUserCredentialsSecret(cluster, user, password), kubeconfig, ct);
+        await client.ApplyManifestAsync(BuildUserCredentialsSecret(cluster, user, password), ct);
 
         string configMap = UserConfigMapName(cluster, user, "password");
         string jobName = JobName(cluster, $"user-pw-{user.Username}");
 
-        await k8s.ApplyManifestAsync(
-            BuildScriptConfigMap(cluster, configMap, BuildPasswordResetScript(cluster, user)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap, user.CredentialsSecretName), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildPasswordResetScript(cluster, user)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap, user.CredentialsSecretName), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
 
         if (outcome != JobOutcome.Succeeded)
         {
@@ -2651,9 +2675,9 @@ public class ElasticsearchService(
 
         if (user is null) return null;
 
-        return await k8s.GetSecretValueAsync(
+        return await (await ClusterFor(user.ElasticsearchCluster.TenantId, user.ElasticsearchCluster.KubernetesClusterId, ct)).GetSecretValueAsync(
             user.CredentialsSecretName, "password", user.ElasticsearchCluster.Namespace,
-            user.ElasticsearchCluster.KubernetesCluster.Kubeconfig!, ct);
+             ct);
     }
 
     /// <summary>
@@ -2677,20 +2701,20 @@ public class ElasticsearchService(
                 + "would leave them with credentials that quietly stop working.");
 
         ElasticsearchCluster cluster = user.ElasticsearchCluster;
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
 
         try
         {
             string configMap = UserConfigMapName(cluster, user, "delete");
             string jobName = JobName(cluster, $"user-del-{user.Username}");
 
-            await k8s.ApplyManifestAsync(
-                BuildScriptConfigMap(cluster, configMap, BuildUserDeleteScript(cluster, user)), kubeconfig, ct);
-            await k8s.ApplyManifestAsync(
-                BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
-            await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+            await client.ApplyManifestAsync(
+                BuildScriptConfigMap(cluster, configMap, BuildUserDeleteScript(cluster, user)), ct);
+            await client.ApplyManifestAsync(
+                BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
+            await WaitForJobAsync(cluster, jobName, client, ct);
 
-            await k8s.DeleteManifestAsync("secret", user.CredentialsSecretName, cluster.Namespace, kubeconfig, ct);
+            await client.DeleteManifestAsync("secret", user.CredentialsSecretName, cluster.Namespace, ct);
         }
         catch (Exception ex)
         {
@@ -2772,10 +2796,10 @@ public class ElasticsearchService(
             ?? throw new InvalidOperationException("Binding not found.");
 
         ElasticsearchCluster cluster = binding.ElasticsearchCluster;
-        string esKubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient esCluster = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
 
-        string password = await k8s.GetSecretValueAsync(
-            binding.ElasticsearchUser.CredentialsSecretName, "password", cluster.Namespace, esKubeconfig, ct)
+        string password = await esCluster.GetSecretValueAsync(
+            binding.ElasticsearchUser.CredentialsSecretName, "password", cluster.Namespace, ct)
             ?? throw new InvalidOperationException(
                 $"The password Secret for '{binding.ElasticsearchUser.Username}' is not in the cluster. "
                 + "Re-apply the user to recreate it.");
@@ -2789,16 +2813,16 @@ public class ElasticsearchService(
 
         // Without the CA the application either fails to connect or is told to skip verification,
         // and the second one is how a search cluster becomes reachable by anything on the network.
-        string? caCert = await k8s.GetSecretValueAsync(
-            cluster.HttpCertsSecretName, "ca.crt", cluster.Namespace, esKubeconfig, ct);
+        string? caCert = await esCluster.GetSecretValueAsync(
+            cluster.HttpCertsSecretName, "ca.crt", cluster.Namespace, ct);
         if (!string.IsNullOrEmpty(caCert)) data["ELASTICSEARCH_CA_CRT"] = caCert;
 
-        string appKubeconfig = binding.AppDeployment.Cluster.Kubeconfig!;
+        Clusters.IClusterClient appCluster = await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct);
         string appNs = binding.AppDeployment.Namespace;
 
-        await k8s.EnsureNamespaceAsync(appNs, appKubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildBindingSecretManifest(binding.KubernetesSecretName, appNs, data), appKubeconfig, ct);
+        await appCluster.EnsureNamespaceAsync(appNs, ct);
+        await appCluster.ApplyManifestAsync(
+            BuildBindingSecretManifest(binding.KubernetesSecretName, appNs, data), ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -2816,8 +2840,9 @@ public class ElasticsearchService(
 
         try
         {
-            await k8s.DeleteManifestAsync("secret", binding.KubernetesSecretName,
-                binding.AppDeployment.Namespace, binding.AppDeployment.Cluster.Kubeconfig!, ct);
+            await (await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct))
+                .DeleteManifestAsync(
+                    "secret", binding.KubernetesSecretName, binding.AppDeployment.Namespace, ct);
         }
         catch (Exception ex)
         {
@@ -2909,21 +2934,21 @@ public class ElasticsearchService(
         cluster.SnapshotMaxCount = maxCount;
         await db.SaveChangesAsync(ct);
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         ElasticsearchS3Settings s3 = await BuildS3SettingsAsync(tenantId, cluster, link, ct);
 
-        await k8s.ApplyManifestAsync(BuildKeystoreSecretManifest(cluster, await ReadS3CredentialsAsync(tenantId, link, ct)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(BuildElasticsearchManifest(cluster, s3), kubeconfig, ct);
+        await client.ApplyManifestAsync(BuildKeystoreSecretManifest(cluster, await ReadS3CredentialsAsync(tenantId, link, ct)), ct);
+        await client.ApplyManifestAsync(BuildElasticsearchManifest(cluster, s3), ct);
 
         string configMap = SnapshotConfigMapName(cluster);
         string jobName = JobName(cluster, "snapshot-setup");
 
-        await k8s.ApplyManifestAsync(
-            BuildScriptConfigMap(cluster, configMap, BuildSnapshotSetupScript(cluster, s3)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildSnapshotSetupScript(cluster, s3)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
 
         if (outcome == JobOutcome.Failed)
         {
@@ -2957,17 +2982,17 @@ public class ElasticsearchService(
             .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string configMap = SnapshotConfigMapName(cluster, "disable");
         string jobName = JobName(cluster, "snapshot-disable");
 
         try
         {
-            await k8s.ApplyManifestAsync(
-                BuildScriptConfigMap(cluster, configMap, BuildSnapshotDisableScript(cluster)), kubeconfig, ct);
-            await k8s.ApplyManifestAsync(
-                BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
-            await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+            await client.ApplyManifestAsync(
+                BuildScriptConfigMap(cluster, configMap, BuildSnapshotDisableScript(cluster)), ct);
+            await client.ApplyManifestAsync(
+                BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
+            await WaitForJobAsync(cluster, jobName, client, ct);
         }
         catch (Exception ex)
         {
@@ -2991,16 +3016,16 @@ public class ElasticsearchService(
         if (!cluster.SnapshotsEnabled)
             throw new InvalidOperationException("Snapshots are not configured for this cluster.");
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string configMap = SnapshotConfigMapName(cluster, "execute");
         string jobName = JobName(cluster, "snapshot-run");
 
-        await k8s.ApplyManifestAsync(
-            BuildScriptConfigMap(cluster, configMap, BuildSnapshotExecuteScript(cluster)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildSnapshotExecuteScript(cluster)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
 
         if (outcome == JobOutcome.Failed)
             throw new InvalidOperationException(
@@ -3027,16 +3052,16 @@ public class ElasticsearchService(
 
         if (!cluster.SnapshotsEnabled) return;
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string configMap = SnapshotConfigMapName(cluster, "status");
         string jobName = JobName(cluster, "snapshot-status");
 
-        await k8s.ApplyManifestAsync(
-            BuildScriptConfigMap(cluster, configMap, BuildSnapshotStatusScript(cluster)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildSnapshotStatusScript(cluster)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
         if (outcome != JobOutcome.Succeeded) return;
 
         SnapshotStatus status = ParseSnapshotStatus(log, cluster.SnapshotPolicyName);
@@ -3094,16 +3119,16 @@ public class ElasticsearchService(
         if (!cluster.SnapshotsEnabled)
             throw new InvalidOperationException("This cluster has no snapshot repository configured.");
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string configMap = SnapshotConfigMapName(cluster, "list");
         string jobName = JobName(cluster, "snapshot-list");
 
-        await k8s.ApplyManifestAsync(
-            BuildScriptConfigMap(cluster, configMap, BuildSnapshotListScript(cluster)), kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+        await client.ApplyManifestAsync(
+            BuildScriptConfigMap(cluster, configMap, BuildSnapshotListScript(cluster)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
 
         if (outcome == JobOutcome.Failed)
             throw new InvalidOperationException("Listing the snapshots failed:\n" + Truncate(log, 1200));
@@ -3163,7 +3188,7 @@ public class ElasticsearchService(
                 "The global state cannot be restored side by side — there is only one set of cluster settings, "
                 + "templates and ILM policies, so restoring them always overwrites the live ones.");
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string configMap = SnapshotConfigMapName(cluster, "restore");
         string jobName = JobName(cluster, "snapshot-restore");
 
@@ -3178,14 +3203,13 @@ public class ElasticsearchService(
             performedBy: performedBy,
             ct: ct);
 
-        await k8s.ApplyManifestAsync(
+        await client.ApplyManifestAsync(
             BuildScriptConfigMap(cluster, configMap,
-                BuildRestoreScript(cluster, snapshotName, indexPattern, mode, renamePrefix, includeGlobalState)),
-            kubeconfig, ct);
-        await k8s.ApplyManifestAsync(
-            BuildElasticsearchJobManifest(cluster, jobName, configMap), kubeconfig, ct);
+                BuildRestoreScript(cluster, snapshotName, indexPattern, mode, renamePrefix, includeGlobalState)), ct);
+        await client.ApplyManifestAsync(
+            BuildElasticsearchJobManifest(cluster, jobName, configMap), ct);
 
-        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, kubeconfig, ct);
+        (JobOutcome outcome, string log) = await WaitForJobAsync(cluster, jobName, client, ct);
 
         return outcome switch
         {
@@ -5229,7 +5253,8 @@ public class ElasticsearchService(
     /// holding a page open.
     /// </summary>
     private async Task<(JobOutcome Outcome, string Log)> WaitForJobAsync(
-        ElasticsearchCluster cluster, string jobName, string kubeconfig, CancellationToken ct)
+        ElasticsearchCluster cluster, string jobName, Clusters.IClusterClient client,
+        CancellationToken ct)
     {
         for (int attempt = 0; attempt < JobPollAttempts; attempt++)
         {
@@ -5238,7 +5263,7 @@ public class ElasticsearchService(
             string json;
             try
             {
-                json = await k8s.GetJsonAsync($"job/{jobName}", cluster.Namespace, kubeconfig, ct: ct);
+                json = await client.GetJsonAsync($"job/{jobName}", cluster.Namespace, ct: ct);
             }
             catch { continue; }
 
@@ -5248,7 +5273,7 @@ public class ElasticsearchService(
             string log = "";
             try
             {
-                log = await k8s.GetPodLogsAsync($"job/{jobName}", cluster.Namespace, kubeconfig, 100, ct);
+                log = await client.GetPodLogsAsync($"job/{jobName}", cluster.Namespace, 100, ct);
             }
             catch { /* a Job whose pod is already gone still reported its result above */ }
 

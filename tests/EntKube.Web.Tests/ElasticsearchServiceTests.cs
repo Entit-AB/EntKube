@@ -38,8 +38,13 @@ public class ElasticsearchServiceTests : IDisposable
         k8s = new Mock<IKubernetesClientFactory>();
         vault = testDb.CreateVaultService();
         audit = new AuditService(testDb.Factory);
+        // The real factory over the intercepting test database, so the vault-seeded kubeconfig
+        // resolves as production resolves it and is then handed to the same mock — every existing
+        // k8s assertion keeps working, and now proves the delegation too.
         sut = new ElasticsearchService(
-            testDb.Factory, k8s.Object, vault, audit, NullLogger<ElasticsearchService>.Instance);
+            testDb.Factory,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
+            vault, audit, NullLogger<ElasticsearchService>.Instance);
     }
 
     public void Dispose()
