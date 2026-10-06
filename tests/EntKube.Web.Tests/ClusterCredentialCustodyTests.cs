@@ -32,15 +32,20 @@ public class ClusterCredentialCustodyTests
     /// <summary>
     /// Places that take a cluster's credential out of the row, measured 2026-10-06.
     ///
-    /// <para><b>372 and falling.</b> 508 after the count was corrected (below), then 499
-    /// (<c>RedisService</c>), 451 (<c>CnpgService</c>), 409 (<c>ElasticsearchService</c>) and 372
-    /// (<c>RabbitMQService</c>). None of the four takes <see cref="IKubernetesClientFactory"/> any
-    /// more, which is the clearest evidence a service is done: it cannot reach the raw-credential
-    /// API even if a later change wanted to.</para>
+    /// <para><b>325 and falling.</b> 508 after the count was corrected (below), then 499
+    /// (<c>RedisService</c>), 451 (<c>CnpgService</c>), 409 (<c>ElasticsearchService</c>), 372
+    /// (<c>RabbitMQService</c>) and 325 (<c>MongoService</c>). None of the five takes
+    /// <see cref="IKubernetesClientFactory"/> any more, which is the clearest evidence a service
+    /// is done: it cannot reach the raw-credential API even if a later change wanted to.</para>
     ///
-    /// <para>DataServices is now down to <c>MongoService</c> (47) — the one module-wide holdout,
-    /// and the one with 13 tests against 3,464 lines, so it wants coverage written before the
-    /// refactor rather than after.</para>
+    /// <para>By module, what is left: Fleet 102 (unremarkable — it owns clusters, and
+    /// <c>KubernetesOperationsService</c> alone is 72), Catalog 52, <b>DataServices 49</b>,
+    /// Telemetry 28, Delivery 26, Connectivity 23, then single and double figures elsewhere.</para>
+    ///
+    /// <para><b>DataServices is not finished</b>, which is worth stating plainly because the five
+    /// conversions so far took its four <em>largest</em> files and it is easy to mistake that for
+    /// the module being done. <c>RegisteredPostgresService</c> (16), <c>KafkaService</c> (15),
+    /// <c>StorageService</c> (8) and <c>DatabaseService</c> (4) are still holding credentials.</para>
     ///
     /// <para><b>508, corrected down from the 534 first reported.</b> The first count matched
     /// <c>.Kubeconfig</c> as plain text, which also caught <c>.KubeconfigSecretId</c> — a
@@ -52,10 +57,10 @@ public class ClusterCredentialCustodyTests
     /// 48, <c>MongoService</c> 47, <c>ElasticsearchService</c> 42, <c>RabbitMQService</c> 37.
     /// Five files hold nearly half of it, which is also where converting pays best.</para>
     /// </summary>
-    private const int BaselineOccurrences = 372;
+    private const int BaselineOccurrences = 325;
 
     /// <summary>Files doing so. A file that has stopped should not be able to start again quietly.</summary>
-    private const int BaselineFiles = 53;
+    private const int BaselineFiles = 52;
 
     private static (int Occurrences, int Files) Measure()
     {

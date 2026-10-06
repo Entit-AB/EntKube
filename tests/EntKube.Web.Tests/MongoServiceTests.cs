@@ -36,7 +36,11 @@ public class MongoServiceTests : IDisposable
 
         vaultService = testDb.CreateVaultService();
         k8sFactory = new Mock<IKubernetesClientFactory>();
-        sut = new MongoService(dbFactory, vaultService, k8sFactory.Object);
+        // Real factory over the intercepting test database: the vault-seeded kubeconfig resolves
+        // as production resolves it, then reaches the same mock — the existing assertions hold.
+        sut = new MongoService(
+            testDb.Factory, vaultService,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory.Object));
     }
 
     public void Dispose()

@@ -23,8 +23,20 @@ namespace EntKube.Web.Services;
 public class MongoService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
-    IKubernetesClientFactory k8sFactory)
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusters)
 {
+    /// <summary>
+    /// A client for one of the tenant's clusters, or a refusal that says why. Keeps the cluster
+    /// credential inside Fleet rather than handing it to every call here — see
+    /// docs/decomposition.md §4.0.1.
+    /// </summary>
+    private async Task<Clusters.IClusterClient> ClusterFor(
+        Guid tenantId, Guid clusterId, CancellationToken ct)
+        => await clusters.ForAsync(tenantId, clusterId, ct)
+           ?? throw new InvalidOperationException(
+               "The cluster has no stored kubeconfig, or does not belong to this tenant, "
+               + "so nothing can be applied to it.");
+
     // ──────── Cluster Lifecycle ────────
 
     /// <summary>
@@ -135,27 +147,28 @@ public class MongoService(
         string adminSecretManifest = BuildAdminSecretManifest(name, ns, adminPassword);
         string clusterManifest = BuildClusterManifest(mongoCluster);
 
-        await k8sFactory.EnsureNamespaceAsync(ns, k8sCluster.Kubeconfig!, ct);
+        await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).EnsureNamespaceAsync(ns, ct);
 
         // The Community Operator sets serviceAccountName: mongodb-database on every pod it creates.
         // It only creates this ServiceAccount in its own installation namespace, so when the MongoDB
         // resource lives in a different namespace the pod admission fails with "serviceaccount not found".
         // We apply the ServiceAccount ourselves so it always exists in the target namespace.
-        await k8sFactory.ApplyManifestAsync(BuildServiceAccountManifest(ns), k8sCluster.Kubeconfig!, ct);
+        await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).ApplyManifestAsync(BuildServiceAccountManifest(ns), ct);
 
         if (storageLink is not null && s3SecretName is not null)
         {
             await EnsureStorageSecretsInK8sAsync(
-                tenantId, storageLink, s3SecretName, ns, k8sCluster.Kubeconfig!, ct);
+                tenantId, storageLink, s3SecretName, ns,
+                await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct), ct);
         }
 
-        await k8sFactory.ApplyManifestAsync(adminSecretManifest, k8sCluster.Kubeconfig!, ct);
-        await k8sFactory.ApplyManifestAsync(clusterManifest, k8sCluster.Kubeconfig!, ct);
+        await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).ApplyManifestAsync(adminSecretManifest, ct);
+        await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).ApplyManifestAsync(clusterManifest, ct);
 
         if (!string.IsNullOrEmpty(backupSchedule) && storageLink is not null && s3SecretName is not null)
         {
             string cronManifest = BuildScheduledBackupCronJobManifest(mongoCluster, storageLink, s3SecretName);
-            await k8sFactory.ApplyManifestAsync(cronManifest, k8sCluster.Kubeconfig!, ct);
+            await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).ApplyManifestAsync(cronManifest, ct);
         }
 
         return mongoCluster;
@@ -203,17 +216,17 @@ public class MongoService(
 
         try
         {
-            await k8sFactory.DeleteManifestAsync(
+            await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).DeleteManifestAsync(
                 "mongodbcommunity.mongodbcommunity.mongodb.com", mongo.Name, mongo.Namespace,
-                mongo.KubernetesCluster.Kubeconfig!, ct);
-            await k8sFactory.DeleteManifestAsync(
+                 ct);
+            await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).DeleteManifestAsync(
                 "secret", $"{mongo.Name}-admin-password", mongo.Namespace,
-                mongo.KubernetesCluster.Kubeconfig!, ct);
+                 ct);
             if (!string.IsNullOrEmpty(mongo.BackupSchedule))
             {
-                await k8sFactory.DeleteManifestAsync(
+                await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).DeleteManifestAsync(
                     "cronjob", $"{mongo.Name}-scheduled-backup", mongo.Namespace,
-                    mongo.KubernetesCluster.Kubeconfig!, ct);
+                     ct);
             }
         }
         catch (Exception)
@@ -279,18 +292,18 @@ public class MongoService(
             // to start its upload container.
             await EnsureStorageSecretsInK8sAsync(
                 tenantId, mongo.StorageLink, s3SecretName, mongo.Namespace,
-                mongo.KubernetesCluster.Kubeconfig!, ct);
+                await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct), ct);
 
             string cronManifest = BuildScheduledBackupCronJobManifest(mongo, mongo.StorageLink, s3SecretName);
-            await k8sFactory.ApplyManifestAsync(cronManifest, mongo.KubernetesCluster.Kubeconfig!, ct);
+            await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ApplyManifestAsync(cronManifest, ct);
         }
         else if (mongo.StorageLink is not null)
         {
             try
             {
-                await k8sFactory.DeleteManifestAsync(
+                await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).DeleteManifestAsync(
                     "cronjob", $"{mongo.Name}-scheduled-backup", mongo.Namespace,
-                    mongo.KubernetesCluster.Kubeconfig!, ct);
+                     ct);
             }
             catch (Exception)
             {
@@ -325,15 +338,18 @@ public class MongoService(
                           "has nowhere to upload. Assign an S3 bucket, then save the schedule again."
             };
 
-        if (string.IsNullOrWhiteSpace(mongo.KubernetesCluster.Kubeconfig))
+        Clusters.IClusterClient? reachable =
+            await clusters.ForAsync(mongo.TenantId, mongo.KubernetesClusterId, ct);
+
+        if (reachable is null)
             return new MongoScheduledBackupStatus { Problem = "Cluster has no kubeconfig configured." };
 
         string cronJobName = $"{mongo.Name}-scheduled-backup";
 
         try
         {
-            string json = await k8sFactory.GetJsonAsync(
-                "cronjob", mongo.Namespace, mongo.KubernetesCluster.Kubeconfig, ct: ct);
+            string json = await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).GetJsonAsync(
+                "cronjob", mongo.Namespace, ct: ct);
 
             using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(json);
             if (!doc.RootElement.TryGetProperty("items", out System.Text.Json.JsonElement items))
@@ -426,7 +442,7 @@ public class MongoService(
         {
             try
             {
-                await k8sFactory.DeleteManifestAsync("Job", backup.Name, mongo.Namespace, mongo.KubernetesCluster.Kubeconfig!, ct);
+                await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).DeleteManifestAsync("Job", backup.Name, mongo.Namespace, ct);
 
                 MongoBackup? dbRecord = await db.MongoBackups
                     .FirstOrDefaultAsync(b => b.MongoClusterId == mongoClusterId && b.Name == backup.Name, ct);
@@ -474,22 +490,22 @@ public class MongoService(
                 : targetVersion;
 
             string jsonPatch = $"{{\"spec\":{{\"version\":\"{versionFull}\"}}}}";
-            await k8sFactory.PatchJsonAsync(
+            await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).PatchJsonAsync(
                 "mongodbcommunity", mongo.Name, mongo.Namespace,
-                jsonPatch, mongo.KubernetesCluster.Kubeconfig!, ct);
+                jsonPatch, ct);
         }
         else
         {
             string? s3SecretName = mongo.StorageLinkId.HasValue ? $"{mongo.Name}-s3-credentials" : null;
             string manifest = BuildClusterManifest(mongo);
 
-            await k8sFactory.ApplyManifestAsync(manifest, mongo.KubernetesCluster.Kubeconfig!, ct);
+            await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
 
             // Re-apply the CronJob so the mongodump image version stays in sync.
             if (!string.IsNullOrEmpty(mongo.BackupSchedule) && mongo.StorageLink is not null && s3SecretName is not null)
             {
                 string cronManifest = BuildScheduledBackupCronJobManifest(mongo, mongo.StorageLink, s3SecretName);
-                await k8sFactory.ApplyManifestAsync(cronManifest, mongo.KubernetesCluster.Kubeconfig!, ct);
+                await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ApplyManifestAsync(cronManifest, ct);
             }
         }
     }
@@ -520,9 +536,9 @@ public class MongoService(
             {"spec":{"statefulSet":{"spec":{"template":{"metadata":{"annotations":{"kubectl.kubernetes.io/restartedAt":"__TS__"}}}}}}}
             """.Replace("__TS__", DateTime.UtcNow.ToString("O"));
 
-        await k8sFactory.PatchJsonAsync(
+        await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).PatchJsonAsync(
             "mongodbcommunity.mongodbcommunity.mongodb.com", mongo.Name, mongo.Namespace, patch,
-            mongo.KubernetesCluster.Kubeconfig!, ct);
+             ct);
     }
 
     /// <summary>
@@ -578,7 +594,7 @@ public class MongoService(
             // Re-apply the full manifest — the operator performs a rolling restart to
             // pick up the new resource requests/limits on the StatefulSet pod template.
             string manifest = BuildClusterManifest(mongo);
-            await k8sFactory.ApplyManifestAsync(manifest, mongo.KubernetesCluster.Kubeconfig!, ct);
+            await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
         }
 
         // ── Storage ───────────────────────────────────────────────────────────────
@@ -594,9 +610,9 @@ public class MongoService(
             for (int i = 0; i < mongo.Members; i++)
             {
                 string pvcName = $"data-volume-{mongo.Name}-{i}";
-                await k8sFactory.PatchJsonAsync(
+                await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).PatchJsonAsync(
                     "pvc", pvcName, mongo.Namespace, patch,
-                    mongo.KubernetesCluster.Kubeconfig!, ct);
+                     ct);
             }
 
             mongo.StorageSize = newSize;
@@ -648,14 +664,15 @@ public class MongoService(
         StorageLink storageLink = await db.StorageLinks.FirstAsync(s => s.Id == mongo.StorageLinkId!.Value, ct);
 
         await EnsureStorageSecretsInK8sAsync(
-            tenantId, storageLink, s3SecretName, mongo.Namespace, mongo.KubernetesCluster.Kubeconfig!, ct);
+            tenantId, storageLink, s3SecretName, mongo.Namespace,
+            await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct), ct);
 
         // Both managed and external clusters use the same backup manifest: the Job connects
         // to {name}-svc (internal service) using the {name}-admin-password K8s Secret.
         // For external clusters the user stores their admin credentials via UpdateExternalClusterSettingsAsync,
         // which writes that same secret — no external URI required.
         string manifest = BuildBackupManifest(backupName, mongo, storageLink, s3SecretName);
-        await k8sFactory.ApplyManifestAsync(manifest, mongo.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
 
         return backup;
     }
@@ -705,10 +722,11 @@ public class MongoService(
         StorageLink storageLink = await db.StorageLinks.FirstAsync(s => s.Id == mongo.StorageLinkId!.Value, ct);
 
         await EnsureStorageSecretsInK8sAsync(
-            tenantId, storageLink, s3SecretName, mongo.Namespace, mongo.KubernetesCluster.Kubeconfig!, ct);
+            tenantId, storageLink, s3SecretName, mongo.Namespace,
+            await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct), ct);
 
         string manifest = BuildRestoreManifest(restoreName, mongo, storageLink, sourceBackup.Name, s3SecretName);
-        await k8sFactory.ApplyManifestAsync(manifest, mongo.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
 
         return restoreRecord;
     }
@@ -745,11 +763,11 @@ public class MongoService(
 
         // Store the Atlas URI in a short-lived K8s Secret so it is not embedded in the Job manifest.
         string atlasSecretManifest = BuildAtlasUriSecret(atlasSecretName, mongo.Namespace, atlasUri);
-        await k8sFactory.ApplyManifestAsync(atlasSecretManifest, mongo.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ApplyManifestAsync(atlasSecretManifest, ct);
 
         string manifest = BuildAtlasRestoreManifest(
             jobName, mongo, atlasSecretName, sourceDatabase, targetDatabase);
-        await k8sFactory.ApplyManifestAsync(manifest, mongo.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     private static string BuildAtlasUriSecret(string secretName, string ns, string atlasUri)
@@ -879,13 +897,13 @@ public class MongoService(
 
         await EnsureStorageSecretsInK8sAsync(
             tenantId, storageLink, s3SecretName, newCluster.Namespace,
-            source.KubernetesCluster.Kubeconfig!, ct);
+            await ClusterFor(source.TenantId, source.KubernetesClusterId, ct), ct);
 
         // Cross-cluster restore: download the backup from the source cluster's S3 path,
         // restore into the new cluster's service using the new cluster's admin credentials.
         string manifest = BuildCrossClusterRestoreManifest(
             restoreName, newCluster, source.Name, storageLink, sourceBackup.Name, s3SecretName);
-        await k8sFactory.ApplyManifestAsync(manifest, source.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(source.TenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
 
         return newCluster;
     }
@@ -925,11 +943,11 @@ public class MongoService(
 
         await EnsureStorageSecretsInK8sAsync(
             tenantId, storageLink, s3SecretName, mongo.Namespace,
-            mongo.KubernetesCluster.Kubeconfig!, ct);
+            await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct), ct);
 
         string manifest = BuildExternalRestoreManifest(
             restoreName, mongo, storageLink, sourceBackup.Name, s3SecretName, externalMongoUri);
-        await k8sFactory.ApplyManifestAsync(manifest, mongo.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     // ──────── Database Management ────────
@@ -988,8 +1006,8 @@ public class MongoService(
             }
             """;
 
-        string createOutput = await k8sFactory.ExecuteMongoWithOutputAsync(
-            mongo.Name, mongo.Namespace, script, mongo.KubernetesCluster.Kubeconfig!,
+        string createOutput = await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ExecuteMongoWithOutputAsync(
+            mongo.Name, mongo.Namespace, script,
             username: "admin", password: adminPassword, ct);
 
         if (!createOutput.Contains("ENTK_SUCCESS"))
@@ -1050,8 +1068,8 @@ public class MongoService(
             db.getSiblingDB("admin").dropUser("{{database.Owner}}")
             """;
 
-        await k8sFactory.ExecuteMongoAsync(
-            mongo.Name, mongo.Namespace, script, mongo.KubernetesCluster.Kubeconfig!,
+        await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ExecuteMongoAsync(
+            mongo.Name, mongo.Namespace, script,
             username: "admin", password: adminPassword, ct);
 
         // Remove vault secrets.
@@ -1130,7 +1148,7 @@ public class MongoService(
         string manifest = BuildMigrateDatabaseManifest(jobName, source, sourceDb.Name, target, targetDatabaseName.Trim());
 
         // Run the Job on the source cluster's K8s so the source service is always reachable.
-        await k8sFactory.ApplyManifestAsync(manifest, source.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(source.TenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     private static string BuildMigrateDatabaseManifest(
@@ -1254,7 +1272,7 @@ public class MongoService(
             throw new InvalidOperationException("No credentials found in the vault for this database.");
 
         string secretName = $"{mongo.Name}-{database.Name}-credentials";
-        string kubeconfig = mongo.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct);
 
         StringBuilder sb = new();
         sb.AppendLine("apiVersion: v1");
@@ -1267,7 +1285,7 @@ public class MongoService(
         foreach (KeyValuePair<string, string> kv in credentials)
             sb.AppendLine($"  {kv.Key}: \"{kv.Value.Replace("\"", "\\\"")}\"");
 
-        await k8sFactory.ApplyManifestAsync(sb.ToString(), kubeconfig, ct);
+        await client.ApplyManifestAsync(sb.ToString(), ct);
 
         // Mark vault secrets as synced.
         List<VaultSecret> vaultSecrets = await vaultService.GetMongoDatabaseSecretsAsync(tenantId, databaseId, ct);
@@ -1283,7 +1301,10 @@ public class MongoService(
 
         foreach (DatabaseBinding binding in bindings)
         {
-            string bindingKubeconfig = binding.AppDeployment.Cluster.Kubeconfig!;
+            // A binding has no tenant of its own; the one this method was called for owns the
+            // database being bound, and the app deployment is in the same tenant by construction.
+            Clusters.IClusterClient bindingCluster =
+                await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct);
             string ns = binding.AppDeployment.Namespace;
 
             StringBuilder bsb = new();
@@ -1301,8 +1322,8 @@ public class MongoService(
             foreach (KeyValuePair<string, string> kv in credentials)
                 bsb.AppendLine($"  {kv.Key}: \"{kv.Value.Replace("\"", "\\\"")}\"");
 
-            await k8sFactory.EnsureNamespaceAsync(ns, bindingKubeconfig, ct);
-            await k8sFactory.ApplyManifestAsync(bsb.ToString(), bindingKubeconfig, ct);
+            await bindingCluster.EnsureNamespaceAsync(ns, ct);
+            await bindingCluster.ApplyManifestAsync(bsb.ToString(), ct);
 
             binding.LastSyncedAt = DateTime.UtcNow;
         }
@@ -1354,10 +1375,10 @@ public class MongoService(
             }
             """;
 
-        string rotateOutput = await k8sFactory.ExecuteMongoWithOutputAsync(
-            mongo.Name, mongo.Namespace, script,
-            mongo.KubernetesCluster.Kubeconfig!,
-            username: "admin", password: adminPassword, ct: ct);
+        string rotateOutput = await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct))
+            .ExecuteMongoWithOutputAsync(
+                mongo.Name, mongo.Namespace, script,
+                username: "admin", password: adminPassword, ct: ct);
 
         if (!rotateOutput.Contains("ENTK_SUCCESS"))
             throw new InvalidOperationException(
@@ -1459,14 +1480,14 @@ public class MongoService(
 
         await db.SaveChangesAsync(ct);
 
-        string kubeconfig = mongo.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct);
 
         // Store the admin password as a K8s Secret so Jobs can reference it by name,
         // exactly like managed clusters. Password is never persisted in EntKube's database.
         if (!string.IsNullOrWhiteSpace(adminPassword))
         {
             string adminSecretManifest = BuildAdminSecretManifest(mongo.Name, mongo.Namespace, adminPassword.Trim());
-            await k8sFactory.ApplyManifestAsync(adminSecretManifest, kubeconfig, ct);
+            await client.ApplyManifestAsync(adminSecretManifest, ct);
         }
 
         // Set up the scheduled backup CronJob if a schedule and storage link are configured.
@@ -1477,10 +1498,12 @@ public class MongoService(
             mongo.StorageLink = storageLink;
 
             string s3SecretName = $"{mongo.Name}-s3-credentials";
-            await EnsureStorageSecretsInK8sAsync(tenantId, storageLink, s3SecretName, mongo.Namespace, kubeconfig, ct);
+            await EnsureStorageSecretsInK8sAsync(
+                tenantId, storageLink, s3SecretName, mongo.Namespace,
+                await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct), ct);
 
             string cronManifest = BuildScheduledBackupCronJobManifest(mongo, storageLink, s3SecretName);
-            await k8sFactory.ApplyManifestAsync(cronManifest, kubeconfig, ct);
+            await client.ApplyManifestAsync(cronManifest, ct);
         }
     }
 
@@ -1540,11 +1563,11 @@ public class MongoService(
 
         if (cluster is null) return string.Empty;
 
-        string kubeconfig = cluster.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
 
         // Read admin password from K8s Secret — same secret that backup Jobs use.
-        string? adminPw = await k8sFactory.GetSecretValueAsync(
-            $"{cluster.Name}-admin-password", "password", cluster.Namespace, kubeconfig, ct);
+        string? adminPw = await client.GetSecretValueAsync(
+            $"{cluster.Name}-admin-password", "password", cluster.Namespace, ct);
 
         // Prefix each name with ENTK_DB: so we can pick out exactly our output lines
         // and ignore all mongosh REPL echoes, banners, and warnings.
@@ -1556,8 +1579,8 @@ public class MongoService(
         using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
         timeout.CancelAfter(TimeSpan.FromSeconds(12));
 
-        output = await k8sFactory.ExecuteMongoWithOutputAsync(
-            cluster.Name, cluster.Namespace, script, kubeconfig,
+        output = await client.ExecuteMongoWithOutputAsync(
+            cluster.Name, cluster.Namespace, script,
             username: string.IsNullOrEmpty(adminPw) ? null : "admin",
             password: adminPw,
             ct: timeout.Token);
@@ -1642,9 +1665,9 @@ public class MongoService(
             ?? throw new InvalidOperationException("Source external MongoDB cluster not found.");
 
         // Verify the admin secret exists on the source cluster.
-        string? adminPw = await k8sFactory.GetSecretValueAsync(
+        string? adminPw = await (await ClusterFor(source.TenantId, source.KubernetesClusterId, ct)).GetSecretValueAsync(
             $"{source.Name}-admin-password", "password", source.Namespace,
-            source.KubernetesCluster.Kubeconfig!, ct);
+             ct);
 
         if (string.IsNullOrEmpty(adminPw))
             throw new InvalidOperationException(
@@ -1661,7 +1684,7 @@ public class MongoService(
         // The Job runs on the source cluster's K8s environment.
         // Both clusters must share network access for cross-cluster migrations.
         string manifest = BuildMigrateFromExternalManifest(jobName, source, target);
-        await k8sFactory.ApplyManifestAsync(manifest, source.KubernetesCluster.Kubeconfig!, ct);
+        await (await ClusterFor(source.TenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     /// <summary>
@@ -1698,9 +1721,9 @@ public class MongoService(
         try
         {
             // Query the MongoDBCommunity CRD status.
-            string clusterJson = await k8sFactory.GetJsonAsync(
+            string clusterJson = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
                 $"mongodbcommunity.mongodbcommunity.mongodb.com/{cluster.Name}",
-                cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!, ct: ct);
+                cluster.Namespace, ct: ct);
 
             ParseClusterStatus(clusterJson, detail);
 
@@ -1711,8 +1734,8 @@ public class MongoService(
             // Query all pods in the namespace and filter by StatefulSet naming convention
             // ({name}-N). Label-selector-based queries are unreliable across Community
             // Operator versions (some use `app`, some use `app.kubernetes.io/name`).
-            string podsJson = await k8sFactory.GetJsonAsync(
-                "pods", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!, ct: ct);
+            string podsJson = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+                "pods", cluster.Namespace, ct: ct);
 
             detail.Pods = ParsePodList(podsJson, cluster.Name);
             podsJsonForReconcile = podsJson; // reuse below for backup status reconciliation
@@ -1846,8 +1869,8 @@ public class MongoService(
             // jobs may not carry the entkube.io/mongo-cluster label if the CronJob was deployed
             // before that label was added to the jobTemplate. We identify our jobs by label OR
             // by ownerReference pointing to this cluster's scheduled-backup CronJob.
-            string jobsJson = await k8sFactory.GetJsonAsync(
-                "jobs", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!, ct: ct);
+            string jobsJson = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+                "jobs", cluster.Namespace, ct: ct);
 
             using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(jobsJson);
             System.Text.Json.JsonElement root = doc.RootElement;
@@ -2093,7 +2116,7 @@ public class MongoService(
 
                 try
                 {
-                    await k8sFactory.ApplyManifestAsync(jobManifest, cluster.KubernetesCluster.Kubeconfig!, ct);
+                    await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(jobManifest, ct);
                 }
                 catch { }
             }
@@ -2239,8 +2262,8 @@ public class MongoService(
             Dictionary<string, (bool Succeeded, bool Failed, DateTime? CompletionTime)> k8sJobs = [];
             try
             {
-                string allJobsJson = await k8sFactory.GetJsonAsync(
-                    "jobs", cluster.Namespace, cluster.KubernetesCluster.Kubeconfig!, ct: ct);
+                string allJobsJson = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+                    "jobs", cluster.Namespace, ct: ct);
 
                 using System.Text.Json.JsonDocument jobsDoc = System.Text.Json.JsonDocument.Parse(allJobsJson);
                 if (jobsDoc.RootElement.TryGetProperty("items", out System.Text.Json.JsonElement jobItems))
@@ -2350,7 +2373,7 @@ public class MongoService(
     /// </summary>
     private async Task EnsureStorageSecretsInK8sAsync(
         Guid tenantId, StorageLink storageLink, string secretName, string ns,
-        string kubeconfig, CancellationToken ct)
+        Clusters.IClusterClient client, CancellationToken ct)
     {
         List<VaultSecret> secrets = await vaultService.GetStorageLinkSecretsAsync(tenantId, storageLink.Id, ct);
 
@@ -2386,7 +2409,7 @@ public class MongoService(
         sb.AppendLine($"  ACCESS_KEY: {accessKeyB64}");
         sb.AppendLine($"  SECRET_KEY: {secretKeyB64}");
 
-        await k8sFactory.ApplyManifestAsync(sb.ToString(), kubeconfig, ct);
+        await client.ApplyManifestAsync(sb.ToString(), ct);
     }
 
     /// <summary>
@@ -2448,10 +2471,10 @@ public class MongoService(
             ?? throw new InvalidOperationException("MongoDB cluster not found.");
 
         string secretName = $"{mongo.Name}-admin-password";
-        string kubeconfig = mongo.KubernetesCluster.Kubeconfig!;
+        Clusters.IClusterClient client = await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct);
 
-        string? password = await k8sFactory.GetSecretValueAsync(
-            secretName, "password", mongo.Namespace, kubeconfig, ct);
+        string? password = await client.GetSecretValueAsync(
+            secretName, "password", mongo.Namespace, ct);
 
         if (string.IsNullOrWhiteSpace(password))
         {
