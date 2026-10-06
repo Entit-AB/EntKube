@@ -32,10 +32,11 @@ public class ClusterCredentialCustodyTests
     /// <summary>
     /// Places that take a cluster's credential out of the row, measured 2026-10-06.
     ///
-    /// <para><b>451 and falling.</b> 508 after the count was corrected (below), then 499 when
-    /// <c>RedisService</c> came off, and 451 with <c>CnpgService</c> — 47 of its 48 in one pass.
-    /// Neither takes <see cref="IKubernetesClientFactory"/> any more, which is the clearest
-    /// evidence a service is done: it cannot reach the raw-credential API even if it wanted to.</para>
+    /// <para><b>409 and falling.</b> 508 after the count was corrected (below), then 499
+    /// (<c>RedisService</c>), 451 (<c>CnpgService</c>) and 409 (<c>ElasticsearchService</c>).
+    /// None of the three takes <see cref="IKubernetesClientFactory"/> any more, which is the
+    /// clearest evidence a service is done: it cannot reach the raw-credential API even if a
+    /// later change wanted to.</para>
     ///
     /// <para><b>508, corrected down from the 534 first reported.</b> The first count matched
     /// <c>.Kubeconfig</c> as plain text, which also caught <c>.KubeconfigSecretId</c> — a
@@ -47,10 +48,10 @@ public class ClusterCredentialCustodyTests
     /// 48, <c>MongoService</c> 47, <c>ElasticsearchService</c> 42, <c>RabbitMQService</c> 37.
     /// Five files hold nearly half of it, which is also where converting pays best.</para>
     /// </summary>
-    private const int BaselineOccurrences = 451;
+    private const int BaselineOccurrences = 409;
 
     /// <summary>Files doing so. A file that has stopped should not be able to start again quietly.</summary>
-    private const int BaselineFiles = 55;
+    private const int BaselineFiles = 54;
 
     private static (int Occurrences, int Files) Measure()
     {
