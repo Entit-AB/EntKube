@@ -2,6 +2,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using k8s;
 using k8s.Models;
 using Microsoft.EntityFrameworkCore;

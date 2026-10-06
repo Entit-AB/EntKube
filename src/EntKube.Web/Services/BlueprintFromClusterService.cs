@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -21,7 +22,7 @@ namespace EntKube.Web.Services;
 /// and can be edited afterwards in the blueprint editor.
 /// </summary>
 public class BlueprintFromClusterService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<FleetDbContext> dbFactory,
     VaultService vaultService,
     ClusterBlueprintService blueprintService,
     CnpgService cnpgService,
@@ -38,7 +39,7 @@ public class BlueprintFromClusterService(
     {
         Guid tenantId;
         Guid environmentId;
-        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        await using (FleetDbContext db = await dbFactory.CreateDbContextAsync(ct))
         {
             KubernetesCluster cluster = await db.KubernetesClusters.FirstAsync(c => c.Id == clusterId, ct);
             tenantId = cluster.TenantId;
@@ -123,7 +124,7 @@ public class BlueprintFromClusterService(
 
         Dictionary<Guid, KeycloakComponentConfig> keycloakConfigs;
         Dictionary<Guid, HarborComponentConfig> harborConfigs;
-        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        await using (FleetDbContext db = await dbFactory.CreateDbContextAsync(ct))
         {
             keycloakConfigs = await db.Set<KeycloakComponentConfig>()
                 .Where(k => k.TenantId == tenantId && k.ClusterComponentId != null)

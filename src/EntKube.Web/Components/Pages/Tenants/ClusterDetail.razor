@@ -2357,7 +2357,7 @@ else if (section == "components")
             : null;
 
         redisEndpoints = entry.FormFields.Any(f => f.Type == FormFieldType.RedisSelector)
-            ? await RedisService.DiscoverEndpointsAsync(Cluster.Id)
+            ? await RedisService.DiscoverEndpointsAsync(TenantId, Cluster.Id)
             : null;
 
         keycloakRealms = entry.FormFields.Any(f => f.Type == FormFieldType.KeycloakRealmSelector)
@@ -2567,7 +2567,7 @@ else if (section == "components")
             bool hasRedisField = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.RedisSelector) == true;
 
             redisEndpoints = hasRedisField
-                ? await RedisService.DiscoverEndpointsAsync(Cluster.Id)
+                ? await RedisService.DiscoverEndpointsAsync(TenantId, Cluster.Id)
                 : null;
 
             keycloakRealms = catalogMatch?.FormFields.Any(f => f.Type == FormFieldType.KeycloakRealmSelector) == true

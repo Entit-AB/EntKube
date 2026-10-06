@@ -1,5 +1,6 @@
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -30,25 +31,25 @@ public sealed class DashboardPanel
 }
 
 /// <summary>CRUD for tenant-scoped composable dashboards; (de)serializes the panel list.</summary>
-public class DashboardService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class DashboardService(IDbContextFactory<TelemetryDbContext> dbFactory)
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
     public async Task<List<Dashboard>> ListAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         return await db.Dashboards.Where(d => d.TenantId == tenantId).OrderBy(d => d.Name).ToListAsync(ct);
     }
 
     public async Task<Dashboard?> GetAsync(Guid tenantId, Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         return await db.Dashboards.FirstOrDefaultAsync(d => d.Id == id && d.TenantId == tenantId, ct);
     }
 
     public async Task<Dashboard> CreateAsync(Guid tenantId, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         Dashboard d = new() { Id = Guid.NewGuid(), TenantId = tenantId, Name = name };
         db.Dashboards.Add(d);
         await db.SaveChangesAsync(ct);
@@ -57,7 +58,7 @@ public class DashboardService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task RenameAsync(Guid tenantId, Guid id, string name, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         Dashboard? d = await db.Dashboards.FirstOrDefaultAsync(x => x.Id == id && x.TenantId == tenantId, ct);
         if (d is null) return;
         d.Name = name; d.UpdatedAt = DateTime.UtcNow;
@@ -66,7 +67,7 @@ public class DashboardService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task SavePanelsAsync(Guid tenantId, Guid id, List<DashboardPanel> panels, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         Dashboard? d = await db.Dashboards.FirstOrDefaultAsync(x => x.Id == id && x.TenantId == tenantId, ct);
         if (d is null) return;
         d.PanelsJson = JsonSerializer.Serialize(panels);
@@ -76,7 +77,7 @@ public class DashboardService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task DeleteAsync(Guid tenantId, Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         await db.Dashboards.Where(d => d.Id == id && d.TenantId == tenantId).ExecuteDeleteAsync(ct);
     }
 

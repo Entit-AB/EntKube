@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -33,7 +34,7 @@ public record MeshReadiness(bool IsAmbient, int TotalPods, IReadOnlyList<string>
 /// <see cref="EvaluateReadiness"/> gates the change on every pod actually being in the mesh.
 /// </summary>
 public class MeshMtlsService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<ConnectivityDbContext> dbFactory,
     ILogger<MeshMtlsService> logger)
 {
     /// <summary>
@@ -55,7 +56,7 @@ public class MeshMtlsService(
     public async Task<List<MeshMtlsPolicy>> GetPoliciesAsync(
         Guid tenantId, Guid? clusterId = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         return await db.MeshMtlsPolicies
             .Where(p => p.TenantId == tenantId && (clusterId == null || p.ClusterId == clusterId))
@@ -69,7 +70,7 @@ public class MeshMtlsService(
     /// </summary>
     public async Task<MeshMtlsMode> GetModeAsync(Guid clusterId, string ns, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         MeshMtlsPolicy? policy = await db.MeshMtlsPolicies
             .FirstOrDefaultAsync(p => p.ClusterId == clusterId && p.Namespace == ns, ct);
@@ -83,7 +84,7 @@ public class MeshMtlsService(
         if (string.IsNullOrWhiteSpace(ns))
             throw new InvalidOperationException("Namespace is required.");
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         string trimmed = ns.Trim();
         MeshMtlsPolicy? policy = await db.MeshMtlsPolicies
@@ -118,7 +119,7 @@ public class MeshMtlsService(
     /// <summary>Records that the PeerAuthentication for a namespace was applied.</summary>
     public async Task MarkAppliedAsync(Guid clusterId, string ns, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         MeshMtlsPolicy? policy = await db.MeshMtlsPolicies
             .FirstOrDefaultAsync(p => p.ClusterId == clusterId && p.Namespace == ns, ct);

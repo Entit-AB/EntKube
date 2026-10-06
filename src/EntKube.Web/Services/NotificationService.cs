@@ -5,13 +5,14 @@ using MailKit.Security;
 using Microsoft.EntityFrameworkCore;
 using MimeKit;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 
 using EntKube.Web.Services.Outbound;
 namespace EntKube.Web.Services;
 
 public class NotificationService(
     IHttpClientFactory httpClientFactory,
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<TelemetryDbContext> dbFactory,
     IConfiguration configuration,
     ILogger<NotificationService> logger)
 {
@@ -66,7 +67,7 @@ public class NotificationService(
             logger.LogWarning(ex, "Notification failed for channel {Channel} ({Type})", channel.Name, channel.Type);
         }
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         db.NotificationDeliveries.Add(new NotificationDelivery
         {
             IncidentId = incident.Id,
@@ -91,7 +92,7 @@ public class NotificationService(
     public async Task<(int Notified, bool Success, string? Error)> DispatchSecretExpiryAsync(
         Guid tenantId, ExpiringSecretInfo secret, int thresholdDays, Guid? customerId = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
 
         List<NotificationChannel> channels = await db.NotificationChannels
             .Where(c => c.TenantId == tenantId && c.CustomerId == customerId && c.IsEnabled)
@@ -156,7 +157,7 @@ public class NotificationService(
     public async Task<(int Notified, bool Success, string? Error)> DispatchDigestAsync(
         Guid tenantId, string title, string body, string severity = "info", CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
 
         List<NotificationChannel> channels = await db.NotificationChannels
             .Where(c => c.TenantId == tenantId && c.CustomerId == null && c.IsEnabled)
@@ -298,7 +299,7 @@ public class NotificationService(
     /// </summary>
     public async Task<int> ReNotifyAsync(Guid incidentId, Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
 
         AlertIncident? incident = await db.AlertIncidents
             .Include(i => i.Cluster)
@@ -457,7 +458,7 @@ public class NotificationService(
         bool isFiring, CancellationToken ct)
     {
         NotificationProviderConfig? providerConfig;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (TelemetryDbContext db = dbFactory.CreateDbContext())
         {
             // The app registration belongs to the tenant that owns the channel. Posting with
             // another tenant's Graph credentials would be a cross-tenant leak, not a fallback.
@@ -575,7 +576,7 @@ public class NotificationService(
         string? smtpPass;
         bool enableSsl;
 
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (TelemetryDbContext db = dbFactory.CreateDbContext())
         {
             NotificationProviderConfig? providerConfig = await db.NotificationProviderConfigs
                 .FirstOrDefaultAsync(

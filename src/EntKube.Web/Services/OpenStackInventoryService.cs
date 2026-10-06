@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -67,7 +68,7 @@ public sealed record OpenStackInventory
 /// cloud you may want to provision into by hand.
 /// </summary>
 public class OpenStackInventoryService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<FleetDbContext> dbFactory,
     VaultService vaultService,
     OpenStackKeystoneClient keystone,
     OpenStackComputeService compute,
@@ -86,7 +87,7 @@ public class OpenStackInventoryService(
         // and tear down the wizard around it.
         try
         {
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
+            using FleetDbContext db = dbFactory.CreateDbContext();
 
             OpenStackConnection? connection = await db.OpenStackConnections
                 .FirstOrDefaultAsync(c => c.Id == connectionId && c.TenantId == tenantId, ct);

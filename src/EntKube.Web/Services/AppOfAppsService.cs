@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 using YamlDotNet.Core;
 using YamlDotNet.Serialization;
@@ -25,7 +26,7 @@ namespace EntKube.Web.Services;
 ///   spec.destination.server → matched to KubernetesCluster by ApiServerUrl
 /// </summary>
 public class AppOfAppsService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DeliveryDbContext> dbFactory,
     ILogger<AppOfAppsService> logger)
 {
     private static readonly IDeserializer Yaml = new DeserializerBuilder()
@@ -44,7 +45,7 @@ public class AppOfAppsService(
     {
         List<ArgoCdApplication> applications = ParseApplications(yamlFiles);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         // Load existing child deployments for this parent.
         List<AppDeployment> existing = await db.AppDeployments

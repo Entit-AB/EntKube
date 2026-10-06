@@ -11,6 +11,7 @@ namespace EntKube.Web.Data.Modules;
 /// </summary>
 public class IdentityDbContext(DbContextOptions<IdentityDbContext> options) : ModuleDbContext(options)
 {
+    public DbSet<IdentityBinding> IdentityBindings => Set<IdentityBinding>();
     public DbSet<ApplicationUser> ApplicationUsers => Set<ApplicationUser>();
     public DbSet<Tenant> Tenants => Set<Tenant>();
     public DbSet<TenantMembership> TenantMemberships => Set<TenantMembership>();

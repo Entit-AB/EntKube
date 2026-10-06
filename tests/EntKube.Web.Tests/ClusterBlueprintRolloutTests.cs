@@ -13,7 +13,7 @@ namespace EntKube.Web.Tests;
 public sealed class ClusterBlueprintRolloutTests : IDisposable
 {
     private readonly SqliteConnection connection;
-    private readonly IDbContextFactory<ApplicationDbContext> dbFactory;
+    private readonly TestDbContextFactory dbFactory;
     private readonly ClusterBlueprintService sut;
 
     private readonly Guid tenantId = Guid.NewGuid();

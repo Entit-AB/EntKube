@@ -1,5 +1,6 @@
 using System.Text;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Upgrades;
@@ -53,7 +54,7 @@ public sealed record ComponentUpgradeOutcome
 /// component at zero replicas would turn "the upgrade did not apply" into an outage.
 /// </summary>
 public class ComponentUpgradeRunner(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<CatalogDbContext> dbFactory,
     ComponentLifecycleService lifecycleService,
     ComponentInstallOrchestrator orchestrator,
     ReleaseVolumeGuard volumeGuard,
@@ -63,7 +64,7 @@ public class ComponentUpgradeRunner(
         ComponentUpgradeRequest request, CancellationToken ct = default)
     {
         ClusterComponent? component;
-        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        await using (CatalogDbContext db = await dbFactory.CreateDbContextAsync(ct))
         {
             component = await db.ClusterComponents
                 .Include(c => c.Cluster)

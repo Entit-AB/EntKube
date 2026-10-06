@@ -61,7 +61,7 @@ public class PostDeployRouteRefreshTests : IDisposable
     /// that is the code under test.
     /// </summary>
     private sealed class RecordingOpsService(
-        IDbContextFactory<ApplicationDbContext> dbFactory,
+        TestDbContextFactory dbFactory,
         ILogger<KubernetesOperationsService> logger,
         ClusterChangeGate gate,
         Func<Guid, KubernetesOperationResult<string>> applyBehaviour)

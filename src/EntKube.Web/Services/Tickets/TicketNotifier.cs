@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.Mail;
 using EntKube.Web.Services.Support;
 using MailKit.Net.Smtp;
@@ -28,7 +29,7 @@ namespace EntKube.Web.Services.Tickets;
 /// bookkeeping. Every failure here is logged and swallowed, and the ticket stands.</para>
 /// </summary>
 public class TicketNotifier(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<SupportDbContext> dbFactory,
     SmtpSettingsResolver smtp,
     OnCallService onCall,
     TicketReference references,
@@ -46,7 +47,7 @@ public class TicketNotifier(
     {
         try
         {
-            using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+            using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
             // The tenant's own support mail server first. It is where the address the receipt
             // comes from actually lives, so it is the only relay whose SPF and DKIM match the
@@ -142,7 +143,7 @@ public class TicketNotifier(
     {
         try
         {
-            using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+            using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
             SmtpSettings settings = await smtp.ResolveAsync(ticket.TenantId, ct);
 
@@ -196,7 +197,7 @@ public class TicketNotifier(
 
         try
         {
-            using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+            using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
             SmtpSettings settings = await smtp.ResolveAsync(ticket.TenantId, ct);
 
@@ -299,7 +300,7 @@ public class TicketNotifier(
     /// different desk.</para>
     /// </summary>
     private static async Task<string> SenderNameAsync(
-        ApplicationDbContext db, Ticket ticket, CancellationToken ct) =>
+        SupportDbContext db, Ticket ticket, CancellationToken ct) =>
         await db.Tenants.AsNoTracking()
             .Where(t => t.Id == ticket.TenantId).Select(t => t.Name).FirstOrDefaultAsync(ct)
             is string tenant && !string.IsNullOrWhiteSpace(tenant)
@@ -311,7 +312,7 @@ public class TicketNotifier(
     /// contact and their deputy.
     /// </summary>
     private static async Task<List<string>> DesignatedContactsAsync(
-        ApplicationDbContext db, Ticket ticket, CancellationToken ct) =>
+        SupportDbContext db, Ticket ticket, CancellationToken ct) =>
         await db.ContractContacts.AsNoTracking()
             .Where(c => c.CustomerId == ticket.CustomerId
                         && c.IsActive
@@ -331,7 +332,7 @@ public class TicketNotifier(
     /// generic address, and the routing that address exists for stops happening.</para>
     /// </summary>
     private static async Task<string> SenderAddressAsync(
-        ApplicationDbContext db, Ticket ticket, SmtpSettings settings, CancellationToken ct)
+        SupportDbContext db, Ticket ticket, SmtpSettings settings, CancellationToken ct)
     {
         string? theirs = await db.CustomerSupportAddresses.AsNoTracking()
             .Where(a => a.CustomerId == ticket.CustomerId && a.ReplyFromThis)

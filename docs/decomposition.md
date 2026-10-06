@@ -126,7 +126,8 @@ The structural weight concentrates on five tables:
 | `Environment` | 7 | Delivery |
 | `StorageLink` | 5 | DataServices |
 
-**`App` and `KubernetesCluster` are the two hubs of this schema** — 40 of the 94 structural
+**`App` and `KubernetesCluster` are the two hubs of this schema** — though see §4.0.1,
+which found that `KubernetesCluster`'s share is mostly not a hub at all but credential custody — — 40 of the 94 structural
 edges point at one or the other. Any decomposition has to treat them as shared reference
 data, which is another way of saying Delivery and Fleet are the two modules least able to
 leave.
@@ -147,6 +148,58 @@ It also sharpens the order of extraction, and corrects an impression:
 
 So the sequence in §6 stands, and Support-before-DataServices is now justified rather than
 asserted.
+
+### 4.0.1 The blocker this plan did not account for: who holds the kubeconfig
+
+Every one of the eighteen methods on `IKubernetesClientFactory` takes a `string kubeconfig`.
+So anything that applies a manifest, reads a pod or creates a namespace must first load the
+cluster row and pull the credential out of it.
+
+**508 places do, across 57 files and twelve of the thirteen modules.**
+
+| file | sites | | file | sites |
+|---|---|---|---|---|
+| `KubernetesOperationsService` | 72 | | `RabbitMQService` | 37 |
+| `CnpgService` | 48 | | `PrometheusService` | 20 |
+| `MongoService` | 47 | | `HeadscaleService` | 17 |
+| `ElasticsearchService` | 42 | | `ComponentLifecycleService` | 16 |
+
+Five files hold nearly half, which is also where converting pays best. By module it is
+DataServices ~236, Fleet ~99, Catalog ~52, then single and double figures elsewhere; only
+Fleet's share is unremarkable, because it owns clusters.
+
+*(First reported as 534/61. That count matched `.Kubeconfig` as text, which also caught
+`.KubeconfigSecretId` — a foreign key — and the `VaultSecretType.Kubeconfig` enum member.
+Thirty were those. Overstating a problem is no better than understating it.)*
+
+**This explains a measurement that previously looked like ordinary coupling.** §4.0 found
+`KubernetesCluster` read by 31 services across module boundaries and filed it under "hub".
+It is not a hub. Those services do not want a cluster's *name*; they want its *credentials*,
+because the factory signature makes every caller a custodian.
+
+It matters twice:
+
+- **As security.** A credential passing through twelve modules has twelve places it can be
+  logged, cached or mishandled.
+- **As architecture.** No module can stop depending on Fleet's cluster table while it needs
+  the kubeconfig out of it. `IFleetApi` deliberately carries no credential, which is correct —
+  and it means the contract cannot serve these 534 callers at all. **This is a hard blocker on
+  the remaining conversions, not a tidying job.**
+
+**The fix is now built, and unused.** `IClusterClient` is bound to one cluster and holds the
+credential itself; `IClusterClientFactory.ForAsync(tenantId, clusterId)` resolves it through
+Fleet's own context — tenant-scoped, and returning null rather than a `.Kubeconfig!` that
+throws further in for the two ordinary cases, a cluster that is not this tenant's and a cluster
+with no credential stored. Callers name a cluster by id and never see what is used to reach it.
+
+Migrating the 508 call sites onto it is the remaining work, best taken file by file starting
+with the five that hold half of them. `ClusterCredentialCustodyTests` ratchets the number so it
+cannot grow while that proceeds.
+
+**It also strengthens the case for §5's agent model.** An agent running *inside* the cluster
+needs no kubeconfig at all — there is nothing to hand out, because the work happens where the
+credentials already are. Credential custody was presented there as a side benefit of
+inverting control. On this measurement it is one of the main ones.
 
 ### 4.1 Modules (logical — inside the monolith first)
 

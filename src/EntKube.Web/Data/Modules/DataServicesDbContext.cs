@@ -11,6 +11,12 @@ namespace EntKube.Web.Data.Modules;
 /// </summary>
 public class DataServicesDbContext(DbContextOptions<DataServicesDbContext> options) : ModuleDbContext(options)
 {
+    public DbSet<StorageBinding> StorageBindings => Set<StorageBinding>();
+    public DbSet<ElasticsearchBinding> ElasticsearchBindings => Set<ElasticsearchBinding>();
+    public DbSet<KafkaBinding> KafkaBindings => Set<KafkaBinding>();
+    public DbSet<MessagingBinding> MessagingBindings => Set<MessagingBinding>();
+    public DbSet<CacheBinding> CacheBindings => Set<CacheBinding>();
+    public DbSet<DatabaseBinding> DatabaseBindings => Set<DatabaseBinding>();
     public DbSet<CnpgCluster> CnpgClusters => Set<CnpgCluster>();
     public DbSet<CnpgDatabase> CnpgDatabases => Set<CnpgDatabase>();
     public DbSet<CnpgBackup> CnpgBackups => Set<CnpgBackup>();

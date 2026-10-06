@@ -1,5 +1,6 @@
 using System.Net.Http;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Data.Sqlite;
@@ -71,22 +72,46 @@ public static class TestServices
 /// sharing the same in-memory SQLite connection. This ensures all contexts
 /// created by the factory see the same seeded test data.
 /// </summary>
-public sealed class TestDbContextFactory : IDbContextFactory<ApplicationDbContext>
+public sealed class TestDbContextFactory(SqliteConnection connection)
+    : IDbContextFactory<ApplicationDbContext>,
+      IDbContextFactory<IdentityDbContext>,
+      IDbContextFactory<FleetDbContext>,
+      IDbContextFactory<CatalogDbContext>,
+      IDbContextFactory<DataServicesDbContext>,
+      IDbContextFactory<MailDbContext>,
+      IDbContextFactory<DeliveryDbContext>,
+      IDbContextFactory<ConnectivityDbContext>,
+      IDbContextFactory<SecretsDbContext>,
+      IDbContextFactory<TelemetryDbContext>,
+      IDbContextFactory<CostDbContext>,
+      IDbContextFactory<SupportDbContext>,
+      IDbContextFactory<AdvisorDbContext>
 {
-    private readonly SqliteConnection connection;
+    public ApplicationDbContext CreateDbContext() => Create<ApplicationDbContext>();
 
-    public TestDbContextFactory(SqliteConnection connection)
-    {
-        this.connection = connection;
-    }
+    /// <summary>
+    /// One factory object satisfies every context, so a test does not have to care which one
+    /// the service it is building happens to take. As services move off ApplicationDbContext
+    /// onto their module's context — see docs/decomposition.md — these call sites do not
+    /// change, which is the point: the migration should not churn the tests.
+    /// </summary>
+    private TContext Create<TContext>() where TContext : DbContext
+        => (TContext)Activator.CreateInstance(
+            typeof(TContext),
+            new DbContextOptionsBuilder<TContext>().UseSqlite(connection).Options)!;
 
-    public ApplicationDbContext CreateDbContext()
-    {
-        DbContextOptions<ApplicationDbContext> options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseSqlite(connection)
-            .Options;
-        return new ApplicationDbContext(options);
-    }
+    IdentityDbContext IDbContextFactory<IdentityDbContext>.CreateDbContext() => Create<IdentityDbContext>();
+    FleetDbContext IDbContextFactory<FleetDbContext>.CreateDbContext() => Create<FleetDbContext>();
+    CatalogDbContext IDbContextFactory<CatalogDbContext>.CreateDbContext() => Create<CatalogDbContext>();
+    DataServicesDbContext IDbContextFactory<DataServicesDbContext>.CreateDbContext() => Create<DataServicesDbContext>();
+    MailDbContext IDbContextFactory<MailDbContext>.CreateDbContext() => Create<MailDbContext>();
+    DeliveryDbContext IDbContextFactory<DeliveryDbContext>.CreateDbContext() => Create<DeliveryDbContext>();
+    ConnectivityDbContext IDbContextFactory<ConnectivityDbContext>.CreateDbContext() => Create<ConnectivityDbContext>();
+    SecretsDbContext IDbContextFactory<SecretsDbContext>.CreateDbContext() => Create<SecretsDbContext>();
+    TelemetryDbContext IDbContextFactory<TelemetryDbContext>.CreateDbContext() => Create<TelemetryDbContext>();
+    CostDbContext IDbContextFactory<CostDbContext>.CreateDbContext() => Create<CostDbContext>();
+    SupportDbContext IDbContextFactory<SupportDbContext>.CreateDbContext() => Create<SupportDbContext>();
+    AdvisorDbContext IDbContextFactory<AdvisorDbContext>.CreateDbContext() => Create<AdvisorDbContext>();
 }
 
 /// <summary>
@@ -109,7 +134,7 @@ public sealed class InterceptingTestDb : IDisposable
     public KubeconfigResolver Resolver { get; }
 
     /// <summary>Creates contexts WITH the kubeconfig interceptor (use for the service under test).</summary>
-    public IDbContextFactory<ApplicationDbContext> Factory { get; }
+    public InterceptingFactory Factory { get; }
 
     public InterceptingTestDb(byte[] rootKey)
     {
@@ -163,15 +188,49 @@ public sealed class InterceptingTestDb : IDisposable
                 .Options);
     }
 
-    private sealed class InterceptingFactory(string connectionString, KubeconfigMaterializationInterceptor interceptor)
-        : IDbContextFactory<ApplicationDbContext>
+    /// <summary>
+    /// Satisfies every context, like <see cref="TestDbContextFactory"/> and for the same
+    /// reason — and every one of them carries the kubeconfig interceptor, because a module
+    /// context without it hands back a cluster whose Kubeconfig is silently null.
+    /// </summary>
+    public sealed class InterceptingFactory(string connectionString, KubeconfigMaterializationInterceptor interceptor)
+        : IDbContextFactory<ApplicationDbContext>,
+          IDbContextFactory<IdentityDbContext>,
+          IDbContextFactory<FleetDbContext>,
+          IDbContextFactory<CatalogDbContext>,
+          IDbContextFactory<DataServicesDbContext>,
+          IDbContextFactory<MailDbContext>,
+          IDbContextFactory<DeliveryDbContext>,
+          IDbContextFactory<ConnectivityDbContext>,
+          IDbContextFactory<SecretsDbContext>,
+          IDbContextFactory<TelemetryDbContext>,
+          IDbContextFactory<CostDbContext>,
+          IDbContextFactory<SupportDbContext>,
+          IDbContextFactory<AdvisorDbContext>
     {
-        public ApplicationDbContext CreateDbContext() =>
-            new(new DbContextOptionsBuilder<ApplicationDbContext>()
-                .UseSqlite(connectionString)
-                .AddInterceptors(interceptor)
-                .ConfigureWarnings(w => w.Ignore(CoreEventId.ManyServiceProvidersCreatedWarning))
-                .Options);
+        public ApplicationDbContext CreateDbContext() => Create<ApplicationDbContext>();
+
+        private TContext Create<TContext>() where TContext : DbContext
+            => (TContext)Activator.CreateInstance(
+                typeof(TContext),
+                new DbContextOptionsBuilder<TContext>()
+                    .UseSqlite(connectionString)
+                    .AddInterceptors(interceptor)
+                    .ConfigureWarnings(w => w.Ignore(CoreEventId.ManyServiceProvidersCreatedWarning))
+                    .Options)!;
+
+        IdentityDbContext IDbContextFactory<IdentityDbContext>.CreateDbContext() => Create<IdentityDbContext>();
+        FleetDbContext IDbContextFactory<FleetDbContext>.CreateDbContext() => Create<FleetDbContext>();
+        CatalogDbContext IDbContextFactory<CatalogDbContext>.CreateDbContext() => Create<CatalogDbContext>();
+        DataServicesDbContext IDbContextFactory<DataServicesDbContext>.CreateDbContext() => Create<DataServicesDbContext>();
+        MailDbContext IDbContextFactory<MailDbContext>.CreateDbContext() => Create<MailDbContext>();
+        DeliveryDbContext IDbContextFactory<DeliveryDbContext>.CreateDbContext() => Create<DeliveryDbContext>();
+        ConnectivityDbContext IDbContextFactory<ConnectivityDbContext>.CreateDbContext() => Create<ConnectivityDbContext>();
+        SecretsDbContext IDbContextFactory<SecretsDbContext>.CreateDbContext() => Create<SecretsDbContext>();
+        TelemetryDbContext IDbContextFactory<TelemetryDbContext>.CreateDbContext() => Create<TelemetryDbContext>();
+        CostDbContext IDbContextFactory<CostDbContext>.CreateDbContext() => Create<CostDbContext>();
+        SupportDbContext IDbContextFactory<SupportDbContext>.CreateDbContext() => Create<SupportDbContext>();
+        AdvisorDbContext IDbContextFactory<AdvisorDbContext>.CreateDbContext() => Create<AdvisorDbContext>();
     }
 }
 

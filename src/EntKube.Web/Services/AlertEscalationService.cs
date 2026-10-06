@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 
 namespace EntKube.Web.Services;
 
@@ -39,12 +40,12 @@ public class AlertEscalationService(
         DateTime cutoff = DateTime.UtcNow.AddMinutes(-thresholdMinutes);
 
         using IServiceScope scope = scopeFactory.CreateScope();
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<TelemetryDbContext>>();
         var notificationService = scope.ServiceProvider.GetRequiredService<NotificationService>();
 
         // Load candidates: Active, un-escalated, past threshold, critical or warning
         List<IncidentRef> candidates;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (TelemetryDbContext db = dbFactory.CreateDbContext())
         {
             var rows = await db.AlertIncidents
                 .Include(i => i.Cluster)
@@ -69,7 +70,7 @@ public class AlertEscalationService(
             {
                 int notified = await notificationService.ReNotifyAsync(c.Id, c.TenantId, ct);
 
-                using ApplicationDbContext db = dbFactory.CreateDbContext();
+                using TelemetryDbContext db = dbFactory.CreateDbContext();
                 AlertIncident? incident = await db.AlertIncidents.FindAsync([c.Id], ct);
                 if (incident is null) continue;
 

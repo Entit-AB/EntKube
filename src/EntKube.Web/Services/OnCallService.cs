@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.Support;
 
 namespace EntKube.Web.Services;
@@ -28,7 +29,7 @@ public enum SubconsultantApproval
     Objected = 3,
 }
 
-public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
 {
     /// <summary>
     /// The working days §18 gives the customer to object to a subconsultant before the
@@ -43,7 +44,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
     public async Task<List<OnCallShift>> WhoIsOnCallAsync(
         Guid tenantId, DateTime at, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
 
         return await db.OnCallShifts
             .Include(sh => sh.Schedule)
@@ -70,7 +71,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
     public async Task<List<CoverageGap>> GetCoverageGapsAsync(
         Guid scheduleId, DateTime from, DateTime to, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
 
         OnCallSchedule? schedule = await db.OnCallSchedules
             .Include(s => s.Shifts)
@@ -136,7 +137,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
     public async Task<List<Subconsultant>> GetSubconsultantsAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
 
         return await db.Subconsultants.AsNoTracking()
             .Where(c => c.TenantId == tenantId)
@@ -148,7 +149,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
     public async Task<Subconsultant> SaveSubconsultantAsync(
         Subconsultant subconsultant, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
 
         subconsultant.UpdatedAt = DateTime.UtcNow;
 
@@ -177,7 +178,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
     public async Task<List<Subconsultant>> GetSubconsultantsForCustomerAsync(
         Guid tenantId, Guid customerId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
 
         return await db.Subconsultants.AsNoTracking()
             .Where(c => c.TenantId == tenantId
@@ -194,7 +195,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
     public async Task ApproveSubconsultantAsync(
         Guid id, DateTime at, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
 
         Subconsultant? person = await db.Subconsultants.FirstOrDefaultAsync(c => c.Id == id, ct);
 
@@ -228,7 +229,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
                 nameof(reason));
         }
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
 
         Subconsultant? person = await db.Subconsultants.FirstOrDefaultAsync(c => c.Id == id, ct);
 
@@ -292,7 +293,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task<List<OnCallSchedule>> GetSchedulesAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
         return await db.OnCallSchedules
             .Include(s => s.Shifts.OrderBy(sh => sh.StartsAt))
             .Where(s => s.TenantId == tenantId)
@@ -302,7 +303,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task<OnCallSchedule?> GetScheduleAsync(Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
         return await db.OnCallSchedules
             .Include(s => s.Shifts.OrderBy(sh => sh.StartsAt))
             .FirstOrDefaultAsync(s => s.Id == id, ct);
@@ -310,7 +311,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task<Guid> CreateScheduleAsync(Guid tenantId, string name, string? description, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
         OnCallSchedule schedule = new()
         {
             TenantId = tenantId,
@@ -324,7 +325,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task UpdateScheduleAsync(Guid id, string name, string? description, bool isEnabled, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
         OnCallSchedule? schedule = await db.OnCallSchedules.FindAsync([id], ct);
         if (schedule is null) return;
 
@@ -336,7 +337,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task DeleteScheduleAsync(Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
         OnCallSchedule? schedule = await db.OnCallSchedules.FindAsync([id], ct);
         if (schedule is not null) db.OnCallSchedules.Remove(schedule);
         await db.SaveChangesAsync(ct);
@@ -367,7 +368,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
         Guid? subconsultantId = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
 
         if (subconsultantId is Guid id)
         {
@@ -412,7 +413,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
     public async Task RecordHandoverAsync(
         Guid shiftId, string? notes, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
 
         OnCallShift? shift = await db.OnCallShifts.FirstOrDefaultAsync(sh => sh.Id == shiftId, ct);
 
@@ -427,7 +428,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task DeleteShiftAsync(Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
         OnCallShift? shift = await db.OnCallShifts.FindAsync([id], ct);
         if (shift is not null) db.OnCallShifts.Remove(shift);
         await db.SaveChangesAsync(ct);
@@ -435,7 +436,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task<OnCallShift?> GetCurrentOnCallAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
         DateTime now = DateTime.UtcNow;
         return await db.OnCallShifts
             .Include(sh => sh.Schedule)
@@ -449,7 +450,7 @@ public class OnCallService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task<List<OnCallShift>> GetUpcomingShiftsAsync(Guid tenantId, int days = 7, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SupportDbContext db = dbFactory.CreateDbContext();
         DateTime now = DateTime.UtcNow;
         DateTime horizon = now.AddDays(days);
         return await db.OnCallShifts

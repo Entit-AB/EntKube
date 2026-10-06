@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using k8s;
 using k8s.Models;
 using Microsoft.EntityFrameworkCore;
@@ -33,7 +34,7 @@ public record AlertRemediation(
 /// Node-level actions (drain, cordon) are excluded.
 /// </summary>
 public class RemediationService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<FleetDbContext> dbFactory,
     AuditService auditService,
     ILogger<RemediationService> logger)
 {
@@ -98,7 +99,7 @@ public class RemediationService(
         string? performedBy = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster? cluster = await db.KubernetesClusters
             .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
 

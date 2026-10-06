@@ -3,6 +3,7 @@ using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 using EntKube.Agents.Protocol;
 
@@ -20,7 +21,7 @@ namespace EntKube.Web.Services.Agents;
 /// the healthiest one is chosen per stream.
 /// </summary>
 public sealed class AgentRegistry(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<FleetDbContext> dbFactory,
     ILogger<AgentRegistry> logger) : IAsyncDisposable
 {
     private readonly ConcurrentDictionary<Guid, List<AgentConnection>> connections = new();
@@ -51,7 +52,7 @@ public sealed class AgentRegistry(
 
         string hash = HashToken(token);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
 
         return await db.EgressAgents
             .FirstOrDefaultAsync(a => a.TokenHash == hash && a.IsEnabled, ct);
@@ -148,7 +149,7 @@ public sealed class AgentRegistry(
     {
         try
         {
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
+            using FleetDbContext db = dbFactory.CreateDbContext();
 
             EgressAgent? agent = await db.EgressAgents.FirstOrDefaultAsync(a => a.Id == agentId, ct);
             if (agent is null) return;

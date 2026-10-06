@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -26,7 +27,7 @@ namespace EntKube.Web.Services;
 /// </list>
 /// </summary>
 public class OutboundMtlsService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<ConnectivityDbContext> dbFactory,
     VaultService vault,
     ILogger<OutboundMtlsService> logger)
 {
@@ -35,7 +36,7 @@ public class OutboundMtlsService(
     public async Task<List<OutboundMtlsCredential>> GetForAppAsync(
         Guid appId, Guid? environmentId = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         return await db.OutboundMtlsCredentials
             .Where(c => c.AppId == appId
@@ -46,7 +47,7 @@ public class OutboundMtlsService(
 
     public async Task<OutboundMtlsCredential?> GetAsync(Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         return await db.OutboundMtlsCredentials.FirstOrDefaultAsync(c => c.Id == id, ct);
     }
@@ -56,7 +57,7 @@ public class OutboundMtlsService(
     {
         Validate(credential);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         string name = SanitizeName(credential.Name);
         bool duplicate = await db.OutboundMtlsCredentials
@@ -91,7 +92,7 @@ public class OutboundMtlsService(
     {
         Validate(credential);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         OutboundMtlsCredential existing = await db.OutboundMtlsCredentials
             .FirstOrDefaultAsync(c => c.Id == credential.Id, ct)
@@ -111,7 +112,7 @@ public class OutboundMtlsService(
 
     public async Task DeleteAsync(Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         OutboundMtlsCredential? credential = await db.OutboundMtlsCredentials
             .FirstOrDefaultAsync(c => c.Id == id, ct);

@@ -2,6 +2,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -63,7 +64,7 @@ public class OpenStackKeystoneClient(
     OpenStackHttpFactory httpFactory,
     VaultService vaultService,
     ClusterEgressTunnel egressTunnel,
-    IDbContextFactory<ApplicationDbContext> dbFactory)
+    IDbContextFactory<FleetDbContext> dbFactory)
 {
     /// <summary>Vault key holding the proxy password for an OpenStack connection.</summary>
     public const string ProxyPasswordSecretName = "OS_PROXY_PASSWORD";
@@ -113,7 +114,7 @@ public class OpenStackKeystoneClient(
     /// </summary>
     private async Task<string> LoadKubeconfigAsync(Guid clusterId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
 
         KubernetesCluster? cluster = await db.KubernetesClusters
             .FirstOrDefaultAsync(c => c.Id == clusterId, ct);

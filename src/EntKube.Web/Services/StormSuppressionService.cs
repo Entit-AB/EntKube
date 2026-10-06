@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 
 namespace EntKube.Web.Services;
 
@@ -14,7 +15,7 @@ namespace EntKube.Web.Services;
 /// Both incident-dispatch paths (telemetry <see cref="IncidentDispatcher"/> and the
 /// Prometheus <see cref="AlertSyncService"/>) run their firing lists through this first.
 /// </summary>
-public class StormSuppressionService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class StormSuppressionService(IDbContextFactory<TelemetryDbContext> dbFactory)
 {
     /// <summary>How long after paging a group we stay quiet about it, even if it keeps firing.</summary>
     private static readonly TimeSpan Cooldown = TimeSpan.FromMinutes(30);
@@ -36,7 +37,7 @@ public class StormSuppressionService(IDbContextFactory<ApplicationDbContext> dbF
         DateTime cutoff = DateTime.UtcNow - Cooldown;
         HashSet<Guid> clusterIds = firing.Select(i => i.ClusterId).ToHashSet();
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         var recent = await db.NotificationDeliveries
             .Where(d => d.IsFiring && d.Success && d.SentAt >= cutoff
                      && clusterIds.Contains(d.Incident.ClusterId))

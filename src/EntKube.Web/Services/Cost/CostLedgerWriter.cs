@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Cost;
@@ -44,7 +45,7 @@ public sealed record CostLedgerWriteResult
 /// <see cref="CostLedgerCoverage"/> rather than papered over.</para>
 /// </summary>
 public class CostLedgerWriter(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<CostDbContext> dbFactory,
     ILogger<CostLedgerWriter> logger)
 {
     /// <summary>
@@ -60,7 +61,7 @@ public class CostLedgerWriter(
         DateTime now,
         CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Dictionary<Guid, List<NamespaceCost>> measured = report.Namespaces
             .GroupBy(n => n.ClusterId)
@@ -282,7 +283,7 @@ public class CostLedgerWriter(
 
         DateTime cutoff = CostAccrual.DayOf(now).AddDays(-retentionDays);
 
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         int removed = await db.CostLedgerEntries.Where(e => e.Day < cutoff).ExecuteDeleteAsync(ct);
         removed += await db.CostLedgerCoverages.Where(c => c.Day < cutoff).ExecuteDeleteAsync(ct);
@@ -297,7 +298,7 @@ public class CostLedgerWriter(
     }
 
     private static async Task<CostLedgerCoverage> GetOrCreateCoverageAsync(
-        ApplicationDbContext db, Guid tenantId, Guid clusterId, string clusterName,
+        CostDbContext db, Guid tenantId, Guid clusterId, string clusterName,
         DateTime day, DateTime now, CancellationToken ct)
     {
         CostLedgerCoverage? coverage = db.ChangeTracker

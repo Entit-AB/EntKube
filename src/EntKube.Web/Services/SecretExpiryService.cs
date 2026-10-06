@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -12,7 +13,7 @@ namespace EntKube.Web.Services;
 /// notification channels via <see cref="NotificationService.DispatchSecretExpiryAsync"/>.
 /// </summary>
 public class SecretExpiryService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<SecretsDbContext> dbFactory,
     VaultService vault,
     NotificationService notifications,
     ILogger<SecretExpiryService> logger)
@@ -24,7 +25,7 @@ public class SecretExpiryService(
     public async Task<SecretExpiryNotificationConfig> GetConfigAsync(
         Guid tenantId, Guid? customerId = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
         SecretExpiryNotificationConfig? config = await db.SecretExpiryNotificationConfigs
             .FirstOrDefaultAsync(c => c.TenantId == tenantId && c.CustomerId == customerId, ct);
         return config ?? new SecretExpiryNotificationConfig { TenantId = tenantId, CustomerId = customerId };
@@ -34,7 +35,7 @@ public class SecretExpiryService(
     public async Task SaveConfigAsync(
         Guid tenantId, Guid? customerId, bool enabled, string thresholdDaysCsv, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
         SecretExpiryNotificationConfig? config = await db.SecretExpiryNotificationConfigs
             .FirstOrDefaultAsync(c => c.TenantId == tenantId && c.CustomerId == customerId, ct);
 
@@ -68,7 +69,7 @@ public class SecretExpiryService(
     public async Task<List<SecretExpiryNotification>> GetHistoryAsync(
         Guid tenantId, Guid? customerId = null, int take = 50, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
         return await db.SecretExpiryNotifications
             .Where(n => n.TenantId == tenantId && n.CustomerId == customerId)
             .OrderByDescending(n => n.SentAt)
@@ -110,7 +111,7 @@ public class SecretExpiryService(
 
         // Successful notices already sent for this scope, for dedupe.
         HashSet<(Guid, int, DateTime)> alreadySent;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (SecretsDbContext db = dbFactory.CreateDbContext())
         {
             alreadySent = (await db.SecretExpiryNotifications
                     .Where(n => n.TenantId == tenantId && n.CustomerId == customerId && n.Success)
@@ -148,7 +149,7 @@ public class SecretExpiryService(
     {
         (int notified, bool success, string? error) = await notifications.DispatchSecretExpiryAsync(tenantId, secret, thresholdDays, customerId, ct);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using SecretsDbContext db = dbFactory.CreateDbContext();
         db.SecretExpiryNotifications.Add(new SecretExpiryNotification
         {
             Id = Guid.NewGuid(),
