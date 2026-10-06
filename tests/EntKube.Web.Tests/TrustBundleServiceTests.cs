@@ -4,6 +4,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services;
 using EntKube.Web.Services.ClusterChanges;
 using FluentAssertions;
+using Moq;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
@@ -19,7 +20,7 @@ namespace EntKube.Web.Tests;
 public sealed class TrustBundleServiceTests : IDisposable
 {
     private readonly SqliteConnection connection;
-    private readonly IDbContextFactory<ApplicationDbContext> dbFactory;
+    private readonly TestDbContextFactory dbFactory;
     private readonly TrustBundleService sut;
     private readonly Guid tenantId = Guid.NewGuid();
     private readonly Guid clusterId = Guid.NewGuid();
@@ -33,7 +34,11 @@ public sealed class TrustBundleServiceTests : IDisposable
             db.Database.EnsureCreated();
 
         ClusterChangeGate gate = new(new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
-        sut = new TrustBundleService(dbFactory, gate, NullLogger<TrustBundleService>.Instance);
+        sut = new TrustBundleService(
+            dbFactory,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(
+                dbFactory, new Mock<IKubernetesClientFactory>().Object),
+            gate, NullLogger<TrustBundleService>.Instance);
     }
 
     // ── Manifest generation ──────────────────────────────────────────────────

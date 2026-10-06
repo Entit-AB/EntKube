@@ -128,7 +128,7 @@ public class MongoServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         // Act — create a new managed MongoDB cluster.
 
@@ -160,7 +160,7 @@ public class MongoServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         // Act — create without backup configuration.
 
@@ -224,7 +224,7 @@ public class MongoServiceTests : IDisposable
                 appliedManifests.Add(manifest);
                 appliedKubeconfig = kubeconfig;
             })
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         // Act
 
@@ -253,7 +253,7 @@ public class MongoServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         k8sFactory.Setup(f => f.DeleteManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
@@ -284,7 +284,7 @@ public class MongoServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.CreateClusterAsync(tenant.Id, cluster.Id, "mongo-1", "ns1", 3, "10Gi", null, null);
         await sut.CreateClusterAsync(tenant.Id, cluster.Id, "mongo-2", "ns2", 1, "5Gi", null, null);
@@ -310,7 +310,7 @@ public class MongoServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         // CreateDatabaseAsync runs a mongosh script and checks stdout for the
         // ENTK_SUCCESS sentinel before marking the database Ready.
@@ -348,7 +348,7 @@ public class MongoServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         MongoCluster mongoCluster = await sut.CreateClusterAsync(
             tenant.Id, cluster.Id, "backup-test", "databases", 3, "10Gi",
@@ -440,7 +440,7 @@ public class MongoServiceTests : IDisposable
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((manifest, _, _) => applied.Add(manifest))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         await sut.UpdateBackupSettingsAsync(tenant.Id, mongo.Id, "0 0 2 * * *", 30, 20);
 

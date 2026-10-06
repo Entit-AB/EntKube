@@ -14,7 +14,11 @@ public interface IKubernetesClientFactory
     /// Applies a YAML manifest to a Kubernetes cluster using the given kubeconfig.
     /// Equivalent to "kubectl apply -f -" with the manifest piped in.
     /// </summary>
-    Task ApplyManifestAsync(string manifest, string kubeconfig, CancellationToken ct = default);
+    /// <returns>
+    /// kubectl's output. Returned rather than discarded because callers that logged it kept their
+    /// own copy of this method in order to see it — see TrustBundleService before this change.
+    /// </returns>
+    Task<string> ApplyManifestAsync(string manifest, string kubeconfig, CancellationToken ct = default);
 
     /// <summary>
     /// Deletes a specific Kubernetes resource by kind/name/namespace.

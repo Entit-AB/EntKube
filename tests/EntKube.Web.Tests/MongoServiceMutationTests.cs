@@ -112,7 +112,7 @@ public class MongoServiceMutationTests : IDisposable
         k8s.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => Applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         k8s.Setup(f => f.PatchJsonAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),

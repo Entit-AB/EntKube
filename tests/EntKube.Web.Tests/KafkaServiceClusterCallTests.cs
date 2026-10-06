@@ -39,7 +39,7 @@ public class KafkaServiceClusterCallTests : IDisposable
         k8s.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
-            .Returns(Task.CompletedTask);
+            .ReturnsAsync(string.Empty);
 
         // Real factory over the intercepting test database — the vault-seeded kubeconfig resolves
         // as production resolves it, then reaches the same mock, so these assertions hold across

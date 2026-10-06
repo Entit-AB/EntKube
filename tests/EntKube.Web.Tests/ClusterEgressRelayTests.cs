@@ -247,7 +247,7 @@ public class ClusterEgressRelayTests
         string? applied = null;
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
            .Callback<string, string, CancellationToken>((m, _, _) => applied = m)
-           .Returns(Task.CompletedTask);
+           .ReturnsAsync(string.Empty);
 
         await CreateRelay(k8s).EnsureAsync("kubeconfig", ["https://identity.example.com:5000/v3"]);
 
@@ -269,7 +269,7 @@ public class ClusterEgressRelayTests
         string? applied = null;
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
            .Callback<string, string, CancellationToken>((m, _, _) => applied = m)
-           .Returns(Task.CompletedTask);
+           .ReturnsAsync(string.Empty);
 
         await CreateRelay(k8s).EnsureAsync("kubeconfig", ["identity.example.com"]);
 
