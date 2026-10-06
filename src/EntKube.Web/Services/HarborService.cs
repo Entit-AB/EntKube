@@ -618,7 +618,7 @@ public class HarborService(
             return RedisEndpointUnusable(malformed, config is null);
         }
 
-        bool? exists = await redisService.InClusterServiceExistsAsync(component.ClusterId, endpoint, ct);
+        bool? exists = await redisService.InClusterServiceExistsAsync(tenantId, component.ClusterId, endpoint, ct);
 
         return exists == false ? RedisEndpointMissing(endpoint.Trim(), config is null) : null;
     }
