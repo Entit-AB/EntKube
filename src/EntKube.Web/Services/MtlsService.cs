@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -35,7 +36,7 @@ namespace EntKube.Web.Services;
 /// points at an existing PKI); we store the public CA material and trust it.
 /// </summary>
 public class MtlsService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<ConnectivityDbContext> dbFactory,
     ILogger<MtlsService> logger)
 {
     /// <summary>
@@ -73,7 +74,7 @@ public class MtlsService(
 
     public async Task<List<ClientCaBundle>> GetBundlesAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         return await db.ClientCaBundles
             .Include(b => b.Certificates)
@@ -84,7 +85,7 @@ public class MtlsService(
 
     public async Task<ClientCaBundle?> GetBundleAsync(Guid bundleId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         return await db.ClientCaBundles
             .Include(b => b.Certificates)
@@ -105,7 +106,7 @@ public class MtlsService(
                 "client certificates — putting a CA there would demand one from all of them — and 15000-15100 " +
                 "is reserved by Istio.");
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         string trimmed = name.Trim();
         bool duplicate = await db.ClientCaBundles.AnyAsync(b => b.TenantId == tenantId && b.Name == trimmed, ct);
@@ -136,7 +137,7 @@ public class MtlsService(
         if (!IsUsableListenerPort(listenerPort))
             throw new InvalidOperationException($"Port {listenerPort} can't serve mTLS.");
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         ClientCaBundle bundle = await db.ClientCaBundles.FirstOrDefaultAsync(b => b.Id == bundleId, ct)
             ?? throw new InvalidOperationException("Trust anchor not found.");
@@ -155,7 +156,7 @@ public class MtlsService(
     /// </summary>
     public async Task DeleteBundleAsync(Guid bundleId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         ClientCaBundle bundle = await db.ClientCaBundles
             .Include(b => b.Routes)
@@ -184,7 +185,7 @@ public class MtlsService(
 
         ParsedCa parsed = ParseCa(pem);
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         bool exists = await db.ClientCaBundles.AnyAsync(b => b.Id == bundleId, ct);
         if (!exists)
@@ -213,7 +214,7 @@ public class MtlsService(
 
     public async Task RemoveCertificateAsync(Guid certificateId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         ClientCaCertificate? cert = await db.ClientCaCertificates
             .FirstOrDefaultAsync(c => c.Id == certificateId, ct);

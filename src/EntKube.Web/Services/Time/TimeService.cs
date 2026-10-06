@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.Contracts;
 using Microsoft.EntityFrameworkCore;
 
@@ -90,7 +91,7 @@ public readonly record struct CommittedHoursStatement(
 /// time category — and nothing beyond it.</para>
 /// </summary>
 public class TimeService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<SupportDbContext> dbFactory,
     ContractService contracts)
 {
     /// <summary>Records a stretch of work.</summary>
@@ -125,7 +126,7 @@ public class TimeService(
             PerformedBy = performedBy,
         };
 
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         db.TimeEntries.Add(entry);
         await db.SaveChangesAsync(ct);
@@ -135,7 +136,7 @@ public class TimeService(
 
     public async Task DeleteAsync(Guid entryId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         TimeEntry? entry = await db.TimeEntries.FindAsync([entryId], ct);
         if (entry is not null)
@@ -149,7 +150,7 @@ public class TimeService(
     public async Task<WorkAuthorisation> AuthoriseAsync(
         WorkAuthorisation authorisation, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         authorisation.Id = authorisation.Id == Guid.Empty ? Guid.NewGuid() : authorisation.Id;
         authorisation.ApprovedAt = authorisation.ApprovedAt == default
@@ -204,7 +205,7 @@ public class TimeService(
     public async Task<CommittedHoursStatement> GetCommittedHoursAsync(
         Guid customerId, DateTime from, DateTime to, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Dictionary<Guid, string> appNames = await db.Apps.AsNoTracking()
             .Where(a => a.CustomerId == customerId)
@@ -260,7 +261,7 @@ public class TimeService(
     public async Task<IReadOnlyList<WorkPass>> PassesAsync(
         Guid customerId, DateTime from, DateTime to, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         List<TimeEntry> entries = await EntriesAsync(db, customerId, from, to, ct);
 
@@ -273,7 +274,7 @@ public class TimeService(
     }
 
     private static Task<List<TimeEntry>> EntriesAsync(
-        ApplicationDbContext db, Guid customerId, DateTime from, DateTime to, CancellationToken ct) =>
+        SupportDbContext db, Guid customerId, DateTime from, DateTime to, CancellationToken ct) =>
         db.TimeEntries.AsNoTracking()
             .Where(e => e.CustomerId == customerId && e.StartedAt >= from && e.StartedAt < to)
             .OrderBy(e => e.StartedAt)
@@ -287,7 +288,7 @@ public class TimeService(
     /// somebody should have got a yes for — worth surfacing before the invoice does it.</para>
     /// </summary>
     private async Task<decimal> UnauthorisedHoursAsync(
-        ApplicationDbContext db,
+        SupportDbContext db,
         Guid customerId,
         DateTime month,
         IReadOnlyList<WorkPass> passes,
@@ -318,7 +319,7 @@ public class TimeService(
     /// would otherwise read as nothing having happened.</para>
     /// </summary>
     private static async Task<List<string>> CappedAppsAsync(
-        ApplicationDbContext db,
+        SupportDbContext db,
         Guid customerId,
         DateTime month,
         IReadOnlyList<WorkPass> passes,
@@ -340,7 +341,7 @@ public class TimeService(
 
     /// <summary>§11.1: hours drawn past the portfolio's bank, without approval.</summary>
     private static async Task<decimal> BeyondTheBankAsync(
-        ApplicationDbContext db,
+        SupportDbContext db,
         Guid customerId,
         DateTime month,
         PortfolioAgreement agreement,
@@ -423,7 +424,7 @@ public class TimeService(
     /// by totals would let one urgent hour excuse a month of them.</para>
     /// </summary>
     private static async Task<decimal> BeyondTheCapsAsync(
-        ApplicationDbContext db,
+        SupportDbContext db,
         Guid customerId,
         DateTime month,
         IReadOnlyList<WorkPass> passes,

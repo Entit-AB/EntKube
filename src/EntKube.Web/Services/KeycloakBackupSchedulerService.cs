@@ -1,6 +1,7 @@
 using Cronos;
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 
 namespace EntKube.Web.Services;
 
@@ -34,11 +35,11 @@ public class KeycloakBackupSchedulerService(
     private async Task RunDueBackupsAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<IdentityDbContext>>();
 
         List<ScheduledRealm> realms;
         Dictionary<Guid, KeycloakBackup> latestByRealm;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (IdentityDbContext db = dbFactory.CreateDbContext())
         {
             realms = await db.KeycloakRealms
                 .Where(r => r.BackupSchedule != null && r.BackupSchedule != "" && r.StorageLinkId != null)

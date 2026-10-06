@@ -1,13 +1,14 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 
 namespace EntKube.Web.Services;
 
-public class AlertRoutingService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class AlertRoutingService(IDbContextFactory<TelemetryDbContext> dbFactory)
 {
     public async Task<List<AlertRoutingRule>> GetRulesAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         return await db.AlertRoutingRules
             .Include(r => r.Channel)
             .Where(r => r.TenantId == tenantId)
@@ -22,7 +23,7 @@ public class AlertRoutingService(IDbContextFactory<ApplicationDbContext> dbFacto
         bool suppressIncident = false, Guid? matchClusterId = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         AlertRoutingRule rule = new()
         {
             TenantId = tenantId,
@@ -48,7 +49,7 @@ public class AlertRoutingService(IDbContextFactory<ApplicationDbContext> dbFacto
         bool suppressIncident = false, Guid? matchClusterId = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         AlertRoutingRule? rule = await db.AlertRoutingRules.FindAsync([id], ct);
         if (rule is null) return;
 
@@ -68,7 +69,7 @@ public class AlertRoutingService(IDbContextFactory<ApplicationDbContext> dbFacto
 
     public async Task DeleteRuleAsync(Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         AlertRoutingRule? rule = await db.AlertRoutingRules.FindAsync([id], ct);
         if (rule is not null) db.AlertRoutingRules.Remove(rule);
         await db.SaveChangesAsync(ct);

@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -9,7 +10,7 @@ namespace EntKube.Web.Services;
 /// encrypted with the tenant DEK before being persisted.
 /// </summary>
 public class GitRepositoryService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DeliveryDbContext> dbFactory,
     VaultService vault,
     GitOperationsService gitOps)
 {
@@ -18,7 +19,7 @@ public class GitRepositoryService(
     public async Task<List<GitRepository>> GetRepositoriesAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         return await db.GitRepositories
             .Where(r => r.TenantId == tenantId)
@@ -29,7 +30,7 @@ public class GitRepositoryService(
     public async Task<GitRepository?> GetRepositoryAsync(
         Guid tenantId, Guid repoId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         return await db.GitRepositories
             .FirstOrDefaultAsync(r => r.TenantId == tenantId && r.Id == repoId, ct);
@@ -47,7 +48,7 @@ public class GitRepositoryService(
         GitAuthType authType, string? username = null, string defaultBranch = "main",
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         GitRepository repo = new()
         {
@@ -71,7 +72,7 @@ public class GitRepositoryService(
         string? username, string defaultBranch,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         GitRepository? repo = await db.GitRepositories
             .FirstOrDefaultAsync(r => r.TenantId == tenantId && r.Id == repoId, ct);
@@ -91,7 +92,7 @@ public class GitRepositoryService(
     public async Task<bool> DeleteRepositoryAsync(
         Guid tenantId, Guid repoId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         GitRepository? repo = await db.GitRepositories
             .FirstOrDefaultAsync(r => r.TenantId == tenantId && r.Id == repoId, ct);
@@ -153,7 +154,7 @@ public class GitRepositoryService(
     public async Task<List<GitKnownHost>> GetKnownHostsAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         return await db.GitKnownHosts
             .Where(h => h.TenantId == tenantId)
@@ -164,7 +165,7 @@ public class GitRepositoryService(
     public async Task<bool> RemoveKnownHostAsync(
         Guid tenantId, Guid knownHostId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         GitKnownHost? host = await db.GitKnownHosts
             .FirstOrDefaultAsync(h => h.TenantId == tenantId && h.Id == knownHostId, ct);

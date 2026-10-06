@@ -4,6 +4,7 @@ using MailKit.Security;
 using Microsoft.EntityFrameworkCore;
 using MimeKit;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 
 namespace EntKube.Web.Services;
 
@@ -14,12 +15,12 @@ namespace EntKube.Web.Services;
 /// asking for one without saying whose would quietly hand back some other tenant's mail
 /// credentials, so the parameter is required rather than optional.</para>
 /// </summary>
-public class NotificationProviderConfigService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class NotificationProviderConfigService(IDbContextFactory<TelemetryDbContext> dbFactory)
 {
     public async Task<NotificationProviderConfig?> GetAsync(
         Guid tenantId, NotificationProviderType type, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         return await db.NotificationProviderConfigs
             .FirstOrDefaultAsync(c => c.TenantId == tenantId && c.ProviderType == type, ct);
     }
@@ -27,7 +28,7 @@ public class NotificationProviderConfigService(IDbContextFactory<ApplicationDbCo
     public async Task<List<NotificationProviderConfig>> GetAllAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         return await db.NotificationProviderConfigs
             .Where(c => c.TenantId == tenantId)
             .ToListAsync(ct);
@@ -37,7 +38,7 @@ public class NotificationProviderConfigService(IDbContextFactory<ApplicationDbCo
         Guid tenantId, NotificationProviderType type, string configJson, bool isEnabled,
         string? userId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         NotificationProviderConfig? existing = await db.NotificationProviderConfigs
             .FirstOrDefaultAsync(c => c.TenantId == tenantId && c.ProviderType == type, ct);
 
@@ -67,7 +68,7 @@ public class NotificationProviderConfigService(IDbContextFactory<ApplicationDbCo
     public async Task DeleteAsync(
         Guid tenantId, NotificationProviderType type, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         NotificationProviderConfig? config = await db.NotificationProviderConfigs
             .FirstOrDefaultAsync(c => c.TenantId == tenantId && c.ProviderType == type, ct);
         if (config is not null)

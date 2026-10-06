@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -30,7 +31,7 @@ public sealed record ComponentApplyOptions
 /// with <c>Success = false</c>.
 /// </summary>
 public class ComponentInstallOrchestrator(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<CatalogDbContext> dbFactory,
     ComponentLifecycleService lifecycleService,
     KeycloakService keycloakService,
     HarborService harborService,
@@ -222,7 +223,7 @@ public class ComponentInstallOrchestrator(
 
     private async Task<bool> IsComponentNamedAsync(Guid componentId, string name, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using CatalogDbContext db = dbFactory.CreateDbContext();
         return await db.ClusterComponents.AnyAsync(c => c.Id == componentId && c.Name == name, ct);
     }
 }

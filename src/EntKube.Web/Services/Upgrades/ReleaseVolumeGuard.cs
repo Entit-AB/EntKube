@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Upgrades;
@@ -72,7 +73,7 @@ public sealed record VolumePreflight
 /// gate would ask the operator to acknowledge, mid-run, something they just approved.
 /// </summary>
 public class ReleaseVolumeGuard(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<CatalogDbContext> dbFactory,
     IKubernetesClientFactory k8s,
     ILogger<ReleaseVolumeGuard> logger)
 {
@@ -91,7 +92,7 @@ public class ReleaseVolumeGuard(
     public async Task<VolumePreflight> InspectAsync(Guid componentId, CancellationToken ct = default)
     {
         ClusterComponent? component;
-        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        await using (CatalogDbContext db = await dbFactory.CreateDbContextAsync(ct))
         {
             component = await db.ClusterComponents
                 .Include(c => c.Cluster)

@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -52,11 +53,11 @@ public class GitSyncService(
     private async Task SyncAllAutoSyncDeploymentsAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
 
         List<Guid> deploymentIds;
 
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (DeliveryDbContext db = dbFactory.CreateDbContext())
         {
             DeploymentType[] gitTypes =
             [
@@ -100,7 +101,7 @@ public class GitSyncService(
         Guid deploymentId, CancellationToken ct = default)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
         var gitOps = scope.ServiceProvider.GetRequiredService<GitOperationsService>();
         var gitService = scope.ServiceProvider.GetRequiredService<CustomerGitService>();
         var appOfApps = scope.ServiceProvider.GetRequiredService<AppOfAppsService>();
@@ -108,7 +109,7 @@ public class GitSyncService(
         AppDeployment? deployment;
         GitRepository repo;
 
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (DeliveryDbContext db = dbFactory.CreateDbContext())
         {
             deployment = await db.AppDeployments
                 .Include(d => d.GitRepository)
@@ -151,7 +152,7 @@ public class GitSyncService(
         }
 
         // Namespace governance check — block sync if the deployment targets a locked namespace it isn't in.
-        using (ApplicationDbContext dbNs = dbFactory.CreateDbContext())
+        using (DeliveryDbContext dbNs = dbFactory.CreateDbContext())
         {
             AppEnvironment? ae = await dbNs.AppEnvironments
                 .FirstOrDefaultAsync(e =>
@@ -195,7 +196,7 @@ public class GitSyncService(
             return GitSyncResult.Failure(checkout.Error ?? "Checkout failed.");
 
         // Apply changes based on deployment type.
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (DeliveryDbContext db = dbFactory.CreateDbContext())
         {
             // Re-fetch to get a tracked entity.
             AppDeployment tracked = await db.AppDeployments
@@ -282,7 +283,7 @@ public class GitSyncService(
     // ── Apply helpers ────────────────────────────────────────────────────────────
 
     private static async Task ApplyYamlManifestsAsync(
-        ApplicationDbContext db,
+        DeliveryDbContext db,
         AppDeployment deployment,
         Dictionary<string, string> files,
         CancellationToken ct)

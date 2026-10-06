@@ -1,5 +1,6 @@
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -14,7 +15,7 @@ namespace EntKube.Web.Services;
 /// are stored uniformly as a JSON string→string map so bootstrap-time overrides
 /// and form rendering can be handled generically.
 /// </summary>
-public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class ClusterBlueprintService(IDbContextFactory<FleetDbContext> dbFactory)
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
 
@@ -22,7 +23,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
     public async Task<List<ClusterBlueprint>> GetBlueprintsAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         return await db.ClusterBlueprints
             .Where(b => b.TenantId == tenantId)
             .OrderBy(b => b.Name)
@@ -31,7 +32,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
     public async Task<ClusterBlueprint?> GetBlueprintAsync(Guid blueprintId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         return await db.ClusterBlueprints
             .Include(b => b.Steps.OrderBy(s => s.Order))
             .FirstOrDefaultAsync(b => b.Id == blueprintId, ct);
@@ -40,7 +41,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
     public async Task<ClusterBlueprint> CreateBlueprintAsync(
         Guid tenantId, string name, string? description, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
 
         if (await db.ClusterBlueprints.AnyAsync(b => b.TenantId == tenantId && b.Name == name, ct))
         {
@@ -88,7 +89,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
     public async Task UpdateBlueprintAsync(
         Guid blueprintId, string name, string? description, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         ClusterBlueprint blueprint = await db.ClusterBlueprints.FirstAsync(b => b.Id == blueprintId, ct);
         blueprint.Name = name.Trim();
         blueprint.Description = string.IsNullOrWhiteSpace(description) ? null : description.Trim();
@@ -97,7 +98,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
     public async Task DeleteBlueprintAsync(Guid blueprintId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         ClusterBlueprint? blueprint = await db.ClusterBlueprints.FirstOrDefaultAsync(b => b.Id == blueprintId, ct);
         if (blueprint is not null)
         {
@@ -121,7 +122,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
             if (errors.Count > 0) throw new InvalidOperationException(string.Join("; ", errors));
         }
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         ClusterBlueprint blueprint = await db.ClusterBlueprints.FirstAsync(b => b.Id == blueprintId, ct);
         blueprint.ProvisioningProvider = string.IsNullOrWhiteSpace(provider) ? null : provider;
         blueprint.ProvisioningConfig = string.IsNullOrWhiteSpace(provider) ? null : config!.ToJson();
@@ -133,7 +134,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
     /// <summary>Loads a blueprint's variables (each with its per-environment values).</summary>
     public async Task<List<BlueprintVariable>> GetVariablesAsync(Guid blueprintId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         return await db.BlueprintVariables
             .Where(v => v.BlueprintId == blueprintId)
             .Include(v => v.Values)
@@ -144,7 +145,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
     public async Task<BlueprintVariable> AddVariableAsync(
         Guid blueprintId, string name, string? description, string? defaultValue, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
 
         string trimmed = name.Trim();
         if (await db.BlueprintVariables.AnyAsync(v => v.BlueprintId == blueprintId && v.Name == trimmed, ct))
@@ -169,7 +170,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
     public async Task UpdateVariableAsync(
         Guid variableId, string name, string? description, string? defaultValue, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         BlueprintVariable variable = await db.BlueprintVariables.FirstAsync(v => v.Id == variableId, ct);
 
         string trimmed = name.Trim();
@@ -188,7 +189,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
     public async Task DeleteVariableAsync(Guid variableId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         BlueprintVariable? variable = await db.BlueprintVariables.FirstOrDefaultAsync(v => v.Id == variableId, ct);
         if (variable is not null)
         {
@@ -201,7 +202,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
     public async Task SetVariableValueAsync(
         Guid variableId, Guid environmentId, string? value, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         BlueprintVariableValue? existing = await db.BlueprintVariableValues
             .FirstOrDefaultAsync(v => v.VariableId == variableId && v.EnvironmentId == environmentId, ct);
 
@@ -238,7 +239,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
         Guid blueprintId, BlueprintStepType stepType, string key, string name,
         string? @namespace, IReadOnlyDictionary<string, string>? parameters, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
 
         int nextOrder = await db.BlueprintSteps
             .Where(s => s.BlueprintId == blueprintId)
@@ -266,7 +267,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
         Guid stepId, string name, string? @namespace,
         IReadOnlyDictionary<string, string>? parameters, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         BlueprintStep step = await db.BlueprintSteps.FirstAsync(s => s.Id == stepId, ct);
         step.Name = name.Trim();
         step.Namespace = string.IsNullOrWhiteSpace(@namespace) ? null : @namespace.Trim();
@@ -276,7 +277,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
     public async Task DeleteStepAsync(Guid stepId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         BlueprintStep? step = await db.BlueprintSteps.FirstOrDefaultAsync(s => s.Id == stepId, ct);
         if (step is null) return;
 
@@ -299,7 +300,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
     /// <summary>Swaps a step with its neighbour in the given direction (-1 up, +1 down).</summary>
     public async Task MoveStepAsync(Guid stepId, int direction, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         BlueprintStep step = await db.BlueprintSteps.FirstAsync(s => s.Id == stepId, ct);
 
         List<BlueprintStep> siblings = await db.BlueprintSteps
@@ -356,7 +357,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
             throw new InvalidOperationException("Provisioning config is invalid: " + string.Join("; ", configErrors));
 
         Guid clusterId;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (FleetDbContext db = dbFactory.CreateDbContext())
         {
             KubernetesCluster cluster = new()
             {
@@ -385,7 +386,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
         BootstrapRunMode mode, Guid? rolloutTargetId,
         string? triggeredBy, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
 
         ClusterBlueprint blueprint = await db.ClusterBlueprints
             .Include(b => b.Steps)
@@ -495,7 +496,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
     /// <summary>Adds a synthesized platform component step (CCM/CSI) to a provisioning run.</summary>
     private static void AddSystemComponentStep(
-        ApplicationDbContext db, Guid runId, int order, string catalogKey, string releaseName, string @namespace)
+        FleetDbContext db, Guid runId, int order, string catalogKey, string releaseName, string @namespace)
     {
         db.BootstrapStepRuns.Add(new BootstrapStepRun
         {
@@ -513,7 +514,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
     /// <summary>Re-queues a failed run so the runner retries from the first non-succeeded step.</summary>
     public async Task ResumeAsync(Guid runId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         BootstrapRun run = await db.BootstrapRuns
             .Include(r => r.StepRuns)
             .FirstAsync(r => r.Id == runId, ct);
@@ -540,7 +541,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
     public async Task CancelAsync(Guid runId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         BootstrapRun? run = await db.BootstrapRuns.FirstOrDefaultAsync(r => r.Id == runId, ct);
         if (run is null) return;
 
@@ -554,7 +555,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
     public async Task<List<BootstrapRun>> GetRunsForClusterAsync(Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         return await db.BootstrapRuns
             .Where(r => r.ClusterId == clusterId)
             .OrderByDescending(r => r.CreatedAt)
@@ -563,7 +564,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
     public async Task<BootstrapRun?> GetRunAsync(Guid runId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         return await db.BootstrapRuns
             .Include(r => r.StepRuns.OrderBy(s => s.Order))
             .FirstOrDefaultAsync(r => r.Id == runId, ct);
@@ -575,7 +576,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
     public async Task<List<(Guid ClusterId, string ClusterName)>> GetBootstrappedClustersAsync(
         Guid blueprintId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
 
         List<Guid> clusterIds = await db.BootstrapRuns
             .Where(r => r.BlueprintId == blueprintId)
@@ -606,7 +607,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
         }
 
         Guid rolloutId;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (FleetDbContext db = dbFactory.CreateDbContext())
         {
             ClusterBlueprint blueprint = await db.ClusterBlueprints.FirstAsync(b => b.Id == blueprintId, ct);
 
@@ -664,7 +665,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
     public async Task StartNextTargetAsync(Guid rolloutId, CancellationToken ct = default)
     {
         Guid targetId, clusterId, blueprintId;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (FleetDbContext db = dbFactory.CreateDbContext())
         {
             BlueprintRollout rollout = await db.BlueprintRollouts
                 .Include(r => r.Targets)
@@ -694,7 +695,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
         {
             // Couldn't launch (e.g. the cluster already has an active run) — fail the
             // target and halt the rollout so the operator can resolve it.
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
+            using FleetDbContext db = dbFactory.CreateDbContext();
             BlueprintRolloutTarget target = await db.BlueprintRolloutTargets.FirstAsync(t => t.Id == targetId, ct);
             target.Status = RolloutTargetStatus.Failed;
             target.FinishedAt = DateTime.UtcNow;
@@ -706,7 +707,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
             return;
         }
 
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (FleetDbContext db = dbFactory.CreateDbContext())
         {
             BlueprintRolloutTarget target = await db.BlueprintRolloutTargets.FirstAsync(t => t.Id == targetId, ct);
             target.Status = RolloutTargetStatus.Running;
@@ -725,7 +726,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
     {
         Guid rolloutIdToAdvance = Guid.Empty;
 
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (FleetDbContext db = dbFactory.CreateDbContext())
         {
             BootstrapRun? run = await db.BootstrapRuns.FirstOrDefaultAsync(r => r.Id == runId, ct);
             if (run?.RolloutTargetId is not Guid targetId) return;
@@ -768,7 +769,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
     public async Task CancelRolloutAsync(Guid rolloutId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         BlueprintRollout? rollout = await db.BlueprintRollouts
             .Include(r => r.Targets)
             .FirstOrDefaultAsync(r => r.Id == rolloutId, ct);
@@ -785,7 +786,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
     public async Task<List<BlueprintRollout>> GetRolloutsForBlueprintAsync(Guid blueprintId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         return await db.BlueprintRollouts
             .Include(r => r.Targets.OrderBy(t => t.Order))
             .Where(r => r.BlueprintId == blueprintId)
@@ -795,7 +796,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
 
     public async Task<BlueprintRollout?> GetRolloutAsync(Guid rolloutId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         return await db.BlueprintRollouts
             .Include(r => r.Targets.OrderBy(t => t.Order))
             .FirstOrDefaultAsync(r => r.Id == rolloutId, ct);
@@ -862,7 +863,7 @@ public class ClusterBlueprintService(IDbContextFactory<ApplicationDbContext> dbF
     public async Task<VariablesPreviewResult> PreviewVariablesAsync(
         Guid clusterId, Guid blueprintId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         ClusterBlueprint blueprint = await db.ClusterBlueprints
             .Include(b => b.Steps)
             .Include(b => b.Variables).ThenInclude(v => v.Values)

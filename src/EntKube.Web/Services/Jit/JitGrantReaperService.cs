@@ -1,5 +1,6 @@
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Jit;
@@ -80,7 +81,7 @@ public class JitGrantReaperService(
         using IServiceScope scope = scopeFactory.CreateScope();
 
         var dbFactory = scope.ServiceProvider
-            .GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+            .GetRequiredService<IDbContextFactory<IdentityDbContext>>();
         var provisioner = scope.ServiceProvider.GetRequiredService<IJitProvisioner>();
 
         await TearDownEndedGrantsAsync(dbFactory, provisioner, ct);
@@ -95,11 +96,11 @@ public class JitGrantReaperService(
     /// because they simply ran out.
     /// </summary>
     private async Task TearDownEndedGrantsAsync(
-        IDbContextFactory<ApplicationDbContext> dbFactory, IJitProvisioner provisioner, CancellationToken ct)
+        IDbContextFactory<IdentityDbContext> dbFactory, IJitProvisioner provisioner, CancellationToken ct)
     {
         DateTime now = DateTime.UtcNow;
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         List<JitGrant> ended = await db.JitGrants
             .Where(g => g.ApprovedAt != null
@@ -135,11 +136,11 @@ public class JitGrantReaperService(
     /// point is to find things the database does not know about.
     /// </summary>
     private async Task SweepOrphansAsync(
-        IDbContextFactory<ApplicationDbContext> dbFactory, IServiceProvider services, CancellationToken ct)
+        IDbContextFactory<IdentityDbContext> dbFactory, IServiceProvider services, CancellationToken ct)
     {
         var k8sFactory = services.GetRequiredService<IKubernetesClientFactory>();
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         // Only clusters that have ever hosted a grant. Scanning every registered cluster for a
         // label that has never been applied there is work with no possible result.

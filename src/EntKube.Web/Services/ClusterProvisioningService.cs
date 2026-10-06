@@ -3,6 +3,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -35,7 +36,7 @@ public sealed class ProvisioningResult
 /// (alongside the <c>helm</c> the component installer already shells out to).
 /// </summary>
 public class ClusterProvisioningService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<FleetDbContext> dbFactory,
     VaultService vaultService,
     OpenStackKeystoneClient keystone,
     OpenStackComputeService compute,
@@ -323,7 +324,7 @@ public class ClusterProvisioningService(
             }, updatedBy: "provisioner", ct);
         if (!ok) throw new InvalidOperationException(error ?? "Failed to store the provisioned kubeconfig.");
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster cluster = await db.KubernetesClusters.FirstAsync(c => c.Id == clusterId, ct);
         cluster.ApiServerUrl = apiServerUrl;
         await db.SaveChangesAsync(ct);
@@ -369,7 +370,7 @@ public class ClusterProvisioningService(
                 workDir, EnvFor(targetKubeconfig), _ => { }, ct, timeout: TimeSpan.FromSeconds(30), quiet: true);
             if (!r.Success) { log("Node inventory skipped (kubectl get nodes failed)."); return; }
 
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
+            using FleetDbContext db = dbFactory.CreateDbContext();
             foreach (string line in r.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
             {
                 string[] parts = line.Split('|', 2);
@@ -439,7 +440,7 @@ public class ClusterProvisioningService(
 
     private async Task<OpenStackConnection> LoadConnectionAsync(Guid tenantId, Guid connectionId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         return await db.Set<OpenStackConnection>()
             .FirstOrDefaultAsync(c => c.Id == connectionId && c.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("OpenStack connection not found for this tenant.");
@@ -447,7 +448,7 @@ public class ClusterProvisioningService(
 
     private async Task SetStatusAsync(Guid clusterId, ClusterProvisioningStatus status, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster? c = await db.KubernetesClusters.FirstOrDefaultAsync(x => x.Id == clusterId, ct);
         if (c is null) return;
         c.ProvisioningStatus = status;
@@ -456,7 +457,7 @@ public class ClusterProvisioningService(
 
     private async Task<BootstrapVm?> LoadBootstrapStateAsync(Guid clusterId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         string? json = await db.KubernetesClusters.Where(c => c.Id == clusterId)
             .Select(c => c.ProvisioningStateJson).FirstOrDefaultAsync(ct);
         return string.IsNullOrWhiteSpace(json) ? null : JsonSerializer.Deserialize<BootstrapVm>(json);
@@ -464,7 +465,7 @@ public class ClusterProvisioningService(
 
     private async Task SaveBootstrapStateAsync(Guid clusterId, BootstrapVm vm, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster c = await db.KubernetesClusters.FirstAsync(x => x.Id == clusterId, ct);
         c.ProvisioningStateJson = JsonSerializer.Serialize(vm);
         await db.SaveChangesAsync(ct);
@@ -472,7 +473,7 @@ public class ClusterProvisioningService(
 
     private async Task ClearBootstrapStateAsync(Guid clusterId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster c = await db.KubernetesClusters.FirstAsync(x => x.Id == clusterId, ct);
         c.ProvisioningStateJson = null;
         await db.SaveChangesAsync(ct);

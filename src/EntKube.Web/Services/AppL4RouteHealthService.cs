@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 using System.Net.Sockets;
 
@@ -42,12 +43,12 @@ public class AppL4RouteHealthService(
     private async Task CheckAllRoutesAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ConnectivityDbContext>>();
         var k8sOps = scope.ServiceProvider.GetRequiredService<KubernetesOperationsService>();
 
         // Only TCP routes are actively probed (UDP is connectionless — see class remarks).
         List<(Guid Id, Guid ClusterId, int Port)> routes;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (ConnectivityDbContext db = dbFactory.CreateDbContext())
         {
             routes = await db.AppL4Routes
                 .Where(r => r.IsEnabled && r.IsManaged && r.ClusterAppliedAt != null && r.Protocol == L4Protocol.Tcp)
@@ -73,7 +74,7 @@ public class AppL4RouteHealthService(
 
             try
             {
-                using ApplicationDbContext db = dbFactory.CreateDbContext();
+                using ConnectivityDbContext db = dbFactory.CreateDbContext();
                 AppL4Route? route = await db.AppL4Routes.FindAsync([id], ct);
                 if (route is null) continue;
 

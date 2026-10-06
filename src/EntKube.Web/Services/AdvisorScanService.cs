@@ -1,6 +1,7 @@
 using System.Text;
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 
 namespace EntKube.Web.Services;
 
@@ -34,14 +35,14 @@ public class AdvisorScanService(
         DateTime now = DateTime.UtcNow;
 
         using IServiceScope scope = scopeFactory.CreateScope();
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AdvisorDbContext>>();
         var advisor = scope.ServiceProvider.GetRequiredService<OperationsAdvisorService>();
         var state = scope.ServiceProvider.GetRequiredService<AdvisorStateService>();
         var notifications = scope.ServiceProvider.GetRequiredService<NotificationService>();
         var digestConfig = scope.ServiceProvider.GetRequiredService<AdvisorDigestConfigService>();
 
         List<Tenant> tenants;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (AdvisorDbContext db = dbFactory.CreateDbContext())
             tenants = await db.Tenants.ToListAsync(ct);
 
         Dictionary<Guid, AdvisorDigestConfig> configs = await digestConfig.GetAllAsync(ct);

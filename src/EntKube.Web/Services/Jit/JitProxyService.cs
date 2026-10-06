@@ -1,5 +1,6 @@
 using System.Net;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Jit;
@@ -15,7 +16,7 @@ namespace EntKube.Web.Services.Jit;
 /// request be recorded against a named person.
 /// </summary>
 public class JitProxyService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<IdentityDbContext> dbFactory,
     JitUpstreamClientPool clientPool,
     VaultEncryptionService encryption,
     AuditService auditService,
@@ -100,7 +101,7 @@ public class JitProxyService(
 
         string hash = KubernetesJitProvisioner.Hash(presented.Trim());
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         JitGrant? grant = await db.JitGrants
             .Include(g => g.KubernetesCluster)
@@ -259,7 +260,7 @@ public class JitProxyService(
 
         try
         {
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
+            using IdentityDbContext db = dbFactory.CreateDbContext();
             await db.JitGrants
                 .Where(g => g.Id == grant.Id)
                 .ExecuteUpdateAsync(s => s.SetProperty(g => g.LastUsedAt, now), ct);

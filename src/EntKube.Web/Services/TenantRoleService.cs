@@ -1,10 +1,11 @@
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
 
-public class TenantRoleService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class TenantRoleService(IDbContextFactory<IdentityDbContext> dbFactory)
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { WriteIndented = false };
 
@@ -34,7 +35,7 @@ public class TenantRoleService(IDbContextFactory<ApplicationDbContext> dbFactory
 
     public async Task<List<TenantRole>> GetRolesAsync(Guid tenantId)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         return await db.TenantRoles
             .Include(r => r.Memberships)
             .Where(r => r.TenantId == tenantId)
@@ -44,13 +45,13 @@ public class TenantRoleService(IDbContextFactory<ApplicationDbContext> dbFactory
 
     public async Task<TenantRole?> GetRoleAsync(Guid roleId)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         return await db.TenantRoles.FindAsync(roleId);
     }
 
     public async Task<TenantRole> CreateRoleAsync(Guid tenantId, string name)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         TenantRole role = new()
         {
             Id = Guid.NewGuid(),
@@ -65,7 +66,7 @@ public class TenantRoleService(IDbContextFactory<ApplicationDbContext> dbFactory
 
     public async Task<bool> DeleteRoleAsync(Guid roleId)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         TenantRole? role = await db.TenantRoles.FindAsync(roleId);
         if (role is null) return false;
         db.TenantRoles.Remove(role);
@@ -75,7 +76,7 @@ public class TenantRoleService(IDbContextFactory<ApplicationDbContext> dbFactory
 
     public async Task RenameRoleAsync(Guid roleId, string newName)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         TenantRole? role = await db.TenantRoles.FindAsync(roleId);
         if (role is null) return;
         role.Name = newName;
@@ -104,7 +105,7 @@ public class TenantRoleService(IDbContextFactory<ApplicationDbContext> dbFactory
 
     public async Task SavePermissionsAsync(Guid roleId, Dictionary<TenantFeature, AccessLevel> permissions)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         TenantRole? role = await db.TenantRoles.FindAsync(roleId);
         if (role is null) return;
 

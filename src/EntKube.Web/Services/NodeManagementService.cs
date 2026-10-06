@@ -1,6 +1,7 @@
 using System.IO;
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using k8s;
 using k8s.Models;
 using Microsoft.EntityFrameworkCore;
@@ -58,7 +59,7 @@ public class NodeInfo
 /// Also provides CRUD for the ClusterServer inventory (physical servers behind nodes).
 /// </summary>
 public class NodeManagementService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<FleetDbContext> dbFactory,
     AuditService auditService,
     EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
     ILogger<NodeManagementService> logger)
@@ -80,7 +81,7 @@ public class NodeManagementService(
     private async Task<(KubernetesCluster? Cluster, KubernetesOperationResult? Error)>
         LoadClusterAsync(Guid clusterId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster? cluster = await db.KubernetesClusters
             .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
 
@@ -97,7 +98,7 @@ public class NodeManagementService(
     private async Task<(KubernetesCluster? Cluster, KubernetesOperationResult<T>? Error)>
         LoadClusterAsync<T>(Guid clusterId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster? cluster = await db.KubernetesClusters
             .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
 
@@ -532,7 +533,7 @@ public class NodeManagementService(
     public async Task<List<ClusterServer>> GetServersAsync(
         Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         return await db.ClusterServers
             .Where(s => s.ClusterId == clusterId)
             .OrderBy(s => s.DisplayName)
@@ -542,7 +543,7 @@ public class NodeManagementService(
     public async Task<ClusterServer> SaveServerAsync(
         ClusterServer server, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         server.UpdatedAt = DateTime.UtcNow;
 
         if (server.Id == Guid.Empty)
@@ -580,7 +581,7 @@ public class NodeManagementService(
 
     public async Task DeleteServerAsync(Guid serverId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using FleetDbContext db = dbFactory.CreateDbContext();
         ClusterServer? server = await db.ClusterServers.FindAsync([serverId], ct);
         if (server is not null)
         {

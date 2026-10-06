@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 using System.Net;
 
@@ -35,11 +36,11 @@ public class ExternalRouteHealthService(
     private async Task CheckAllRoutesAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ConnectivityDbContext>>();
 
         List<(Guid Id, string Hostname, string PathPrefix)> routes;
 
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (ConnectivityDbContext db = dbFactory.CreateDbContext())
         {
             routes = await db.ExternalRoutes
                 .Select(r => new ValueTuple<Guid, string, string>(r.Id, r.Hostname, r.PathPrefix))
@@ -80,7 +81,7 @@ public class ExternalRouteHealthService(
 
             try
             {
-                using ApplicationDbContext db = dbFactory.CreateDbContext();
+                using ConnectivityDbContext db = dbFactory.CreateDbContext();
                 ExternalRoute? route = await db.ExternalRoutes.FindAsync([id], ct);
                 if (route is null) continue;
 

@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Cost;
@@ -87,13 +88,13 @@ public class CostScanService(
     private async Task RunAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<CostDbContext>>();
         var costs = scope.ServiceProvider.GetRequiredService<CostReportService>();
         var rates = scope.ServiceProvider.GetRequiredService<CostRateService>();
         var ledger = scope.ServiceProvider.GetRequiredService<CostLedgerWriter>();
 
         List<Guid> tenantIds;
-        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        await using (CostDbContext db = await dbFactory.CreateDbContextAsync(ct))
         {
             tenantIds = await db.Tenants.Select(t => t.Id).ToListAsync(ct);
         }
@@ -167,11 +168,11 @@ public class CostScanService(
 }
 
 /// <summary>Reads and writes the per-cluster price sheets.</summary>
-public class CostRateService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class CostRateService(IDbContextFactory<CostDbContext> dbFactory)
 {
     public async Task<List<ClusterCostRate>> ListAsync(Guid tenantId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
         return await db.ClusterCostRates
             .AsNoTracking()
             .Where(r => r.Cluster.TenantId == tenantId)
@@ -186,7 +187,7 @@ public class CostRateService(IDbContextFactory<ApplicationDbContext> dbFactory)
         Guid tenantId, Guid clusterId, ClusterCostRate values, string? updatedBy,
         CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         bool owned = await db.KubernetesClusters.AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
         if (!owned)
@@ -221,7 +222,7 @@ public class CostRateService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
     public async Task<bool> DeleteAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         ClusterCostRate? rate = await db.ClusterCostRates
             .FirstOrDefaultAsync(r => r.ClusterId == clusterId && r.Cluster.TenantId == tenantId, ct);

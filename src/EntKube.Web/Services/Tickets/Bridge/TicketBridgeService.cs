@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Tickets.Bridge;
@@ -41,7 +42,7 @@ public readonly record struct BridgeDelivery(
 /// channel, not a second owner of the record.</para>
 /// </summary>
 public class TicketBridgeService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<SupportDbContext> dbFactory,
     TicketService tickets,
     IEnumerable<IInboundTicketAdapter> adapters,
     ILogger<TicketBridgeService> logger)
@@ -85,7 +86,7 @@ public class TicketBridgeService(
     private async Task<BridgeDelivery> DeliverInternalAsync(
         Guid connectionId, string payload, DateTime at, CancellationToken ct)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         TicketBridgeConnection? connection = await db.TicketBridgeConnections
             .FirstOrDefaultAsync(c => c.Id == connectionId, ct);
@@ -141,7 +142,7 @@ public class TicketBridgeService(
 
     /// <summary>Opens a ticket for something we have not seen before.</summary>
     private async Task<BridgeDelivery> RaiseAsync(
-        ApplicationDbContext db, TicketBridgeConnection connection,
+        SupportDbContext db, TicketBridgeConnection connection,
         InboundTicketReport report, DateTime at, CancellationToken ct)
     {
         // §14.3 counts from when the fault was reported, and for a ticket raised in the
@@ -210,7 +211,7 @@ public class TicketBridgeService(
     /// ticket open, because §14.4's resolution is ours to record and theirs to accept.</para>
     /// </summary>
     private async Task<BridgeDelivery> AppendAsync(
-        ApplicationDbContext db, TicketBridgeConnection connection,
+        SupportDbContext db, TicketBridgeConnection connection,
         ExternalTicketLink link, InboundTicketReport report, DateTime at, CancellationToken ct)
     {
         link.LastSeenAt = at;
@@ -250,7 +251,7 @@ public class TicketBridgeService(
     /// wrong window, which looks entirely fine.</para>
     /// </summary>
     private static async Task<Guid?> ResolveAppAsync(
-        ApplicationDbContext db, TicketBridgeConnection connection,
+        SupportDbContext db, TicketBridgeConnection connection,
         InboundTicketReport report, CancellationToken ct)
     {
         if (!string.IsNullOrWhiteSpace(report.AppHint))
@@ -318,7 +319,7 @@ public class TicketBridgeService(
     /// unreadable is visible here rather than only in their own logs.
     /// </summary>
     private static async Task<BridgeDelivery> FailAsync(
-        ApplicationDbContext db, TicketBridgeConnection connection,
+        SupportDbContext db, TicketBridgeConnection connection,
         DateTime at, string why, CancellationToken ct)
     {
         connection.LastError = why;

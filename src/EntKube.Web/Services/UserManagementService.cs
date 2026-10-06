@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
@@ -7,7 +8,7 @@ namespace EntKube.Web.Services;
 public class UserManagementService(
     UserManager<ApplicationUser> userManager,
     RoleManager<IdentityRole> roleManager,
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<IdentityDbContext> dbFactory,
     IPresenceTracker presence)
 {
     public async Task<List<ApplicationUser>> GetAllUsersAsync()
@@ -158,7 +159,7 @@ public class UserManagementService(
 
     public async Task<List<TenantMembership>> GetUserTenantMembershipsAsync(string userId)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         return await db.TenantMemberships
             .Include(m => m.Tenant)
             .Include(m => m.Role)
@@ -169,7 +170,7 @@ public class UserManagementService(
 
     public async Task<List<Tenant>> GetAllTenantsAsync()
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         return await db.Tenants
             .Include(t => t.Roles)
             .OrderBy(t => t.Name)
@@ -178,7 +179,7 @@ public class UserManagementService(
 
     public async Task AddTenantMembershipAsync(string userId, Guid tenantId, Guid roleId)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         db.TenantMemberships.Add(new TenantMembership
         {
             UserId = userId,
@@ -191,7 +192,7 @@ public class UserManagementService(
 
     public async Task RemoveTenantMembershipAsync(string userId, Guid tenantId)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         TenantMembership? m = await db.TenantMemberships
             .FirstOrDefaultAsync(x => x.UserId == userId && x.TenantId == tenantId);
         if (m is not null)
@@ -203,7 +204,7 @@ public class UserManagementService(
 
     public async Task<List<GroupMembership>> GetUserGroupMembershipsAsync(string userId)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         return await db.GroupMemberships
             .Include(gm => gm.Group)
                 .ThenInclude(g => g.Tenant)
@@ -215,7 +216,7 @@ public class UserManagementService(
 
     public async Task<List<Group>> GetGroupsForTenantAsync(Guid tenantId)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         return await db.Groups
             .Where(g => g.TenantId == tenantId)
             .OrderBy(g => g.Name)
@@ -224,7 +225,7 @@ public class UserManagementService(
 
     public async Task AddGroupMembershipAsync(string userId, Guid groupId)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         db.GroupMemberships.Add(new GroupMembership
         {
             UserId = userId,
@@ -236,7 +237,7 @@ public class UserManagementService(
 
     public async Task RemoveGroupMembershipAsync(string userId, Guid groupId)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
         GroupMembership? gm = await db.GroupMemberships
             .FirstOrDefaultAsync(x => x.UserId == userId && x.GroupId == groupId);
         if (gm is not null)

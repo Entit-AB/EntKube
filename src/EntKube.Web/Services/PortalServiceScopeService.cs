@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -21,7 +22,7 @@ namespace EntKube.Web.Services;
 /// allow-list entry for is invisible, and the Is*InScope guards let a panel re-check
 /// a target before mutating so a stale page can't act outside the scope it rendered.
 /// </summary>
-public class PortalServiceScopeService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class PortalServiceScopeService(IDbContextFactory<DeliveryDbContext> dbFactory)
 {
     // ── Databases ─────────────────────────────────────────────────────────────
 
@@ -32,7 +33,7 @@ public class PortalServiceScopeService(IDbContextFactory<ApplicationDbContext> d
     public async Task<PortalDatabaseScope> GetDatabaseScopeAsync(
         Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         List<AppDeployment> deployments = await db.AppDeployments
             .Include(d => d.Cluster)
@@ -100,7 +101,7 @@ public class PortalServiceScopeService(IDbContextFactory<ApplicationDbContext> d
         Guid? cnpgDatabaseId = null, Guid? mongoDatabaseId = null,
         Guid? registeredPostgresDatabaseId = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         bool exists = await db.AppAllowedDatabases.AnyAsync(a =>
             a.AppId == appId && a.EnvironmentId == environmentId
@@ -133,7 +134,7 @@ public class PortalServiceScopeService(IDbContextFactory<ApplicationDbContext> d
     public async Task<PortalMessagingScope> GetMessagingScopeAsync(
         Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         List<AppDeployment> deployments = await db.AppDeployments
             .Include(d => d.Cluster)
@@ -180,7 +181,7 @@ public class PortalServiceScopeService(IDbContextFactory<ApplicationDbContext> d
     public async Task<PortalCacheScope> GetCacheScopeAsync(
         Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         List<AppDeployment> deployments = await db.AppDeployments
             .Include(d => d.Cluster)

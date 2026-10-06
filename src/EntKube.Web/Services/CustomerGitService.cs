@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.RegularExpressions;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -10,7 +11,7 @@ namespace EntKube.Web.Services;
 /// credential sets. Credential secrets are stored encrypted via VaultService.
 /// </summary>
 public class CustomerGitService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DeliveryDbContext> dbFactory,
     VaultService vault)
 {
     // ── Repo policies ────────────────────────────────────────────────────────────
@@ -18,7 +19,7 @@ public class CustomerGitService(
     public async Task<List<CustomerGitRepoPolicy>> GetRepoPoliciesAsync(
         Guid customerId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         return await db.CustomerGitRepoPolicies
             .Where(p => p.CustomerId == customerId && p.EnvironmentId == environmentId)
@@ -29,7 +30,7 @@ public class CustomerGitService(
     public async Task<CustomerGitRepoPolicy> AddRepoPolicyAsync(
         Guid customerId, Guid environmentId, string urlPattern, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         CustomerGitRepoPolicy policy = new()
         {
@@ -47,7 +48,7 @@ public class CustomerGitService(
     public async Task<bool> DeleteRepoPolicyAsync(
         Guid customerId, Guid policyId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         CustomerGitRepoPolicy? policy = await db.CustomerGitRepoPolicies
             .FirstOrDefaultAsync(p => p.CustomerId == customerId && p.Id == policyId, ct);
@@ -112,7 +113,7 @@ public class CustomerGitService(
         Guid credentialId,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         // Normal case: repo already linked to this credential.
         GitRepository? existing = await db.GitRepositories
@@ -165,7 +166,7 @@ public class CustomerGitService(
         return repo;
     }
 
-    private static string DeriveRepoName(Guid tenantId, string url, ApplicationDbContext db)
+    private static string DeriveRepoName(Guid tenantId, string url, DeliveryDbContext db)
     {
         // Strip scheme and trailing .git to get a human-readable label.
         string path = url
@@ -190,7 +191,7 @@ public class CustomerGitService(
     public async Task<List<CustomerGitCredential>> GetCredentialsAsync(
         Guid customerId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         return await db.CustomerGitCredentials
             .Where(c => c.CustomerId == customerId && c.EnvironmentId == environmentId)
@@ -203,7 +204,7 @@ public class CustomerGitService(
         GitAuthType authType, string? username = null, string? urlPattern = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         CustomerGitCredential credential = new()
         {
@@ -227,7 +228,7 @@ public class CustomerGitService(
         string name, GitAuthType authType, string? username, string? urlPattern,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         CustomerGitCredential? credential = await db.CustomerGitCredentials
             .FirstOrDefaultAsync(c => c.CustomerId == customerId && c.Id == credentialId, ct);
@@ -251,7 +252,7 @@ public class CustomerGitService(
     public async Task<CustomerGitCredential?> FindMatchingCredentialAsync(
         Guid customerId, Guid environmentId, string url, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         List<CustomerGitCredential> creds = await db.CustomerGitCredentials
             .Where(c => c.CustomerId == customerId && c.EnvironmentId == environmentId)
@@ -265,7 +266,7 @@ public class CustomerGitService(
     public async Task<bool> DeleteCredentialAsync(
         Guid customerId, Guid credentialId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         CustomerGitCredential? credential = await db.CustomerGitCredentials
             .FirstOrDefaultAsync(c => c.CustomerId == customerId && c.Id == credentialId, ct);

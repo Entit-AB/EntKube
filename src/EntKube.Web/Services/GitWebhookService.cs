@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -20,7 +21,7 @@ namespace EntKube.Web.Services;
 ///   3. Enqueue a GitSyncService sync for each matching deployment.
 /// </summary>
 public class GitWebhookService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DeliveryDbContext> dbFactory,
     GitSyncService syncService,
     ILogger<GitWebhookService> logger)
 {
@@ -34,7 +35,7 @@ public class GitWebhookService(
         string? hubSignature256,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         Guid? tenantId = await db.Tenants
             .Where(t => t.Slug == tenantSlug)

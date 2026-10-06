@@ -1,14 +1,15 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
 
 /// <summary>CRUD for tenant-scoped native telemetry alert rules (used by the rule-authoring UI).</summary>
-public class TelemetryAlertRuleService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class TelemetryAlertRuleService(IDbContextFactory<TelemetryDbContext> dbFactory)
 {
     public async Task<List<TelemetryAlertRule>> ListAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         return await db.TelemetryAlertRules
             .Where(r => r.TenantId == tenantId)
             .OrderBy(r => r.Name)
@@ -18,7 +19,7 @@ public class TelemetryAlertRuleService(IDbContextFactory<ApplicationDbContext> d
     /// <summary>Inserts a new rule (Id empty) or updates an existing one; enforces tenant ownership.</summary>
     public async Task UpsertAsync(TelemetryAlertRule rule, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         DateTime now = DateTime.UtcNow;
 
         // Keep fields within the AlertIncident column caps they flow into, so a firing rule can never
@@ -61,7 +62,7 @@ public class TelemetryAlertRuleService(IDbContextFactory<ApplicationDbContext> d
 
     public async Task SetEnabledAsync(Guid tenantId, Guid id, bool enabled, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         TelemetryAlertRule? rule = await db.TelemetryAlertRules.FirstOrDefaultAsync(r => r.Id == id && r.TenantId == tenantId, ct);
         if (rule is null) return;
         rule.IsEnabled = enabled;
@@ -72,7 +73,7 @@ public class TelemetryAlertRuleService(IDbContextFactory<ApplicationDbContext> d
 
     public async Task DeleteAsync(Guid tenantId, Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
         int deleted = await db.TelemetryAlertRules.Where(r => r.Id == id && r.TenantId == tenantId).ExecuteDeleteAsync(ct);
         if (deleted > 0) await ResolveOpenIncidentsAsync(db, id, ct);
     }
@@ -82,7 +83,7 @@ public class TelemetryAlertRuleService(IDbContextFactory<ApplicationDbContext> d
     /// touches incidents for currently-enabled rules, so without this an incident firing at the moment a rule
     /// is silenced would linger Active on the board forever with no all-clear.
     /// </summary>
-    internal static async Task ResolveOpenIncidentsAsync(ApplicationDbContext db, Guid ruleId, CancellationToken ct)
+    internal static async Task ResolveOpenIncidentsAsync(TelemetryDbContext db, Guid ruleId, CancellationToken ct)
     {
         string prefix = $"telemetry:{ruleId:N}:";
         DateTime now = DateTime.UtcNow;
