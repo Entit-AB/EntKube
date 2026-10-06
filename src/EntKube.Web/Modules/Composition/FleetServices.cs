@@ -61,6 +61,10 @@ internal static class FleetServices
         // The module's contract — what everyone else is allowed to know about it.
         services.AddScoped<EntKube.Contracts.Fleet.IFleetApi, EntKube.Web.Modules.Api.FleetApi>();
 
+        // Reaching a cluster without holding its credentials — see docs/decomposition.md §4.0.1.
+        services.AddScoped<EntKube.Web.Services.Clusters.IClusterClientFactory,
+            EntKube.Web.Services.Clusters.ClusterClientFactory>();
+
         return services;
     }
 }

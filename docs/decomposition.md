@@ -155,17 +155,22 @@ Every one of the eighteen methods on `IKubernetesClientFactory` takes a `string 
 So anything that applies a manifest, reads a pod or creates a namespace must first load the
 cluster row and pull the credential out of it.
 
-**534 places do, across 61 files and twelve of the thirteen modules.**
+**508 places do, across 57 files and twelve of the thirteen modules.**
 
-| module | sites | | module | sites |
+| file | sites | | file | sites |
 |---|---|---|---|---|
-| DataServices | 236 | | Connectivity | 23 |
-| Fleet | 99 | | Secrets | 12 |
-| Catalog | 52 | | Identity | 9 |
-| Telemetry | 30 | | Mail | 6 |
-| Delivery | 28 | | UI / Advisor / Cost | 9 |
+| `KubernetesOperationsService` | 72 | | `RabbitMQService` | 37 |
+| `CnpgService` | 48 | | `PrometheusService` | 20 |
+| `MongoService` | 47 | | `HeadscaleService` | 17 |
+| `ElasticsearchService` | 42 | | `ComponentLifecycleService` | 16 |
 
-Only Fleet's share is unremarkable — it owns clusters.
+Five files hold nearly half, which is also where converting pays best. By module it is
+DataServices ~236, Fleet ~99, Catalog ~52, then single and double figures elsewhere; only
+Fleet's share is unremarkable, because it owns clusters.
+
+*(First reported as 534/61. That count matched `.Kubeconfig` as text, which also caught
+`.KubeconfigSecretId` — a foreign key — and the `VaultSecretType.Kubeconfig` enum member.
+Thirty were those. Overstating a problem is no better than understating it.)*
 
 **This explains a measurement that previously looked like ordinary coupling.** §4.0 found
 `KubernetesCluster` read by 31 services across module boundaries and filed it under "hub".
@@ -181,11 +186,15 @@ It matters twice:
   and it means the contract cannot serve these 534 callers at all. **This is a hard blocker on
   the remaining conversions, not a tidying job.**
 
-**The fix** is to give the factory methods a cluster id and let them resolve the credential
-inside Fleet, so it never reaches a caller. That is a 534-site change and belongs in its own
-piece of work, sequenced before the DataServices and Telemetry conversions that are otherwise
-stuck behind it. `ClusterCredentialCustodyTests` ratchets the number meanwhile, so it cannot
-grow while the work waits.
+**The fix is now built, and unused.** `IClusterClient` is bound to one cluster and holds the
+credential itself; `IClusterClientFactory.ForAsync(tenantId, clusterId)` resolves it through
+Fleet's own context — tenant-scoped, and returning null rather than a `.Kubeconfig!` that
+throws further in for the two ordinary cases, a cluster that is not this tenant's and a cluster
+with no credential stored. Callers name a cluster by id and never see what is used to reach it.
+
+Migrating the 508 call sites onto it is the remaining work, best taken file by file starting
+with the five that hold half of them. `ClusterCredentialCustodyTests` ratchets the number so it
+cannot grow while that proceeds.
 
 **It also strengthens the case for §5's agent model.** An agent running *inside* the cluster
 needs no kubeconfig at all — there is nothing to hand out, because the work happens where the

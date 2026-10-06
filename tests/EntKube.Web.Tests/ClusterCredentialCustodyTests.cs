@@ -30,17 +30,22 @@ public class ClusterCredentialCustodyTests
     private const string Web = "../../../../../src/EntKube.Web";
 
     /// <summary>
-    /// Places that reach into a cluster's <c>Kubeconfig</c>, measured 2026-10-06.
+    /// Places that take a cluster's credential out of the row, measured 2026-10-06.
     ///
-    /// <para>Spread, at the time of measuring: DataServices 236, Fleet 99, Catalog 52,
-    /// Telemetry 30, Delivery 28, Connectivity 23, Secrets 12, Identity 9, Mail 6, and a
-    /// handful each in the UI, Advisor and Cost. Fleet's share is the only one that is
-    /// unremarkable — it owns clusters.</para>
+    /// <para><b>508, corrected down from the 534 first reported.</b> The first count matched
+    /// <c>.Kubeconfig</c> as plain text, which also caught <c>.KubeconfigSecretId</c> — a
+    /// foreign key, not a credential — and <c>VaultSecretType.Kubeconfig</c>, an enum member.
+    /// Thirty of the original number were those. Overstating the problem is no better than
+    /// understating it, so the match now requires the property itself.</para>
+    ///
+    /// <para>Where it concentrates: <c>KubernetesOperationsService</c> 72, <c>CnpgService</c>
+    /// 48, <c>MongoService</c> 47, <c>ElasticsearchService</c> 42, <c>RabbitMQService</c> 37.
+    /// Five files hold nearly half of it, which is also where converting pays best.</para>
     /// </summary>
-    private const int BaselineOccurrences = 534;
+    private const int BaselineOccurrences = 508;
 
     /// <summary>Files doing so. A file that has stopped should not be able to start again quietly.</summary>
-    private const int BaselineFiles = 61;
+    private const int BaselineFiles = 57;
 
     private static (int Occurrences, int Files) Measure()
     {
@@ -60,7 +65,7 @@ public class ClusterCredentialCustodyTests
                               && !p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}")
                               && !p.Contains($"{Path.DirectorySeparatorChar}Migrations{Path.DirectorySeparatorChar}")))
         {
-            int n = Count(File.ReadAllText(path), ".Kubeconfig");
+            int n = Credential.Matches(File.ReadAllText(path)).Count;
 
             if (n > 0)
             {
@@ -72,18 +77,17 @@ public class ClusterCredentialCustodyTests
         return (occurrences, files);
     }
 
-    private static int Count(string text, string needle)
-    {
-        int n = 0, i = text.IndexOf(needle, StringComparison.Ordinal);
-
-        while (i >= 0)
-        {
-            n++;
-            i = text.IndexOf(needle, i + needle.Length, StringComparison.Ordinal);
-        }
-
-        return n;
-    }
+    /// <summary>
+    /// The credential property itself, and not the things that merely look like it.
+    ///
+    /// <para>The lookahead excludes <c>.KubeconfigSecretId</c> and anything else that
+    /// continues the identifier; the lookbehind excludes
+    /// <c>VaultSecretType.Kubeconfig</c>, which names a kind of secret rather than holding
+    /// one. Both were counted by the first version of this test.</para>
+    /// </summary>
+    private static readonly System.Text.RegularExpressions.Regex Credential =
+        new(@"(?<!VaultSecretType)\.Kubeconfig(?![A-Za-z0-9_])",
+            System.Text.RegularExpressions.RegexOptions.Compiled);
 
     [Fact]
     public void The_cluster_credential_does_not_spread_any_further()
