@@ -56,6 +56,7 @@ public static partial class ModuleMap
 
         // ---- Fleet -----------------------------------------------------------------
         [typeof(AgentRegistry)] = Module.Fleet,
+        [typeof(Services.Clusters.ClusterClientFactory)] = Module.Fleet,
         [typeof(Api.FleetApi)] = Module.Fleet,
         [typeof(BlueprintFromClusterService)] = Module.Fleet,
         [typeof(BootstrapRunnerService)] = Module.Fleet,
