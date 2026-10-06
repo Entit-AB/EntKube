@@ -49,7 +49,10 @@ public class ComponentScanServiceTests : IDisposable
             new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
             NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance);
         KyvernoPolicyService kyvernoService = new(dbFactory, k8sFactory, gate, NullLogger<KyvernoPolicyService>.Instance);
-        RabbitMQService rabbitMQService = new(dbFactory, k8sFactory, vaultService);
+        RabbitMQService rabbitMQService = new(
+            dbFactory,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory),
+            vaultService);
         sut = new ComponentScanService(dbFactory, vaultService, kyvernoService, rabbitMQService);
 
         // Seed tenant, environment, and cluster.
