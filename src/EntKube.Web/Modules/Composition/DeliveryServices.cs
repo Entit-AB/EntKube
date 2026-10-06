@@ -52,6 +52,9 @@ internal static class DeliveryServices
         services.AddScoped<GitWebhookService>();
         services.AddHostedService<DeploymentSyncService>();
 
+        // The module's contract — what everyone else is allowed to know about it.
+        services.AddScoped<EntKube.Contracts.Delivery.IDeliveryApi, EntKube.Web.Modules.Api.DeliveryApi>();
+
         return services;
     }
 }
