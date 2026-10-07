@@ -289,7 +289,7 @@ public class DockerRegistryService(
         try
         {
             await SecretFile.WriteAsync(tempKubeconfig, cred.KubernetesCluster.Kubeconfig, ct);
-            await File.WriteAllTextAsync(tempManifest, manifest, ct);
+            await SecretFile.WriteAsync(tempManifest, manifest, ct);
 
             HelmExecutionResult result = await RunCliAsync(
                 "kubectl", $"apply -f {tempManifest} --kubeconfig {tempKubeconfig}", ct);

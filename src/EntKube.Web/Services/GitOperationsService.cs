@@ -341,8 +341,7 @@ public class GitOperationsService(
     private static async Task<string> WriteTempKeyFileAsync(string privateKey)
     {
         string path = Path.Combine(Path.GetTempPath(), $"entkube-ssh-{Guid.NewGuid():N}");
-        await File.WriteAllTextAsync(path, privateKey);
-        File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
+        await SecretFile.WriteAsync(path, privateKey);
         return path;
     }
 }

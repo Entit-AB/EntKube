@@ -549,7 +549,7 @@ public class ReleaseVolumeGuard(
     private static async Task<string> WriteKubeconfigAsync(string kubeconfig, CancellationToken ct)
     {
         string path = Path.Combine(Path.GetTempPath(), $"entkube-upgrade-{Guid.NewGuid()}.kubeconfig");
-        await File.WriteAllTextAsync(path, kubeconfig, ct);
+        await SecretFile.WriteAsync(path, kubeconfig, ct);
         return path;
     }
 

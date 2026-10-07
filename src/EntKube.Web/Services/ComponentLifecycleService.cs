@@ -1494,10 +1494,9 @@ public class ComponentLifecycleService(
                         }
 
                         string valuePath = Path.Combine(Path.GetTempPath(), $"entkube-val-{Guid.NewGuid()}");
-                        await File.WriteAllTextAsync(valuePath, plainValue, ct);
+                        await SecretFile.WriteAsync(valuePath, plainValue, ct);
                         if (!OperatingSystem.IsWindows())
                         {
-                            File.SetUnixFileMode(valuePath, UnixFileMode.UserRead | UnixFileMode.UserWrite);
                         }
                         stagedFiles.Add(valuePath);
                         literals.Add($"--from-file={vaultSecret.Name}={valuePath}");
@@ -1653,7 +1652,7 @@ public class ComponentLifecycleService(
         try
         {
             await SecretFile.WriteAsync(tempKubeconfig, cluster.Kubeconfig, ct);
-            await File.WriteAllTextAsync(tempManifest, manifestYaml, ct);
+            await SecretFile.WriteAsync(tempManifest, manifestYaml, ct);
 
             string operation = delete ? "delete" : "apply";
             string args = $"{operation} -f {tempManifest} --kubeconfig {tempKubeconfig}";
@@ -1690,7 +1689,7 @@ public class ComponentLifecycleService(
 
         try
         {
-            await File.WriteAllTextAsync(tempManifest, command.ValuesYaml, ct);
+            await SecretFile.WriteAsync(tempManifest, command.ValuesYaml, ct);
 
             string operation = command.Operation == "kubectl-apply" ? "apply" : "delete";
             List<string> args = [operation, "-f", tempManifest, "--kubeconfig", kubeconfigPath];
@@ -2104,7 +2103,7 @@ public class ComponentLifecycleService(
             if (command.HasValues && !string.IsNullOrWhiteSpace(command.ValuesYaml))
             {
                 tempValuesFile = Path.Combine(Path.GetTempPath(), $"entkube-values-{Guid.NewGuid()}.yaml");
-                await File.WriteAllTextAsync(tempValuesFile, command.ValuesYaml, ct);
+                await SecretFile.WriteAsync(tempValuesFile, command.ValuesYaml, ct);
                 args.Add("--values");
                 args.Add(tempValuesFile);
             }
@@ -2359,7 +2358,7 @@ public class ComponentLifecycleService(
             await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
             // Written to a file rather than passed as --from-literal: process arguments are readable by
             // any process on the host and routinely end up in logs.
-            await File.WriteAllTextAsync(manifestPath, manifest, ct);
+            await SecretFile.WriteAsync(manifestPath, manifest, ct);
 
             // The Secret has to exist before Helm creates the pods that reference it, and the namespace
             // before the Secret. Both are idempotent.
@@ -2425,7 +2424,7 @@ public class ComponentLifecycleService(
         string tempFile = Path.Combine(Path.GetTempPath(), $"entkube-limitrange-{Guid.NewGuid()}.yaml");
         try
         {
-            await File.WriteAllTextAsync(tempFile, limitRange, ct);
+            await SecretFile.WriteAsync(tempFile, limitRange, ct);
             await RunProcessAsync("kubectl", $"apply -f {tempFile} --kubeconfig {kubeconfigPath}", ct);
         }
         finally
