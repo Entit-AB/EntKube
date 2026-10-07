@@ -62,6 +62,7 @@ public static partial class ModuleMap
         [typeof(BootstrapRunnerService)] = Module.Fleet,
         [typeof(ClusterBlueprintService)] = Module.Fleet,
         [typeof(EntKube.Web.Services.ClusterChanges.ClusterChangeGate)] = Module.Fleet,
+        [typeof(EntKube.Web.Services.ClusterChanges.AuditClusterChangeRecorder)] = Module.Fleet,
         [typeof(ClusterEgressRelay)] = Module.Fleet,
         [typeof(ClusterEgressTunnel)] = Module.Fleet,
         [typeof(ClusterProvisioningService)] = Module.Fleet,

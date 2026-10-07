@@ -348,6 +348,35 @@ background services. It stops being defensible when a remote agent is a caller.
 This is a prerequisite, not a phase-4 nicety. Everything else in this document can
 slip; this cannot.
 
+**Started: the ungated path is now recorded, which it was not.** The four bullets above are
+one product decision apart from being buildable — whether unattended work stalls waiting for
+an out-of-band approval, proceeds under a policy, or is refused outright, is a question about
+how EntKube should behave, not a detail to settle in passing. The half that needs no such
+decision came first: `IClusterChangeRecorder` writes every gate outcome to the audit trail,
+so an unattended change leaves a trace.
+
+It matters because the previous behaviour was not "ungated", it was *invisible*:
+`AcknowledgeAsync` returned on the first line, before a diff was even computed, and nothing
+anywhere said a cluster had been altered with nobody watching. The two bypass reasons are now
+recorded separately — `GateDisabled` (an operator opted out of the dialog) and
+`AppliedUnattended` (there was no operator to ask) — because only the second one grows as more
+work moves off the Blazor circuit, and that trend is exactly what decides how urgent the
+remaining four bullets are. Before choosing what *should* happen to unattended changes, it is
+worth being able to count them.
+
+Two things deliberately not done, both recorded in code rather than left to be discovered:
+
+- **Diff bodies and manifests are never written to the record.** A manifest on its way to a
+  cluster routinely contains a Secret, and `kubectl diff` of one shows its old and new values.
+  Persisting either would turn a safety feature into a second copy of every credential EntKube
+  applies. The row carries what happened, where, and the diff's size.
+- **The rows cannot be grouped by cluster**, because `PlannedClusterChange` has no cluster id —
+  only a `ClusterLabel`, a non-nullable string whose default is the literal `"cluster"`, so a
+  caller that never set it is indistinguishable from a cluster named that. This is the *same*
+  missing identity that stops the gate moving into `IClusterClient` (§4.0.1): none of the
+  eighteen factory methods receives a cluster to put in the model. One `ClusterId` on
+  `PlannedClusterChange` fixes both, and belongs with that work rather than ahead of it.
+
 ---
 
 ## 6. Sequence
