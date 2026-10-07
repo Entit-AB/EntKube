@@ -399,7 +399,7 @@ public class KedaScalerService(
         try
         {
             await SecretFile.WriteAsync(kubeconfigPath, cluster.Kubeconfig, ct);
-            await File.WriteAllTextAsync(manifestPath, yaml, ct);
+            await SecretFile.WriteAsync(manifestPath, yaml, ct);
 
             // -n {ns} targets the app's namespace; manifests omit an explicit namespace so
             // both structured ScaledObjects and user-authored Custom YAML land there.

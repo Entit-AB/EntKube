@@ -970,7 +970,7 @@ public class KubernetesOperationsService(
 
                 try
                 {
-                    await File.WriteAllTextAsync(tempManifest, combined, ct);
+                    await SecretFile.WriteAsync(tempManifest, combined, ct);
                     result = await RunCliAsync("kubectl",
                         $"delete -f {tempManifest} --kubeconfig {tempKubeconfig} --ignore-not-found",
                         ct);
@@ -1126,7 +1126,7 @@ public class KubernetesOperationsService(
             }, ct);
 
             await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
-            await File.WriteAllTextAsync(tempManifest, combined, ct);
+            await SecretFile.WriteAsync(tempManifest, combined, ct);
 
             HelmExecutionResult result = await RunCliAsync(
                 "kubectl",
@@ -2408,7 +2408,7 @@ public class KubernetesOperationsService(
             if (!string.IsNullOrWhiteSpace(deployment.HelmValues))
             {
                 tempValues = Path.Combine(Path.GetTempPath(), $"entkube-values-{Guid.NewGuid()}.yaml");
-                await File.WriteAllTextAsync(tempValues, deployment.HelmValues, ct);
+                await SecretFile.WriteAsync(tempValues, deployment.HelmValues, ct);
                 args.Add("--values");
                 args.Add(tempValues);
             }

@@ -458,7 +458,7 @@ public class KyvernoPolicyService(
         string manifestPath = Path.Combine(Path.GetTempPath(), $"entkube-kyverno-cp-{Guid.NewGuid():N}.yaml");
         try
         {
-            await File.WriteAllTextAsync(manifestPath, yaml, ct);
+            await SecretFile.WriteAsync(manifestPath, yaml, ct);
             return await RunKubectlAsync(cluster, $"apply -f {manifestPath}", ct);
         }
         finally
@@ -803,7 +803,7 @@ public class KyvernoPolicyService(
         try
         {
             await SecretFile.WriteAsync(kubeconfigPath, cluster.Kubeconfig, ct);
-            await File.WriteAllTextAsync(manifestPath, yaml, ct);
+            await SecretFile.WriteAsync(manifestPath, yaml, ct);
 
             System.Diagnostics.ProcessStartInfo psi = new("kubectl",
                 $"apply -f {manifestPath} --kubeconfig {kubeconfigPath}")

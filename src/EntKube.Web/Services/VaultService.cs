@@ -2582,7 +2582,7 @@ public class VaultService(
 
                         // Shell-safe: write value to a temp file so we avoid quoting issues.
                         string tmpVal = Path.Combine(Path.GetTempPath(), $"entkube-val-{Guid.NewGuid()}");
-                        await File.WriteAllTextAsync(tmpVal, plainValue, ct);
+                        await SecretFile.WriteAsync(tmpVal, plainValue, ct);
                         literals.Add($"--from-file={vaultSecret.Name}={tmpVal}");
                     }
 
@@ -2713,11 +2713,11 @@ public class VaultService(
 
         try
         {
-            await File.WriteAllTextAsync(crtFile, bundle.CombinedCertificateChain, ct);
-            await File.WriteAllTextAsync(keyFile, bundle.PrivateKey!.Trim() + "\n", ct);
+            await SecretFile.WriteAsync(crtFile, bundle.CombinedCertificateChain, ct);
+            await SecretFile.WriteAsync(keyFile, bundle.PrivateKey!.Trim() + "\n", ct);
             // fullchain.crt = leaf + intermediates + CA (everything but the private key),
             // for consumers that want the complete chain in a single file.
-            await File.WriteAllTextAsync(fullChainFile, bundle.FullChain, ct);
+            await SecretFile.WriteAsync(fullChainFile, bundle.FullChain, ct);
 
             List<string> fromFiles =
             [
@@ -2807,7 +2807,7 @@ public class VaultService(
             foreach ((string key, string value) in data)
             {
                 string tmp = Path.Combine(Path.GetTempPath(), $"entkube-oauth-{Guid.NewGuid()}");
-                await File.WriteAllTextAsync(tmp, value, ct);
+                await SecretFile.WriteAsync(tmp, value, ct);
                 tmpFiles.Add(tmp);
                 fromFiles.Add($"--from-file={key}={tmp}");
             }

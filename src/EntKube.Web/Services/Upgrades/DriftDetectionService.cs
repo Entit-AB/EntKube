@@ -252,7 +252,7 @@ public class DriftDetectionService(
         try
         {
             await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
-            await File.WriteAllTextAsync(manifestPath, desired, ct);
+            await SecretFile.WriteAsync(manifestPath, desired, ct);
 
             using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
             timeout.CancelAfter(DiffTimeout);
