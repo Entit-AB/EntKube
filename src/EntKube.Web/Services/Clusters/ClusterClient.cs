@@ -34,6 +34,9 @@ public sealed class ClusterClient(
     public Task EnsureNamespaceAsync(string ns, CancellationToken ct = default)
         => inner.EnsureNamespaceAsync(ns, kubeconfig, ct);
 
+    public Task<HelmExecutionResult> RunHelmAsync(HelmInvocation invocation, CancellationToken ct = default)
+        => inner.RunHelmAsync(invocation, kubeconfig, ct);
+
     public Task<bool> ResourceExistsAsync(string resource, string name, string ns = "", CancellationToken ct = default)
         => inner.ResourceExistsAsync(resource, name, ns, kubeconfig, ct);
 

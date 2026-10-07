@@ -32,6 +32,12 @@ public interface IClusterClient
     Task EnsureNamespaceAsync(string ns, CancellationToken ct = default);
 
     /// <summary>
+    /// Runs one helm invocation against this cluster. The credential is supplied from here and the
+    /// acknowledgment is raised on the way through.
+    /// </summary>
+    Task<HelmExecutionResult> RunHelmAsync(HelmInvocation invocation, CancellationToken ct = default);
+
+    /// <summary>
     /// Whether one named resource exists on this cluster. Pass an empty <paramref name="ns"/> for
     /// cluster-scoped resources such as CRDs.
     /// </summary>

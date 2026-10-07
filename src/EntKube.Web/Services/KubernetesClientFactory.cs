@@ -167,6 +167,115 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// Supports optional label selectors for filtering.
     /// </summary>
     /// <summary>
+    /// Runs one helm invocation against a cluster.
+    ///
+    /// <para>Three things happen here that the callers used to each do for themselves: the
+    /// acknowledgment is raised, the credential is written to a 0600 file and passed as
+    /// <c>--kubeconfig</c>, and the file is removed afterwards. The arguments are otherwise passed
+    /// through untouched, because chart resolution is the caller's business — see
+    /// <see cref="HelmInvocation"/>.</para>
+    ///
+    /// <para>Unlike the kubectl operations here, this returns a result rather than throwing. Every
+    /// helm caller in EntKube inspects <see cref="HelmExecutionResult.Output"/> — a failed release
+    /// is something an operator reads, not an exception to unwind — and a non-zero helm exit is an
+    /// ordinary outcome of installing a chart.</para>
+    /// </summary>
+    public async Task<HelmExecutionResult> RunHelmAsync(
+        Clusters.HelmInvocation invocation, string kubeconfig, CancellationToken ct = default)
+    {
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Helm,
+            Name = invocation.ReleaseName,
+            Namespace = invocation.Namespace,
+            Kubeconfig = kubeconfig,
+            Summary = invocation.Summary ?? $"helm {invocation.Verb} {invocation.ReleaseName} in {invocation.Namespace}",
+        }, ct);
+
+        string kubeconfigPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+
+            return await RunHelmProcessAsync(BuildHelmArguments(invocation, kubeconfigPath), ct);
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+        }
+    }
+
+    /// <summary>
+    /// The command line for one invocation: the verb, then the caller's arguments, then the
+    /// credential this seam supplies.
+    ///
+    /// <para>Split out so it can be asserted on. It was inlined, and a mutant that stopped
+    /// appending <c>--kubeconfig</c> passed every test — because the tests exercised the callers
+    /// through a mocked factory and so never ran this. The one line that makes the seam a seam
+    /// deserves to be observable.</para>
+    /// </summary>
+    public static string BuildHelmArguments(Clusters.HelmInvocation invocation, string kubeconfigPath)
+        => string.Join(' ',
+            new[] { invocation.Verb }
+                .Concat(invocation.Arguments)
+                .Concat(["--kubeconfig", kubeconfigPath]));
+
+    /// <summary>
+    /// Runs helm and captures its combined output. Separate from <see cref="RunKubectlAsync"/>
+    /// because helm's non-zero exit is a result to report rather than a failure to raise.
+    /// </summary>
+    private static async Task<HelmExecutionResult> RunHelmProcessAsync(string arguments, CancellationToken ct)
+    {
+        using Process process = new()
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "helm",
+                Arguments = arguments,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            },
+        };
+        // As for kubectl: the container user's real HOME is not writable, and helm wants a cache.
+        process.StartInfo.EnvironmentVariables["HOME"] = "/tmp";
+
+        try
+        {
+            process.Start();
+
+            Task<string> stdout = process.StandardOutput.ReadToEndAsync(ct);
+            Task<string> stderr = process.StandardError.ReadToEndAsync(ct);
+            await process.WaitForExitAsync(ct);
+
+            string output = (await stdout).Trim();
+            string error = (await stderr).Trim();
+
+            if (error.Length > 0)
+            {
+                output = output.Length > 0 ? $"{output}\n{error}" : error;
+            }
+
+            return new HelmExecutionResult
+            {
+                Success = process.ExitCode == 0,
+                ExitCode = process.ExitCode,
+                Output = output,
+            };
+        }
+        catch (Exception ex)
+        {
+            return new HelmExecutionResult
+            {
+                Success = false,
+                Output = HelmExecutionResult.DescribeLaunchFailure("helm", ex),
+            };
+        }
+    }
+
+    /// <summary>
     /// Whether one named resource exists. <c>--ignore-not-found</c> makes "absent" an empty answer
     /// rather than a failure, so only an unreachable cluster raises.
     /// </summary>
