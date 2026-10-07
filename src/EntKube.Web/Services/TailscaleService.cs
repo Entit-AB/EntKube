@@ -158,13 +158,22 @@ public class TailscaleService(
             string ns   = item["metadata"]?["namespace"]?.GetValue<string>() ?? "";
             string name = item["metadata"]?["name"]?.GetValue<string>() ?? "";
 
-            JsonNode? firstRule = item["spec"]?["rules"]?[0];
+            // FirstOrDefault rather than [0] throughout: indexing an EMPTY JsonArray throws
+            // ArgumentOutOfRangeException, which the null-conditional chain does not catch. All
+            // three of these arrays are legitimately empty — an Ingress may carry no rules, a rule
+            // no paths, and `status.loadBalancer.ingress` is empty for every LoadBalancer that has
+            // not been given an address yet, which is the normal state for a few seconds after
+            // one is created. With [0] a single pending Ingress threw out of this loop and took
+            // the whole listing with it. The line above already pattern-matches to JsonArray for
+            // exactly this reason.
+            JsonNode? firstRule = (item["spec"]?["rules"] as JsonArray)?.FirstOrDefault();
             string? host    = firstRule?["host"]?.GetValue<string>();
-            JsonNode? firstPath = firstRule?["http"]?["paths"]?[0];
+            JsonNode? firstPath = (firstRule?["http"]?["paths"] as JsonArray)?.FirstOrDefault();
             string svcName  = firstPath?["backend"]?["service"]?["name"]?.GetValue<string>() ?? "";
             int svcPort     = firstPath?["backend"]?["service"]?["port"]?["number"]?.GetValue<int>() ?? 80;
 
-            string? lbHost = item["status"]?["loadBalancer"]?["ingress"]?[0]?["hostname"]?.GetValue<string>();
+            string? lbHost = (item["status"]?["loadBalancer"]?["ingress"] as JsonArray)
+                ?.FirstOrDefault()?["hostname"]?.GetValue<string>();
 
             ingresses.Add(new TailscaleIngress(name, ns, svcName, svcPort, host, lbHost));
         }

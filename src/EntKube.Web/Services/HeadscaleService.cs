@@ -144,7 +144,14 @@ public class HeadscaleService(
         string json = await k8sFactory.GetJsonAsync("pods", "headscale", kubeconfig,
             "app=headscale", ct);
         JsonNode? root = JsonNode.Parse(json);
-        string? podName = root?["items"]?[0]?["metadata"]?["name"]?.GetValue<string>();
+
+        // FirstOrDefault rather than [0]: indexing an empty JsonArray throws
+        // ArgumentOutOfRangeException, and the null-conditional chain does not catch that. With
+        // [0] the message below was unreachable in precisely the case it was written for — no
+        // headscale pod yet — and bootstrap failed with "Index was out of range" instead.
+        string? podName = (root?["items"] as JsonArray)?.FirstOrDefault()
+            ?["metadata"]?["name"]?.GetValue<string>();
+
         if (string.IsNullOrEmpty(podName))
             throw new InvalidOperationException("Headscale pod not found. Is headscale installed and running?");
         return podName;
