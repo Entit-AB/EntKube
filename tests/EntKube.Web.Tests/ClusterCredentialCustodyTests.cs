@@ -30,9 +30,9 @@ public class ClusterCredentialCustodyTests
     private const string Web = "../../../../../src/EntKube.Web";
 
     /// <summary>
-    /// Places that take a cluster's credential out of the row, measured 2026-10-06.
+    /// Places that take a cluster's credential out of the row, measured 2026-10-07.
     ///
-    /// <para><b>275 and falling</b>, from 508 once the count was corrected (below):
+    /// <para><b>259 and falling</b>, from 508 once the count was corrected (below):
     /// <c>RedisService</c> 9, <c>CnpgService</c> 48, <c>ElasticsearchService</c> 42,
     /// <c>RabbitMQService</c> 37, <c>MongoService</c> 47, then <c>KafkaService</c> 15 and
     /// <c>RegisteredPostgresService</c> 16. None of those seven injects
@@ -47,17 +47,27 @@ public class ClusterCredentialCustodyTests
     /// a diff capability on the seam — the gate shells out to <c>kubectl diff</c>, which is not
     /// among the factory's eighteen methods.</para>
     ///
-    /// <para>By module: Fleet 102 (unremarkable — it owns clusters, and
-    /// <c>KubernetesOperationsService</c> alone is 72), Catalog 52, Telemetry 28, Delivery 26,
+    /// <para>By module: Fleet 86 (unremarkable — it owns clusters, and
+    /// <c>KubernetesOperationsService</c> alone is 56), Catalog 52, Telemetry 28, Delivery 26,
     /// Connectivity 23, DataServices 18, then single figures elsewhere.</para>
     ///
     /// <para><b>What the remaining sites actually do</b>, classified per site rather than per file —
     /// two earlier attempts to plan this inferred a site's purpose from its file's contents and were
-    /// wrong both times. Of 275: a <b>reachability guard</b> 96 (<c>IsNullOrWhiteSpace(cluster
-    /// .Kubeconfig)</c>, which is not use of the credential at all — <c>ForAsync</c> returning null
-    /// already answers that question), handed to <b>one of the service's own helpers</b> 70,
-    /// <b>building an SDK client</b> 31, a <b>local assignment</b> 16, the <b>gate's model</b> 16,
-    /// and an actual <b>factory call</b> 13.</para>
+    /// wrong both times. Of the 275 measured a day earlier: a <b>reachability guard</b> 96
+    /// (<c>IsNullOrWhiteSpace(cluster.Kubeconfig)</c>, which is not use of the credential at all —
+    /// <c>ForAsync</c> returning null already answers that question), handed to <b>one of the
+    /// service's own helpers</b> 70, <b>building an SDK client</b> 31, a <b>local assignment</b> 16,
+    /// the <b>gate's model</b> 16, and an actual <b>factory call</b> 13.</para>
+    ///
+    /// <para>The sixteen that went next were the first two categories meeting in one place: the
+    /// routing, gateway, L4 and mesh paths of <c>KubernetesOperationsService</c> shared eight
+    /// private helpers that each took a <c>string kubeconfig</c> only because their callers had
+    /// one — <c>ApplyRawYamlAsync</c> alone was the funnel for ten applies. Converting the helpers
+    /// rather than the public methods moved every one of their callers at once, and turned each
+    /// caller's reachability guard into the resolution that answers it. See
+    /// <c>RoutingClusterCallTests</c>, which is also the first coverage this service has had of
+    /// what it sends a cluster: the kubectl invocation used to sit behind a <c>private static</c>
+    /// method, so the seam and the coverage had to arrive together.</para>
     ///
     /// <para>So the bulk is not exotic transports. It is guards that become a resolution, and
     /// private helpers whose signatures take a credential because their callers had one. Both are
@@ -66,8 +76,10 @@ public class ClusterCredentialCustodyTests
     /// <para><b>helm is 8 invocations in 2 files</b>, not the 97 an earlier count suggested — that
     /// figure was credential sites in files that merely mention helm. The two files are
     /// <c>KubernetesOperationsService</c> and <c>ComponentLifecycleService</c>, which between them
-    /// hold <b>88 of the 275</b> and use the SDK, their own process spawning and helm. That one
-    /// file at 72 is the centre of gravity of everything left.</para>
+    /// hold <b>72 of the 259</b> and use the SDK, their own process spawning and helm. That one
+    /// file, now 56, is still the centre of gravity of everything left: the YAML-deployment path
+    /// (apply, prune, delete-from-cluster), the four helm invocations, and eighteen remaining
+    /// places that build an SDK client of their own.</para>
     ///
     /// <para><b>The change gate comes last, not next.</b> <c>PlannedClusterChange</c> requires a
     /// kubeconfig, so every gated call site holds one — but the gate is invoked from inside
@@ -77,7 +89,7 @@ public class ClusterCredentialCustodyTests
     /// rather than a refactor. The gate can only change once its callers already route through
     /// the seam.</para>
     ///
-    private const int BaselineOccurrences = 275;
+    private const int BaselineOccurrences = 259;
 
     /// <summary>Files doing so. A file that has stopped should not be able to start again quietly.</summary>
     private const int BaselineFiles = 45;

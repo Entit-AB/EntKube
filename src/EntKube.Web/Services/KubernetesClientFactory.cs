@@ -166,6 +166,31 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// Gets JSON output from kubectl for a given resource type in a namespace.
     /// Supports optional label selectors for filtering.
     /// </summary>
+    /// <summary>
+    /// Whether one named resource exists. <c>--ignore-not-found</c> makes "absent" an empty answer
+    /// rather than a failure, so only an unreachable cluster raises.
+    /// </summary>
+    public async Task<bool> ResourceExistsAsync(
+        string resource, string name, string ns, string kubeconfig, CancellationToken ct = default)
+    {
+        string kubeconfigPath = Path.GetTempFileName();
+
+        try
+        {
+            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+
+            string nsArg = string.IsNullOrEmpty(ns) ? "" : $" -n {ns}";
+            string output = await RunKubectlAsync(
+                $"get {resource} {name}{nsArg} --kubeconfig={kubeconfigPath} --ignore-not-found -o name", ct);
+
+            return !string.IsNullOrWhiteSpace(output);
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+        }
+    }
+
     public async Task<string> GetJsonAsync(
         string resource, string ns, string kubeconfig, string labelSelector = "", CancellationToken ct = default)
     {

@@ -31,6 +31,12 @@ public interface IClusterClient
 
     Task EnsureNamespaceAsync(string ns, CancellationToken ct = default);
 
+    /// <summary>
+    /// Whether one named resource exists on this cluster. Pass an empty <paramref name="ns"/> for
+    /// cluster-scoped resources such as CRDs.
+    /// </summary>
+    Task<bool> ResourceExistsAsync(string resource, string name, string ns = "", CancellationToken ct = default);
+
     Task<string> GetJsonAsync(string resource, string ns, string labelSelector = "", CancellationToken ct = default);
 
     Task<string> GetJsonAllNamespacesAsync(string resource, string labelSelector = "", CancellationToken ct = default);

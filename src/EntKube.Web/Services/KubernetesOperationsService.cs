@@ -2,6 +2,7 @@ using System.Text.Json;
 using System.Text.Json.Nodes;
 using EntKube.Web.Data;
 using EntKube.Web.Services.ClusterChanges;
+using EntKube.Web.Services.Clusters;
 using k8s;
 using k8s.Models;
 using Microsoft.EntityFrameworkCore;
@@ -73,6 +74,7 @@ public class KubernetesOperationsService(
     AuditService auditService,
     KyvernoPolicyService kyvernoPolicyService,
     IClusterChangeGate gate,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     EntKube.Web.Services.Rollouts.IRolloutStarter rollouts,
     ILogger<KubernetesOperationsService> logger,
     // Optional: used only to read the client certificate for outbound mTLS. Absent in unit tests,
@@ -1219,15 +1221,18 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Failure(
                 "This route is observed only (imported / managed by ArgoCD or Flux). Enable management to let EntKube apply it.");
 
-        if (string.IsNullOrWhiteSpace(dr.AppDeployment?.Cluster?.Kubeconfig))
+        IClusterClient? clusterAccess = dr.AppDeployment?.Cluster is null
+            ? null
+            : await clusterClients.ForAsync(dr.AppDeployment.Cluster.TenantId, dr.AppDeployment.ClusterId, ct);
+
+        if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
                 "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
 
-        Guid clusterId = dr.AppDeployment.ClusterId;
-        string kubeconfig = dr.AppDeployment.Cluster.Kubeconfig;
+        Guid clusterId = dr.AppDeployment!.ClusterId;
 
         // Apply the Gateway first so the HTTPS listener + cert exist before the HTTPRoute attaches.
-        KubernetesOperationResult<string> gatewayResult = await ApplyGatewayForClusterAsync(clusterId, kubeconfig, db, ct);
+        KubernetesOperationResult<string> gatewayResult = await ApplyGatewayForClusterAsync(clusterAccess, clusterId, db, ct);
         if (!gatewayResult.IsSuccess)
             return gatewayResult;
 
@@ -1275,7 +1280,7 @@ public class KubernetesOperationsService(
                 MeshMtlsMode mode = namespaceModes.GetValueOrDefault(backendNs, MeshMtlsMode.Permissive);
                 string peerAuthYaml = MeshMtlsService.BuildPeerAuthenticationYaml(backendNs, mode);
                 // Ignore errors — cluster may already have the policy or not need one.
-                await ApplyRawYamlAsync(kubeconfig, peerAuthYaml, ct);
+                await ApplyRawYamlAsync(clusterAccess, peerAuthYaml, ct);
             }
 
             // DestinationRule is placed in the gateway's namespace (istio-system / root config
@@ -1300,7 +1305,7 @@ public class KubernetesOperationsService(
                 // would push plaintext into them and the backend would drop the connection.
                 // An empty list (service missing, API unreachable) yields exactly the
                 // service-wide rule this call site has always applied.
-                List<KubeServicePort> ports = await GetServicePortsAsync(kubeconfig, svcNs, svc, ct);
+                List<KubeServicePort> ports = await GetServicePortsAsync(clusterAccess, svcNs, svc, ct);
 
                 // Under STRICT the backend refuses the plaintext hop this rule normally sets up,
                 // so the gateway originates mesh mTLS instead. Same resource name either way:
@@ -1312,14 +1317,14 @@ public class KubernetesOperationsService(
                     svc, svcNs, gwNamespace, ports, alwaysEmit: true, serviceWideTlsMode: backendTlsMode,
                     sessionAffinity: SessionAffinitySpec.Merge(group.Select(SessionAffinitySpec.From)));
 
-                await ApplyRawYamlAsync(kubeconfig, destinationRuleYaml, ct);
+                await ApplyRawYamlAsync(clusterAccess, destinationRuleYaml, ct);
             }
         }
 
         // GenerateManifestYaml includes the HTTPRoute + Certificate + ReferenceGrants for any
         // cross-namespace backendRefs (required by Gateway API when services are in other namespaces).
         string yaml = AppRouteService.GenerateManifestYaml(dr.AppRoute, enabledRoutes);
-        KubernetesOperationResult<string> result = await ApplyRawYamlAsync(kubeconfig, yaml, ct);
+        KubernetesOperationResult<string> result = await ApplyRawYamlAsync(clusterAccess, yaml, ct);
 
         if (result.IsSuccess)
         {
@@ -1414,12 +1419,15 @@ public class KubernetesOperationsService(
         if (dr is null)
             return KubernetesOperationResult<string>.Failure("Deployment route not found.");
 
-        if (string.IsNullOrWhiteSpace(dr.AppDeployment?.Cluster?.Kubeconfig))
+        IClusterClient? clusterAccess = dr.AppDeployment?.Cluster is null
+            ? null
+            : await clusterClients.ForAsync(dr.AppDeployment.Cluster.TenantId, dr.AppDeployment.ClusterId, ct);
+
+        if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
                 "Cluster has no kubeconfig configured.");
 
-        string ns = dr.AppDeployment.Namespace;
-        string kubeconfig = dr.AppDeployment.Cluster.Kubeconfig;
+        string ns = dr.AppDeployment!.Namespace;
         Guid clusterId = dr.AppDeployment.ClusterId;
 
         // Query remaining routes for this hostname across all AppRoutes on this cluster.
@@ -1442,37 +1450,32 @@ public class KubernetesOperationsService(
             // Re-apply HTTPRoute + ReferenceGrants with only the remaining rules so other deployments stay live.
             // Gateway stays unchanged — the hostname listener remains for the remaining routes.
             string yaml = AppRouteService.GenerateManifestYaml(dr.AppRoute, remainingRoutes);
-            return await ApplyRawYamlAsync(kubeconfig, yaml, ct);
+            return await ApplyRawYamlAsync(clusterAccess, yaml, ct);
         }
 
         // Last deployment route for this hostname — delete the HTTPRoute and update the Gateway
         // to remove the HTTPS listener for this hostname (and its Certificate in cert-manager).
         string routeName = ExternalRouteService.ToListenerName(dr.AppRoute.Hostname) + "-route";
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await RequireAckAsync(ChangeVerb.Delete, kubeconfig, dr.AppDeployment.Cluster.Name, ns,
-                $"Delete HTTPRoute/{routeName} for {hostname}", ct: ct);
-
-            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
-
-            HelmExecutionResult deleteResult = await RunCliAsync(
-                "kubectl",
-                $"delete httproute {routeName} --namespace {ns} --kubeconfig {tempKubeconfig} --ignore-not-found",
-                ct);
+            // The acknowledgment is raised by the cluster client, whose own description of a delete
+            // is the one this used to pass by hand: "Delete HTTPRoute/{name} in {namespace}".
+            await clusterAccess.DeleteManifestAsync("httproute", routeName, ns, ct);
 
             // Regenerate the Gateway without this hostname so the HTTPS listener is removed.
             // The Certificate in cert-manager namespace is left in place (cert-manager cleans it up
             // if needed, and deleting it here would break any in-flight ACME challenges).
-            await ApplyGatewayForClusterAsync(clusterId, kubeconfig, db, ct);
+            await ApplyGatewayForClusterAsync(clusterAccess, clusterId, db, ct);
 
-            return deleteResult.Success
-                ? KubernetesOperationResult<string>.Success(deleteResult.Output)
-                : KubernetesOperationResult<string>.Failure(deleteResult.Output);
+            return KubernetesOperationResult<string>.Success(
+                $"HTTPRoute {routeName} deleted from {ns}.");
         }
-        finally
+        catch (Exception ex)
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+            // A failed delete now stops before the Gateway is regenerated. It used to regenerate
+            // regardless and then report the failure, which removed the hostname's listener while
+            // the HTTPRoute was still attached to it; leaving both in place is the safer half-state.
+            return KubernetesOperationResult<string>.Failure(ex.Message);
         }
     }
 
@@ -1483,7 +1486,7 @@ public class KubernetesOperationsService(
     /// is added or removed so the Gateway tracks the current set of exposed hostnames.
     /// </summary>
     private async Task<KubernetesOperationResult<string>> ApplyGatewayForClusterAsync(
-        Guid clusterId, string kubeconfig, ApplicationDbContext db, CancellationToken ct)
+        IClusterClient clusterAccess, Guid clusterId, ApplicationDbContext db, CancellationToken ct)
     {
         KubernetesCluster? cluster = await db.KubernetesClusters
             .Include(c => c.Components)
@@ -1531,10 +1534,10 @@ public class KubernetesOperationsService(
         // Label first, apply second. The listeners admit routes by namespace label, so a Gateway
         // that lands before the labels do detaches every route on the cluster for as long as the
         // gap lasts — the ordering here is the difference between a policy change and an outage.
-        await LabelRouteNamespacesAsync(kubeconfig, externalRoutes, appRoutes, clusterId, ct);
+        await LabelRouteNamespacesAsync(clusterAccess, externalRoutes, appRoutes, clusterId, ct);
 
         string yaml = ExternalRouteService.GenerateGatewayYaml(gatewayName, gatewayNamespace, externalRoutes, appRoutes, gatewayClass: gatewayClass);
-        KubernetesOperationResult<string> applyResult = await ApplyRawYamlAsync(kubeconfig, yaml, ct);
+        KubernetesOperationResult<string> applyResult = await ApplyRawYamlAsync(clusterAccess, yaml, ct);
         if (!applyResult.IsSuccess) return applyResult;
 
         // A listener on a port the gateway Service doesn't publish is invisible from outside: the
@@ -1550,7 +1553,7 @@ public class KubernetesOperationsService(
         // spec.tls.frontend in v1.5; against an older CRD the field is not rejected, it is pruned —
         // kubectl reports success, the Gateway programs cleanly, and nothing ever asks a client for
         // a certificate. Reading it back is the only way to tell those two outcomes apart.
-        if (!await GatewayHasFrontendTlsAsync(kubeconfig, gatewayNamespace, gatewayName, ct))
+        if (!await GatewayHasFrontendTlsAsync(clusterAccess, gatewayNamespace, gatewayName, ct))
         {
             return KubernetesOperationResult<string>.Failure(
                 $"The Gateway was applied but its client-certificate configuration was dropped by the cluster. " +
@@ -1559,7 +1562,7 @@ public class KubernetesOperationsService(
                 $"Gateway API CRDs component, and note that Istio only implements this from 1.28.");
         }
 
-        List<KubeServicePort> servicePorts = await GetServicePortsAsync(kubeconfig, gatewayNamespace, gatewayName, ct);
+        List<KubeServicePort> servicePorts = await GetServicePortsAsync(clusterAccess, gatewayNamespace, gatewayName, ct);
         List<int> unexposed = mtlsPlan.BundlesByPort.Keys
             .Where(port => servicePorts.Count > 0 && servicePorts.All(sp => sp.Port != port))
             .OrderBy(p => p)
@@ -1587,11 +1590,11 @@ public class KubernetesOperationsService(
     /// apply on a transient read would be worse than the problem being detected.
     /// </summary>
     private static async Task<bool> GatewayHasFrontendTlsAsync(
-        string kubeconfig, string ns, string name, CancellationToken ct)
+        IClusterClient clusterAccess, string ns, string name, CancellationToken ct)
     {
         try
         {
-            using Kubernetes client = CreateClient(kubeconfig);
+            using Kubernetes client = clusterAccess.CreateSdkClient();
 
             object raw = await client.CustomObjects.GetNamespacedCustomObjectAsync(
                 "gateway.networking.k8s.io", "v1", ns, "gateways", name, cancellationToken: ct);
@@ -1660,13 +1663,17 @@ public class KubernetesOperationsService(
         {
             AppDeployment first = group.First();
 
-            if (string.IsNullOrWhiteSpace(first.Cluster?.Kubeconfig))
+            IClusterClient? clusterAccess = first.Cluster is null
+                ? null
+                : await clusterClients.ForAsync(first.Cluster.TenantId, first.ClusterId, ct);
+
+            if (clusterAccess is null)
             {
                 notes.Add($"{first.Cluster?.Name ?? "cluster"}: no kubeconfig configured, skipped.");
                 continue;
             }
 
-            bool hasMesh = ExternalRouteService.ResolveGatewayClass(first.Cluster.Components) == "istio";
+            bool hasMesh = ExternalRouteService.ResolveGatewayClass(first.Cluster!.Components) == "istio";
 
             // Falling back to the Secret alone is better than applying mesh resources that nothing
             // reads — but it changes who performs the handshake, so it is said out loud.
@@ -1693,7 +1700,7 @@ public class KubernetesOperationsService(
             }
 
             string manifest = OutboundMtlsService.BuildManifest(effective, bundle, first.Namespace);
-            KubernetesOperationResult<string> result = await ApplyRawYamlAsync(first.Cluster.Kubeconfig, manifest, ct);
+            KubernetesOperationResult<string> result = await ApplyRawYamlAsync(clusterAccess, manifest, ct);
 
             if (!result.IsSuccess)
                 return KubernetesOperationResult<string>.Failure(
@@ -1723,10 +1730,10 @@ public class KubernetesOperationsService(
     /// Reads a namespace's mesh membership: whether it runs in ambient mode, and which pods carry
     /// an Istio sidecar. Used to decide whether STRICT can be applied without cutting traffic off.
     /// </summary>
-    public async Task<MeshReadiness> GetMeshReadinessAsync(
-        string kubeconfig, string ns, CancellationToken ct = default)
+    private static async Task<MeshReadiness> GetMeshReadinessAsync(
+        IClusterClient clusterAccess, string ns, CancellationToken ct = default)
     {
-        using Kubernetes client = CreateClient(kubeconfig);
+        using Kubernetes client = clusterAccess.CreateSdkClient();
 
         V1Namespace namespaceObj = await client.CoreV1.ReadNamespaceAsync(ns, cancellationToken: ct);
         bool isAmbient = namespaceObj.Metadata?.Labels is { } labels
@@ -1763,14 +1770,15 @@ public class KubernetesOperationsService(
         if (cluster is null)
             return KubernetesOperationResult<MeshReadiness>.Failure("Cluster not found.");
 
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        IClusterClient? clusterAccess = await clusterClients.ForAsync(cluster.TenantId, clusterId, ct);
+        if (clusterAccess is null)
             return KubernetesOperationResult<MeshReadiness>.Failure(
                 "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
 
         try
         {
             return KubernetesOperationResult<MeshReadiness>.Success(
-                await GetMeshReadinessAsync(cluster.Kubeconfig, ns, ct));
+                await GetMeshReadinessAsync(clusterAccess, ns, ct));
         }
         catch (Exception ex)
         {
@@ -1803,7 +1811,8 @@ public class KubernetesOperationsService(
         if (cluster is null)
             return KubernetesOperationResult<string>.Failure("Cluster not found.");
 
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        IClusterClient? clusterAccess = await clusterClients.ForAsync(cluster.TenantId, clusterId, ct);
+        if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
                 "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
 
@@ -1811,8 +1820,6 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Failure(
                 "Service-to-service mTLS requires an Istio service mesh on this cluster. PeerAuthentication is " +
                 "an Istio resource — there is no equivalent on a cluster running Traefik alone.");
-
-        string kubeconfig = cluster.Kubeconfig;
 
         MeshMtlsPolicy? policy = await db.MeshMtlsPolicies
             .FirstOrDefaultAsync(p => p.ClusterId == clusterId && p.Namespace == ns, ct);
@@ -1824,7 +1831,7 @@ public class KubernetesOperationsService(
             MeshReadiness readiness;
             try
             {
-                readiness = await GetMeshReadinessAsync(kubeconfig, ns, ct);
+                readiness = await GetMeshReadinessAsync(clusterAccess, ns, ct);
             }
             catch (Exception ex)
             {
@@ -1845,7 +1852,7 @@ public class KubernetesOperationsService(
         }
 
         string peerAuthYaml = MeshMtlsService.BuildPeerAuthenticationYaml(ns, mode);
-        KubernetesOperationResult<string> peerAuthResult = await ApplyRawYamlAsync(kubeconfig, peerAuthYaml, ct);
+        KubernetesOperationResult<string> peerAuthResult = await ApplyRawYamlAsync(clusterAccess, peerAuthYaml, ct);
         if (!peerAuthResult.IsSuccess) return peerAuthResult;
 
         // Move the gateway's side of the hop to match.
@@ -1870,11 +1877,11 @@ public class KubernetesOperationsService(
         foreach (IGrouping<string, AppDeploymentRoute> group in services)
         {
             string svc = group.Key;
-            List<KubeServicePort> ports = await GetServicePortsAsync(kubeconfig, ns, svc, ct);
+            List<KubeServicePort> ports = await GetServicePortsAsync(clusterAccess, ns, svc, ct);
             string ruleYaml = ExternalRouteService.GenerateBackendDestinationRuleYaml(
                 svc, ns, gwNamespace, ports, alwaysEmit: true, serviceWideTlsMode: backendTlsMode,
                 sessionAffinity: SessionAffinitySpec.Merge(group.Select(SessionAffinitySpec.From)));
-            await ApplyRawYamlAsync(kubeconfig, ruleYaml, ct);
+            await ApplyRawYamlAsync(clusterAccess, ruleYaml, ct);
         }
 
         if (policy is not null)
@@ -1915,12 +1922,15 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Failure(
                 "This route is observed only. Enable management to let EntKube apply it.");
 
-        if (string.IsNullOrWhiteSpace(route.AppDeployment?.Cluster?.Kubeconfig))
+        IClusterClient? clusterAccess = route.AppDeployment?.Cluster is null
+            ? null
+            : await clusterClients.ForAsync(route.AppDeployment.Cluster.TenantId, route.AppDeployment.ClusterId, ct);
+
+        if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
                 "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
 
-        Guid clusterId = route.AppDeployment.ClusterId;
-        string kubeconfig = route.AppDeployment.Cluster.Kubeconfig;
+        Guid clusterId = route.AppDeployment!.ClusterId;
         string backendNs = route.AppDeployment.Namespace;
         string proto = route.Protocol.ToString().ToUpperInvariant();
 
@@ -1937,13 +1947,13 @@ public class KubernetesOperationsService(
         // Preflight: the TCPRoute/UDPRoute CRD ships only in the experimental channel of Gateway API.
         // Without it kubectl apply fails obscurely — surface a clear, actionable error instead.
         string crdName = AppL4RouteService.RouteCrdName(route.Protocol);
-        if (!await CrdInstalledAsync(kubeconfig, crdName, ct))
+        if (!await CrdInstalledAsync(clusterAccess, crdName, ct))
             return KubernetesOperationResult<string>.Failure(
                 $"The {AppL4RouteService.RouteKind(route.Protocol)} CRD ({crdName}) is not installed on this cluster. " +
                 "Install the experimental channel of the Gateway API CRDs to enable L4 routing.");
 
         // Apply the dedicated L4 Gateway first so the listener exists before the route attaches.
-        KubernetesOperationResult<string> gatewayResult = await ApplyL4GatewayForClusterAsync(clusterId, kubeconfig, db, null, ct);
+        KubernetesOperationResult<string> gatewayResult = await ApplyL4GatewayForClusterAsync(clusterAccess, clusterId, db, null, ct);
         if (!gatewayResult.IsSuccess)
             return gatewayResult;
 
@@ -1962,7 +1972,7 @@ public class KubernetesOperationsService(
                 $"spec:\n" +
                 $"  mtls:\n" +
                 $"    mode: PERMISSIVE\n";
-            await ApplyRawYamlAsync(kubeconfig, peerAuthYaml, ct);
+            await ApplyRawYamlAsync(clusterAccess, peerAuthYaml, ct);
 
             string destinationRuleYaml =
                 $"apiVersion: networking.istio.io/v1beta1\n" +
@@ -1975,18 +1985,18 @@ public class KubernetesOperationsService(
                 $"  trafficPolicy:\n" +
                 $"    tls:\n" +
                 $"      mode: DISABLE\n";
-            await ApplyRawYamlAsync(kubeconfig, destinationRuleYaml, ct);
+            await ApplyRawYamlAsync(clusterAccess, destinationRuleYaml, ct);
         }
 
         string yaml = AppL4RouteService.GenerateRouteYaml(route, backendNs);
-        KubernetesOperationResult<string> result = await ApplyRawYamlAsync(kubeconfig, yaml, ct);
+        KubernetesOperationResult<string> result = await ApplyRawYamlAsync(clusterAccess, yaml, ct);
         if (!result.IsSuccess)
             return result;
 
         route.ClusterAppliedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
 
-        string? address = await GetL4GatewayAddressAsync(kubeconfig, gwNamespace, ct);
+        string? address = await GetL4GatewayAddressAsync(clusterAccess, gwNamespace, ct);
         string endpoint = address is not null
             ? $"{address}:{route.ExternalPort}/{proto}"
             : $"(LoadBalancer address pending):{route.ExternalPort}/{proto}";
@@ -2011,19 +2021,22 @@ public class KubernetesOperationsService(
         if (route is null)
             return KubernetesOperationResult<string>.Failure("L4 route not found.");
 
-        if (string.IsNullOrWhiteSpace(route.AppDeployment?.Cluster?.Kubeconfig))
+        IClusterClient? clusterAccess = route.AppDeployment?.Cluster is null
+            ? null
+            : await clusterClients.ForAsync(route.AppDeployment.Cluster.TenantId, route.AppDeployment.ClusterId, ct);
+
+        if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure("Cluster has no kubeconfig configured.");
 
-        string kubeconfig = route.AppDeployment.Cluster.Kubeconfig;
-        string ns = route.AppDeployment.Namespace;
+        string ns = route.AppDeployment!.Namespace;
         Guid clusterId = route.AppDeployment.ClusterId;
 
-        await DeleteResourceAsync(
-            kubeconfig, AppL4RouteService.RouteResourceType(route.Protocol),
+        await clusterAccess.DeleteManifestAsync(
+            AppL4RouteService.RouteResourceType(route.Protocol),
             AppL4RouteService.RouteResourceName(route), ns, ct);
 
         // Regenerate the gateway from the remaining routes (this one excluded — it is still in the DB).
-        return await ApplyL4GatewayForClusterAsync(clusterId, kubeconfig, db, l4RouteId, ct);
+        return await ApplyL4GatewayForClusterAsync(clusterAccess, clusterId, db, l4RouteId, ct);
     }
 
     /// <summary>
@@ -2031,8 +2044,9 @@ public class KubernetesOperationsService(
     /// routes (optionally excluding one being deleted). When no ports remain the Gateway is deleted so
     /// its auto-provisioned LoadBalancer is released.
     /// </summary>
-    private async Task<KubernetesOperationResult<string>> ApplyL4GatewayForClusterAsync(
-        Guid clusterId, string kubeconfig, ApplicationDbContext db, Guid? excludeRouteId, CancellationToken ct)
+    private static async Task<KubernetesOperationResult<string>> ApplyL4GatewayForClusterAsync(
+        IClusterClient clusterAccess, Guid clusterId, ApplicationDbContext db, Guid? excludeRouteId,
+        CancellationToken ct)
     {
         List<ClusterComponent> components = await db.ClusterComponents
             .Where(c => c.ClusterId == clusterId)
@@ -2051,12 +2065,12 @@ public class KubernetesOperationsService(
         if (string.IsNullOrEmpty(yaml))
         {
             // No L4 ports left — remove the dedicated gateway so its LoadBalancer is freed.
-            await DeleteResourceAsync(kubeconfig, "gateway.gateway.networking.k8s.io",
+            await clusterAccess.DeleteManifestAsync("gateway.gateway.networking.k8s.io",
                 ExternalRouteService.L4GatewayName, gwNamespace, ct);
             return KubernetesOperationResult<string>.Success("No L4 routes remain — dedicated L4 gateway removed.");
         }
 
-        return await ApplyRawYamlAsync(kubeconfig, yaml, ct);
+        return await ApplyRawYamlAsync(clusterAccess, yaml, ct);
     }
 
     /// <summary>Returns the dedicated L4 gateway's external address (LoadBalancer IP/hostname), or null if not yet assigned.</summary>
@@ -2068,76 +2082,58 @@ public class KubernetesOperationsService(
             .Include(c => c.Components)
             .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
 
-        if (string.IsNullOrWhiteSpace(cluster?.Kubeconfig)) return null;
+        if (cluster is null) return null;
+
+        IClusterClient? clusterAccess = await clusterClients.ForAsync(cluster.TenantId, clusterId, ct);
+        if (clusterAccess is null) return null;
 
         (_, string gwNamespace) = ExternalRouteService.ResolveL4Gateway(cluster.Components);
-        return await GetL4GatewayAddressAsync(cluster.Kubeconfig, gwNamespace, ct);
+        return await GetL4GatewayAddressAsync(clusterAccess, gwNamespace, ct);
     }
 
-    private async Task<string?> GetL4GatewayAddressAsync(string kubeconfig, string gwNamespace, CancellationToken ct)
+    /// <summary>
+    /// The dedicated L4 gateway's first assigned address, or null when it has none yet. Reads the
+    /// Gateway as JSON and picks out <c>status.addresses[0].value</c> — the same field the kubectl
+    /// jsonpath selected. Absent Gateway, empty address list, unreachable cluster: all null, which
+    /// the callers render as "(LoadBalancer address pending)".
+    /// </summary>
+    private async Task<string?> GetL4GatewayAddressAsync(
+        IClusterClient clusterAccess, string gwNamespace, CancellationToken ct)
     {
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
-            HelmExecutionResult result = await RunCliAsync(
-                "kubectl",
-                $"get gateway {ExternalRouteService.L4GatewayName} --namespace {gwNamespace} " +
-                $"--kubeconfig {tempKubeconfig} -o jsonpath={{.status.addresses[0].value}}",
-                ct);
-            string addr = result.Output.Trim();
-            return result.Success && !string.IsNullOrEmpty(addr) ? addr : null;
-        }
-        finally
-        {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
-        }
-    }
+            string json = await clusterAccess.GetJsonAsync(
+                $"gateway/{ExternalRouteService.L4GatewayName}", gwNamespace, ct: ct);
 
-    private async Task<bool> CrdInstalledAsync(string kubeconfig, string crdName, CancellationToken ct)
-    {
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-        try
-        {
-            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
-            HelmExecutionResult result = await RunCliAsync(
-                "kubectl",
-                $"get crd {crdName} --kubeconfig {tempKubeconfig} --ignore-not-found -o name",
-                ct);
-            return result.Success && result.Output.Contains(crdName);
+            string? addr = JsonNode.Parse(json)?["status"]?["addresses"]
+                ?.AsArray().FirstOrDefault()?["value"]?.GetValue<string>();
+
+            return string.IsNullOrWhiteSpace(addr) ? null : addr;
         }
-        finally
+        catch (Exception ex)
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+            logger.LogDebug(ex, "Could not read the L4 gateway address in {Namespace} on {Cluster}",
+                gwNamespace, clusterAccess.ClusterName);
+            return null;
         }
     }
 
-    private async Task DeleteResourceAsync(string kubeconfig, string kind, string name, string ns, CancellationToken ct)
+    /// <summary>
+    /// Whether a CRD is installed. A cluster that cannot be reached reads as "not installed", as it
+    /// did when this ran kubectl directly — the caller turns either into the same advice to install
+    /// the Gateway API experimental channel.
+    /// </summary>
+    private async Task<bool> CrdInstalledAsync(IClusterClient clusterAccess, string crdName, CancellationToken ct)
     {
-        // Real kind/name/ns → the gate does a live lookup and auto-skips if the target is absent
-        // (mirrors --ignore-not-found), so this stays quiet for no-op deletes.
-        await gate.AcknowledgeAsync(new PlannedClusterChange
-        {
-            Verb = ChangeVerb.Delete,
-            Kubeconfig = kubeconfig,
-            Kind = kind,
-            Name = name,
-            Namespace = ns,
-            Summary = $"Delete {kind}/{name} in {ns}",
-        }, ct);
-
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
-            await RunCliAsync(
-                "kubectl",
-                $"delete {kind} {name} --namespace {ns} --kubeconfig {tempKubeconfig} --ignore-not-found",
-                ct);
+            return await clusterAccess.ResourceExistsAsync("crd", crdName, ct: ct);
         }
-        finally
+        catch (Exception ex)
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+            logger.LogDebug(ex, "Could not check whether CRD {Crd} is installed on {Cluster}",
+                crdName, clusterAccess.ClusterName);
+            return false;
         }
     }
 
@@ -2245,16 +2241,16 @@ public class KubernetesOperationsService(
     /// Stamps <see cref="ExternalRouteService.RouteNamespaceLabel"/> on every namespace holding an
     /// HTTPRoute for this cluster's Gateway, so the listeners' namespace selector admits them.
     ///
-    /// Uses <c>kubectl label --overwrite</c> rather than an applied Namespace manifest: labelling
-    /// is purely additive, while applying a two-line Namespace object can strip labels a previous
-    /// apply owned — and these namespaces belong to customer applications, not to EntKube.
+    /// Patches the label on rather than applying a Namespace manifest: a strategic-merge patch is
+    /// purely additive, while applying a two-line Namespace object can strip labels a previous apply
+    /// owned — and these namespaces belong to customer applications, not to EntKube.
     ///
     /// Failures are logged, not raised. A namespace that cannot be labelled is one hostname that
     /// keeps serving from a Gateway that already works; aborting the whole reconcile over it would
-    /// hold back the other listeners for no gain.
+    /// hold back the other listeners for no gain. This is why each patch is caught individually.
     /// </summary>
     private async Task LabelRouteNamespacesAsync(
-        string kubeconfig,
+        IClusterClient clusterAccess,
         IEnumerable<ExternalRoute> externalRoutes,
         IEnumerable<AppRoute> appRoutes,
         Guid clusterId,
@@ -2275,69 +2271,49 @@ public class KubernetesOperationsService(
 
         if (namespaces.Count == 0) return;
 
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-
-        try
+        string patch = JsonSerializer.Serialize(new
         {
-            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
-
-            foreach (string ns in namespaces)
+            metadata = new
             {
-                HelmExecutionResult result = await RunCliAsync(
-                    "kubectl",
-                    $"label namespace {ns} " +
-                    $"{ExternalRouteService.RouteNamespaceLabel}={ExternalRouteService.RouteNamespaceLabelValue} " +
-                    $"--overwrite --kubeconfig {tempKubeconfig}",
-                    ct);
-
-                if (!result.Success)
+                labels = new Dictionary<string, string>
                 {
-                    logger.LogWarning(
-                        "Could not label namespace {Namespace} for gateway route attachment: {Output}",
-                        ns, result.Output);
-                }
-            }
-        }
-        finally
+                    [ExternalRouteService.RouteNamespaceLabel] = ExternalRouteService.RouteNamespaceLabelValue,
+                },
+            },
+        });
+
+        foreach (string ns in namespaces)
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+            try
+            {
+                await clusterAccess.PatchStrategicAsync("namespace", ns, ns, patch, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex,
+                    "Could not label namespace {Namespace} for gateway route attachment", ns);
+            }
         }
     }
 
-    private async Task<KubernetesOperationResult<string>> ApplyRawYamlAsync(
-        string kubeconfig, string yaml, CancellationToken ct)
+    /// <summary>
+    /// Central raw-apply used by all route/gateway/Istio paths. The acknowledgment gate, the
+    /// temporary credential file and the kubectl invocation all live in the cluster client now,
+    /// so what remains here is the one thing these callers need that the client does not do:
+    /// turn a failed apply into a <see cref="KubernetesOperationResult{T}"/> instead of an
+    /// exception, because every caller on this path is written to inspect a result.
+    /// </summary>
+    private static async Task<KubernetesOperationResult<string>> ApplyRawYamlAsync(
+        IClusterClient clusterAccess, string yaml, CancellationToken ct)
     {
-        // Central raw-apply used by all route/gateway/Istio paths — gating here covers them once,
-        // and the gate's no-op-diff auto-skip collapses repeat applies of unchanged resources.
-        await gate.AcknowledgeAsync(new PlannedClusterChange
-        {
-            Verb = ChangeVerb.Apply,
-            Kubeconfig = kubeconfig,
-            Manifest = yaml,
-            Summary = "Apply routing/gateway manifest",
-        }, ct);
-
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-        string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-manifest-{Guid.NewGuid()}.yaml");
-
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
-            await File.WriteAllTextAsync(tempManifest, yaml, ct);
-
-            HelmExecutionResult result = await RunCliAsync(
-                "kubectl",
-                $"apply -f {tempManifest} --kubeconfig {tempKubeconfig}",
-                ct);
-
-            return result.Success
-                ? KubernetesOperationResult<string>.Success(result.Output)
-                : KubernetesOperationResult<string>.Failure(result.Output);
+            return KubernetesOperationResult<string>.Success(
+                await clusterAccess.ApplyManifestAsync(yaml, ct));
         }
-        finally
+        catch (Exception ex)
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
-            if (File.Exists(tempManifest)) File.Delete(tempManifest);
+            return KubernetesOperationResult<string>.Failure(ex.Message);
         }
     }
 
@@ -3444,11 +3420,11 @@ public class KubernetesOperationsService(
     /// must treat that as "nothing known about the ports", never as "no TLS ports".
     /// </summary>
     private async Task<List<KubeServicePort>> GetServicePortsAsync(
-        string kubeconfig, string ns, string serviceName, CancellationToken ct)
+        IClusterClient clusterAccess, string ns, string serviceName, CancellationToken ct)
     {
         try
         {
-            using Kubernetes client = CreateClient(kubeconfig);
+            using Kubernetes client = clusterAccess.CreateSdkClient();
             V1Service svc = await client.CoreV1.ReadNamespacedServiceAsync(serviceName, ns, cancellationToken: ct);
 
             return (svc.Spec?.Ports ?? [])
