@@ -194,7 +194,25 @@ with no credential stored. Callers name a cluster by id and never see what is us
 
 Migrating the 508 call sites onto it is the remaining work, best taken file by file starting
 with the five that hold half of them. `ClusterCredentialCustodyTests` ratchets the number so it
-cannot grow while that proceeds.
+cannot grow while that proceeds — in both directions, so slack has to be banked rather than left
+lying around. **508 → 259 so far**, with the seven DataServices services done outright (none of
+them can even reach the raw-credential API any more) and `KubernetesOperationsService` down from
+72 to 56.
+
+**Convert the private helpers, not the public methods.** The largest file turned out to be much
+less work than its 72 sites suggested, because its routing, gateway, L4 and mesh paths shared
+eight private helpers that each took a `string kubeconfig` only because their callers had one —
+`ApplyRawYamlAsync` alone funnelled ten applies. Changing the helpers' parameter moved every
+caller at once and converted each caller's `IsNullOrWhiteSpace(cluster.Kubeconfig)` guard into
+the `ForAsync` that already answers it. Two categories of the classification below, 96 + 70, are
+largely this shape.
+
+**The seam is also the first thing that makes these paths testable.** `KubernetesOperationsService`
+had seven tests for 32 public methods, and every one asserted the same thing: a cluster with no
+kubeconfig is refused. Nothing observed a manifest, a delete or a patch, because the kubectl
+invocation sat behind a `private static` method. So for this file, unlike the DataServices ones,
+coverage could not come first — it had to come *with* the conversion. `RoutingClusterCallTests`
+is that coverage, asserting on what reaches the cluster and verified by mutation.
 
 **It also strengthens the case for §5's agent model.** An agent running *inside* the cluster
 needs no kubeconfig at all — there is nothing to hand out, because the work happens where the

@@ -48,6 +48,12 @@ public interface IKubernetesClientFactory
     /// <summary>
     /// Gets the JSON output of a kubectl command. Used for querying cluster/pod status.
     /// </summary>
+    /// <summary>
+    /// Whether one named resource exists, by <c>kubectl get … --ignore-not-found</c>. Pass an empty
+    /// <paramref name="ns"/> for cluster-scoped resources such as CRDs.
+    /// </summary>
+    Task<bool> ResourceExistsAsync(string resource, string name, string ns, string kubeconfig, CancellationToken ct = default);
+
     Task<string> GetJsonAsync(string resource, string ns, string kubeconfig, string labelSelector = "", CancellationToken ct = default);
 
     /// <summary>
