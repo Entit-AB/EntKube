@@ -40,6 +40,8 @@ internal static class FleetServices
         services.AddScoped<WorkloadService>();
         services.AddSingleton<KubernetesProxyClientPool>();
         services.AddScoped<ClusterTenantResolver>();
+        services.AddScoped<EntKube.Web.Services.ClusterChanges.IClusterChangeRecorder,
+            EntKube.Web.Services.ClusterChanges.AuditClusterChangeRecorder>();
         services.AddScoped<EntKube.Web.Services.ClusterChanges.IClusterChangeGate, EntKube.Web.Services.ClusterChanges.ClusterChangeGate>();
         services.AddScoped<IKubernetesClientFactory, KubernetesClientFactory>();
         services.AddSingleton<OpenStackHttpFactory>();

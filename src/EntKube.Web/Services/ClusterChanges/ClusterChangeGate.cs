@@ -16,12 +16,21 @@ public sealed class ClusterChangeGate : IClusterChangeGate
 {
     private readonly IConfiguration _config;
     private readonly ILogger<ClusterChangeGate> _logger;
+    private readonly IClusterChangeRecorder _recorder;
     private IClusterChangeAckSink? _sink;
 
-    public ClusterChangeGate(IConfiguration config, ILogger<ClusterChangeGate> logger)
+    /// <param name="recorder">
+    /// Where outcomes are written. Optional so that the tests about acknowledgment can keep
+    /// constructing a gate without one; in the application it is always supplied.
+    /// </param>
+    public ClusterChangeGate(
+        IConfiguration config,
+        ILogger<ClusterChangeGate> logger,
+        IClusterChangeRecorder? recorder = null)
     {
         _config = config;
         _logger = logger;
+        _recorder = recorder ?? new NullClusterChangeRecorder();
     }
 
     /// <summary>Master switch. When false, the gate never blocks (diffs are never computed).</summary>
@@ -37,8 +46,26 @@ public sealed class ClusterChangeGate : IClusterChangeGate
     {
         // Bypass when the feature is off, or when there is no interactive sink on this scope
         // (background/automated flows). This is the "interactive UI only" boundary.
-        if (!Enabled || _sink is null)
+        //
+        // It is also the boundary an in-cluster agent would sit on the wrong side of, so the two
+        // reasons are recorded separately: "an operator turned the dialog off" and "nobody was
+        // there to ask" are different problems, and only the second one grows as more work moves
+        // off the circuit.
+        if (!Enabled)
+        {
+            await RecordAsync(change, ClusterChangeOutcome.GateDisabled, null, ct);
             return;
+        }
+
+        if (_sink is null)
+        {
+            _logger.LogInformation(
+                "Cluster change applied with no operator present on {Cluster}: {Change}",
+                change.ClusterLabel, change.Describe());
+
+            await RecordAsync(change, ClusterChangeOutcome.AppliedUnattended, null, ct);
+            return;
+        }
 
         ClusterChangeDiff diff;
         try
@@ -61,7 +88,9 @@ public sealed class ClusterChangeGate : IClusterChangeGate
             };
         }
 
-        // A clean dry-run that reports no change: nothing to acknowledge.
+        // A clean dry-run that reports no change: nothing to acknowledge, and nothing to record
+        // either — the cluster is not being altered, and the post-deploy route refresh alone would
+        // otherwise write a row per route per deploy. The record is for changes, not for calls.
         if (!diff.HasChanges && diff.Warning is null)
         {
             _logger.LogInformation("Cluster change is a no-op, skipping acknowledgment: {Change}", change.Describe());
@@ -73,11 +102,40 @@ public sealed class ClusterChangeGate : IClusterChangeGate
         if (decision == ClusterChangeDecision.Acknowledged)
         {
             _logger.LogInformation("Cluster change ACKNOWLEDGED on {Cluster}: {Change}", change.ClusterLabel, change.Describe());
+            await RecordAsync(change, ClusterChangeOutcome.Acknowledged, diff, ct);
             return;
         }
 
         _logger.LogInformation("Cluster change CANCELLED by operator on {Cluster}: {Change}", change.ClusterLabel, change.Describe());
+        await RecordAsync(change, ClusterChangeOutcome.Cancelled, diff, ct);
         throw new OperationCanceledException($"Cluster change cancelled by operator: {change.Describe()}");
+    }
+
+    /// <summary>
+    /// Records an outcome without letting the recording affect the change.
+    ///
+    /// <para>The interface asks implementations not to throw, but asking is not enforcing — and
+    /// the consequence of trusting it is the worst one available: a change an operator has just
+    /// approved failing because writing a row about it did. Cancellation is the one exception,
+    /// because a cancelled token means the caller is already going away.</para>
+    /// </summary>
+    private async Task RecordAsync(
+        PlannedClusterChange change, ClusterChangeOutcome outcome, ClusterChangeDiff? diff,
+        CancellationToken ct)
+    {
+        try
+        {
+            await _recorder.RecordAsync(change, outcome, diff, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Could not record cluster change outcome {Outcome} for {Change}",
+                outcome, change.Describe());
+        }
     }
 
     // ---- diff computation -------------------------------------------------
