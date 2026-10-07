@@ -918,27 +918,28 @@ public class KubernetesOperationsService(
         if (deployment is null)
             return KubernetesOperationResult<string>.Failure("Deployment not found.");
 
-        if (string.IsNullOrWhiteSpace(deployment.Cluster?.Kubeconfig))
+        IClusterClient? clusterAccess = deployment.Cluster is null
+            ? null
+            : await clusterClients.ForAsync(deployment.Cluster.TenantId, deployment.ClusterId, ct);
+
+        if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
                 "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
 
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
-
             HelmExecutionResult result;
 
             if (deployment.Type is DeploymentType.HelmChart or DeploymentType.GitHelm)
             {
                 string releaseName = ToHelmReleaseName(deployment.Name);
 
-                await RequireAckAsync(ChangeVerb.Helm, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
-                    deployment.Namespace, $"helm uninstall {releaseName} (removes all release resources)", ct: ct);
-
-                result = await RunCliAsync("helm",
-                    $"uninstall {releaseName} --namespace {deployment.Namespace} --kubeconfig {tempKubeconfig}",
+                result = await clusterAccess.RunHelmAsync(new HelmInvocation(
+                    Verb: "uninstall",
+                    ReleaseName: releaseName,
+                    Namespace: deployment.Namespace,
+                    Arguments: [releaseName, "--namespace", deployment.Namespace],
+                    Summary: $"helm uninstall {releaseName} (removes all release resources)"),
                     ct);
             }
             else
@@ -966,11 +967,16 @@ public class KubernetesOperationsService(
                     Manifest = combined,
                 }, ct);
 
+                // `kubectl delete -f <manifest>` removes a whole set in one call, and the seam
+                // only deletes one named resource at a time, so this branch still holds the
+                // credential itself. A delete-by-manifest operation would close it.
                 string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-manifest-{Guid.NewGuid()}.yaml");
+                string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
 
                 try
                 {
                     await SecretFile.WriteAsync(tempManifest, combined, ct);
+                    await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster!.Kubeconfig!, ct);
                     result = await RunCliAsync("kubectl",
                         $"delete -f {tempManifest} --kubeconfig {tempKubeconfig} --ignore-not-found",
                         ct);
@@ -978,6 +984,7 @@ public class KubernetesOperationsService(
                 finally
                 {
                     if (File.Exists(tempManifest)) File.Delete(tempManifest);
+                    if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
                 }
             }
 
@@ -1008,7 +1015,8 @@ public class KubernetesOperationsService(
         }
         finally
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+            // Nothing at this level any more: the helm branch holds no credential, and the
+            // manifest branch cleans up the one it still needs.
         }
     }
 
@@ -2344,7 +2352,11 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Failure(
                 "This deployment is observed only (imported / managed by ArgoCD or Flux). Enable management to let EntKube apply it.");
 
-        if (deployment.Cluster is null || string.IsNullOrWhiteSpace(deployment.Cluster.Kubeconfig))
+        IClusterClient? clusterAccess = deployment.Cluster is null
+            ? null
+            : await clusterClients.ForAsync(deployment.Cluster.TenantId, deployment.ClusterId, ct);
+
+        if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
                 "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
 
@@ -2359,12 +2371,10 @@ public class KubernetesOperationsService(
                 "No Helm chart name configured. Set the chart name in the deployment settings before installing.");
 
         string releaseName = ToHelmReleaseName(deployment.Name);
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         string? tempValues = null;
 
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
 
             // Register and update the Helm repo if a URL is given.
             string chartRef = deployment.HelmChartName;
@@ -2380,19 +2390,23 @@ public class KubernetesOperationsService(
                 {
                     string repoAlias = $"entkube-{releaseName}";
 
+                    // No --kubeconfig: `helm repo add` and `repo update` fetch an index over HTTP
+                    // and write helm's local cache. They never contact a cluster — verified by
+                    // running both with a malformed kubeconfig and with a path that does not
+                    // exist, which succeed. Passing it made them look like cluster operations in
+                    // every census of where the credential travels.
                     await RunCliAsync("helm",
-                        $"repo add {repoAlias} {deployment.HelmRepoUrl} --force-update --kubeconfig {tempKubeconfig}", ct);
-                    await RunCliAsync("helm",
-                        $"repo update {repoAlias} --kubeconfig {tempKubeconfig}", ct);
+                        $"repo add {repoAlias} {deployment.HelmRepoUrl} --force-update", ct);
+                    await RunCliAsync("helm", $"repo update {repoAlias}", ct);
 
                     chartRef = $"{repoAlias}/{deployment.HelmChartName}";
                 }
             }
 
             // Build the main helm upgrade --install command.
+            // The verb is carried on the invocation rather than here, so the gate can name it.
             List<string> args =
             [
-                "upgrade", "--install",
                 releaseName,
                 chartRef,
                 "--namespace", deployment.Namespace,
@@ -2413,18 +2427,20 @@ public class KubernetesOperationsService(
                 args.Add(tempValues);
             }
 
-            args.Add("--kubeconfig");
-            args.Add(tempKubeconfig);
             args.Add("--wait");
             args.Add("--timeout");
             args.Add("10m0s");
 
-            await RequireAckAsync(ChangeVerb.Helm, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
-                deployment.Namespace,
-                $"helm upgrade --install {releaseName} ({deployment.HelmChartName}@{deployment.HelmChartVersion}) in {deployment.Namespace}",
-                ct: ct);
-
-            HelmExecutionResult result = await RunCliAsync("helm", string.Join(" ", args), ct);
+            // The acknowledgment moves into the seam with the call: the summary that used to be
+            // passed by hand is handed over too, so the dialog says exactly what it said before.
+            HelmExecutionResult result = await clusterAccess.RunHelmAsync(new HelmInvocation(
+                Verb: "upgrade --install",
+                ReleaseName: releaseName,
+                Namespace: deployment.Namespace,
+                Arguments: args,
+                Summary: $"helm upgrade --install {releaseName} "
+                       + $"({deployment.HelmChartName}@{deployment.HelmChartVersion}) in {deployment.Namespace}"),
+                ct);
 
             // Anything the post-install steps want to tell the operator gets appended to Helm's
             // own output at the end, so the deploy log reads as one story.
@@ -2461,7 +2477,7 @@ public class KubernetesOperationsService(
         }
         finally
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+            // The credential is not ours any more — the seam writes and removes its own.
             if (tempValues is not null && File.Exists(tempValues)) File.Delete(tempValues);
         }
     }

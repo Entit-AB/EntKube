@@ -32,7 +32,7 @@ public class ClusterCredentialCustodyTests
     /// <summary>
     /// Places that take a cluster's credential out of the row, measured 2026-10-07.
     ///
-    /// <para><b>257 and falling</b>, from 508 once the count was corrected (below):
+    /// <para><b>252 and falling</b>, from 508 once the count was corrected (below):
     /// <c>RedisService</c> 9, <c>CnpgService</c> 48, <c>ElasticsearchService</c> 42,
     /// <c>RabbitMQService</c> 37, <c>MongoService</c> 47, then <c>KafkaService</c> 15 and
     /// <c>RegisteredPostgresService</c> 16. None of those seven injects
@@ -73,6 +73,13 @@ public class ClusterCredentialCustodyTests
     /// private helpers whose signatures take a credential because their callers had one. Both are
     /// the ordinary conversion this work has been doing.</para>
     ///
+    /// <para><b>Helm is on the seam now, and it turned out to need two operations rather than a
+    /// general passthrough — because five of the eight invocations do not touch a cluster at all.</b>
+    /// <c>helm repo add</c>, <c>repo update</c> and <c>registry login</c> fetch an index over HTTP
+    /// and write a local cache; two of them were being handed <c>--kubeconfig</c> anyway, which is
+    /// why every census of this counted them. Checked rather than reasoned about: both succeed
+    /// with a malformed kubeconfig and with a path that does not exist.</para>
+    ///
     /// <para><b>helm is 8 invocations in 2 files</b>, not the 97 an earlier count suggested — that
     /// figure was credential sites in files that merely mention helm. The two files are
     /// <c>KubernetesOperationsService</c> and <c>ComponentLifecycleService</c>, which between them
@@ -89,7 +96,7 @@ public class ClusterCredentialCustodyTests
     /// rather than a refactor. The gate can only change once its callers already route through
     /// the seam.</para>
     ///
-    private const int BaselineOccurrences = 257;
+    private const int BaselineOccurrences = 252;
 
     /// <summary>Files doing so. A file that has stopped should not be able to start again quietly.</summary>
     private const int BaselineFiles = 45;

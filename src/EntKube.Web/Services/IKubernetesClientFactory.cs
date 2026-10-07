@@ -49,6 +49,15 @@ public interface IKubernetesClientFactory
     /// Gets the JSON output of a kubectl command. Used for querying cluster/pod status.
     /// </summary>
     /// <summary>
+    /// Runs one helm invocation against a cluster, supplying the credential and raising the
+    /// acknowledgment. See <see cref="EntKube.Web.Services.Clusters.HelmInvocation"/> for why the
+    /// caller passes arguments rather than a modelled chart API.
+    /// </summary>
+    Task<HelmExecutionResult> RunHelmAsync(
+        EntKube.Web.Services.Clusters.HelmInvocation invocation, string kubeconfig,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Whether one named resource exists, by <c>kubectl get … --ignore-not-found</c>. Pass an empty
     /// <paramref name="ns"/> for cluster-scoped resources such as CRDs.
     /// </summary>
