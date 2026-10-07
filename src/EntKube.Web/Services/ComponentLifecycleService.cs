@@ -74,6 +74,7 @@ public class ComponentLifecycleService(
     IngestTokenService ingestTokens,
     EntKubeTelemetryService entKubeTelemetry,
     IConfiguration configuration,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     ILogger<ComponentLifecycleService> logger)
 {
     /// <summary>
@@ -1819,7 +1820,10 @@ public class ComponentLifecycleService(
             return new HelmExecutionResult { Success = true, Output = "" };
         }
 
-        if (string.IsNullOrWhiteSpace(component.Cluster.Kubeconfig))
+        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess = await clusterClients.ForAsync(
+            component.Cluster.TenantId, component.Cluster.Id, ct);
+
+        if (clusterAccess is null)
         {
             return new HelmExecutionResult { Success = false, Output = "No kubeconfig stored for this cluster." };
         }
@@ -1889,95 +1893,126 @@ public class ComponentLifecycleService(
 
         List<string> documents = [gatewayYaml, .. httpRoutes];
 
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-        string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-routes-{Guid.NewGuid()}.yaml");
+
+        // On Istio, a backend port that serves TLS needs the gateway to originate TLS to it.
+        // Without that the gateway connects in plaintext, the backend drops the connection and
+        // the browser gets "upstream connect error ... reset reason: connection termination".
+        // Nothing is emitted for services whose ports are all plaintext, so clusters that work
+        // today are left exactly as they are.
+        if (gatewayClass == "istio")
+        {
+            // Grouped by backend Service, not by route: one DestinationRule exists per
+            // Service, so two routes onto the same Service would otherwise produce two
+            // documents with the same name and the second would silently overwrite the
+            // first — including its session affinity.
+            //
+            // A route that splits its hostname across several Services (Harbor: core and portal)
+            // contributes each of them — a DestinationRule naming only the route's own backend
+            // would leave the other half of the hostname without one, which is how a
+            // TLS-serving backend ends up with the gateway connecting to it in plaintext.
+            IEnumerable<IGrouping<(string Namespace, string Service), ExternalRoute>> byService = allRoutes
+                .Where(r => r.TlsMode != TlsMode.Passthrough)
+                .OrderBy(r => r.Hostname, StringComparer.Ordinal)
+                .SelectMany(r => ExternalRouteService.BackendServiceNames(r)
+                    .Select(svc => (
+                        Key: (Namespace: r.Component?.Namespace ?? "default", Service: svc),
+                        Route: r)))
+                .GroupBy(x => x.Key, x => x.Route);
+
+            foreach (IGrouping<(string Namespace, string Service), ExternalRoute> group in byService)
+            {
+                List<KubeServicePort> ports = await GetServicePortsAsync(
+                    clusterAccess, group.Key.Namespace, group.Key.Service, ct);
+
+                string destinationRule = ExternalRouteService.GenerateBackendDestinationRuleYaml(
+                    group.Key.Service, group.Key.Namespace, gatewayNamespace, ports, alwaysEmit: false,
+                    sessionAffinity: SessionAffinitySpec.Merge(group.Select(SessionAffinitySpec.From)));
+
+                if (destinationRule.Length > 0)
+                {
+                    documents.Add(destinationRule);
+                }
+            }
+        }
+
+        // Every namespace holding a route for this Gateway must carry the label its listeners
+        // select on, and must carry it BEFORE the Gateway arrives — the alternative is a
+        // window where the new listeners admit nothing and every hostname on the cluster 404s.
+        // Additive and idempotent, so re-running costs nothing.
+        HashSet<string> routeNamespaces = [
+            .. allRoutes
+                .Select(r => r.Component?.Namespace)
+                .Where(ns => !string.IsNullOrWhiteSpace(ns))
+                .Select(ns => ns!),
+            .. appRoutes
+                .SelectMany(r => r.DeploymentRoutes)
+                .Where(dr => dr.IsEnabled && dr.AppDeployment?.ClusterId == component.Cluster.Id)
+                .Select(dr => dr.AppDeployment?.Namespace)
+                .Where(ns => !string.IsNullOrWhiteSpace(ns))
+                .Select(ns => ns!),
+        ];
+
+        // A strategic-merge patch is the additive equivalent of `kubectl label --overwrite`:
+        // it adds this one label and leaves every other label on a namespace that belongs to a
+        // customer application, not to EntKube.
+        string namespaceLabelPatch = JsonSerializer.Serialize(new
+        {
+            metadata = new
+            {
+                labels = new Dictionary<string, string>
+                {
+                    [ExternalRouteService.RouteNamespaceLabel] = ExternalRouteService.RouteNamespaceLabelValue,
+                },
+            },
+        });
+
+        foreach (string routeNs in routeNamespaces)
+        {
+            try
+            {
+                await clusterAccess.PatchStrategicAsync("namespace", routeNs, routeNs, namespaceLabelPatch, ct);
+            }
+            catch (Exception ex)
+            {
+                // As before: a namespace that cannot be labelled is one hostname that keeps
+                // serving from a Gateway that already works. Aborting the reconcile over it
+                // would hold back the other listeners for nothing.
+                logger.LogWarning(ex,
+                    "Could not label namespace {Namespace} for gateway route attachment", routeNs);
+            }
+        }
+
+        string combinedYaml = string.Join("\n---\n", documents);
+
+        // Delete orphaned service-name-based HTTPRoutes before applying hostname-based ones.
+        foreach ((string oldName, string ns) in orphanedRoutes)
+        {
+            try
+            {
+                await clusterAccess.DeleteManifestAsync("httproute", oldName, ns, ct);
+            }
+            catch (Exception ex)
+            {
+                // An orphan that will not delete is a stale route, not a reason to leave the
+                // live ones un-applied.
+                logger.LogWarning(ex, "Could not delete orphaned HTTPRoute {Name} in {Namespace}",
+                    oldName, ns);
+            }
+        }
 
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, component.Cluster.Kubeconfig, ct);
-
-            // On Istio, a backend port that serves TLS needs the gateway to originate TLS to it.
-            // Without that the gateway connects in plaintext, the backend drops the connection and
-            // the browser gets "upstream connect error ... reset reason: connection termination".
-            // Nothing is emitted for services whose ports are all plaintext, so clusters that work
-            // today are left exactly as they are.
-            if (gatewayClass == "istio")
+            return new HelmExecutionResult
             {
-                // Grouped by backend Service, not by route: one DestinationRule exists per
-                // Service, so two routes onto the same Service would otherwise produce two
-                // documents with the same name and the second would silently overwrite the
-                // first — including its session affinity.
-                //
-                // A route that splits its hostname across several Services (Harbor: core and portal)
-                // contributes each of them — a DestinationRule naming only the route's own backend
-                // would leave the other half of the hostname without one, which is how a
-                // TLS-serving backend ends up with the gateway connecting to it in plaintext.
-                IEnumerable<IGrouping<(string Namespace, string Service), ExternalRoute>> byService = allRoutes
-                    .Where(r => r.TlsMode != TlsMode.Passthrough)
-                    .OrderBy(r => r.Hostname, StringComparer.Ordinal)
-                    .SelectMany(r => ExternalRouteService.BackendServiceNames(r)
-                        .Select(svc => (
-                            Key: (Namespace: r.Component?.Namespace ?? "default", Service: svc),
-                            Route: r)))
-                    .GroupBy(x => x.Key, x => x.Route);
-
-                foreach (IGrouping<(string Namespace, string Service), ExternalRoute> group in byService)
-                {
-                    List<KubeServicePort> ports = await GetServicePortsAsync(
-                        tempKubeconfig, group.Key.Namespace, group.Key.Service, ct);
-
-                    string destinationRule = ExternalRouteService.GenerateBackendDestinationRuleYaml(
-                        group.Key.Service, group.Key.Namespace, gatewayNamespace, ports, alwaysEmit: false,
-                        sessionAffinity: SessionAffinitySpec.Merge(group.Select(SessionAffinitySpec.From)));
-
-                    if (destinationRule.Length > 0)
-                    {
-                        documents.Add(destinationRule);
-                    }
-                }
-            }
-
-            // Every namespace holding a route for this Gateway must carry the label its listeners
-            // select on, and must carry it BEFORE the Gateway arrives — the alternative is a
-            // window where the new listeners admit nothing and every hostname on the cluster 404s.
-            // Additive and idempotent, so re-running costs nothing.
-            HashSet<string> routeNamespaces = [
-                .. allRoutes
-                    .Select(r => r.Component?.Namespace)
-                    .Where(ns => !string.IsNullOrWhiteSpace(ns))
-                    .Select(ns => ns!),
-                .. appRoutes
-                    .SelectMany(r => r.DeploymentRoutes)
-                    .Where(dr => dr.IsEnabled && dr.AppDeployment?.ClusterId == component.Cluster.Id)
-                    .Select(dr => dr.AppDeployment?.Namespace)
-                    .Where(ns => !string.IsNullOrWhiteSpace(ns))
-                    .Select(ns => ns!),
-            ];
-
-            foreach (string routeNs in routeNamespaces)
-            {
-                await RunProcessAsync("kubectl",
-                    $"label namespace {routeNs} " +
-                    $"{ExternalRouteService.RouteNamespaceLabel}={ExternalRouteService.RouteNamespaceLabelValue} " +
-                    $"--overwrite --kubeconfig {tempKubeconfig}", ct);
-            }
-
-            string combinedYaml = string.Join("\n---\n", documents);
-            await File.WriteAllTextAsync(tempManifest, combinedYaml, ct);
-
-            // Delete orphaned service-name-based HTTPRoutes before applying hostname-based ones.
-            foreach ((string oldName, string ns) in orphanedRoutes)
-            {
-                await RunProcessAsync("kubectl",
-                    $"delete httproute {oldName} -n {ns} --kubeconfig {tempKubeconfig} --ignore-not-found", ct);
-            }
-
-            return await RunProcessAsync("kubectl", $"apply -f {tempManifest} --kubeconfig {tempKubeconfig}", ct);
+                Success = true,
+                Output = await clusterAccess.ApplyManifestAsync(combinedYaml, ct),
+            };
         }
-        finally
+        catch (Exception ex)
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
-            if (File.Exists(tempManifest)) File.Delete(tempManifest);
+            // Every caller inspects the result rather than catching, so a failed apply stays a
+            // failed result.
+            return new HelmExecutionResult { Success = false, Output = ex.Message };
         }
     }
 
@@ -2650,15 +2685,27 @@ public class ComponentLifecycleService(
     /// read that as "nothing known about the ports", never as "no TLS ports".
     /// </summary>
     private static async Task<List<KubeServicePort>> GetServicePortsAsync(
-        string kubeconfigPath, string ns, string serviceName, CancellationToken ct)
+        EntKube.Web.Services.Clusters.IClusterClient clusterAccess, string ns, string serviceName,
+        CancellationToken ct)
     {
-        HelmExecutionResult result = await RunProcessAsync("kubectl",
-            $"get svc {serviceName} -n {ns} -o json --kubeconfig {kubeconfigPath}", ct);
+        string json;
+        try
+        {
+            json = await clusterAccess.GetJsonAsync($"svc/{serviceName}", ns, ct: ct);
+        }
+        catch
+        {
+            // A service that cannot be read is "nothing known about the ports" — the summary above
+            // is explicit that callers must not read it as "no TLS ports".
+            return [];
+        }
 
-        if (!result.Success || string.IsNullOrWhiteSpace(result.Output))
+        if (string.IsNullOrWhiteSpace(json))
         {
             return [];
         }
+
+        HelmExecutionResult result = new() { Success = true, Output = json };
 
         try
         {

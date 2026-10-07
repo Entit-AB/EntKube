@@ -64,6 +64,8 @@ public static class TestServices
         return new ComponentLifecycleService(
             dbFactory, vaultService, BuildKeycloak(dbFactory, vaultService),
             tokens, new EntKubeTelemetryService(dbFactory, vaultService, tokens, config), config,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(
+                dbFactory, new Mock<IKubernetesClientFactory>().Object),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<ComponentLifecycleService>.Instance);
     }
 }
