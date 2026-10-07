@@ -273,22 +273,40 @@ public class FederatedLogBackendTests
     /// Both budgets run against the same clock. They used to be awaited one after the other, so the hot
     /// tier's window only opened once the sealed tier had finished or given up — two slow halves cost the
     /// sum of the budgets rather than the larger of them.
+    ///
+    /// <para><b>Why this one measures a clock, and why the margin is wide.</b> The property is
+    /// about when the two <em>budget timers</em> start, and nothing observable happens when a timer
+    /// starts — so there is no state to assert on. An attempt to make it deterministic by having
+    /// each half announce its arrival measured nothing at all: <c>MergeAsync</c> is handed tasks
+    /// that are already running, so "both halves were entered" is true whether the budgets overlap
+    /// or queue. A sequential-budget mutant passed it.</para>
+    ///
+    /// <para>So the clock stays, and the margin gets wider instead. With 1s budgets, overlapping
+    /// costs ~1s and queueing ~2s, and the 1.5s ceiling sits 500ms clear of both. The previous
+    /// version used 300ms budgets against a 550ms ceiling — 250ms of headroom over the concurrent
+    /// case — which scheduling jitter under a full test run crossed twice, and a flaky test about
+    /// concurrency is worse than none because it teaches you to disbelieve a red run.</para>
     /// </summary>
     [Fact]
     public async Task The_two_budgets_run_concurrently_not_one_after_the_other()
     {
+        using CancellationTokenSource cts = new();
+
         FederatedLogBackend sut = Federated(
             new FakeLogBackend { Streams = [Stream("api-1", (T0, "sealed"))], Delay = TimeSpan.FromSeconds(30) },
             new FakeLogBackend { Streams = [Stream("api-2", (T0, "hot"))], Delay = TimeSpan.FromSeconds(30) },
-            halfBudget: TimeSpan.FromMilliseconds(300),
-            sealedBudget: TimeSpan.FromMilliseconds(300));
+            halfBudget: TimeSpan.FromSeconds(1),
+            sealedBudget: TimeSpan.FromSeconds(1));
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
-        await sut.QueryAsync(Cluster, Filter, T0.AddHours(-1), T0.AddHours(1));
+        await sut.QueryAsync(Cluster, Filter, T0.AddHours(-1), T0.AddHours(1), ct: cts.Token);
         sw.Stop();
 
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(550),
+        sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(1500),
             "both halves are already in flight; the budgets must overlap, not queue");
+
+        // Neither half ever answers; stop their delays rather than leaving them running.
+        await cts.CancelAsync();
     }
 
     [Fact]
@@ -320,9 +338,10 @@ public class FederatedLogBackendTests
 
         public bool IsEnabled => true;
 
-        private async Task<KubernetesOperationResult<T>> Result<T>(T value)
+        private async Task<KubernetesOperationResult<T>> Result<T>(T value, CancellationToken ct = default)
         {
-            if (Delay > TimeSpan.Zero) await Task.Delay(Delay);
+            // Honours the token so a cancelled query does not leave a long delay running behind it.
+            if (Delay > TimeSpan.Zero) await Task.Delay(Delay, ct);
             return Error is null
                 ? KubernetesOperationResult<T>.Success(value)
                 : KubernetesOperationResult<T>.Failure(Error);
@@ -330,7 +349,7 @@ public class FederatedLogBackendTests
 
         public async Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
         {
-            if (Delay > TimeSpan.Zero) await Task.Delay(Delay);
+            if (Delay > TimeSpan.Zero) await Task.Delay(Delay, ct);
             return Error is null && Streams.Count > 0;
         }
 
@@ -345,7 +364,7 @@ public class FederatedLogBackendTests
 
         public Task<KubernetesOperationResult<List<LokiLogStream>>> QueryAsync(
             Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int limit = 200,
-            CancellationToken ct = default) => Result(Streams);
+            CancellationToken ct = default) => Result(Streams, ct);
 
         public Task<KubernetesOperationResult<List<LokiLogStream>>> QueryByTraceAsync(
             Guid clusterId, string traceId, int limit = 500, CancellationToken ct = default) => Result(Streams);
