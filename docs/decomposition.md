@@ -366,6 +366,22 @@ background services. It stops being defensible when a remote agent is a caller.
 This is a prerequisite, not a phase-4 nicety. Everything else in this document can
 slip; this cannot.
 
+⚠️ **And the gate's reach is narrower than "every human-triggered mutation" suggests: 46
+invocations in nine files never reach it at all.** The gate covers every mutation that goes
+through `IKubernetesClientFactory`, because the factory raises the acknowledgment itself. A
+service that spawns `kubectl` or `helm` as its own process bypasses the factory, so the gate is
+never invoked — and the recorder below cannot see those either, because there is no outcome to
+record when nothing asked. `ComponentLifecycleService` holds 21 of them and is what installs,
+upgrades and removes every catalog component on every cluster; `VaultService` 11, syncing secrets
+into namespaces; `ClusterProvisioningService` 7.
+
+This is the same work as §4.0.1 arriving from the other side: routing a call through
+`IClusterClient` puts it behind the factory and therefore behind the gate, so custody and gate
+coverage come down together. `ClusterChangeGateCoverageTests` ratchets the number and names the
+files, and is deliberately a **lower bound** — a file that acknowledges some paths and not others
+scores zero, so it can understate the gap but never overstate it. The helm invocations need a seam
+operation that does not exist, which is what stops the number reaching zero today.
+
 **Started: the ungated path is now recorded, which it was not.** The four bullets above are
 one product decision apart from being buildable — whether unattended work stalls waiting for
 an out-of-band approval, proceeds under a policy, or is refused outright, is a question about
