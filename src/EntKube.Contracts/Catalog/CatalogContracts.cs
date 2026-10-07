@@ -32,6 +32,12 @@ public enum ComponentStatus
 /// <param name="HelmChartName">Chart name.</param>
 /// <param name="HelmChartVersion">Chart version.</param>
 /// <param name="HelmValues">The values it was installed with.</param>
+/// <param name="Configuration">
+/// The installer module's own JSON blob for this component — a <c>TempoConfig</c>, a
+/// <c>VeleroConfig</c> and so on. Carried because nine foreign call sites deserialize it, which
+/// the first version of this record left out: a contract missing the one field its callers read
+/// cannot be adopted by them, which is a good way for an interface to stay unused.
+/// </param>
 /// <param name="LastError">Why the last attempt failed, if it did.</param>
 /// <param name="InstalledAt">When it was installed.</param>
 public sealed record InstalledComponent(
@@ -48,16 +54,28 @@ public sealed record InstalledComponent(
     string? HelmChartName,
     string? HelmChartVersion,
     string? HelmValues,
+    string? Configuration,
     string? LastError,
     DateTime? InstalledAt);
 
 /// <summary>
 /// What Catalog offers the rest of EntKube.
 ///
-/// <para><b>Read-only, and that is a finding rather than a choice.</b> Thirty-six services in
-/// ten other modules read this table and <em>not one of them writes it</em>. Installing,
-/// upgrading and removing components is Catalog's own work and stays behind
-/// <c>ComponentLifecycleService</c>; everyone else only ever needs to know what is there.</para>
+/// <para><b>Almost read-only — and the exception was missed the first time.</b> This interface
+/// used to say that thirty-six services in ten other modules read this table and "not one of them
+/// writes it". That was wrong, and wrong in a way worth recording: the measurement looked for
+/// <c>.ClusterComponents.Add/Remove/Update</c> and found none, which misses every write EF performs
+/// through change tracking. <b>Nine foreign services mutate a component in 22 places</b>, all of
+/// them <c>component.HelmValues = …</c> (18) or <c>component.Configuration = …</c> (4) followed by
+/// <c>SaveChangesAsync</c>. A write with no <c>Update()</c> call is still a write.</para>
+///
+/// <para>Those 22 are not 22 different operations. Fourteen are
+/// <c>MergeFormValues(component.HelmValues, dict)</c>, four replace the values outright, and all
+/// four <c>Configuration</c> writes sit in the same method as one of those — so the whole set is
+/// two operations, which is what <see cref="MergeHelmValuesAsync"/> and
+/// <see cref="SetHelmValuesAsync"/> are. Installing, upgrading and removing components remains
+/// Catalog's own work behind <c>ComponentLifecycleService</c>; what the contract had to admit is
+/// that <em>configuring</em> a component is something its installer module asks for.</para>
 ///
 /// <para>Every method is tenant-scoped, because the dominant query already was —
 /// <c>c.Id == componentId &amp;&amp; c.Cluster.TenantId == tenantId</c> appeared 21 times. Making
@@ -85,4 +103,34 @@ public interface ICatalogApi
     /// <summary>Every installation of one catalog key across the tenant's clusters.</summary>
     Task<IReadOnlyList<InstalledComponent>> FindComponentsAsync(
         Guid tenantId, string catalogKey, CancellationToken ct = default);
+
+    /// <summary>
+    /// Merges form values into a component's stored Helm values and returns it as it now stands.
+    /// Null when the component is not this tenant's — the same answer as
+    /// <see cref="GetComponentAsync"/>, so a caller needs one call rather than a read, a check and
+    /// a write.
+    ///
+    /// <para>How the merge is performed is deliberately Catalog's business, not the caller's.
+    /// Fourteen call sites reached for the same <c>YamlFormMerger.MergeFormValues</c> on values they
+    /// had just loaded; passing the dictionary instead means there is one place that decides what
+    /// merging a component's values means.</para>
+    /// </summary>
+    /// <param name="configuration">
+    /// The component's configuration blob, or <c>null</c> to leave the stored one untouched. There
+    /// is no way to clear it through this contract, because nothing does — say so here rather than
+    /// let a null argument mean two things.
+    /// </param>
+    Task<InstalledComponent?> MergeHelmValuesAsync(
+        Guid tenantId, Guid componentId, IReadOnlyDictionary<string, string> formValues,
+        string? configuration = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// Replaces a component's Helm values outright, for the callers that build the whole document
+    /// themselves (a rendered manifest, or values assembled from a config object) rather than
+    /// patching fields into what is already there.
+    /// </summary>
+    /// <param name="configuration">As <see cref="MergeHelmValuesAsync"/>: null leaves it alone.</param>
+    Task<InstalledComponent?> SetHelmValuesAsync(
+        Guid tenantId, Guid componentId, string helmValues,
+        string? configuration = null, CancellationToken ct = default);
 }

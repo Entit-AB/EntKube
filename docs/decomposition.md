@@ -369,7 +369,39 @@ Nothing moves. The monolith becomes modular.
    configured at all. All 165 table names are now stated in the model, so renaming a C#
    property can no longer rename a production table.
 2. One `IXxxApi` interface per module — the module's whole contract, in `EntKube.Contracts`.
-   ☐ Not started; this is the hinge into Phase 1.
+   ◐ **Four of twelve written** (Advisor, Catalog, Fleet, Delivery), and the lesson from
+   using the first one is that **writing more of them is not the next job**.
+
+   All four were registered in DI and unit-tested, and **nothing in production called any of
+   them.** An interface with no consumers decomposes nothing; it only looks like progress. So
+   the work turned to making one real, and that immediately found two things the contract had
+   wrong — neither of which could have surfaced from writing eight more:
+
+   - **`ICatalogApi` said the table was never written from outside. It is, in 22 places.** The
+     measurement behind that claim looked for `.ClusterComponents.Add/Remove/Update` and found
+     none. EF writes through change tracking, so `component.HelmValues = x` followed by
+     `SaveChangesAsync` is a write with no `Update()` in sight. Nine foreign services do exactly
+     that. The claim was in the interface's own documentation as the reason it was read-only.
+   - **`InstalledComponent` omitted `Configuration`, which nine call sites deserialize.** A
+     record missing the one field its callers read cannot be adopted by them — which is a
+     tidy explanation for how an interface stays unused.
+
+   Both are fixed, with `MergeHelmValuesAsync`/`SetHelmValuesAsync` covering all 22 writes
+   (14 merge form values, 4 replace outright, 4 paired configuration writes — two operations,
+   not 22). Tempo, Mimir and Loki are the first real consumers.
+
+   **How to pick the next contract: by adoptable call sites, not by reader count.** Identity
+   looks like the biggest prize — 43 foreign services touch its tables, `Customer` 57 times.
+   But **28 of those 57 are `a.Customer.TenantId`**: services hopping App → Customer purely to
+   resolve a tenant, because `App` carries no `TenantId`. Only **two** are direct queries a
+   contract would serve, and replacing an EF join with an API call would turn one query into N
+   round trips. The fix for the other 28 is a `TenantId` on `App`, or nothing at all. Same
+   shape for DataServices (16 services, 9 direct queries), Secrets (12/4) and Connectivity
+   (9/4) — so Catalog's 87 direct queries in 34 services is not merely the largest, it is
+   larger than the rest put together.
+
+   This repeats §4.0's lesson exactly: a big coupling number usually has one structural cause,
+   and it is rarely the one the number's name suggests.
 3. **An architecture test that fails the build when the boundaries erode.** ☑ **Done.**
    `ModuleMap` assigns all 165 entities to a module and `ModuleBoundaryTests` holds it to the
    EF model in both directions — an unassigned table fails the build, and so does a mapping
@@ -407,6 +439,14 @@ Nothing moves. The monolith becomes modular.
 
 *Exit criterion: the module boundary and composition tests are green, and every entity and
 every service has a named owner.* ☑
+
+**Phase 1 and §4.0.1 are the same dependency chain.** Of Catalog's 87 direct queries, the ones
+whose surrounding code also reads `cluster.Kubeconfig` cannot move to the contract at all — it
+deliberately carries no credential, so those callers have to go through `IClusterClient` first.
+That is **34 queries in 7 services** (Stalwart 16, Storage 6, OpenLdap 5, Headscale 3,
+StorageLinkClientFactory 2, TelemetryNodeClient 1, StalwartDns 1); the other **53 in 27 services**
+can move today. Credential custody is not a parallel tidying job — it gates contract adoption.
+`CatalogContractAdoptionTests` ratchets both halves of the number so neither can creep back.
 
 ### Phase 1 — The API (the actual product work)
 

@@ -97,6 +97,91 @@ public class ModuleApiTests : IDisposable
         (await Catalog.FindComponentsAsync(ourTenant, "harbor")).Should().ContainSingle();
     }
 
+    // ════════════════════════════════════════════════════════════════
+    //  Configuring a component through the contract
+    // ════════════════════════════════════════════════════════════════
+
+    [Fact]
+    public async Task Catalog_merges_form_values_into_what_is_already_stored()
+    {
+        await SetHelmValuesDirectlyAsync(ourComponent, "existing:\n  keep: yes\n");
+
+        InstalledComponent? after = await Catalog.MergeHelmValuesAsync(
+            ourTenant, ourComponent, new Dictionary<string, string> { ["added.field"] = "new" });
+
+        // Merging, not replacing: the point of the method is that a caller patching one field
+        // does not have to load, edit and write back the whole document itself.
+        after.Should().NotBeNull();
+        after!.HelmValues.Should().Contain("keep").And.Contain("new");
+    }
+
+    [Fact]
+    public async Task Catalog_refuses_to_configure_another_tenants_component_and_writes_nothing()
+    {
+        await SetHelmValuesDirectlyAsync(theirComponent, "theirs: untouched\n");
+
+        InstalledComponent? after = await Catalog.MergeHelmValuesAsync(
+            ourTenant, theirComponent, new Dictionary<string, string> { ["injected"] = "yes" });
+
+        after.Should().BeNull("a component that is not ours must read as absent");
+
+        // The null is only half the guarantee. A refusal that still wrote would be worse than
+        // no contract at all, so the row is checked too.
+        using ApplicationDbContext check = factory.CreateDbContext();
+        ClusterComponent theirs = check.ClusterComponents.Single(c => c.Id == theirComponent);
+        theirs.HelmValues.Should().Be("theirs: untouched\n");
+    }
+
+    [Fact]
+    public async Task Catalog_set_replaces_the_values_outright()
+    {
+        await SetHelmValuesDirectlyAsync(ourComponent, "old: gone\n");
+
+        InstalledComponent? after = await Catalog.SetHelmValuesAsync(
+            ourTenant, ourComponent, "fresh: document\n");
+
+        after!.HelmValues.Should().Be("fresh: document\n");
+        after.HelmValues.Should().NotContain("old");
+    }
+
+    [Fact]
+    public async Task Catalog_leaves_the_configuration_blob_alone_when_none_is_given()
+    {
+        using (ApplicationDbContext seed = factory.CreateDbContext())
+        {
+            ClusterComponent c = seed.ClusterComponents.Single(x => x.Id == ourComponent);
+            c.Configuration = "{\"StorageLinkId\":\"keep-me\"}";
+            seed.SaveChanges();
+        }
+
+        InstalledComponent? after = await Catalog.MergeHelmValuesAsync(
+            ourTenant, ourComponent, new Dictionary<string, string> { ["a"] = "b" });
+
+        // Null means "leave it", not "clear it" — the one ambiguity the contract documents away.
+        after!.Configuration.Should().Be("{\"StorageLinkId\":\"keep-me\"}");
+    }
+
+    [Fact]
+    public async Task Catalog_carries_the_configuration_blob_that_callers_deserialize()
+    {
+        InstalledComponent? after = await Catalog.MergeHelmValuesAsync(
+            ourTenant, ourComponent, new Dictionary<string, string> { ["a"] = "b" },
+            "{\"StorageLinkId\":\"written\"}");
+
+        // Nine foreign call sites read this field. The first version of the record omitted it,
+        // which would have stopped every one of them adopting the contract.
+        after!.Configuration.Should().Be("{\"StorageLinkId\":\"written\"}");
+    }
+
+    /// <summary>Sets a component's Helm values behind the contract's back, to arrange a test.</summary>
+    private async Task SetHelmValuesDirectlyAsync(Guid componentId, string helmValues)
+    {
+        using ApplicationDbContext seed = factory.CreateDbContext();
+        ClusterComponent c = seed.ClusterComponents.Single(x => x.Id == componentId);
+        c.HelmValues = helmValues;
+        await seed.SaveChangesAsync();
+    }
+
     [Fact]
     public async Task Fleet_answers_for_the_asking_tenant_and_refuses_the_neighbour()
     {

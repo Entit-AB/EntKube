@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using ICatalogApi = EntKube.Contracts.Catalog.ICatalogApi;
+using InstalledComponent = EntKube.Contracts.Catalog.InstalledComponent;
 using k8s;
 using k8s.Models;
 using Microsoft.EntityFrameworkCore;
@@ -30,7 +32,8 @@ public class LokiService(
     KubernetesProxyClientPool clientPool,
     ILogger<LokiService> logger,
     VaultService vaultService,
-    StorageService storageService)
+    StorageService storageService,
+    ICatalogApi catalog)
 {
     public async Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(
         Guid clusterId, CancellationToken ct = default)
@@ -226,9 +229,8 @@ public class LokiService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+        InstalledComponent component =
+            await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         StorageLink link = await db.StorageLinks
@@ -262,15 +264,11 @@ public class LokiService(
         {
             s3Values["loki.storage.s3.endpoint"] = link.Endpoint;
         }
-
-        component.HelmValues = YamlFormMerger.MergeFormValues(component.HelmValues ?? "", s3Values);
-
         // Persist the storage link ID in Configuration so the UI can re-populate the dropdown.
         LokiConfig storedConfig = TryDeserializeConfig(component.Configuration) ?? new LokiConfig();
         storedConfig.StorageLinkId = storageLinkId;
-        component.Configuration = JsonSerializer.Serialize(storedConfig);
-
-        await db.SaveChangesAsync(ct);
+        await catalog.MergeHelmValuesAsync(tenantId, clusterComponentId, s3Values,
+            JsonSerializer.Serialize(storedConfig), ct);
 
         // Store credentials as vault secrets — injected at install time via hidden catalog fields
         // loki-s3-access-key (→ loki.storage.s3.accessKeyId) and
@@ -292,10 +290,8 @@ public class LokiService(
     public async Task<Guid?> GetStorageLinkIdForComponentAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        ClusterComponent? component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+        InstalledComponent? component =
+            await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
         if (component is null) return null;
         return TryDeserializeConfig(component.Configuration)?.StorageLinkId;
     }
