@@ -76,7 +76,7 @@ public class StalwartDnsService(
             .FirstOrDefaultAsync(c => c.ClusterComponentId == componentId && c.TenantId == tenantId, ct);
 
         ClusterComponent? component = await db.ClusterComponents.AsNoTracking()
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct);
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct);
 
         if (config is null || component is null)
         {

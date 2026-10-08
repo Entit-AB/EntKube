@@ -186,7 +186,7 @@ public class SmtpSettingsResolver(
         }
 
         ClusterComponent? component = await db.ClusterComponents.AsNoTracking()
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct);
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct);
 
         StalwartComponentConfig? config = await db.StalwartComponentConfigs.AsNoTracking()
             .FirstOrDefaultAsync(c => c.ClusterComponentId == componentId, ct);
