@@ -214,6 +214,33 @@ invocation sat behind a `private static` method. So for this file, unlike the Da
 coverage could not come first — it had to come *with* the conversion. `RoutingClusterCallTests`
 is that coverage, asserting on what reaches the cluster and verified by mutation.
 
+**What actually gates the rest, measured rather than assumed.** Site count has been the wrong
+way to choose the next conversion, repeatedly. Of the 246 credential sites left, **40 are in a
+method that already has a tenant in scope and 206 are not** (`CustodyTriageTests`). The seam is
+not the constraint any more — it can run kubectl, build a typed client, pooled or not, run helm and
+apply or delete a whole manifest set. The constraint is that `ForAsync(tenantId, clusterId)` needs
+a tenant, and most of the code reaches clusters by id alone.
+
+`PrometheusService` is the clearest case and the reason this matters. Twenty sites, which reads as
+the obvious next job — and **all twenty are unreachable**, because not one of its fifteen public
+methods receives a tenant. Converting it is not a refactor; it is deciding who may read which
+cluster's metrics and where that tenant comes from, then changing fifteen signatures and their
+callers. The same is true of `KubernetesOperationsService` (49 sites, none with a tenant),
+`HeadscaleService` (17), `NodeManagementService` (13) and `ComponentScanService` (10).
+
+Two capabilities are also genuinely still missing, and they are small:
+
+- a **server-side dry-run apply** and a **server version read**, which is what stops
+  `DriftDetectionService` moving even though all five of its sites have a tenant;
+- a **default namespace on apply**, for documents that do not name one — `ApplyManifestAsync` has
+  no namespace parameter and adding one touches 65 Moq setups and 153 callers, so it wants its own
+  change.
+
+So the remaining work splits three ways: **40 sites that could move today**, **two small seam
+additions**, and **206 sites behind an authorization question that is not ours to answer by
+refactoring**. The third is the large one, and it is the same question §5.4 asks about the gate —
+who is acting, and on whose behalf.
+
 **It also strengthens the case for §5's agent model.** An agent running *inside* the cluster
 needs no kubeconfig at all — there is nothing to hand out, because the work happens where the
 credentials already are. Credential custody was presented there as a side benefit of
