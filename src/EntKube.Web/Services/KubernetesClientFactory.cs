@@ -167,6 +167,53 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// Supports optional label selectors for filtering.
     /// </summary>
     /// <summary>
+    /// Deletes every resource in a manifest set.
+    ///
+    /// <para><c>--ignore-not-found</c>, so removing something already gone is a success rather
+    /// than an error — these run on teardown paths where a half-removed state is the normal case.
+    /// The acknowledgment carries the manifest, which is what the gate needs: a composite delete
+    /// has no single kind and name to look up, so its preview is the set itself.</para>
+    /// </summary>
+    public async Task<string> DeleteManifestSetAsync(
+        string manifest, string kubeconfig, CancellationToken ct = default)
+    {
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Delete,
+            Manifest = manifest,
+            Kubeconfig = kubeconfig,
+        }, ct);
+
+        string kubeconfigPath = Path.GetTempFileName();
+        string manifestPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+            await SecretFile.WriteAsync(manifestPath, manifest, ct);
+
+            return await RunKubectlAsync(
+                BuildDeleteSetArguments(manifestPath, kubeconfigPath), ct);
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+            File.Delete(manifestPath);
+        }
+    }
+
+    /// <summary>
+    /// The command line for deleting a manifest set.
+    ///
+    /// <para>Split out so <c>--ignore-not-found</c> can be asserted on. It was inline, and a
+    /// mutant that dropped it passed every test — the tests reach this through a mocked factory,
+    /// so the argv never ran. The flag is load-bearing: these run on teardown paths where some of
+    /// the set is already gone, and without it kubectl fails the whole call.</para>
+    /// </summary>
+    public static string BuildDeleteSetArguments(string manifestPath, string kubeconfigPath)
+        => $"delete -f {manifestPath} --kubeconfig={kubeconfigPath} --ignore-not-found";
+
+    /// <summary>
     /// Runs one helm invocation against a cluster.
     ///
     /// <para>Three things happen here that the callers used to each do for themselves: the

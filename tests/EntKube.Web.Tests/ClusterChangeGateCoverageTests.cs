@@ -41,7 +41,7 @@ public class ClusterChangeGateCoverageTests
     /// Own-process <c>kubectl</c>/<c>helm</c> invocations in files that never acknowledge,
     /// measured 2026-10-07. Was 49 before <c>ApplyExternalRoutesAsync</c> moved onto the seam.
     /// </summary>
-    private const int BaselineUngatedInvocations = 46;
+    private const int BaselineUngatedInvocations = 45;
 
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the
