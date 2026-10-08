@@ -49,6 +49,16 @@ public interface IKubernetesClientFactory
     /// Gets the JSON output of a kubectl command. Used for querying cluster/pod status.
     /// </summary>
     /// <summary>
+    /// Deletes every resource in a manifest set, by <c>kubectl delete -f --ignore-not-found</c>.
+    ///
+    /// <para>Distinct from <see cref="DeleteManifestAsync"/>, which deletes one named resource.
+    /// A caller holding a multi-document manifest cannot express itself with that one without
+    /// parsing the YAML to find each kind and name — which is why those callers kept writing the
+    /// credential themselves.</para>
+    /// </summary>
+    Task<string> DeleteManifestSetAsync(string manifest, string kubeconfig, CancellationToken ct = default);
+
+    /// <summary>
     /// Runs one helm invocation against a cluster, supplying the credential and raising the
     /// acknowledgment. See <see cref="EntKube.Web.Services.Clusters.HelmInvocation"/> for why the
     /// caller passes arguments rather than a modelled chart API.

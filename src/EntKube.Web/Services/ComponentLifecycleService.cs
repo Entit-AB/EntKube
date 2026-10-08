@@ -1647,27 +1647,27 @@ public class ComponentLifecycleService(
         KubernetesCluster cluster, string manifestYaml, bool delete = false,
         CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return new HelmExecutionResult { Success = false, Output = "No kubeconfig stored for this cluster." };
+        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
+            await clusterClients.ForAsync(cluster.TenantId, cluster.Id, ct);
 
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-        string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-manifest-{Guid.NewGuid()}.yaml");
+        if (clusterAccess is null)
+            return new HelmExecutionResult { Success = false, Output = "No kubeconfig stored for this cluster." };
 
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, cluster.Kubeconfig, ct);
-            await SecretFile.WriteAsync(tempManifest, manifestYaml, ct);
+            // Both halves go through the seam now, which is also what brings them inside the
+            // acknowledgment gate — this was applying and deleting customer resources with nobody
+            // asked, because it spawned its own kubectl.
+            string output = delete
+                ? await clusterAccess.DeleteManifestSetAsync(manifestYaml, ct)
+                : await clusterAccess.ApplyManifestAsync(manifestYaml, ct);
 
-            string operation = delete ? "delete" : "apply";
-            string args = $"{operation} -f {tempManifest} --kubeconfig {tempKubeconfig}";
-            if (delete) args += " --ignore-not-found";
-
-            return await RunProcessAsync("kubectl", args, ct);
+            return new HelmExecutionResult { Success = true, Output = output };
         }
-        finally
+        catch (Exception ex)
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
-            if (File.Exists(tempManifest)) File.Delete(tempManifest);
+            // The caller (VpnService) inspects the result rather than catching.
+            return new HelmExecutionResult { Success = false, Output = ex.Message };
         }
     }
 
