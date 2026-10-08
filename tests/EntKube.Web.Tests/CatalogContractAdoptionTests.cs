@@ -35,13 +35,13 @@ public class CatalogContractAdoptionTests
     /// Direct <c>.ClusterComponents</c> uses in services Catalog does not own, measured
     /// 2026-10-07. Was 87 before Tempo, Mimir and Loki moved to the contract.
     /// </summary>
-    private const int BaselineQueries = 81;
+    private const int BaselineQueries = 66;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22;
     /// the same three services accounted for six of them.
     /// </summary>
-    private const int BaselineWrites = 16;
+    private const int BaselineWrites = 3;
 
     [Fact]
     public void No_new_service_reaches_past_the_catalog_contract()

@@ -5,6 +5,8 @@ using System.Text.Json.Nodes;
 using Amazon.S3;
 using Amazon.S3.Model;
 using EntKube.Web.Data;
+using ICatalogApi = EntKube.Contracts.Catalog.ICatalogApi;
+using InstalledComponent = EntKube.Contracts.Catalog.InstalledComponent;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -179,6 +181,7 @@ public class KeycloakService(
     VaultService vaultService,
     IHttpClientFactory httpClientFactory,
     CnpgService cnpgService,
+    ICatalogApi catalog,
     IKubernetesClientFactory k8sFactory)
 {
     private readonly record struct TokenCacheKey(Guid ComponentId);
@@ -270,9 +273,7 @@ public class KeycloakService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+        InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         // Only load the CNPG database when one was explicitly selected.
@@ -325,9 +326,13 @@ public class KeycloakService(
         {
             string updatedYaml = component.HelmValues.Replace(
                 "name: keycloak-credentials", $"name: {credSecretName}");
+
             if (updatedYaml != component.HelmValues)
             {
-                component.HelmValues = updatedYaml;
+                // Replaced outright rather than merged: this rewrites a reference inside the
+                // existing document, so there are no form values to merge in.
+                component = await catalog.SetHelmValuesAsync(tenantId, clusterComponentId, updatedYaml, ct: ct)
+                    ?? throw new InvalidOperationException("Component not found.");
             }
         }
 
@@ -338,29 +343,27 @@ public class KeycloakService(
         if (cnpgDb is not null)
         {
             string dbHost = $"{cnpgDb.CnpgCluster.Name}-rw.{cnpgDb.CnpgCluster.Namespace}.svc.cluster.local";
-            component.HelmValues = YamlFormMerger.MergeFormValues(
-                component.HelmValues ?? "",
+            await catalog.MergeHelmValuesAsync(tenantId, clusterComponentId,
                 new Dictionary<string, string>
                 {
                     ["database.hostname"] = dbHost,
                     ["database.port"] = "5432",
                     ["database.database"] = cnpgDb.Name,
                     ["database.username"] = cnpgDb.Owner
-                });
+                }, ct: ct);
         }
         else if (regPgDb is not null)
         {
             RegisteredPostgresInstance rpi = regPgDb.RegisteredPostgresInstance;
             string dbHost = $"{rpi.ServiceName}.{rpi.Namespace}.svc.cluster.local";
-            component.HelmValues = YamlFormMerger.MergeFormValues(
-                component.HelmValues ?? "",
+            await catalog.MergeHelmValuesAsync(tenantId, clusterComponentId,
                 new Dictionary<string, string>
                 {
                     ["database.hostname"] = dbHost,
                     ["database.port"] = rpi.Port.ToString(),
                     ["database.database"] = regPgDb.Name,
                     ["database.username"] = regPgDb.Owner
-                });
+                }, ct: ct);
         }
 
         await db.SaveChangesAsync(ct);
@@ -548,9 +551,7 @@ public class KeycloakService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+        InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         CnpgDatabase cnpgDb = await db.CnpgDatabases
@@ -562,17 +563,14 @@ public class KeycloakService(
         string credSecretName = $"{component.ReleaseName ?? component.Name}-credentials";
         string host = $"{cnpgDb.CnpgCluster.Name}-rw.{cnpgDb.CnpgCluster.Namespace}.svc.cluster.local";
 
-        component.HelmValues = YamlFormMerger.MergeFormValues(
-            component.HelmValues ?? "",
+        await catalog.MergeHelmValuesAsync(tenantId, clusterComponentId,
             new Dictionary<string, string>
             {
                 ["database.hostname"] = host,
                 ["database.port"] = "5432",
                 ["database.database"] = cnpgDb.Name,
                 ["database.username"] = cnpgDb.Owner
-            });
-
-        await db.SaveChangesAsync(ct);
+            }, ct: ct);
 
         // Also write env-var secrets so the K8s secret is complete when synced.
         await vaultService.InitializeVaultAsync(tenantId, ct);
@@ -1808,8 +1806,11 @@ public class KeycloakService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent comp = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct)
+        // Was `c.Id == clusterComponentId` with no tenant predicate, in a method that already
+        // takes a tenantId — so it would answer about any component in the installation. Asking
+        // the contract closes that, because its tenant is a parameter rather than a filter a
+        // caller has to remember.
+        InstalledComponent comp = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         return await db.CnpgDatabases
@@ -1830,8 +1831,11 @@ public class KeycloakService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent comp = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct)
+        // Was `c.Id == clusterComponentId` with no tenant predicate, in a method that already
+        // takes a tenantId — so it would answer about any component in the installation. Asking
+        // the contract closes that, because its tenant is a parameter rather than a filter a
+        // caller has to remember.
+        InstalledComponent comp = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         return await db.RegisteredPostgresDatabases

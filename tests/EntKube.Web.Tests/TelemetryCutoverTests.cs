@@ -191,7 +191,8 @@ public class TelemetryCutoverTests
 
             IConfiguration config = TestServices.TestConfiguration(PublicIngest);
             VaultService vault = new(factory, new VaultEncryptionService(TestRootKey));
-            EntKubeTelemetryService telemetry = new(factory, vault, new IngestTokenService(config), config);
+            EntKubeTelemetryService telemetry = new(factory, vault, new IngestTokenService(config),
+                new EntKube.Web.Modules.Api.CatalogApi(factory), config);
 
             return new Fixture(
                 telemetry, TestServices.BuildLifecycle(factory, vault, PublicIngest),

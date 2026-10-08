@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using EntKube.Web.Data;
+using ICatalogApi = EntKube.Contracts.Catalog.ICatalogApi;
+using InstalledComponent = EntKube.Contracts.Catalog.InstalledComponent;
 using EntKube.Web.Services.Telemetry;
 using Microsoft.EntityFrameworkCore;
 
@@ -24,6 +26,7 @@ public class EntKubeTelemetryService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
     IngestTokenService ingestTokens,
+    ICatalogApi catalog,
     IConfiguration configuration)
 {
     /// <summary>Catalog keys of the two components this service configures.</summary>
@@ -72,21 +75,19 @@ public class EntKubeTelemetryService(
     {
         await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+        InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         // The node validates the presented bearer against this literal value, so it must be the very token
         // the collector sends. Mint is deterministic per (cluster, tenant), so this is that same token.
         string ingestToken = ingestTokens.Mint(component.ClusterId, tenantId);
 
-        component.HelmValues = YamlFormMerger.MergeFormValues(component.HelmValues ?? "", new Dictionary<string, string>
+        await catalog.MergeHelmValuesAsync(tenantId, clusterComponentId,
+            new Dictionary<string, string>
         {
             ["node.tenantId"] = tenantId.ToString(),
             ["node.clusterId"] = component.ClusterId.ToString(),
-        });
-        await db.SaveChangesAsync(ct);
+        }, ct: ct);
 
         await vaultService.InitializeVaultAsync(tenantId, ct);
         await vaultService.SetComponentSecretAsync(tenantId, clusterComponentId, IngestTokenSecret, ingestToken, ct);
@@ -156,9 +157,7 @@ public class EntKubeTelemetryService(
     {
         await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+        InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         StorageLink link = await db.StorageLinks
@@ -168,7 +167,8 @@ public class EntKubeTelemetryService(
         string region = link.Region ?? "us-east-1";
         (string endpointHost, bool insecure) = S3EndpointUtil.Normalize(link.Endpoint, region);
 
-        component.HelmValues = YamlFormMerger.MergeFormValues(component.HelmValues ?? "", new Dictionary<string, string>
+        await catalog.MergeHelmValuesAsync(tenantId, clusterComponentId,
+            new Dictionary<string, string>
         {
             ["objectStorage.bucket"] = link.BucketName ?? "",
             // The engine's S3 client takes a full URL, unlike Tempo's host-only form.
@@ -178,8 +178,7 @@ public class EntKubeTelemetryService(
             ["objectStorage.region"] = region,
             // Required by MinIO and Ceph RGW, which do not support virtual-host bucket addressing.
             ["objectStorage.forcePathStyle"] = "true",
-        });
-        await db.SaveChangesAsync(ct);
+        }, ct: ct);
 
         await vaultService.InitializeVaultAsync(tenantId, ct);
         // Straight from the vault rather than through StorageService: that service carries a long
@@ -234,6 +233,9 @@ public class EntKubeTelemetryService(
         // Matched on the catalog key, NOT on the chart name: the query component installs the SAME chart
         // with indexer.enabled=false, so a chart-name match can return the querier's row and derive an
         // indexer address inside a release that renders no indexer at all.
+        // Not the contract: this takes only a clusterId, and the contract's lookups are
+        // tenant-scoped by design. Giving this method a tenant changes its callers, which is a
+        // separate change — and it is also a tenancy gap in its own right.
         var indexer = await db.ClusterComponents
             .Where(c => c.ClusterId == clusterId && c.Name == IndexerKey)
             .Select(c => new { c.ReleaseName, c.Name, c.Namespace })
@@ -321,6 +323,7 @@ public class EntKubeTelemetryService(
 
         // Projected into an anonymous type, not straight to the string: HelmValues is nullable, so a
         // bare Select cannot tell "no collector on this cluster" from "a collector with no values".
+        // Same as above: no tenant to scope by until this method's signature gains one.
         var collector = await db.ClusterComponents
             .Where(c => c.ClusterId == clusterId
                         && c.Name == TelemetryIngestDefaults.CollectorKey

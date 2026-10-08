@@ -29,7 +29,8 @@ public static class TestServices
         IHttpClientFactory httpFactory = new Mock<IHttpClientFactory>().Object;
         CnpgService cnpgService = new(dbFactory, vaultService,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory));
-        return new KeycloakService(dbFactory, vaultService, httpFactory, cnpgService, k8sFactory);
+        return new KeycloakService(dbFactory, vaultService, httpFactory, cnpgService,
+            new EntKube.Web.Modules.Api.CatalogApi(dbFactory), k8sFactory);
     }
 
     /// <summary>A 32-byte base64 key — enough for the vault encryption service and to derive ingest tokens.</summary>
@@ -69,9 +70,11 @@ public static class TestServices
 
         return new ComponentLifecycleService(
             testDb.Factory, vaultService,
-            new KeycloakService(testDb.Factory, vaultService, httpFactory, cnpg, k8sFactory),
+            new KeycloakService(testDb.Factory, vaultService, httpFactory, cnpg,
+                new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), k8sFactory),
             tokens,
-            new EntKubeTelemetryService(testDb.Factory, vaultService, tokens, config),
+            new EntKubeTelemetryService(testDb.Factory, vaultService, tokens,
+                new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), config),
             config,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<ComponentLifecycleService>.Instance);
@@ -89,7 +92,8 @@ public static class TestServices
         IngestTokenService tokens = new(config);
         return new ComponentLifecycleService(
             dbFactory, vaultService, BuildKeycloak(dbFactory, vaultService),
-            tokens, new EntKubeTelemetryService(dbFactory, vaultService, tokens, config), config,
+            tokens, new EntKubeTelemetryService(dbFactory, vaultService, tokens,
+                new EntKube.Web.Modules.Api.CatalogApi(dbFactory), config), config,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(
                 dbFactory, new Mock<IKubernetesClientFactory>().Object),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<ComponentLifecycleService>.Instance);

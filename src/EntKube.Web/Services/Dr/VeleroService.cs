@@ -1,5 +1,7 @@
 using System.Text.Json;
 using EntKube.Web.Data;
+using ICatalogApi = EntKube.Contracts.Catalog.ICatalogApi;
+using InstalledComponent = EntKube.Contracts.Catalog.InstalledComponent;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Dr;
@@ -17,6 +19,7 @@ public class VeleroService(
     IKubernetesClientFactory k8s,
     StorageService storageService,
     VaultService vaultService,
+    ICatalogApi catalog,
     ILogger<VeleroService> logger)
 {
     /// <summary>
@@ -48,9 +51,7 @@ public class VeleroService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+        InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         StorageLink link = await db.StorageLinks
@@ -66,13 +67,12 @@ public class VeleroService(
         }
 
         Dictionary<string, string> values = BuildStorageValues(link);
-        component.HelmValues = YamlFormMerger.MergeFormValues(component.HelmValues ?? "", values);
+
 
         VeleroConfig config = TryReadConfig(component.Configuration) ?? new VeleroConfig();
         config.StorageLinkId = storageLinkId;
-        component.Configuration = JsonSerializer.Serialize(config);
-
-        await db.SaveChangesAsync(ct);
+        await catalog.MergeHelmValuesAsync(tenantId, clusterComponentId, values,
+            JsonSerializer.Serialize(config), ct);
 
         await vaultService.InitializeVaultAsync(tenantId, ct);
         (string accessKey, string secretKey) =
@@ -121,12 +121,10 @@ public class VeleroService(
             Guid environmentId;
             using (ApplicationDbContext db = dbFactory.CreateDbContext())
             {
-                ClusterComponent velero = await db.ClusterComponents
-                    .Include(c => c.Cluster)
-                    .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+                InstalledComponent velero = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
                     ?? throw new InvalidOperationException("Velero component not found.");
                 clusterId = velero.ClusterId;
-                environmentId = velero.Cluster.EnvironmentId;
+                environmentId = velero.EnvironmentId;
             }
 
             Guid? cubefsComponentId = await FindCubeFsComponentOnClusterAsync(clusterId, ct);
@@ -176,9 +174,7 @@ public class VeleroService(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        ClusterComponent? component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+        InstalledComponent? component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
         return component is null ? null : TryReadConfig(component.Configuration)?.StorageLinkId;
     }
 
@@ -188,6 +184,9 @@ public class VeleroService(
     private async Task<Guid?> FindCubeFsComponentOnClusterAsync(Guid clusterId, CancellationToken ct)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+        // Not FindComponentAsync: this one filters on Status and takes the most recently created
+        // match, neither of which the contract expresses — converting it would change which
+        // component is picked.
         ClusterComponent? cubefs = await db.ClusterComponents
             .Where(c => c.ClusterId == clusterId && c.Name == "cubefs" && c.Status == ComponentStatus.Installed)
             .OrderByDescending(c => c.CreatedAt)
