@@ -198,7 +198,7 @@ public class OpenLdapService(
                 .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId && c.TenantId == tenantId, ct);
             if (config is null) return;
 
-            ClusterComponent? component = await db.ClusterComponents.FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+            ClusterComponent? component = await db.ClusterComponents.FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
             if (component is null) return;
             release = component.ReleaseName ?? component.Name;
         }
@@ -395,7 +395,7 @@ public class OpenLdapService(
             return;
         }
 
-        ClusterComponent? component = await db.ClusterComponents.FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+        ClusterComponent? component = await db.ClusterComponents.FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
         if (component is null)
         {
             return;
@@ -437,7 +437,7 @@ public class OpenLdapService(
 
         ClusterComponent? component = await db.ClusterComponents
             .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
         if (component?.Cluster?.Kubeconfig is not { Length: > 0 } kubeconfig)
         {
             logger.LogWarning("OpenLDAP TLS certificate skipped — no kubeconfig for component {ComponentId}.", clusterComponentId);

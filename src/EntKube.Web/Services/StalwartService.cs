@@ -720,7 +720,7 @@ public class StalwartService(
                 .FirstOrDefaultAsync(d => d.Id == dbId, ct);
             link = await db.StorageLinks.FirstOrDefaultAsync(l => l.Id == linkId, ct);
             kubernetesClusterId = await db.ClusterComponents
-                .Where(c => c.Id == clusterComponentId)
+                .Where(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId)
                 .Select(c => c.ClusterId)
                 .FirstOrDefaultAsync(ct);
         }
@@ -789,7 +789,7 @@ public class StalwartService(
         }
 
         ClusterComponent? component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
         if (component is null)
         {
             return;
@@ -828,7 +828,7 @@ public class StalwartService(
 
         ClusterComponent? component = await db.ClusterComponents
             .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
         if (component?.Cluster?.Kubeconfig is not { Length: > 0 } kubeconfig)
         {
             return;
@@ -866,7 +866,7 @@ public class StalwartService(
 
         ClusterComponent? component = await db.ClusterComponents
             .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
         if (component?.Cluster?.Kubeconfig is not { Length: > 0 } kubeconfig)
         {
             logger.LogWarning(
@@ -1183,7 +1183,7 @@ public class StalwartService(
             }
 
             ClusterComponent? component = await db.ClusterComponents
-                .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+                .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
             if (component is null)
             {
                 return;
@@ -1326,7 +1326,7 @@ public class StalwartService(
         {
             ClusterComponent? component = await db.ClusterComponents
                 .Include(c => c.Cluster)
-                .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+                .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
 
             if (component?.Status == ComponentStatus.Installed
                 && component.Cluster?.Kubeconfig is { Length: > 0 } certKubeconfig)
@@ -1862,7 +1862,7 @@ public class StalwartService(
 
             ClusterComponent? component = await db.ClusterComponents
                 .Include(c => c.Cluster)
-                .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+                .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
             if (component is null)
             {
                 return Failure("Component not found.");
@@ -2752,7 +2752,7 @@ public class StalwartService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent? component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
         if (component is null)
         {
             return [];
@@ -2785,7 +2785,7 @@ public class StalwartService(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
         (ClusterComponent? component, string releaseName, string ns) =
-            await ResolveComponentAsync(clusterComponentId, RspamdCatalogKey, ct);
+            await ResolveComponentAsync(tenantId, clusterComponentId, RspamdCatalogKey, ct);
         if (component is null)
         {
             return;
@@ -3002,7 +3002,7 @@ public class StalwartService(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
         (ClusterComponent? component, string releaseName, string ns) =
-            await ResolveComponentAsync(clusterComponentId, RoundcubeCatalogKey, ct);
+            await ResolveComponentAsync(tenantId, clusterComponentId, RoundcubeCatalogKey, ct);
         if (component is null)
         {
             return;
@@ -3084,7 +3084,7 @@ public class StalwartService(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
         (ClusterComponent? component, string releaseName, string ns) =
-            await ResolveComponentAsync(clusterComponentId, SnappyMailCatalogKey, ct);
+            await ResolveComponentAsync(tenantId, clusterComponentId, SnappyMailCatalogKey, ct);
         if (component is null)
         {
             return;
@@ -3109,12 +3109,13 @@ public class StalwartService(
     }
 
     private async Task<(ClusterComponent? Component, string ReleaseName, string Namespace)>
-        ResolveComponentAsync(Guid clusterComponentId, string expectedName, CancellationToken ct)
+        ResolveComponentAsync(
+            Guid tenantId, Guid clusterComponentId, string expectedName, CancellationToken ct)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent? component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Name == expectedName, ct);
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId && c.Name == expectedName, ct);
 
         return component is null
             ? (null, "", "")
