@@ -4,6 +4,8 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using EntKube.Web.Data;
+using ICatalogApi = EntKube.Contracts.Catalog.ICatalogApi;
+using InstalledComponent = EntKube.Contracts.Catalog.InstalledComponent;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -209,6 +211,7 @@ public class HarborService(
     StorageService storageService,
     RedisService redisService,
     CnpgService cnpgService,
+    ICatalogApi catalog,
     IHttpClientFactory httpClientFactory)
 {
     private static readonly JsonSerializerOptions _json = new(JsonSerializerDefaults.Web);
@@ -250,9 +253,7 @@ public class HarborService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+        InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         // Before anything is written. A Redis Harbor cannot use must not reach the config record, or the
@@ -350,9 +351,7 @@ public class HarborService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+        InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         // The expose mode is written whether or not a hostname is configured: it is what keeps the
@@ -373,9 +372,8 @@ public class HarborService(
             values["expose.ingress.hosts.core"] = hostname;
         }
 
-        component.HelmValues = YamlFormMerger.MergeFormValues(component.HelmValues ?? "", values);
-
-        await db.SaveChangesAsync(ct);
+        await catalog.MergeHelmValuesAsync(tenantId, clusterComponentId,
+            values, ct: ct);
     }
 
     /// <summary>The host part of a stored registry URL, with or without its scheme or trailing path.</summary>
@@ -412,9 +410,7 @@ public class HarborService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+        InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         CnpgDatabase cnpgDb = await db.CnpgDatabases
@@ -424,8 +420,7 @@ public class HarborService(
 
         string host = $"{cnpgDb.CnpgCluster.Name}-rw.{cnpgDb.CnpgCluster.Namespace}.svc.cluster.local";
 
-        component.HelmValues = YamlFormMerger.MergeFormValues(
-            component.HelmValues ?? "",
+        await catalog.MergeHelmValuesAsync(tenantId, clusterComponentId,
             new Dictionary<string, string>
             {
                 ["database.type"] = "external",
@@ -434,9 +429,7 @@ public class HarborService(
                 ["database.external.username"] = cnpgDb.Owner,
                 ["database.external.coreDatabase"] = cnpgDb.Name,
                 ["database.external.sslmode"] = "disable"
-            });
-
-        await db.SaveChangesAsync(ct);
+            }, ct: ct);
 
         // Store DB password as a component vault secret; injected at install time via the
         // harbor-db-password hidden catalog field.
@@ -463,9 +456,7 @@ public class HarborService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+        InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         StorageLink link = await db.StorageLinks
@@ -489,8 +480,8 @@ public class HarborService(
             s3Values["persistence.imageChartStorage.s3.regionendpoint"] = s3Endpoint;
         }
 
-        component.HelmValues = YamlFormMerger.MergeFormValues(component.HelmValues ?? "", s3Values);
-        await db.SaveChangesAsync(ct);
+        await catalog.MergeHelmValuesAsync(tenantId, clusterComponentId,
+            s3Values, ct: ct);
 
         // Store S3 credentials as component vault secrets; injected at install time via hidden
         // harbor-s3-access-key and harbor-s3-secret-key catalog fields.
@@ -588,9 +579,7 @@ public class HarborService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent? component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+        InstalledComponent? component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
 
         if (component is null) return null;
 
@@ -716,9 +705,7 @@ public class HarborService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+        InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         string endpoint = (redisEndpoint ?? "").Trim();
@@ -729,15 +716,12 @@ public class HarborService(
             // the type is internal, but `helm get values` and the advanced editor both still show it,
             // and an address nothing uses is worse than no address when the next person is working out
             // which Redis this registry talks to — especially when it got there by autofill.
-            component.HelmValues = YamlFormMerger.MergeFormValues(
-                component.HelmValues ?? "",
+            await catalog.MergeHelmValuesAsync(tenantId, clusterComponentId,
                 new Dictionary<string, string>
                 {
                     ["redis.type"] = "internal",
                     ["redis.external.addr"] = ""
-                });
-
-            await db.SaveChangesAsync(ct);
+                }, ct: ct);
             return;
         }
 
@@ -749,15 +733,12 @@ public class HarborService(
             throw ShardedRedisRefused(endpoint);
         }
 
-        component.HelmValues = YamlFormMerger.MergeFormValues(
-            component.HelmValues ?? "",
+        await catalog.MergeHelmValuesAsync(tenantId, clusterComponentId,
             new Dictionary<string, string>
             {
                 ["redis.type"] = "external",
                 ["redis.external.addr"] = endpoint
-            });
-
-        await db.SaveChangesAsync(ct);
+            }, ct: ct);
 
         // The credential follows the same route as the database and S3 ones: the component vault secret
         // behind redis.external.password, which InjectSecretsIntoValuesAsync merges in at install time so
