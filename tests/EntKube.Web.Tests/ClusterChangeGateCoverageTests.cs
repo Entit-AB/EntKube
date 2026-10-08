@@ -42,10 +42,15 @@ public class ClusterChangeGateCoverageTests
     /// measured 2026-10-08. Was 49, then 46 once <c>ApplyExternalRoutesAsync</c> moved onto the
     /// seam, then 45 once the component installer's helm run did.
     ///
-    /// <para>42 rather than 45 because <c>helm repo</c> and <c>helm registry</c> are excluded —
-    /// see <see cref="LooksLocal"/>. That is a correction to this metric, not progress.</para>
+    /// <para>Excludes <c>helm repo</c> and <c>helm registry</c> — see <see cref="LooksLocal"/>.
+    /// Dropping those was a correction to this metric, not progress.</para>
+    ///
+    /// <para>41 after two changes landed together, each of which had banked the number it saw on
+    /// its own branch. Two independent reductions to one baseline cannot both be right, and the
+    /// slack half of this ratchet is what said so — it failed on <c>main</c> rather than letting a
+    /// stale ceiling sit there granting four sites of free headroom.</para>
     /// </summary>
-    private const int BaselineUngatedInvocations = 42;
+    private const int BaselineUngatedInvocations = 41;
 
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the

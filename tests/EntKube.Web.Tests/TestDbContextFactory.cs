@@ -70,9 +70,11 @@ public static class TestServices
 
         return new ComponentLifecycleService(
             testDb.Factory, vaultService,
-            new KeycloakService(testDb.Factory, vaultService, httpFactory, cnpg, k8sFactory),
+            new KeycloakService(testDb.Factory, vaultService, httpFactory, cnpg,
+                new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), k8sFactory),
             tokens,
-            new EntKubeTelemetryService(testDb.Factory, vaultService, tokens, config),
+            new EntKubeTelemetryService(testDb.Factory, vaultService, tokens,
+                new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), config),
             config,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory),
             Microsoft.Extensions.Logging.Abstractions.NullLogger<ComponentLifecycleService>.Instance);
