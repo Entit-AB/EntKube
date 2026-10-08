@@ -39,9 +39,13 @@ public class ClusterChangeGateCoverageTests
 
     /// <summary>
     /// Own-process <c>kubectl</c>/<c>helm</c> invocations in files that never acknowledge,
-    /// measured 2026-10-07. Was 49 before <c>ApplyExternalRoutesAsync</c> moved onto the seam.
+    /// measured 2026-10-08. Was 49, then 46 once <c>ApplyExternalRoutesAsync</c> moved onto the
+    /// seam, then 45 once the component installer's helm run did.
+    ///
+    /// <para>42 rather than 45 because <c>helm repo</c> and <c>helm registry</c> are excluded —
+    /// see <see cref="LooksLocal"/>. That is a correction to this metric, not progress.</para>
     /// </summary>
-    private const int BaselineUngatedInvocations = 45;
+    private const int BaselineUngatedInvocations = 42;
 
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the
@@ -97,6 +101,22 @@ public class ClusterChangeGateCoverageTests
     }
 
     /// <summary>
+    /// Helm invocations that cannot reach a cluster, and so can never be gated no matter how much
+    /// of EntKube moves onto the seam: <c>helm repo add</c>, <c>helm repo update</c> and
+    /// <c>helm registry login</c> fetch an index or authenticate to a registry over HTTP and write
+    /// helm's local cache.
+    ///
+    /// <para>Excluded because leaving them in made this number mean something other than its name.
+    /// Two of them were being passed <c>--kubeconfig</c>, which is how they came to be counted in
+    /// the first place; the flag is gone and it was never used. Checked rather than assumed —
+    /// <c>repo add</c> and <c>repo update</c> both succeed with a malformed kubeconfig and with a
+    /// path that does not exist.</para>
+    /// </summary>
+    private static int LooksLocal(string code)
+        => Regex.Matches(code, "\"helm\"\\s*,\\s*\\$?\"(?:repo|registry)\\b").Count
+         + Regex.Matches(code, "\"helm\"\\s*,\\s*\\n\\s*\\$?\"(?:repo|registry)\\b").Count;
+
+    /// <summary>
     /// Counts <c>"kubectl"</c>/<c>"helm"</c> as the program argument of a process call.
     ///
     /// <para>Deliberately does not parse the verb. An earlier attempt did, to separate mutations
@@ -131,8 +151,10 @@ public class ClusterChangeGateCoverageTests
                 .Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)
                          && !l.TrimStart().StartsWith("*", StringComparison.Ordinal)));
 
-            int cli = Regex.Matches(code, "\"(?:kubectl|helm)\"\\s*,").Count;
-            if (cli == 0) continue;
+            int cli = Regex.Matches(code, "\"(?:kubectl|helm)\"\\s*,").Count
+                      - LooksLocal(code);
+
+            if (cli <= 0) continue;
 
             bool acknowledges = Regex.IsMatch(code, @"gate\.AcknowledgeAsync|RequireAckAsync");
             if (acknowledges) continue;
