@@ -52,6 +52,32 @@ public static class TestServices
     }
 
     /// <summary>
+    /// A ComponentLifecycleService over an <see cref="InterceptingTestDb"/>, for tests that need
+    /// <c>cluster.Kubeconfig</c> to resolve the way production resolves it — through the vault
+    /// materialisation interceptor rather than from a column that no longer exists.
+    /// </summary>
+    public static ComponentLifecycleService BuildLifecycle(
+        InterceptingTestDb testDb, IKubernetesClientFactory k8sFactory, string? publicIngestUrl = null)
+    {
+        IConfiguration config = TestConfiguration(publicIngestUrl);
+        IngestTokenService tokens = new(config);
+        IHttpClientFactory httpFactory = new Mock<IHttpClientFactory>().Object;
+        VaultService vaultService = testDb.CreateVaultService();
+
+        CnpgService cnpg = new(testDb.Factory, vaultService,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory));
+
+        return new ComponentLifecycleService(
+            testDb.Factory, vaultService,
+            new KeycloakService(testDb.Factory, vaultService, httpFactory, cnpg, k8sFactory),
+            tokens,
+            new EntKubeTelemetryService(testDb.Factory, vaultService, tokens, config),
+            config,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ComponentLifecycleService>.Instance);
+    }
+
+    /// <summary>
     /// Builds a ComponentLifecycleService with its telemetry-ingest dependencies satisfied from an
     /// in-memory configuration, for tests that do not drive collector behaviour.
     /// </summary>
