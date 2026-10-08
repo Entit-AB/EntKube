@@ -32,6 +32,14 @@ public interface IClusterClient
     Task EnsureNamespaceAsync(string ns, CancellationToken ct = default);
 
     /// <summary>
+    /// How this cluster differs from a manifest, by server-side dry run. A read; nothing changes.
+    /// </summary>
+    Task<ManifestDiff> DiffManifestAsync(string manifest, string ns, CancellationToken ct = default);
+
+    /// <summary>This cluster's server version, or null when it cannot be read.</summary>
+    Task<string?> GetServerVersionAsync(CancellationToken ct = default);
+
+    /// <summary>
     /// Deletes every resource in a manifest set. Use when holding a multi-document manifest;
     /// <see cref="DeleteManifestAsync"/> is for one named resource.
     /// </summary>

@@ -167,6 +167,125 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// Supports optional label selectors for filtering.
     /// </summary>
     /// <summary>
+    /// Asks a cluster how it differs from a manifest.
+    ///
+    /// <para>Exit 0 means the cluster matches, exit 1 means it differs and the diff is on stdout,
+    /// and anything else means the question went unanswered — so this does not use
+    /// <see cref="RunKubectlAsync"/>, which treats any non-zero exit as a failure and would turn
+    /// "it differs" into an exception.</para>
+    ///
+    /// <para>No timeout here on purpose: <c>kubectl diff</c> against an unresponsive API server
+    /// can hang, and how long that is worth waiting for belongs to the caller, which passes a
+    /// linked token.</para>
+    /// </summary>
+    public async Task<Clusters.ManifestDiff> DiffManifestAsync(
+        string manifest, string ns, string kubeconfig, CancellationToken ct = default)
+    {
+        string kubeconfigPath = Path.GetTempFileName();
+        string manifestPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+            await SecretFile.WriteAsync(manifestPath, manifest, ct);
+
+            string nsArg = string.IsNullOrEmpty(ns) ? "" : $" --namespace {ns}";
+
+            (int code, string stdout, string stderr) = await RunKubectlRawAsync(
+                $"diff -f {manifestPath} --kubeconfig={kubeconfigPath}{nsArg} --server-side --force-conflicts",
+                ct);
+
+            return InterpretDiffExit(code, stdout, stderr);
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+            File.Delete(manifestPath);
+        }
+    }
+
+    /// <summary>
+    /// What <c>kubectl diff</c>'s exit code means: 0 the cluster matches, 1 it differs and the
+    /// diff is on stdout, anything else the question went unanswered.
+    ///
+    /// <para>Split out so it can be asserted on directly. Callers reach this through a mocked
+    /// factory, so a mutant that turned "differs" into "could not tell" passed every test — the
+    /// third time a seam operation's own logic has been invisible that way (after the helm argv
+    /// and the manifest-set delete flags). The mapping is the whole operation: get it wrong in the
+    /// Unknown direction and a drifted deployment reports as healthy.</para>
+    /// </summary>
+    public static Clusters.ManifestDiff InterpretDiffExit(int exitCode, string stdout, string stderr)
+        => exitCode switch
+        {
+            0 => new Clusters.ManifestDiff(Clusters.DiffOutcome.Matches),
+            1 => new Clusters.ManifestDiff(Clusters.DiffOutcome.Differs, stdout),
+            _ => new Clusters.ManifestDiff(Clusters.DiffOutcome.Unknown,
+                Error: string.IsNullOrWhiteSpace(stderr) ? "kubectl diff failed." : stderr.Trim()),
+        };
+
+    /// <summary>The cluster's server version, or null when it cannot be read.</summary>
+    public async Task<string?> GetServerVersionAsync(string kubeconfig, CancellationToken ct = default)
+    {
+        string kubeconfigPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+
+            (int code, string stdout, _) = await RunKubectlRawAsync(
+                $"version -o json --kubeconfig={kubeconfigPath}", ct);
+
+            if (code != 0 || string.IsNullOrWhiteSpace(stdout)) return null;
+
+            using JsonDocument doc = JsonDocument.Parse(stdout);
+
+            return doc.RootElement.TryGetProperty("serverVersion", out JsonElement server)
+                   && server.TryGetProperty("gitVersion", out JsonElement git)
+                ? git.GetString()
+                : null;
+        }
+        catch (JsonException)
+        {
+            // kubectl answered with something that is not the version document; "unknown" is the
+            // honest result and the caller already treats null as that.
+            return null;
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+        }
+    }
+
+    /// <summary>
+    /// Runs kubectl and hands back the exit code rather than raising on a non-zero one, for the
+    /// commands where a non-zero exit is an answer instead of a failure.
+    /// </summary>
+    private static async Task<(int Code, string Stdout, string Stderr)> RunKubectlRawAsync(
+        string arguments, CancellationToken ct)
+    {
+        using Process process = new()
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "kubectl",
+                Arguments = arguments,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            },
+        };
+        process.StartInfo.EnvironmentVariables["HOME"] = "/tmp";
+        process.Start();
+
+        Task<string> stdout = process.StandardOutput.ReadToEndAsync(ct);
+        Task<string> stderr = process.StandardError.ReadToEndAsync(ct);
+        await process.WaitForExitAsync(ct);
+
+        return (process.ExitCode, await stdout, await stderr);
+    }
+
+    /// <summary>
     /// Deletes every resource in a manifest set.
     ///
     /// <para><c>--ignore-not-found</c>, so removing something already gone is a success rather

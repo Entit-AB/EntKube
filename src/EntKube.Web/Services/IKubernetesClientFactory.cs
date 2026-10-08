@@ -49,6 +49,19 @@ public interface IKubernetesClientFactory
     /// Gets the JSON output of a kubectl command. Used for querying cluster/pod status.
     /// </summary>
     /// <summary>
+    /// Asks a cluster how it differs from a manifest, by server-side dry run. A read: nothing is
+    /// changed and no acknowledgment is raised.
+    /// </summary>
+    Task<EntKube.Web.Services.Clusters.ManifestDiff> DiffManifestAsync(
+        string manifest, string ns, string kubeconfig, CancellationToken ct = default);
+
+    /// <summary>
+    /// The cluster's server version as reported by <c>kubectl version</c>, or null when it cannot
+    /// be read. Used to tell a deprecated API that is already gone from one that is only coming.
+    /// </summary>
+    Task<string?> GetServerVersionAsync(string kubeconfig, CancellationToken ct = default);
+
+    /// <summary>
     /// Deletes every resource in a manifest set, by <c>kubectl delete -f --ignore-not-found</c>.
     ///
     /// <para>Distinct from <see cref="DeleteManifestAsync"/>, which deletes one named resource.

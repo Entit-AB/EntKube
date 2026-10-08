@@ -78,6 +78,7 @@ public sealed record DriftReport
 /// </summary>
 public class DriftDetectionService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     ILogger<DriftDetectionService> logger)
 {
     /// <summary>
@@ -138,7 +139,7 @@ public class DriftDetectionService(
                 d.Namespace,
                 d.ClusterId,
                 ClusterName = d.Cluster.Name,
-                Kubeconfig = d.Cluster.Kubeconfig,
+
                 AppName = d.App.Name,
                 CustomerId = (Guid?)d.App.CustomerId,
                 CustomerName = d.App.Customer.Name,
@@ -162,12 +163,20 @@ public class DriftDetectionService(
         // Resolve each cluster's Kubernetes version once per sweep so the removed-API scan can
         // say "already broken" rather than only "will break". One extra kubectl call per
         // cluster is negligible next to one server-side dry-run per deployment.
+        // One client per cluster, resolved once: the sweep walks every managed deployment in the
+        // tenant and they share a handful of clusters between them.
+        Dictionary<Guid, EntKube.Web.Services.Clusters.IClusterClient> clusterAccess = [];
         Dictionary<Guid, string?> minorByCluster = [];
-        foreach (var cluster in targets
-            .Where(t => !string.IsNullOrWhiteSpace(t.Kubeconfig))
-            .GroupBy(t => t.ClusterId))
+
+        foreach (Guid clusterId in targets.Select(t => t.ClusterId).Distinct())
         {
-            minorByCluster[cluster.Key] = await GetServerMinorAsync(cluster.First().Kubeconfig!, ct);
+            EntKube.Web.Services.Clusters.IClusterClient? access =
+                await clusterClients.ForAsync(tenantId, clusterId, ct);
+
+            if (access is null) continue;
+
+            clusterAccess[clusterId] = access;
+            minorByCluster[clusterId] = await GetServerMinorAsync(access, ct);
         }
 
         using SemaphoreSlim limiter = new(MaxConcurrentDiffs);
@@ -198,7 +207,7 @@ public class DriftDetectionService(
                     return Base(DriftState.Unknown, "No manifests are defined for this deployment.");
                 }
 
-                if (string.IsNullOrWhiteSpace(target.Kubeconfig))
+                if (!clusterAccess.TryGetValue(target.ClusterId, out var access))
                 {
                     return Base(DriftState.Unknown, "Cluster has no kubeconfig configured.");
                 }
@@ -208,7 +217,7 @@ public class DriftDetectionService(
                     desired, minorByCluster.GetValueOrDefault(target.ClusterId));
 
                 (DriftState state, string? diff, string? note) =
-                    await DiffAsync(desired, target.Kubeconfig, target.Namespace, ct);
+                    await DiffAsync(desired, access, target.Namespace, ct);
 
                 return Base(state, note) with
                 {
@@ -239,48 +248,38 @@ public class DriftDetectionService(
     }
 
     /// <summary>
-    /// Runs a server-side <c>kubectl diff</c>. Exit 0 = in sync, exit 1 = drift on stdout,
-    /// anything else = the diff could not be computed — reported as Unknown rather than as
-    /// "in sync", so a broken connection never reads as a clean bill of health.
+    /// Asks the cluster how it differs from the desired manifest.
+    ///
+    /// <para>"Could not tell" stays distinct from "no difference" all the way through: the seam
+    /// reports three outcomes and this maps them to three drift states, so a broken connection
+    /// never reads as a clean bill of health.</para>
+    ///
+    /// <para>The timeout is set here rather than in the seam, because how long a drift sweep is
+    /// willing to wait on one deployment is this caller's policy, not the cluster client's.</para>
     /// </summary>
-    private async Task<(DriftState State, string? Diff, string? Note)> DiffAsync(
-        string desired, string kubeconfig, string ns, CancellationToken ct)
+    private static async Task<(DriftState State, string? Diff, string? Note)> DiffAsync(
+        string desired, EntKube.Web.Services.Clusters.IClusterClient access, string ns,
+        CancellationToken ct)
     {
-        string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-drift-{Guid.NewGuid()}.kubeconfig");
-        string manifestPath = Path.Combine(Path.GetTempPath(), $"entkube-drift-{Guid.NewGuid()}.yaml");
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(DiffTimeout);
 
         try
         {
-            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
-            await SecretFile.WriteAsync(manifestPath, desired, ct);
+            EntKube.Web.Services.Clusters.ManifestDiff diff =
+                await access.DiffManifestAsync(desired, ns, timeout.Token);
 
-            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(DiffTimeout);
-
-            (int code, string stdout, string stderr) = await RunKubectlAsync(
-                $"diff -f {manifestPath} --kubeconfig {kubeconfigPath} --namespace {ns} --server-side --force-conflicts",
-                timeout.Token);
-
-            return code switch
+            return diff.Outcome switch
             {
-                0 => (DriftState.InSync, null, null),
-                1 => (DriftState.Drifted, Truncate(stdout), null),
-                _ => (DriftState.Unknown, null,
-                    string.IsNullOrWhiteSpace(stderr) ? "kubectl diff failed." : stderr.Trim()),
+                EntKube.Web.Services.Clusters.DiffOutcome.Matches => (DriftState.InSync, null, null),
+                EntKube.Web.Services.Clusters.DiffOutcome.Differs
+                    => (DriftState.Drifted, Truncate(diff.Text ?? ""), null),
+                _ => (DriftState.Unknown, null, diff.Error ?? "kubectl diff failed."),
             };
         }
         catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
             return (DriftState.Unknown, null, $"Timed out after {DiffTimeout.TotalSeconds:N0}s.");
-        }
-        catch (Exception ex)
-        {
-            return (DriftState.Unknown, null, ex.Message);
-        }
-        finally
-        {
-            Delete(kubeconfigPath);
-            Delete(manifestPath);
         }
     }
 
@@ -289,42 +288,29 @@ public class DriftDetectionService(
     /// determined. Null is not an error: the removed-API scan then reports every removal as
     /// upcoming, which is the conservative direction.
     /// </summary>
-    private async Task<string?> GetServerMinorAsync(string kubeconfig, CancellationToken ct)
+    private async Task<string?> GetServerMinorAsync(
+        EntKube.Web.Services.Clusters.IClusterClient access, CancellationToken ct)
     {
-        string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-ver-{Guid.NewGuid()}.kubeconfig");
+        using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        timeout.CancelAfter(TimeSpan.FromSeconds(20));
+
         try
         {
-            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+            string? gitVersion = await access.GetServerVersionAsync(timeout.Token);
 
-            using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
-            timeout.CancelAfter(TimeSpan.FromSeconds(20));
+            // Still SemVer.Parse(StripDistroSuffix(…)) rather than a looser read of the string:
+            // a managed cluster reports things like "v1.29.4-eks-1234" and "+k3s1", and the
+            // suffix stripping is why the minor comes out right on those.
+            SemVer? parsed = SemVer.Parse(StripDistroSuffix(gitVersion));
 
-            (int code, string stdout, _) = await RunKubectlAsync(
-                $"version -o json --kubeconfig {kubeconfigPath}", timeout.Token);
-
-            if (code != 0 || string.IsNullOrWhiteSpace(stdout))
-            {
-                return null;
-            }
-
-            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(stdout);
-            if (!doc.RootElement.TryGetProperty("serverVersion", out System.Text.Json.JsonElement server)
-                || !server.TryGetProperty("gitVersion", out System.Text.Json.JsonElement gitVersion))
-            {
-                return null;
-            }
-
-            SemVer? parsed = SemVer.Parse(StripDistroSuffix(gitVersion.GetString()));
             return parsed is null ? null : $"{parsed.Major}.{parsed.Minor}";
         }
         catch (Exception ex) when (ex is not OperationCanceledException || !ct.IsCancellationRequested)
         {
-            logger.LogDebug(ex, "Could not read cluster version for the removed-API scan");
+            // As before: a cluster that will not say its version is one whose deprecations we do
+            // not know, which the scanner treats as "assume the API is still there".
+            logger.LogDebug(ex, "Could not read the server version for drift detection");
             return null;
-        }
-        finally
-        {
-            Delete(kubeconfigPath);
         }
     }
 
