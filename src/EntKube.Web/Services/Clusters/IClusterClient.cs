@@ -32,6 +32,12 @@ public interface IClusterClient
     Task EnsureNamespaceAsync(string ns, CancellationToken ct = default);
 
     /// <summary>
+    /// Deletes every resource in a manifest set. Use when holding a multi-document manifest;
+    /// <see cref="DeleteManifestAsync"/> is for one named resource.
+    /// </summary>
+    Task<string> DeleteManifestSetAsync(string manifest, CancellationToken ct = default);
+
+    /// <summary>
     /// Runs one helm invocation against this cluster. The credential is supplied from here and the
     /// acknowledgment is raised on the way through.
     /// </summary>

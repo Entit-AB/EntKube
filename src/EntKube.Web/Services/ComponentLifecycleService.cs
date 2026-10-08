@@ -1590,7 +1590,10 @@ public class ComponentLifecycleService(
             .FirstOrDefaultAsync(c => c.Id == componentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
-        if (string.IsNullOrWhiteSpace(component.Cluster.Kubeconfig))
+        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess = await clusterClients.ForAsync(
+            component.Cluster.TenantId, component.ClusterId, ct);
+
+        if (clusterAccess is null)
         {
             return new HelmExecutionResult
             {
@@ -1599,8 +1602,9 @@ public class ComponentLifecycleService(
             };
         }
 
-        // Write the kubeconfig to a temporary file.
-
+        // Still written for the kubectl helpers around the helm run — extracting a chart from the
+        // release secret, ensuring the namespace's LimitRange, describing stalled workloads. Those
+        // take a path, and moving them onto the seam is the follow-up to this change.
         string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
 
         try
@@ -1624,7 +1628,7 @@ public class ComponentLifecycleService(
                 return await ExecuteKubectlUrlAsync(command, tempKubeconfig, ct);
             }
 
-            return await ExecuteHelmCliAsync(command, tempKubeconfig, component.Cluster.Kubeconfig, ct);
+            return await ExecuteHelmCliAsync(command, clusterAccess, tempKubeconfig, ct);
         }
         finally
         {
@@ -1643,27 +1647,27 @@ public class ComponentLifecycleService(
         KubernetesCluster cluster, string manifestYaml, bool delete = false,
         CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return new HelmExecutionResult { Success = false, Output = "No kubeconfig stored for this cluster." };
+        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
+            await clusterClients.ForAsync(cluster.TenantId, cluster.Id, ct);
 
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-        string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-manifest-{Guid.NewGuid()}.yaml");
+        if (clusterAccess is null)
+            return new HelmExecutionResult { Success = false, Output = "No kubeconfig stored for this cluster." };
 
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, cluster.Kubeconfig, ct);
-            await SecretFile.WriteAsync(tempManifest, manifestYaml, ct);
+            // Both halves go through the seam now, which is also what brings them inside the
+            // acknowledgment gate — this was applying and deleting customer resources with nobody
+            // asked, because it spawned its own kubectl.
+            string output = delete
+                ? await clusterAccess.DeleteManifestSetAsync(manifestYaml, ct)
+                : await clusterAccess.ApplyManifestAsync(manifestYaml, ct);
 
-            string operation = delete ? "delete" : "apply";
-            string args = $"{operation} -f {tempManifest} --kubeconfig {tempKubeconfig}";
-            if (delete) args += " --ignore-not-found";
-
-            return await RunProcessAsync("kubectl", args, ct);
+            return new HelmExecutionResult { Success = true, Output = output };
         }
-        finally
+        catch (Exception ex)
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
-            if (File.Exists(tempManifest)) File.Delete(tempManifest);
+            // The caller (VpnService) inspects the result rather than catching.
+            return new HelmExecutionResult { Success = false, Output = ex.Message };
         }
     }
 
@@ -2055,7 +2059,8 @@ public class ComponentLifecycleService(
     /// from the Helm release secret on the cluster and uses it as a local chart path.
     /// </summary>
     private async Task<HelmExecutionResult> ExecuteHelmCliAsync(
-        HelmCommand command, string kubeconfigPath, string kubeconfig, CancellationToken ct)
+        HelmCommand command, EntKube.Web.Services.Clusters.IClusterClient clusterAccess,
+        string kubeconfigPath, CancellationToken ct)
     {
         // Build the helm command arguments.
 
@@ -2108,8 +2113,8 @@ public class ComponentLifecycleService(
                 args.Add(tempValuesFile);
             }
 
-            args.Add("--kubeconfig");
-            args.Add(kubeconfigPath);
+            // No --kubeconfig here any more: the seam appends its own. Leaving this in handed
+            // helm the flag twice, which a test caught.
             if (!command.NoWait)
             {
                 args.Add("--wait");
@@ -2172,7 +2177,7 @@ public class ComponentLifecycleService(
                 // so we can use it as a local chart directory for the upgrade.
 
                 tempChartDir = await ExtractChartFromReleaseAsync(
-                    kubeconfig, command.ReleaseName, command.Namespace, ct);
+                    clusterAccess, command.ReleaseName, command.Namespace, ct);
 
                 if (tempChartDir is not null && chartRefIndex >= 0)
                 {
@@ -2188,8 +2193,21 @@ public class ComponentLifecycleService(
                 await EnsureNamespaceDefaultsAsync(command.Namespace, kubeconfigPath, ct);
             }
 
-            string arguments = string.Join(" ", args);
-            HelmExecutionResult result = await RunProcessAsync("helm", arguments, ct);
+            // Through the seam: the credential is supplied there and the acknowledgment is raised
+            // there. Until now this was the component installer running helm as its own process,
+            // which meant installing, upgrading or removing any catalog component on any cluster
+            // never reached the gate at all — and left nothing for the recorder to record, because
+            // nothing asked.
+            //
+            // The verb leads `args`, so it is split off here for the gate to name.
+            HelmExecutionResult result = await clusterAccess.RunHelmAsync(
+                new EntKube.Web.Services.Clusters.HelmInvocation(
+                    Verb: args[0],
+                    ReleaseName: command.ReleaseName,
+                    Namespace: command.Namespace ?? "",
+                    Arguments: args.Skip(1).ToList(),
+                    Summary: DescribeHelmCommand(command)),
+                ct);
 
             // "Error: context deadline exceeded" is the whole of what helm says when --wait runs out,
             // and on its own it names nothing: not the resource, not the reason, not even that waiting
@@ -2223,6 +2241,31 @@ public class ComponentLifecycleService(
                 Directory.Delete(tempChartDir, recursive: true);
             }
         }
+    }
+
+    /// <summary>
+    /// What an operator is asked to acknowledge before a release changes.
+    ///
+    /// <para>Supplied because the gate's own fallback for a Helm verb is the bare words "Helm
+    /// manifest", which names neither the release nor the cluster — and an install of a catalog
+    /// component replaces whole workloads, so it is worth naming the chart and version an
+    /// operator would want to recognise.</para>
+    /// </summary>
+    private static string DescribeHelmCommand(HelmCommand command)
+    {
+        string where = string.IsNullOrWhiteSpace(command.Namespace) ? "" : $" in {command.Namespace}";
+
+        if (command.Operation == "uninstall")
+        {
+            return $"helm uninstall {command.ReleaseName}{where} (removes all release resources)";
+        }
+
+        string chart = string.IsNullOrWhiteSpace(command.ChartReference)
+            ? ""
+            : $" ({command.ChartReference}"
+              + (string.IsNullOrWhiteSpace(command.Version) ? "" : $"@{command.Version}") + ")";
+
+        return $"helm {command.Operation} {command.ReleaseName}{chart}{where}";
     }
 
     /// <summary>
@@ -2440,13 +2483,12 @@ public class ComponentLifecycleService(
     /// Returns the path to a temp chart directory, or null if extraction failed.
     /// </summary>
     private static async Task<string?> ExtractChartFromReleaseAsync(
-        string kubeconfig, string releaseName, string? ns, CancellationToken ct)
+        EntKube.Web.Services.Clusters.IClusterClient clusterAccess, string releaseName, string? ns,
+        CancellationToken ct)
     {
         try
         {
-            using MemoryStream stream = new(Encoding.UTF8.GetBytes(kubeconfig));
-            KubernetesClientConfiguration config = KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
-            using Kubernetes client = new(config);
+            using Kubernetes client = clusterAccess.CreateSdkClient();
 
             // Helm stores releases as secrets with label owner=helm, name=<release>.
             // The latest revision is the one with the highest version number.

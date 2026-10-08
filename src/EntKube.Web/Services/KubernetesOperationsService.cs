@@ -957,34 +957,22 @@ public class KubernetesOperationsService(
 
                 string combined = string.Join("\n---\n", manifests.Select(m => m.YamlContent));
 
-                await gate.AcknowledgeAsync(new PlannedClusterChange
-                {
-                    Verb = ChangeVerb.Delete,
-                    Kubeconfig = deployment.Cluster.Kubeconfig,
-                    ClusterLabel = deployment.Cluster.Name,
-                    Namespace = deployment.Namespace,
-                    Summary = $"Delete cluster resources for '{deployment.Name}' ({manifests.Count} manifest(s))",
-                    Manifest = combined,
-                }, ct);
-
-                // `kubectl delete -f <manifest>` removes a whole set in one call, and the seam
-                // only deletes one named resource at a time, so this branch still holds the
-                // credential itself. A delete-by-manifest operation would close it.
-                string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-manifest-{Guid.NewGuid()}.yaml");
-                string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-
+                // The acknowledgment is raised by the seam, which carries the manifest — a
+                // composite delete has no single kind and name, so the set itself is the preview.
+                // The summary this used to pass by hand said how many manifests were involved;
+                // the gate's own description of a manifest delete does not, which is the one
+                // thing lost here.
                 try
                 {
-                    await SecretFile.WriteAsync(tempManifest, combined, ct);
-                    await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster!.Kubeconfig!, ct);
-                    result = await RunCliAsync("kubectl",
-                        $"delete -f {tempManifest} --kubeconfig {tempKubeconfig} --ignore-not-found",
-                        ct);
+                    result = new HelmExecutionResult
+                    {
+                        Success = true,
+                        Output = await clusterAccess.DeleteManifestSetAsync(combined, ct),
+                    };
                 }
-                finally
+                catch (Exception ex)
                 {
-                    if (File.Exists(tempManifest)) File.Delete(tempManifest);
-                    if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+                    result = new HelmExecutionResult { Success = false, Output = ex.Message };
                 }
             }
 
