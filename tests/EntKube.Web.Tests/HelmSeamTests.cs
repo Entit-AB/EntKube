@@ -63,7 +63,8 @@ public class HelmSeamTests : IDisposable
         return new KubernetesOperationsService(
             testDb.Factory,
             new AuditService(testDb.Factory),
-            new KyvernoPolicyService(testDb.Factory, k8s.Object, gate, NullLogger<KyvernoPolicyService>.Instance),
+            new KyvernoPolicyService(testDb.Factory, k8s.Object, gate,
+                new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), NullLogger<KyvernoPolicyService>.Instance),
             gate,
             new ClusterClientFactory(testDb.Factory, k8s.Object),
             new EntKube.Web.Services.Rollouts.NoOpRolloutStarter(),

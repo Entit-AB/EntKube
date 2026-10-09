@@ -90,7 +90,8 @@ public class ManifestSetDeleteTests : IDisposable
         IngestTokenService tokens = new(config);
         IHttpClientFactory httpFactory = new Mock<IHttpClientFactory>().Object;
         ClusterClientFactory clusters = new(testDb.Factory, k8s.Object);
-        CnpgService cnpg = new(testDb.Factory, vault, clusters);
+        CnpgService cnpg = new(testDb.Factory, vault, clusters,
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory));
 
         return new ComponentLifecycleService(
             testDb.Factory, vault,

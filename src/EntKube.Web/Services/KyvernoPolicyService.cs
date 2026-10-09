@@ -42,6 +42,7 @@ public class KyvernoPolicyService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     IKubernetesClientFactory k8s,
     EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<KyvernoPolicyService> logger)
 {
     // ── CRUD ──────────────────────────────────────────────────────────────────
@@ -204,12 +205,15 @@ public class KyvernoPolicyService(
 
         if (clusterIds.Count == 0) return false;
 
-        return await db.ClusterComponents
-            .AnyAsync(c => clusterIds.Contains(c.ClusterId)
-                        && c.Status == ComponentStatus.Installed
-                        && (c.Name == "kyverno"
-                            || c.HelmChartName == "kyverno"
-                            || c.ReleaseName == "kyverno"), ct);
+        // One tenant-wide read, then the same predicate over the clusters in this environment.
+        // The set is a tenant's installed components, which is tens of rows — the filter does not
+        // need to be in SQL, and keeping it here keeps the question's exact shape.
+        return (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+            .Any(c => clusterIds.Contains(c.ClusterId)
+                   && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed
+                   && (c.Name == "kyverno"
+                       || c.HelmChartName == "kyverno"
+                       || c.ReleaseName == "kyverno"));
     }
 
     // ── Cluster-wide policies (observed, not owned) ────────────────────────────

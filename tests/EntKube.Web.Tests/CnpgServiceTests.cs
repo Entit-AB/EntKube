@@ -40,7 +40,8 @@ public class CnpgServiceTests : IDisposable
         // vault is resolved the way production resolves it, and then handed to the mock. So the
         // existing k8sFactory assertions keep working and additionally prove the delegation.
         sut = new CnpgService(dbFactory, vaultService,
-            new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory.Object));
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(dbFactory));
     }
 
     public void Dispose()
@@ -173,6 +174,53 @@ public class CnpgServiceTests : IDisposable
 
         result.StorageLinkId.Should().BeNull();
         result.BackupSchedule.Should().BeNull();
+    }
+
+    /// <summary>
+    /// A CloudNativePG operator that is still installing does not count as installed.
+    ///
+    /// <para>Added because a mutant proved it was not covered: dropping the <c>Installed</c> check
+    /// from this gate passed all twenty-four tests here. The consequence is not cosmetic — the
+    /// operator's CRDs may not be registered yet, so a <c>Cluster</c> object applied now is either
+    /// rejected by the API server or accepted and never reconciled, and the user is told their
+    /// database was created.</para>
+    /// </summary>
+    [Fact]
+    public async Task CreateClusterAsync_OperatorStillInstalling_ThrowsInvalidOperation()
+    {
+        Tenant tenant = new() { Id = Guid.NewGuid(), Name = "MidInstall", Slug = "mid-install" };
+        db.Tenants.Add(tenant);
+
+        Data.Environment env = new() { Id = Guid.NewGuid(), TenantId = tenant.Id, Name = "Dev" };
+        db.Set<Data.Environment>().Add(env);
+
+        KubernetesCluster cluster = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            EnvironmentId = env.Id,
+            Name = "dev-cluster",
+            ApiServerUrl = "https://k8s.dev.example.com",
+            Kubeconfig = "fake",
+        };
+        db.KubernetesClusters.Add(cluster);
+
+        db.ClusterComponents.Add(new ClusterComponent
+        {
+            Id = Guid.NewGuid(),
+            ClusterId = cluster.Id,
+            Name = "cloudnative-pg",
+            ComponentType = "helm",
+            Status = ComponentStatus.Installing,
+            Namespace = "cnpg-system",
+        });
+        await db.SaveChangesAsync();
+
+        Func<Task> act = () => sut.CreateClusterAsync(
+            tenant.Id, cluster.Id, "pg", "default", 1, "5Gi", null, null);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*CloudNativePG operator*not installed*");
     }
 
     [Fact]

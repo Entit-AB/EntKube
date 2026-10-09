@@ -18,7 +18,8 @@ namespace EntKube.Web.Services;
 public class CnpgService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
-    EntKube.Web.Services.Clusters.IClusterClientFactory clusters)
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
+    EntKube.Contracts.Catalog.ICatalogApi catalog)
 {
     /// <summary>
     /// A client for one of the tenant's clusters, or a refusal that says why.
@@ -61,10 +62,13 @@ public class CnpgService(
 
         // Verify the CNPG operator is installed on the target cluster.
 
-        bool operatorInstalled = await db.ClusterComponents
-            .AnyAsync(c => c.ClusterId == kubernetesClusterId
-                && c.Name == "cloudnative-pg"
-                && c.Status == ComponentStatus.Installed, ct);
+        // Asked of Catalog rather than of its table. The predicate is unchanged and applied here
+        // deliberately: widening "is the operator installed" is not a refactor, it is a different
+        // answer, so what moves is where the rows come from and nothing else.
+        bool operatorInstalled =
+            (await catalog.GetComponentsForClusterAsync(tenantId, kubernetesClusterId, ct))
+            .Any(c => c.Name == "cloudnative-pg"
+                   && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed);
 
         if (!operatorInstalled)
         {
