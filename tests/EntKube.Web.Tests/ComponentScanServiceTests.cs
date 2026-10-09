@@ -48,7 +48,8 @@ public class ComponentScanServiceTests : IDisposable
         EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate = new(
             new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
             NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance);
-        KyvernoPolicyService kyvernoService = new(dbFactory, k8sFactory, gate, NullLogger<KyvernoPolicyService>.Instance);
+        KyvernoPolicyService kyvernoService = new(dbFactory, k8sFactory, gate,
+            new EntKube.Web.Modules.Api.CatalogApi(dbFactory), NullLogger<KyvernoPolicyService>.Instance);
         RabbitMQService rabbitMQService = new(
             dbFactory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory),

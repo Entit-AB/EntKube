@@ -23,7 +23,8 @@ namespace EntKube.Web.Services;
 public class MongoService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
-    EntKube.Web.Services.Clusters.IClusterClientFactory clusters)
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
+    EntKube.Contracts.Catalog.ICatalogApi catalog)
 {
     /// <summary>
     /// A client for one of the tenant's clusters, or a refusal that says why. Keeps the cluster
@@ -63,12 +64,16 @@ public class MongoService(
 
         // Verify the MongoDB Community Operator is installed on the target cluster.
 
-        bool operatorInstalled = await db.ClusterComponents
-            .AnyAsync(c => c.ClusterId == kubernetesClusterId
-                && (c.Name == "mongodb-community-operator" || c.Name == "mongodb-operator"
+        // Kept exactly as it was, column by column. The aliases are NOT symmetrical — the two
+        // names are accepted as Name or ReleaseName, while the chart is only ever
+        // "community-operator" — so a contract method that matched every key against every column
+        // would answer true for installations this never accepted.
+        bool operatorInstalled =
+            (await catalog.GetComponentsForClusterAsync(tenantId, kubernetesClusterId, ct))
+            .Any(c => (c.Name == "mongodb-community-operator" || c.Name == "mongodb-operator"
                     || c.ReleaseName == "mongodb-community-operator" || c.ReleaseName == "mongodb-operator"
                     || c.HelmChartName == "community-operator")
-                && c.Status == ComponentStatus.Installed, ct);
+                   && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed);
 
         if (!operatorInstalled)
         {

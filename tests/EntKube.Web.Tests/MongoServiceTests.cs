@@ -40,7 +40,8 @@ public class MongoServiceTests : IDisposable
         // as production resolves it, then reaches the same mock — the existing assertions hold.
         sut = new MongoService(
             testDb.Factory, vaultService,
-            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory.Object));
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory));
     }
 
     public void Dispose()
@@ -205,6 +206,103 @@ public class MongoServiceTests : IDisposable
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*MongoDB Community Operator*not installed*");
+    }
+
+    /// <summary>
+    /// The operator check moved from a SQL predicate to <c>ICatalogApi</c> plus the same predicate
+    /// in memory. This pins the part that a shorter conversion would have lost: <b>the aliases are
+    /// not symmetrical across the three columns.</b> The two operator names are accepted as
+    /// <c>Name</c> or <c>ReleaseName</c>, but the chart is only ever <c>community-operator</c> —
+    /// so a contract method matching every key against every column would answer "installed" for
+    /// a component this has always rejected, and MongoDB clusters would be created on a cluster
+    /// with no operator to reconcile them.
+    /// </summary>
+    [Fact]
+    public async Task CreateClusterAsync_DoesNotAcceptAnOperatorNameAsAChartName()
+    {
+        Tenant tenant = new() { Id = Guid.NewGuid(), Name = "Chartish", Slug = "chartish" };
+        db.Tenants.Add(tenant);
+
+        Data.Environment env = new() { Id = Guid.NewGuid(), TenantId = tenant.Id, Name = "Dev" };
+        db.Set<Data.Environment>().Add(env);
+
+        KubernetesCluster cluster = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            EnvironmentId = env.Id,
+            Name = "dev-cluster",
+            ApiServerUrl = "https://k8s.dev.example.com",
+            Kubeconfig = "fake",
+        };
+        db.KubernetesClusters.Add(cluster);
+
+        // An installed component whose CHART is named like the operator, which the original
+        // predicate never matched on: HelmChartName is only ever compared to "community-operator".
+        db.ClusterComponents.Add(new ClusterComponent
+        {
+            Id = Guid.NewGuid(),
+            ClusterId = cluster.Id,
+            Name = "something-else",
+            ComponentType = "helm",
+            HelmChartName = "mongodb-operator",
+            Status = ComponentStatus.Installed,
+            Namespace = "elsewhere",
+        });
+        await db.SaveChangesAsync();
+
+        Func<Task> act = () => sut.CreateClusterAsync(
+            tenant.Id, cluster.Id, "mongo", "default", 1, "5Gi", null, null);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*MongoDB Community Operator*not installed*");
+    }
+
+    /// <summary>
+    /// The other half of the same asymmetry: the chart name the predicate does accept.
+    /// </summary>
+    [Fact]
+    public async Task CreateClusterAsync_AcceptsTheOperatorByItsChartName()
+    {
+        Tenant tenant = new() { Id = Guid.NewGuid(), Name = "ByChart", Slug = "by-chart" };
+        db.Tenants.Add(tenant);
+
+        Data.Environment env = new() { Id = Guid.NewGuid(), TenantId = tenant.Id, Name = "Dev" };
+        db.Set<Data.Environment>().Add(env);
+
+        KubernetesCluster cluster = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            EnvironmentId = env.Id,
+            Name = "dev-cluster",
+            ApiServerUrl = "https://k8s.dev.example.com",
+            Kubeconfig = "fake",
+        };
+        db.KubernetesClusters.Add(cluster);
+
+        db.ClusterComponents.Add(new ClusterComponent
+        {
+            Id = Guid.NewGuid(),
+            ClusterId = cluster.Id,
+            Name = "renamed-by-the-operator",
+            ComponentType = "helm",
+            HelmChartName = "community-operator",
+            Status = ComponentStatus.Installed,
+            Namespace = "mongodb-operator",
+        });
+        await db.SaveChangesAsync();
+
+        Func<Task> act = () => sut.CreateClusterAsync(
+            tenant.Id, cluster.Id, "mongo", "default", 1, "5Gi", null, null);
+
+        // It fails at the NEXT step — resolving the cluster credential, which this test
+        // deliberately does not seed — and that is the assertion: getting as far as the kubeconfig
+        // means the operator check accepted a component installed under the chart name alone.
+        // Asserting the later message rather than seeding a vault keeps the test about one thing.
+        (await act.Should().ThrowAsync<InvalidOperationException>())
+            .And.Message.Should().Contain("kubeconfig")
+            .And.NotContain("Operator");
     }
 
     [Fact]

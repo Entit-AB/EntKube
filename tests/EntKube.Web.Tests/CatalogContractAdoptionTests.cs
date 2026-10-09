@@ -33,9 +33,19 @@ public class CatalogContractAdoptionTests
 
     /// <summary>
     /// Direct <c>.ClusterComponents</c> uses in services Catalog does not own, measured
-    /// 2026-10-07. Was 87 before Tempo, Mimir and Loki moved to the contract.
+    /// 2026-10-09. Was 87 before Tempo, Mimir and Loki moved to the contract, then 66, now 63
+    /// with CnpgService, MongoService and KyvernoPolicyService.
+    ///
+    /// <para><b>What the 63 are, which says what is actually left to do.</b> 14 are
+    /// credential-bound — their surrounding method also takes <c>cluster.Kubeconfig</c>, and the
+    /// contract deliberately carries no credential, so those wait on <c>IClusterClient</c>.
+    /// <b>13 have no tenant at all</b>: background sweeps like <c>AlertSyncService</c> and
+    /// <c>ResourceUsageCollectorService</c> ask "every cluster in the installation running
+    /// kube-prometheus-stack", and every method on this contract is tenant-scoped. That is the
+    /// same blocker as the credential work's remaining 206 — not a missing method but an unanswered
+    /// question about who a background sweep acts as. The other 36 are movable now.</para>
     /// </summary>
-    private const int BaselineQueries = 66;
+    private const int BaselineQueries = 63;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22;

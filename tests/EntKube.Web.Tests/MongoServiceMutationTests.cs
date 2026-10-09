@@ -42,7 +42,8 @@ public class MongoServiceMutationTests : IDisposable
         // as production resolves it, then reaches the same mock — the existing assertions hold.
         sut = new MongoService(
             testDb.Factory, vaultService,
-            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object));
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory));
     }
 
     public void Dispose()
