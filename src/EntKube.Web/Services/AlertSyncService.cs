@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -122,6 +123,7 @@ public class AlertSyncService(
         List<Guid> clusterIds;
         using (IServiceScope scope = scopeFactory.CreateScope())
         {
+            using IDisposable unattended = scope.DeclareUnattended("alert-sync");
             var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
             using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -150,6 +152,7 @@ public class AlertSyncService(
     private async Task SyncClusterAsync(Guid clusterId, CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("alert-sync");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
         var prometheusService = scope.ServiceProvider.GetRequiredService<PrometheusService>();
         var notificationService = scope.ServiceProvider.GetRequiredService<NotificationService>();

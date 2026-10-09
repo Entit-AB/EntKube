@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -40,6 +41,7 @@ public class AlertEscalationService(
         DateTime cutoff = DateTime.UtcNow.AddMinutes(-thresholdMinutes);
 
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("alert-escalation");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<TelemetryDbContext>>();
         var notificationService = scope.ServiceProvider.GetRequiredService<NotificationService>();
 

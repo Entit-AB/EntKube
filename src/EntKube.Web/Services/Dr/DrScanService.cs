@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services.Dr;
 
@@ -76,6 +77,7 @@ public class DrScanService(
     private async Task RunAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("dr-scan");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<FleetDbContext>>();
         var velero = scope.ServiceProvider.GetRequiredService<VeleroService>();
 

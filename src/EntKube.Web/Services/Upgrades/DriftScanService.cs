@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services.Upgrades;
 
@@ -119,6 +120,7 @@ public class DriftScanService(
     private async Task RunAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("drift-scan");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<CatalogDbContext>>();
         var drift = scope.ServiceProvider.GetRequiredService<DriftDetectionService>();
 

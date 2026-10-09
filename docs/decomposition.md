@@ -409,8 +409,44 @@ files, and is deliberately a **lower bound** — a file that acknowledges some p
 scores zero, so it can understate the gap but never overstate it. The helm invocations need a seam
 operation that does not exist, which is what stops the number reaching zero today.
 
-**Started: the ungated path is now recorded, which it was not.** The four bullets above are
-one product decision apart from being buildable — whether unattended work stalls waiting for
+### 5.4.1 Decided (2026-10-09): declare or be refused
+
+The product decision the four bullets above were waiting on has been made, and the first half
+of it is built.
+
+**A scope with nobody to ask must say what it is.** `IClusterChangeGate.DeclareUnattended(reason)`
+sits beside `RegisterSink` — same shape, same lifetime, and it answers the same question: who is
+answerable for what happens in this scope. A declared scope proceeds and every change it makes is
+recorded against its reason. **An undeclared one is refused**, with a `RefusedUndeclared` row and
+an exception that says how to declare.
+
+That inverts the old failure mode, which is the whole point. Before, "nobody is watching" and
+"this is allowed to run unwatched" were the same state, so a background reconcile and a remote
+agent were indistinguishable to the gate — and the agent would have inherited every bypass in the
+product. Now the two are different states, and the consequence of missing one is a **loud refusal
+in a job** rather than a silent unaudited mutation. An incomplete enumeration is therefore safe to
+ship: it breaks visibly, in the audit trail, and it breaks forward.
+
+**And agents may not write.** An in-cluster agent may read and may propose — compute a diff, open
+an approval row — but every mutation needs a human approver. It is the conservative starting
+point, and it can be loosened per-policy later from evidence of what agents are actually asked to
+do, rather than from guesses made before the feature exists.
+
+What that leaves to build is the approval queue itself: bullets one and two, a persisted
+`PlannedClusterChange` with its diff and an out-of-band approval carrying who approved it and
+when. Until that exists, a context that needs approval rather than autonomy has nowhere to wait,
+which is why every existing unattended context was declared as what it already does rather than
+converted to an approval. `PreApproved(policy)` was deliberately **not** added yet: a label that
+implies a policy engine which does not exist would be worse than no label.
+
+Declared today: 26 background scopes, named in `UnattendedDeclarationTests`, plus the two
+authenticated API endpoints that mutate — those declare `api-token:<name>`, because an API request
+has no circuit but does have someone answerable, and it is already the thing the change is
+attributed to. The ratchet is an **upper bound** on purpose: it lists every context that *could*
+act unattended, not every one that does, which is the set worth being able to read in one place.
+
+**The other half was already started: the ungated path is now recorded, which it was not.** The
+four bullets above were — whether unattended work stalls waiting for
 an out-of-band approval, proceeds under a policy, or is refused outright, is a question about
 how EntKube should behave, not a detail to settle in passing. The half that needs no such
 decision came first: `IClusterChangeRecorder` writes every gate outcome to the audit trail,

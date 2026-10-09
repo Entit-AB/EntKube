@@ -2,6 +2,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 using System.Net.Sockets;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -43,6 +44,7 @@ public class AppL4RouteHealthService(
     private async Task CheckAllRoutesAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("app-l4-route-health");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ConnectivityDbContext>>();
         var k8sOps = scope.ServiceProvider.GetRequiredService<KubernetesOperationsService>();
 

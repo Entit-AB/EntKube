@@ -1,3 +1,5 @@
+using EntKube.Web.Services.ClusterChanges;
+
 namespace EntKube.Web.Services;
 
 /// <summary>
@@ -26,6 +28,7 @@ public class MessagingStatusPollingService(
             try
             {
                 using IServiceScope scope = scopeFactory.CreateScope();
+                using IDisposable unattended = scope.DeclareUnattended("messaging-status-polling");
 
                 RabbitMQService rabbit = scope.ServiceProvider.GetRequiredService<RabbitMQService>();
                 await rabbit.ReconcileAllAsync(stoppingToken);

@@ -18,6 +18,7 @@ public sealed class ClusterChangeGate : IClusterChangeGate
     private readonly ILogger<ClusterChangeGate> _logger;
     private readonly IClusterChangeRecorder _recorder;
     private IClusterChangeAckSink? _sink;
+    private string? _unattendedReason;
 
     /// <param name="recorder">
     /// Where outcomes are written. Optional so that the tests about acknowledgment can keep
@@ -42,15 +43,25 @@ public sealed class ClusterChangeGate : IClusterChangeGate
         return new Unregister(this, sink);
     }
 
+    public IDisposable DeclareUnattended(string reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            // A blank reason is a declaration that explains nothing, and the reason is the entire
+            // value of the declaration — it is what the audit trail has to show.
+            throw new ArgumentException(
+                "An unattended declaration must say what the work is.", nameof(reason));
+        }
+
+        _unattendedReason = reason;
+        return new Undeclare(this, reason);
+    }
+
     public async Task AcknowledgeAsync(PlannedClusterChange change, CancellationToken ct = default)
     {
-        // Bypass when the feature is off, or when there is no interactive sink on this scope
-        // (background/automated flows). This is the "interactive UI only" boundary.
-        //
-        // It is also the boundary an in-cluster agent would sit on the wrong side of, so the two
-        // reasons are recorded separately: "an operator turned the dialog off" and "nobody was
-        // there to ask" are different problems, and only the second one grows as more work moves
-        // off the circuit.
+        // Bypass when the feature is off. An operator opting out of the dialog is a different
+        // thing from nobody being there to ask, and only the second one grows as more work moves
+        // off the circuit — so they are recorded separately.
         if (!Enabled)
         {
             await RecordAsync(change, ClusterChangeOutcome.GateDisabled, null, ct);
@@ -59,9 +70,28 @@ public sealed class ClusterChangeGate : IClusterChangeGate
 
         if (_sink is null)
         {
+            // Nobody to ask. What happens now is the context's own declaration, not a default:
+            // this used to apply straight through, which is the bypass an in-cluster agent would
+            // have inherited (docs/decomposition.md §5.4).
+            if (_unattendedReason is null)
+            {
+                _logger.LogError(
+                    "Cluster change REFUSED on {Cluster}: no operator to ask and nothing declared "
+                    + "this context may act unattended. {Change}",
+                    change.ClusterLabel, change.Describe());
+
+                await RecordAsync(change, ClusterChangeOutcome.RefusedUndeclared, null, ct);
+
+                throw new InvalidOperationException(
+                    $"Refused to change {change.ClusterLabel}: {change.Describe()}. There is no "
+                    + "operator to acknowledge it and this context has not declared that it may "
+                    + "act unattended. Wrap the work in IClusterChangeGate.DeclareUnattended("
+                    + "\"<what this work is>\") where its scope is created.");
+            }
+
             _logger.LogInformation(
-                "Cluster change applied with no operator present on {Cluster}: {Change}",
-                change.ClusterLabel, change.Describe());
+                "Cluster change applied unattended on {Cluster} as {Reason}: {Change}",
+                change.ClusterLabel, _unattendedReason, change.Describe());
 
             await RecordAsync(change, ClusterChangeOutcome.AppliedUnattended, null, ct);
             return;
@@ -291,6 +321,22 @@ public sealed class ClusterChangeGate : IClusterChangeGate
         public void Dispose()
         {
             if (ReferenceEquals(_gate._sink, _sink)) _gate._sink = null;
+        }
+    }
+
+    /// <summary>
+    /// Ends a declaration, so a scope reused for something else does not inherit it. Compares the
+    /// reason before clearing, for the same reason <see cref="Unregister"/> compares the sink:
+    /// disposing an older declaration must not revoke a newer one.
+    /// </summary>
+    private sealed class Undeclare : IDisposable
+    {
+        private readonly ClusterChangeGate _gate;
+        private readonly string _reason;
+        public Undeclare(ClusterChangeGate gate, string reason) { _gate = gate; _reason = reason; }
+        public void Dispose()
+        {
+            if (ReferenceEquals(_gate._unattendedReason, _reason)) _gate._unattendedReason = null;
         }
     }
 }

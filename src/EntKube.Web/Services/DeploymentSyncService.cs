@@ -1,6 +1,7 @@
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -35,6 +36,7 @@ public class DeploymentSyncService(
     private async Task SyncAllDeploymentsAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("deployment-sync");
 
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
         var opsService = scope.ServiceProvider.GetRequiredService<KubernetesOperationsService>();

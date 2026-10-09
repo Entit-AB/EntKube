@@ -2,6 +2,7 @@ using Cronos;
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -35,6 +36,7 @@ public class KeycloakBackupSchedulerService(
     private async Task RunDueBackupsAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("keycloak-backup-scheduler");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<IdentityDbContext>>();
 
         List<ScheduledRealm> realms;

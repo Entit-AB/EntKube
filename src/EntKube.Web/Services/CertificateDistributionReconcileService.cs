@@ -1,4 +1,5 @@
 using Microsoft.Extensions.Options;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -34,6 +35,7 @@ public class CertificateDistributionReconcileService(
             try
             {
                 using IServiceScope scope = scopeFactory.CreateScope();
+                using IDisposable unattended = scope.DeclareUnattended("certificate-distribution-reconcile");
                 CertificateDistributionService svc =
                     scope.ServiceProvider.GetRequiredService<CertificateDistributionService>();
                 await svc.ReconcileAllAsync(stoppingToken);

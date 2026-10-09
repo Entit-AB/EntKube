@@ -1,6 +1,7 @@
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -35,6 +36,7 @@ public class SecretExpiryNotificationService(
         try
         {
             using IServiceScope scope = scopeFactory.CreateScope();
+            using IDisposable unattended = scope.DeclareUnattended("secret-expiry-notification");
             var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<SecretsDbContext>>();
             var expiry = scope.ServiceProvider.GetRequiredService<SecretExpiryService>();
 

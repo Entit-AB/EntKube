@@ -1,5 +1,6 @@
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -46,6 +47,7 @@ public class BootstrapRunnerService(
     private async Task ProcessQueuedRunsAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("bootstrap-runner");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
 
         List<Guid> queuedRunIds;
@@ -70,6 +72,7 @@ public class BootstrapRunnerService(
         // Each run gets its own scope so scoped services (registrar, orchestrator,
         // CNPG/Redis/RabbitMQ services) resolve cleanly outside any request context.
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("bootstrap-runner");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
         var registrar = scope.ServiceProvider.GetRequiredService<CatalogComponentRegistrar>();
         var orchestrator = scope.ServiceProvider.GetRequiredService<ComponentInstallOrchestrator>();

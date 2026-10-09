@@ -166,9 +166,18 @@ public static class PublicApiEndpoints
         api.MapPost("/deployments/{deploymentId:guid}/sync", async (
             Guid deploymentId, HttpContext ctx,
             IDbContextFactory<ApplicationDbContext> dbFactory,
-            KubernetesOperationsService operations, CancellationToken ct) =>
+            KubernetesOperationsService operations,
+            EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
+            CancellationToken ct) =>
         {
             ApiTokenPrincipal principal = ctx.GetApiPrincipal()!;
+
+            // An API request has no Blazor circuit, so there is nobody for the gate to ask — but
+            // there IS someone answerable: the token the request authenticated with, which is
+            // already what this attributes the change to. The declaration names it, so the audit
+            // trail says which token applied the change rather than only that nobody was asked.
+            using IDisposable unattended = gate.DeclareUnattended(
+                $"api-token:{principal.TokenName}");
             await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
             bool owned = await db.AppDeployments
@@ -194,9 +203,14 @@ public static class PublicApiEndpoints
         api.MapPost("/deployments/{deploymentId:guid}/restart", async (
             Guid deploymentId, string workload, HttpContext ctx,
             IDbContextFactory<ApplicationDbContext> dbFactory,
-            KubernetesOperationsService operations, CancellationToken ct) =>
+            KubernetesOperationsService operations,
+            EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
+            CancellationToken ct) =>
         {
             ApiTokenPrincipal principal = ctx.GetApiPrincipal()!;
+
+            using IDisposable unattended = gate.DeclareUnattended(
+                $"api-token:{principal.TokenName}");
 
             if (string.IsNullOrWhiteSpace(workload))
             {
