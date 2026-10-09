@@ -75,8 +75,30 @@ public sealed class ClusterChangeDiff
     /// <summary>True when the dry-run reports the cluster state will actually change.</summary>
     public bool HasChanges { get; init; } = true;
 
-    /// <summary>Unified/rendered diff text shown to the operator. May be empty when <see cref="HasChanges"/> is false.</summary>
-    public string DiffText { get; init; } = "";
+    /// <summary>
+    /// Unified/rendered diff text shown to the operator. May be empty when
+    /// <see cref="HasChanges"/> is false.
+    ///
+    /// <para><b>Secret values are removed on the way in</b>, by
+    /// <see cref="SecretRedaction.Scrub"/>. It is done here rather than at the call sites because
+    /// the gate builds this text in nine places and six of them can carry a Secret — the
+    /// <c>kubectl diff</c> output, a server-side dry-run rendering, the raw manifest shown when the
+    /// dry-run itself fails, a deleted resource read back with <c>get -o yaml</c>, a JSON patch
+    /// body, and the catch-all that shows the manifest when no diff could be computed. Scrubbing
+    /// six call sites would leave the seventh to whoever adds it; a property cannot be
+    /// bypassed.</para>
+    ///
+    /// <para>What survives is the keys and a fingerprint per value, which is what the decision
+    /// needs: whether this adds, changes or removes a key, and where. See
+    /// <see cref="SecretRedaction"/> for why the default is to redact rather than to detect.</para>
+    /// </summary>
+    public string DiffText
+    {
+        get => _diffText;
+        init => _diffText = SecretRedaction.Scrub(value) ?? "";
+    }
+
+    private readonly string _diffText = "";
 
     /// <summary>
     /// Set when the diff could not be computed (e.g. kubectl unavailable, cluster unreachable).
