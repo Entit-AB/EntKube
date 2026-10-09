@@ -2349,7 +2349,7 @@ else if (section == "components")
             : null;
 
         keycloakAvailableIssuers = entry.FormFields.Any(f => f.Type == FormFieldType.ClusterIssuer)
-            ? await LifecycleService.ListClusterIssuersAsync(Cluster.Id)
+            ? await LifecycleService.ListClusterIssuersAsync(TenantId, Cluster.Id)
             : null;
 
         harborStorageLinks = entry.FormFields.Any(f => f.Type == FormFieldType.StorageLink)
@@ -2584,7 +2584,7 @@ else if (section == "components")
                     ? await KeycloakService.GetDatabasesForClusterAsync(TenantId, Cluster.Id)
                     : null;
                 keycloakAvailableIssuers = hasIssuerField
-                    ? await LifecycleService.ListClusterIssuersAsync(Cluster.Id)
+                    ? await LifecycleService.ListClusterIssuersAsync(TenantId, Cluster.Id)
                     : null;
                 harborStorageLinks = hasStorageLinkField
                     ? await StorageService.GetStorageLinksAsync(TenantId)

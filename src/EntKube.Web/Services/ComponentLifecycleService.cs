@@ -2185,7 +2185,7 @@ public class ComponentLifecycleService(
             // injected sidecars) is admitted with defaults on clusters that require limits.
             if (command.Operation != "uninstall" && !string.IsNullOrWhiteSpace(command.Namespace))
             {
-                await EnsureNamespaceDefaultsAsync(command.Namespace, kubeconfigPath, ct);
+                await EnsureNamespaceDefaultsAsync(command.Namespace, clusterAccess, ct);
             }
 
             // Through the seam: the credential is supplied there and the acknowledgment is raised
@@ -2214,7 +2214,8 @@ public class ComponentLifecycleService(
                 && !string.IsNullOrWhiteSpace(command.Namespace)
                 && LooksLikeWaitTimeout(result.Output))
             {
-                string stalled = await DescribeStalledWorkloadsAsync(command.Namespace!, kubeconfigPath, ct);
+                string stalled = await DescribeStalledWorkloadsAsync(
+                    command.Namespace!, clusterAccess, kubeconfigPath, ct);
 
                 if (!string.IsNullOrWhiteSpace(stalled))
                 {
@@ -2435,11 +2436,20 @@ public class ComponentLifecycleService(
     /// injected sidecars that per-chart Helm values can't reach. Applied before the install
     /// so pods created during --wait pass admission. Idempotent (kubectl apply).
     /// </summary>
-    private static async Task EnsureNamespaceDefaultsAsync(string ns, string kubeconfigPath, CancellationToken ct)
+    /// <summary>
+    /// Puts the default LimitRange on a namespace before anything is installed into it.
+    ///
+    /// <para>Through the seam, which is what brings it inside the acknowledgment gate: these are
+    /// the only two <em>mutations</em> moved in this batch, and so the only two whose gate
+    /// exposure actually changes. A second install of the same component re-applies an identical
+    /// LimitRange, and the gate's clean-dry-run path means nobody is asked about a no-op.</para>
+    /// </summary>
+    private static async Task EnsureNamespaceDefaultsAsync(
+        string ns, EntKube.Web.Services.Clusters.IClusterClient clusterAccess, CancellationToken ct)
     {
         // Create the namespace up front (helm --create-namespace would otherwise make it,
         // but the LimitRange must exist before any pod is admitted). Ignore AlreadyExists.
-        await RunProcessAsync("kubectl", $"create namespace {ns} --kubeconfig {kubeconfigPath}", ct);
+        await clusterAccess.EnsureNamespaceAsync(ns, ct);
 
         // Containers that set their own requests/limits keep them; this only fills the gaps.
         string limitRange = $$"""
@@ -2459,16 +2469,7 @@ public class ComponentLifecycleService(
                     memory: 1Gi
             """;
 
-        string tempFile = Path.Combine(Path.GetTempPath(), $"entkube-limitrange-{Guid.NewGuid()}.yaml");
-        try
-        {
-            await SecretFile.WriteAsync(tempFile, limitRange, ct);
-            await RunProcessAsync("kubectl", $"apply -f {tempFile} --kubeconfig {kubeconfigPath}", ct);
-        }
-        finally
-        {
-            if (File.Exists(tempFile)) File.Delete(tempFile);
-        }
+        await clusterAccess.ApplyManifestAsync(limitRange, ct);
     }
 
     /// <summary>
@@ -2656,39 +2657,37 @@ public class ComponentLifecycleService(
     /// Used to populate ClusterIssuer selector dropdowns in the UI.
     /// Returns an empty list if kubectl fails or cert-manager is not installed.
     /// </summary>
-    public async Task<List<string>> ListClusterIssuersAsync(Guid clusterId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose cluster this must be. It was not asked for, and the lookup had no tenant predicate,
+    /// so any cluster id in the installation listed its issuers — a read rather than a write, but
+    /// a ClusterIssuer name is a piece of another tenant's configuration. Every one of the four
+    /// callers is a page that already holds a tenant.
+    /// </param>
+    public async Task<List<string>> ListClusterIssuersAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
 
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
-
-        if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        if (clusterAccess is null)
             return [];
-
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
 
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, cluster.Kubeconfig, ct);
+            // Cluster-scoped, so no namespace. An empty answer and an unreachable cluster are the
+            // same thing to the caller — a picker with nothing in it — which is what the catch
+            // preserves: this populates a dropdown, and throwing would take the page down with it.
+            string json = await clusterAccess.GetJsonAsync("clusterissuers.cert-manager.io", "", ct: ct);
 
-            HelmExecutionResult result = await RunProcessAsync(
-                "kubectl",
-                $"get clusterissuers.cert-manager.io -o json --kubeconfig {tempKubeconfig}",
-                ct);
-
-            if (!result.Success || string.IsNullOrWhiteSpace(result.Output))
-                return [];
-
-            return ParseJsonResourceNames(result.Output);
+            return string.IsNullOrWhiteSpace(json) ? [] : ParseJsonResourceNames(json);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch
         {
             return [];
-        }
-        finally
-        {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
         }
     }
 
@@ -2795,20 +2794,46 @@ public class ComponentLifecycleService(
     /// operator can act on. Best-effort throughout: a diagnosis that fails must not replace or obscure
     /// helm's own error, so anything unexpected here simply yields nothing.
     /// </summary>
-    private async Task<string> DescribeStalledWorkloadsAsync(
-        string ns, string kubeconfigPath, CancellationToken ct)
+    /// <summary>
+    /// One <c>-o json</c> read, or null when the cluster will not answer.
+    ///
+    /// <para>The seam raises on a failed read, and the callers here treated a non-zero exit as
+    /// "no data" — so the exception is turned back into the null they were already written for.
+    /// Swallowing it is correct only because this is a diagnostic path: the alternative is an
+    /// install failure report that fails to be produced.</para>
+    /// </summary>
+    private static async Task<string?> ReadJsonOrNullAsync(
+        EntKube.Web.Services.Clusters.IClusterClient clusterAccess, string resource, string ns,
+        CancellationToken ct)
     {
         try
         {
-            HelmExecutionResult pods = await RunProcessAsync(
-                "kubectl", $"get pods -n {ns} -o json --kubeconfig {kubeconfigPath}", ct);
-            HelmExecutionResult claims = await RunProcessAsync(
-                "kubectl", $"get pvc -n {ns} -o json --kubeconfig {kubeconfigPath}", ct);
+            string json = await clusterAccess.GetJsonAsync(resource, ns, ct: ct);
+            return string.IsNullOrWhiteSpace(json) ? null : json;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            return null;
+        }
+    }
 
-            string summary = SummarizeStalledWorkloads(
-                ns,
-                pods.Success ? pods.Output : null,
-                claims.Success ? claims.Output : null);
+    private async Task<string> DescribeStalledWorkloadsAsync(
+        string ns, EntKube.Web.Services.Clusters.IClusterClient clusterAccess,
+        string kubeconfigPath, CancellationToken ct)
+    {
+        try
+        {
+            // Through the seam. Both reads stay best-effort in exactly the way they were: this
+            // whole method exists to explain a stalled install, so a read that fails must leave
+            // the explanation thinner rather than replace it with an error.
+            string? podsJson = await ReadJsonOrNullAsync(clusterAccess, "pods", ns, ct);
+            string? claimsJson = await ReadJsonOrNullAsync(clusterAccess, "pvc", ns, ct);
+
+            string summary = SummarizeStalledWorkloads(ns, podsJson, claimsJson);
 
             if (summary.Length == 0) return "";
 
@@ -2819,8 +2844,7 @@ public class ComponentLifecycleService(
             // the tail here is what turns the report into the answer instead of a place to start looking.
             List<string> tails = [];
 
-            foreach ((string pod, string container) in FindSilentlyUnreadyContainers(
-                         pods.Success ? pods.Output : null))
+            foreach ((string pod, string container) in FindSilentlyUnreadyContainers(podsJson))
             {
                 HelmExecutionResult log = await RunProcessAsync(
                     "kubectl",
