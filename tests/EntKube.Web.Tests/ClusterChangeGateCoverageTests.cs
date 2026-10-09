@@ -71,13 +71,21 @@ public class ClusterChangeGateCoverageTests
     /// <c>SecretRedaction</c>, so routing these through the seam no longer puts credentials on a
     /// screen.</para>
     ///
-    /// <para>Of the 17 left, 10 are in <c>ComponentLifecycleService</c>: four are
-    /// <c>SyncComponentSecretsAsync</c>'s deliberate <c>--from-file</c> path — which could now
-    /// follow VaultService onto <c>ReplaceSecretAsync</c> — two apply an image-pull Secret,
-    /// one applies a manifest from a URL and one is <c>kubectl describe</c>, neither of which the
-    /// seam can express.</para>
+    /// <para>Now <b>13</b>: <c>SyncComponentSecretsAsync</c> followed VaultService onto
+    /// <c>ReplaceSecretAsync</c>. Its <c>--from-file</c> staging was kept deliberately for
+    /// reasons that were all about the argument list — a value with a space split into several
+    /// arguments, a value with a quote corrupted the command line, and <c>ps</c> shows arguments
+    /// to anyone — and base64 in a 0600 manifest satisfies every one of them better. The
+    /// prohibition was on <c>--from-literal</c>, which still stands.</para>
+    ///
+    /// <para>Of the 13, six are in <c>ComponentLifecycleService</c>: two apply an image-pull
+    /// Secret, one applies a manifest from a URL, one is <c>kubectl describe</c>, and two are the
+    /// rest of the stalled-workload path including <c>kubectl logs -c &lt;container&gt;</c>. The
+    /// seam can express none of the last four: it has no apply-from-URL, no describe, and
+    /// <c>GetPodLogsAsync</c> takes no container. Only the image-pull pair is work rather than a
+    /// missing operation.</para>
     /// </summary>
-    private const int BaselineUngatedInvocations = 17;
+    private const int BaselineUngatedInvocations = 13;
 
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the
