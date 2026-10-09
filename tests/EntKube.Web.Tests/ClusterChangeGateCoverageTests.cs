@@ -54,12 +54,19 @@ public class ClusterChangeGateCoverageTests
     /// slack half of this ratchet is what said so — it failed on <c>main</c> rather than letting a
     /// stale ceiling sit there granting four sites of free headroom.</para>
     ///
-    /// <para>Then 40, and now <b>33</b>: six of <c>ClusterProvisioningService</c>'s seven are
+    /// <para>Then 40, then <b>33</b>: six of <c>ClusterProvisioningService</c>'s seven are
     /// excluded as unreachable (see <see cref="CannotReachTheSeam"/>) and the seventh was
-    /// converted. The slack half earned itself again here — I banked 34, having subtracted the
+    /// converted. The slack half earned itself again there — I banked 34, having subtracted the
     /// exemption and forgotten the conversion.</para>
+    ///
+    /// <para>Now <b>28</b>, from <c>ComponentLifecycleService</c>: the namespace LimitRange
+    /// defaults, two stalled-workload reads and the ClusterIssuer listing. That file held 15 and
+    /// holds 10. Of those ten, four are <c>SyncComponentSecretsAsync</c>'s deliberate
+    /// <c>--from-file</c> path, two apply an image-pull Secret, one applies a manifest from a URL
+    /// (which the seam cannot express) and one is <c>kubectl describe</c> (likewise). Only the
+    /// Secret-bearing pairs are a decision rather than a missing operation.</para>
     /// </summary>
-    private const int BaselineUngatedInvocations = 33;
+    private const int BaselineUngatedInvocations = 28;
 
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the

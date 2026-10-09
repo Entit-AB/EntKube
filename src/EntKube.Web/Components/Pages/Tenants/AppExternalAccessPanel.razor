@@ -798,7 +798,7 @@
         availableIssuers = [];
         newClusterIssuer = "";
 
-        availableIssuers = await ComponentLifecycleService.ListClusterIssuersAsync(clusterId);
+        availableIssuers = await ComponentLifecycleService.ListClusterIssuersAsync(TenantId, clusterId);
         if (availableIssuers.Count == 1)
             newClusterIssuer = availableIssuers[0];
 
