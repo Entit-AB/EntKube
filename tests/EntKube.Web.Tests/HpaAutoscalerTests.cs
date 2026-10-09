@@ -46,6 +46,7 @@ public class HpaAutoscalerTests : IDisposable
             factory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(
                 factory, new Mock<IKubernetesClientFactory>().Object),
+            new EntKube.Web.Modules.Api.CatalogApi(factory),
             NullLogger<KedaScalerService>.Instance);
     }
 

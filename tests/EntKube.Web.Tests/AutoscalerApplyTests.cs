@@ -43,6 +43,7 @@ public class AutoscalerApplyTests : IDisposable
         sut = new KedaScalerService(
             testDb.Factory,
             new ClusterClientFactory(testDb.Factory, k8s.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             NullLogger<KedaScalerService>.Instance);
     }
 

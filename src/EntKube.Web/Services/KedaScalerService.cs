@@ -18,6 +18,7 @@ namespace EntKube.Web.Services;
 public class KedaScalerService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<KedaScalerService> logger)
 {
     // ── CRUD ──────────────────────────────────────────────────────────────────
@@ -310,12 +311,16 @@ public class KedaScalerService(
 
         if (clusterIds.Count == 0) return false;
 
-        return await db.ClusterComponents
-            .AnyAsync(c => clusterIds.Contains(c.ClusterId)
-                        && c.Status == ComponentStatus.Installed
-                        && (c.Name == "keda"
-                            || c.HelmChartName == "keda"
-                            || c.ReleaseName == "keda"), ct);
+        // Asked of Catalog rather than of its table. The predicate is unchanged and
+        // applied here: these alias lists are not symmetrical across Name,
+        // ReleaseName and HelmChartName, so a contract method matching every key
+        // against every column would answer about installations these never accepted.
+        return (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+            .Any(c => clusterIds.Contains(c.ClusterId)
+                   && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed
+                   && (c.Name == "keda"
+                       || c.HelmChartName == "keda"
+                       || c.ReleaseName == "keda"));
     }
 
     // ── Apply to environment ──────────────────────────────────────────────────

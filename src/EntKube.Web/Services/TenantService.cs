@@ -8,7 +8,10 @@ namespace EntKube.Web.Services;
 /// (environments, customers, groups, clusters). Each method tells a simple
 /// story: load, validate, persist, return.
 /// </summary>
-public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vault)
+public class TenantService(
+    IDbContextFactory<ApplicationDbContext> dbFactory,
+    VaultService vault,
+    EntKube.Contracts.Catalog.ICatalogApi catalog)
 {
     // --- Tenant CRUD ---
 
@@ -194,7 +197,10 @@ public class TenantService(IDbContextFactory<ApplicationDbContext> dbFactory, Va
             Apps: await db.Apps.CountAsync(a => a.Customer.TenantId == id, ct),
             Deployments: await db.AppDeployments.CountAsync(d => d.App.Customer.TenantId == id, ct),
             Clusters: await db.KubernetesClusters.CountAsync(c => c.TenantId == id, ct),
-            Components: await db.ClusterComponents.CountAsync(cc => cc.Cluster.TenantId == id, ct),
+            // Asked of Catalog. The count has to be exact — it is what the purge dialog shows
+            // before a tenant is deleted — and the contract's tenant listing is exactly the rows
+            // the old CountAsync counted.
+            Components: (await catalog.GetComponentsForTenantAsync(id, ct)).Count,
             Secrets: await db.VaultSecrets.CountAsync(s => s.Vault.TenantId == id, ct),
             Dashboards: await db.Dashboards.CountAsync(x => x.TenantId == id, ct));
     }

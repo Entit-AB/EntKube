@@ -36,7 +36,21 @@ public class CatalogContractAdoptionTests
     /// 2026-10-09. Was 87 before Tempo, Mimir and Loki moved to the contract, then 66, now 63
     /// with CnpgService, MongoService and KyvernoPolicyService.
     ///
-    /// <para><b>What the 63 are, which says what is actually left to do.</b> 14 are
+    /// <para><b>55 now.</b> Eight more services stopped touching the table, each of which had
+    /// exactly one query: <c>DatabaseService</c>, <c>ElasticsearchService</c>, <c>KafkaService</c>,
+    /// <c>KedaScalerService</c>, <c>RabbitMQService</c>, <c>RedisService</c>, <c>TenantService</c>
+    /// and <c>VpnService</c>. Every one asked a variant of "is this operator installed", and every
+    /// one keeps its own predicate in memory rather than getting a contract method — the alias
+    /// lists are not symmetrical across <c>Name</c>, <c>ReleaseName</c> and <c>HelmChartName</c>,
+    /// so a uniform match would answer about installations they have always rejected.</para>
+    ///
+    /// <para>⚠️ <c>TailscaleService</c> looks like a ninth and is not. Its result record hands a
+    /// <c>ClusterComponent</c> to a Razor page that reaches through it for
+    /// <c>Component.Cluster.Kubeconfig</c> — five times. Converting the query means converting the
+    /// page's cluster access, which is credential-custody work rather than contract work, so it is
+    /// left whole rather than half-moved.</para>
+    ///
+    /// <para><b>What the 63 were, which says what is actually left to do.</b> 14 are
     /// credential-bound — their surrounding method also takes <c>cluster.Kubeconfig</c>, and the
     /// contract deliberately carries no credential, so those wait on <c>IClusterClient</c>.
     /// <b>13 have no tenant at all</b>: background sweeps like <c>AlertSyncService</c> and
@@ -45,7 +59,7 @@ public class CatalogContractAdoptionTests
     /// same blocker as the credential work's remaining 206 — not a missing method but an unanswered
     /// question about who a background sweep acts as. The other 36 are movable now.</para>
     /// </summary>
-    private const int BaselineQueries = 63;
+    private const int BaselineQueries = 55;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22;

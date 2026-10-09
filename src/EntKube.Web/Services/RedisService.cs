@@ -52,7 +52,8 @@ public sealed record RedisEndpointOption(
 public class RedisService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
-    VaultService vaultService)
+    VaultService vaultService,
+    EntKube.Contracts.Catalog.ICatalogApi catalog)
 {
     private const int RedisPort = 6379;
 
@@ -386,17 +387,20 @@ public class RedisService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent? op = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Cluster.TenantId == tenantId
-                && c.Status == ComponentStatus.Installed
+        // Asked of Catalog rather than of its table. The predicate is unchanged and
+        // applied here: these alias lists are not symmetrical across Name,
+        // ReleaseName and HelmChartName, so a contract method matching every key
+        // against every column would answer about installations these never accepted.
+        EntKube.Contracts.Catalog.InstalledComponent? op =
+            (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+            .FirstOrDefault(c => c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed
                 && (c.Name == "redis-operator"
-                    || c.ReleaseName == "redis-operator"), ct);
+                    || c.ReleaseName == "redis-operator"));
 
         return new RedisOperatorStatus
         {
             OperatorAvailable = op is not null,
-            OperatorClusterName = op?.Cluster.Name
+            OperatorClusterName = op?.ClusterName
         };
     }
 

@@ -24,7 +24,7 @@ public class TenantPurgeTests : IDisposable
     public TenantPurgeTests()
     {
         db = new InterceptingTestDb(new byte[32]);
-        tenants = new TenantService(db.Factory, db.CreateVaultService());
+        tenants = new TenantService(db.Factory, db.CreateVaultService(), new EntKube.Web.Modules.Api.CatalogApi(db.Factory));
     }
 
     [Fact]

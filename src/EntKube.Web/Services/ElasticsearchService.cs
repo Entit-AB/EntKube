@@ -174,6 +174,7 @@ public class ElasticsearchService(
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     VaultService vaultService,
     AuditService auditService,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<ElasticsearchService> logger)
 {
     /// <summary>
@@ -237,18 +238,23 @@ public class ElasticsearchService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent? op = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Cluster.TenantId == tenantId
-                && c.Status == ComponentStatus.Installed
+        // Asked of Catalog rather than of its table. The predicate is unchanged and
+        // applied here: these alias lists are not symmetrical across Name,
+        // ReleaseName and HelmChartName, so a contract method matching every key
+        // against every column would answer about installations these never accepted.
+        EntKube.Contracts.Catalog.InstalledComponent? op =
+            (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+            .FirstOrDefault(c => c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed
                 && (c.Name == "eck-operator"
                     || c.ReleaseName == "elastic-operator"
-                    || (c.HelmChartName ?? "") == "eck-operator"), ct);
+                    || (c.HelmChartName ?? "") == "eck-operator"));
 
         return new ElasticsearchOperatorStatus
         {
             OperatorAvailable = op is not null,
-            OperatorClusterName = op?.Cluster.Name
+            // The contract carries the cluster's name inline, which is why it does: of the
+            // cross-module reads of this table, 56 were .Include(c => c.Cluster) purely to get it.
+            OperatorClusterName = op?.ClusterName
         };
     }
 
