@@ -36,12 +36,28 @@ public class CustodyTriageTests
     private const string Web = "../../../../../src/EntKube.Web";
 
     /// <summary>
-    /// Credential sites whose enclosing method already has a tenant, measured 2026-10-08. These
+    /// Credential sites whose enclosing method already has a tenant, measured 2026-10-09. These
     /// are the ones that could move onto <c>IClusterClient</c> without touching a signature.
     ///
-    /// <para>32 of 235. The other 203 are gated on a tenant.</para>
+    /// <para><b>29 of 235, corrected from 32 — and the correction matters more than the number.</b>
+    /// See <see cref="Declaration"/>: a method returning a tuple was not recognised as a
+    /// declaration, so sites inside it were judged by the signature of the method above. Six were
+    /// credited with a tenant they did not have. Every figure this test has published, including
+    /// the "35 of 241" that was used to pick targets, overstated the easy group by six.</para>
+    ///
+    /// <para>And the reduction this PR claimed for itself was in the wrong column: with the
+    /// pattern fixed, its three conversions took <b>gated</b> from 212 to 206 and left reachable
+    /// at 29. None of them was in a method with a tenant — which is exactly what the triage was
+    /// built to tell apart, and it could not, because of the pattern above.</para>
+    ///
+    /// <para>Where the 29 are: <c>StorageService</c> 5, <c>StalwartService</c> 4,
+    /// <c>VeleroService</c> 4, <c>KyvernoPolicyService</c> 3, <c>DriftAdoptionService</c> 3,
+    /// then two each in <c>VaultService</c> and <c>KeycloakService</c> and one each in
+    /// <c>OpenLdapService</c>, <c>TenantService</c>, <c>IngressDashboardService</c> and
+    /// <c>StalwartDnsService</c>. <c>ClusterClient</c>'s own two are the seam resolving the
+    /// credential, which is the one place that should.</para>
     /// </summary>
-    private const int BaselineReachable = 32;
+    private const int BaselineReachable = 29;
 
     [Fact]
     public void The_sites_that_could_already_ask_the_seam_do_not_multiply()
@@ -65,8 +81,19 @@ public class CustodyTriageTests
     private static readonly Regex Credential =
         new(@"(?<!VaultSecretType)\.Kubeconfig(?![A-Za-z0-9_])", RegexOptions.Compiled);
 
+    /// <summary>
+    /// A method declaration, so each site can be attributed to the signature above it.
+    ///
+    /// <para>⚠️ The return type must allow parentheses, or a method returning a tuple is not
+    /// recognised as a declaration at all and every site inside it is attributed to the method
+    /// <em>above</em> — judged by the wrong signature, and so put in the wrong group. That is not
+    /// hypothetical: it is what made this test report 35 reachable when the number was 29. Six
+    /// sites in tuple-returning methods were credited with a tenant that belonged to a different
+    /// method, which is six "easy wins" that were never easy. The identical defect was naming the
+    /// wrong method in <c>ComponentTenantScopingTests</c>.</para>
+    /// </summary>
     private static readonly Regex Declaration =
-        new(@"^\s+(?:public|private|internal|protected)\s+(?:static\s+)?(?:async\s+)?[\w<>?,\.\s\[\]]+?\s\w+\(",
+        new(@"^\s+(?:public|private|internal|protected)\s+(?:static\s+)?(?:async\s+)?[\w<>?,\.\s\[\]\(\)]+?\s\w+\(",
             RegexOptions.Compiled);
 
     private static (int Reachable, int Gated) Measure()
