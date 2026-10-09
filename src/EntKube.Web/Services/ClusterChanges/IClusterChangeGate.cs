@@ -9,10 +9,12 @@ namespace EntKube.Web.Services.ClusterChanges;
 /// the current scope — blocks until the operator acknowledges or cancels. On cancel it throws
 /// <see cref="OperationCanceledException"/>, which cleanly aborts the calling service method.
 ///
-/// "Interactive only" falls out of the scope model: the gate is scoped (per Blazor circuit),
-/// and the global acknowledgment dialog registers an <see cref="IClusterChangeAckSink"/> on that
-/// scope. Background/automated scopes register no sink, so the gate passes through ungated —
-/// automated remediation, bootstrap and git-sync are unaffected.
+/// The gate is scoped (per Blazor circuit), and the global acknowledgment dialog registers an
+/// <see cref="IClusterChangeAckSink"/> on that scope. A scope with no sink has nobody to ask, and
+/// what happens then is now a decision the context has to have made: see
+/// <see cref="DeclareUnattended"/>. A declared scope proceeds and is recorded against its reason;
+/// an undeclared one is refused. It used to proceed either way, which is what made the gate
+/// something an in-cluster agent would simply have walked past.
 /// </summary>
 public interface IClusterChangeGate
 {
@@ -28,6 +30,26 @@ public interface IClusterChangeGate
     /// Returns a disposable that unregisters on dispose.
     /// </summary>
     IDisposable RegisterSink(IClusterChangeAckSink sink);
+
+    /// <summary>
+    /// Declares that this scope may change clusters with no operator to ask, and why.
+    ///
+    /// <para><b>Why a declaration and not a default.</b> A scope with no sink used to apply
+    /// straight through. That meant "nobody is watching" and "this is allowed to run unwatched"
+    /// were the same state, so a background reconcile and a remote agent were indistinguishable
+    /// to the gate — and the agent would have inherited every bypass in the product. The
+    /// declaration separates them: a context that is supposed to act on its own says so, by name,
+    /// and anything else is refused.</para>
+    ///
+    /// <para>It sits beside <see cref="RegisterSink"/> on purpose. Both answer "who is
+    /// answerable for what happens in this scope", both are made once where the scope is created,
+    /// and both last until disposed. A background service declares around its unit of work; an
+    /// authenticated API request declares for the request, naming the caller.</para>
+    ///
+    /// <para><paramref name="reason"/> is written to the audit trail, so it should name the work
+    /// rather than the mechanism — "drift-remediation", not "background".</para>
+    /// </summary>
+    IDisposable DeclareUnattended(string reason);
 }
 
 /// <summary>

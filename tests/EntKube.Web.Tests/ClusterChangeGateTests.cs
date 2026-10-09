@@ -60,12 +60,76 @@ public class ClusterChangeGateTests
     }
 
     [Fact]
-    public async Task No_sink_registered_passes_through_without_asking()
+    public async Task No_sink_and_no_declaration_is_refused()
     {
         ClusterChangeGate gate = NewGate();
 
-        // Should complete silently — no sink means a non-interactive (background) scope.
+        // This used to complete silently, and that was the whole problem: "nobody is watching"
+        // and "this is allowed to run unwatched" were the same state, so an in-cluster agent
+        // would have inherited every bypass in the product (docs/decomposition.md §5.4).
+        Func<Task> act = () => gate.AcknowledgeAsync(PatchChange());
+
+        (await act.Should().ThrowAsync<InvalidOperationException>())
+            .And.Message.Should().Contain("DeclareUnattended",
+                "the refusal has to say how to declare, or the first person to hit it has only a "
+                + "stack trace to go on");
+    }
+
+    [Fact]
+    public async Task A_declared_scope_applies_without_asking()
+    {
+        ClusterChangeGate gate = NewGate();
+
+        using IDisposable declaration = gate.DeclareUnattended("drift-remediation");
+
+        // No throw: a background context that has said what it is still proceeds, which is what
+        // keeps scheduled work running.
         await gate.AcknowledgeAsync(PatchChange());
+    }
+
+    [Fact]
+    public async Task A_declaration_ends_when_it_is_disposed()
+    {
+        ClusterChangeGate gate = NewGate();
+
+        using (gate.DeclareUnattended("drift-remediation"))
+        {
+            await gate.AcknowledgeAsync(PatchChange());
+        }
+
+        // A scope reused for something else must not inherit the declaration.
+        Func<Task> act = () => gate.AcknowledgeAsync(PatchChange());
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    [Fact]
+    public void A_declaration_must_say_what_the_work_is()
+    {
+        ClusterChangeGate gate = NewGate();
+
+        // The reason is the entire value of the declaration: it is what the audit trail shows for
+        // every change the scope goes on to make.
+        gate.Invoking(g => g.DeclareUnattended("  ")).Should().Throw<ArgumentException>();
+    }
+
+    /// <summary>
+    /// A sink outranks a declaration. A background scope that somehow has an operator attached
+    /// should still ask them — the declaration says "there may be nobody", not "do not ask".
+    /// </summary>
+    [Fact]
+    public async Task A_declared_scope_with_a_sink_still_asks()
+    {
+        ClusterChangeGate gate = NewGate();
+        FakeSink sink = new(ClusterChangeDecision.Cancelled);
+        gate.RegisterSink(sink);
+
+        using IDisposable declaration = gate.DeclareUnattended("drift-remediation");
+
+        Func<Task> act = () => gate.AcknowledgeAsync(PatchChange());
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+        sink.Calls.Should().Be(1);
     }
 
     [Fact]
@@ -108,7 +172,7 @@ public class ClusterChangeGateTests
     }
 
     [Fact]
-    public async Task Disposing_the_registration_restores_pass_through()
+    public async Task Disposing_the_registration_stops_the_gate_asking_that_sink()
     {
         ClusterChangeGate gate = NewGate();
         FakeSink sink = new(ClusterChangeDecision.Cancelled);
@@ -116,8 +180,12 @@ public class ClusterChangeGateTests
 
         reg.Dispose();
 
-        // Sink is gone → gate must pass through (no throw, no call).
-        await gate.AcknowledgeAsync(PatchChange());
+        // The sink is gone, so there is nobody to ask — and with nothing declared that is now a
+        // refusal rather than a pass-through. What this still pins is that the unregistered sink
+        // is not consulted.
+        Func<Task> act = () => gate.AcknowledgeAsync(PatchChange());
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
         sink.Calls.Should().Be(0);
     }
 }

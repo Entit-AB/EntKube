@@ -1,6 +1,7 @@
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -53,6 +54,7 @@ public class GitSyncService(
     private async Task SyncAllAutoSyncDeploymentsAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("git-sync");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
 
         List<Guid> deploymentIds;
@@ -101,6 +103,7 @@ public class GitSyncService(
         Guid deploymentId, CancellationToken ct = default)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("git-sync");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
         var gitOps = scope.ServiceProvider.GetRequiredService<GitOperationsService>();
         var gitService = scope.ServiceProvider.GetRequiredService<CustomerGitService>();

@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -46,6 +47,7 @@ public class ResourceUsageCollectorService(
     private async Task CollectAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("resource-usage-collector");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
         var prometheus = scope.ServiceProvider.GetRequiredService<PrometheusService>();
 

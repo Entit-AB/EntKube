@@ -2,6 +2,7 @@ using System.Collections.Concurrent;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services.Cost;
 
@@ -88,6 +89,7 @@ public class CostScanService(
     private async Task RunAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("cost-scan");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<CostDbContext>>();
         var costs = scope.ServiceProvider.GetRequiredService<CostReportService>();
         var rates = scope.ServiceProvider.GetRequiredService<CostRateService>();

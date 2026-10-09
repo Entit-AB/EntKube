@@ -2,6 +2,7 @@ using System.Text.Json;
 using EntKube.Web.Data;
 using EntKube.Web.Services.Telemetry;
 using Microsoft.EntityFrameworkCore;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -36,6 +37,7 @@ public sealed class TelemetryAlertEvaluator(
     private async Task EvaluateAllAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("telemetry-alert-evaluator");
         ITelemetryIngest store = scope.ServiceProvider.GetRequiredService<ITelemetryIngest>();
         if (!store.IsEnabled) return;
 

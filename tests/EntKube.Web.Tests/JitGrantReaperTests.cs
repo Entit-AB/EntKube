@@ -59,6 +59,14 @@ public class JitGrantReaperTests : IDisposable
         // the provider; production registers all twelve via AddModuleContexts.
         collection.AddSingleton<IDbContextFactory<IdentityDbContext>>(factory);
         collection.AddSingleton<IJitProvisioner>(provisioner);
+
+        // The sweep declares its scope unattended before it touches anything, so the gate has to
+        // be resolvable from this provider exactly as it is from production's — a declaration that
+        // could silently no-op when the gate is missing would be worse than one that throws.
+        collection.AddScoped<EntKube.Web.Services.ClusterChanges.IClusterChangeGate>(_ =>
+            new EntKube.Web.Services.ClusterChanges.ClusterChangeGate(
+                new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+                NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance));
         collection.AddSingleton(k8s.Object);
         services = collection.BuildServiceProvider();
 

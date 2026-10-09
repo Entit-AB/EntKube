@@ -84,16 +84,37 @@ public class ClusterChangeRecordTests
     // ════════════════════════════════════════════════════════════════
 
     [Fact]
-    public async Task A_change_with_no_operator_present_is_recorded_as_unattended()
+    public async Task A_declared_change_with_no_operator_present_is_recorded_as_unattended()
     {
         RecordingRecorder recorder = new();
+        ClusterChangeGate gate = NewGate(recorder);
 
-        // No sink registered: this is a background flow, which is also where an in-cluster agent
-        // would sit.
-        await NewGate(recorder).AcknowledgeAsync(PatchChange());
+        // No sink, but the scope has said what it is — a scheduled reconcile rather than an
+        // agent nobody authorised.
+        using IDisposable declaration = gate.DeclareUnattended("drift-remediation");
+
+        await gate.AcknowledgeAsync(PatchChange());
 
         recorder.Entries.Should().ContainSingle()
             .Which.Outcome.Should().Be(ClusterChangeOutcome.AppliedUnattended);
+    }
+
+    /// <summary>
+    /// A refusal is recorded, not only thrown. A background job that has stopped working needs to
+    /// be findable in the audit trail, not only in whatever log swallowed its exception — and the
+    /// count of these is what says whether the declarations are complete.
+    /// </summary>
+    [Fact]
+    public async Task An_undeclared_change_with_no_operator_present_is_recorded_as_refused()
+    {
+        RecordingRecorder recorder = new();
+
+        Func<Task> act = () => NewGate(recorder).AcknowledgeAsync(PatchChange());
+
+        await act.Should().ThrowAsync<InvalidOperationException>();
+
+        recorder.Entries.Should().ContainSingle()
+            .Which.Outcome.Should().Be(ClusterChangeOutcome.RefusedUndeclared);
     }
 
     [Fact]

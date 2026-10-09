@@ -1,6 +1,7 @@
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services.Mail;
 
@@ -88,6 +89,7 @@ public class SupportMailPoller(
             // A scope per mailbox: the service and its DbContext factory are scoped, and
             // one tenant's failure must not carry state into the next.
             using IServiceScope scope = scopes.CreateScope();
+            using IDisposable unattended = scope.DeclareUnattended("support-mail-poller");
 
             SupportMailboxService mailboxes =
                 scope.ServiceProvider.GetRequiredService<SupportMailboxService>();

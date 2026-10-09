@@ -2,6 +2,7 @@ using System.Text;
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -35,6 +36,7 @@ public class AdvisorScanService(
         DateTime now = DateTime.UtcNow;
 
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("advisor-scan");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<AdvisorDbContext>>();
         var advisor = scope.ServiceProvider.GetRequiredService<OperationsAdvisorService>();
         var state = scope.ServiceProvider.GetRequiredService<AdvisorStateService>();

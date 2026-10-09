@@ -2,6 +2,7 @@ using System.Text.Json;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services.Jit;
 
@@ -79,6 +80,7 @@ public class JitGrantReaperService(
     public async Task SweepAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("jit-grant-reaper");
 
         var dbFactory = scope.ServiceProvider
             .GetRequiredService<IDbContextFactory<IdentityDbContext>>();

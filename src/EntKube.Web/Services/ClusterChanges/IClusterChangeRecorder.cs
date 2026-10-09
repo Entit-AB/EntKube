@@ -22,6 +22,24 @@ public enum ClusterChangeOutcome
     /// opted out of the dialog, which is not the same as opting out of the record.
     /// </summary>
     GateDisabled,
+
+    /// <summary>
+    /// Nobody was asked and nobody had declared that this context may act unattended, so the
+    /// change was <b>refused</b>.
+    ///
+    /// <para>This is the outcome that replaces the old silent bypass. Before, a scope with no
+    /// interactive sink applied straight through on the first line of
+    /// <c>AcknowledgeAsync</c> — which was defensible while the only sinkless callers were
+    /// trusted in-process background services, and stops being defensible the moment a remote
+    /// agent is a caller (docs/decomposition.md §5.4). Now a context has to say what it is:
+    /// <c>DeclareUnattended</c> is a claim on the record, and an undeclared context is turned
+    /// away.</para>
+    ///
+    /// <para>It is recorded rather than only thrown because a refusal is operational news. A
+    /// background job that stops working needs to be findable in the audit trail, not only in
+    /// whatever log swallowed its exception.</para>
+    /// </summary>
+    RefusedUndeclared,
 }
 
 /// <summary>

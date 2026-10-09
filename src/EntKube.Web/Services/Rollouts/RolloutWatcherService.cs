@@ -1,6 +1,7 @@
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services.Rollouts;
 
@@ -76,6 +77,7 @@ public class RolloutWatcherService(
         DateTime now = DateTime.UtcNow;
 
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("rollout-watcher");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
         var rollouts = scope.ServiceProvider.GetRequiredService<RolloutService>();
         var notifications = scope.ServiceProvider.GetRequiredService<NotificationService>();

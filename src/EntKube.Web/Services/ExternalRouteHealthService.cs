@@ -2,6 +2,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 using System.Net;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -36,6 +37,7 @@ public class ExternalRouteHealthService(
     private async Task CheckAllRoutesAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("external-route-health");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ConnectivityDbContext>>();
 
         List<(Guid Id, string Hostname, string PathPrefix)> routes;

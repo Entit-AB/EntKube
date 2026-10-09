@@ -1,5 +1,6 @@
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
+using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
 
@@ -34,6 +35,7 @@ public class HeadscaleCertSyncService(
     private async Task SyncAllAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("headscale-cert-sync");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
         var headscaleService = scope.ServiceProvider.GetRequiredService<HeadscaleService>();
 

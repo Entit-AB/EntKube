@@ -1,3 +1,5 @@
+using EntKube.Web.Services.ClusterChanges;
+
 namespace EntKube.Web.Services;
 
 /// <summary>
@@ -27,6 +29,7 @@ public class SearchStatusPollingService(
             try
             {
                 using IServiceScope scope = scopeFactory.CreateScope();
+                using IDisposable unattended = scope.DeclareUnattended("search-status-polling");
                 ElasticsearchService elasticsearch =
                     scope.ServiceProvider.GetRequiredService<ElasticsearchService>();
                 await elasticsearch.ReconcileAllAsync(stoppingToken);

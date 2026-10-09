@@ -1,3 +1,5 @@
+using EntKube.Web.Services.ClusterChanges;
+
 namespace EntKube.Web.Services;
 
 /// <summary>
@@ -43,6 +45,7 @@ public class ObservedSecretRefreshService(
     private async Task RefreshObservedSecretsAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
+        using IDisposable unattended = scope.DeclareUnattended("observed-secret-refresh");
         VaultService vaultService = scope.ServiceProvider.GetRequiredService<VaultService>();
 
         List<Guid> secretIds = await vaultService.GetObservedAppSecretIdsAsync(ct);
