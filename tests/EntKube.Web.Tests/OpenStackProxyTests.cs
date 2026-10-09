@@ -61,7 +61,9 @@ public class OpenStackProxyTests : IDisposable
 
         sut = new StorageService(
             dbFactory, vaultService, openStackS3, keystone, egressRelay, egressTunnel, agentRegistry,
-            k8sMock.Object, storageClientFactory);
+            k8sMock.Object,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sMock.Object),
+            storageClientFactory);
     }
 
     public void Dispose()
