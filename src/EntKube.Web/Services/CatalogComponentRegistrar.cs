@@ -121,7 +121,7 @@ public class CatalogComponentRegistrar(
         await SaveTempoConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveVeleroConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
         await SaveEntKubeTelemetryConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
-        await SaveWgEasyConfigIfNeededAsync(component.Id, formValues, entry);
+        await SaveWgEasyConfigIfNeededAsync(tenantId, component.Id, formValues, entry);
 
         return component;
     }
@@ -263,7 +263,7 @@ public class CatalogComponentRegistrar(
 
         if (!string.IsNullOrEmpty(hostname))
         {
-            await EnsureRouteAsync(componentId, fieldValues, hostname, "keycloak", isKeycloak: true);
+            await EnsureRouteAsync(tenantId, componentId, fieldValues, hostname, "keycloak", isKeycloak: true);
         }
     }
 
@@ -315,7 +315,7 @@ public class CatalogComponentRegistrar(
 
             // Harbor is two Services behind one hostname; the route record carries the primary one.
             await EnsureRouteAsync(
-                componentId, fieldValues, hostname, "harbor", isKeycloak: false,
+                tenantId, componentId, fieldValues, hostname, "harbor", isKeycloak: false,
                 serviceName: ExternalRouteService.PrimaryBackendService(
                     comp?.Name ?? "harbor", comp?.HelmChartName ?? "harbor", harborRelease));
         }
@@ -442,7 +442,8 @@ public class CatalogComponentRegistrar(
     /// an address. Registering it anyway would produce a route that silently matches nothing.
     /// </summary>
     private async Task SaveWgEasyConfigIfNeededAsync(
-        Guid componentId, IReadOnlyDictionary<string, string> fieldValues, CatalogEntry catalogEntry)
+        Guid tenantId, Guid componentId, IReadOnlyDictionary<string, string> fieldValues,
+        CatalogEntry catalogEntry)
     {
         if (catalogEntry.Key != "wg-easy") return;
 
@@ -462,7 +463,7 @@ public class CatalogComponentRegistrar(
         }
 
         await EnsureRouteAsync(
-            componentId, fieldValues, host,
+            tenantId, componentId, fieldValues, host,
             serviceName: "wg-easy-svc",
             servicePort: WgEasyUiPort);
     }
@@ -479,7 +480,7 @@ public class CatalogComponentRegistrar(
     /// need; components whose Service name is fixed by their chart pass it explicitly.
     /// </param>
     private async Task EnsureRouteAsync(
-        Guid componentId, IReadOnlyDictionary<string, string> fieldValues, string hostname,
+        Guid tenantId, Guid componentId, IReadOnlyDictionary<string, string> fieldValues, string hostname,
         string? fallbackReleaseName = null, bool isKeycloak = false,
         string? serviceName = null, int servicePort = 80)
     {
@@ -517,7 +518,7 @@ public class CatalogComponentRegistrar(
             RequestTimeoutSeconds = isKeycloak ? null : ExternalRouteService.RegistryRequestTimeoutSeconds
         };
 
-        await routeService.AddRouteAsync(componentId, routeRequest);
+        await routeService.AddRouteAsync(tenantId, componentId, routeRequest);
     }
 
     private async Task<ClusterComponent?> GetComponentAsync(Guid componentId)

@@ -958,7 +958,7 @@ else
                 && component is not null)
             {
                 await HeadscaleService.EnsureExternalRouteAsync(
-                    component.Id, serverUrl, routeClusterIssuer);
+                    TenantId, component.Id, serverUrl, routeClusterIssuer);
                 hasExternalRoute = true;
             }
         }
@@ -1022,7 +1022,7 @@ else
         try
         {
             await HeadscaleService.EnsureExternalRouteAsync(
-                component.Id, serverUrl, routeClusterIssuer);
+                TenantId, component.Id, serverUrl, routeClusterIssuer);
             hasExternalRoute = true;
         }
         catch (Exception ex)

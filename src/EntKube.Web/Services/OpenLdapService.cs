@@ -213,16 +213,16 @@ public class OpenLdapService(
             await routeService.DeleteRouteAsync(r.Id, ct);
         }
 
-        await AddGatewayRouteIfNeeded(clusterComponentId, config.PhpLdapAdminEnabled, config.PhpLdapAdminExposeMode,
+        await AddGatewayRouteIfNeeded(tenantId, clusterComponentId, config.PhpLdapAdminEnabled, config.PhpLdapAdminExposeMode,
             config.PhpLdapAdminHostname, phpSvc, config.WebUiClusterIssuer, ct);
         // LTB is only actually deployed when an image is supplied — don't route to a Service that won't exist.
         bool ltbDeployed = config.LtbPasswdEnabled && !string.IsNullOrWhiteSpace(config.LtbPasswdImage);
-        await AddGatewayRouteIfNeeded(clusterComponentId, ltbDeployed, config.LtbPasswdExposeMode,
+        await AddGatewayRouteIfNeeded(tenantId, clusterComponentId, ltbDeployed, config.LtbPasswdExposeMode,
             config.LtbPasswdHostname, ltbSvc, config.WebUiClusterIssuer, ct);
     }
 
     private async Task AddGatewayRouteIfNeeded(
-        Guid componentId, bool enabled, OpenLdapExposeMode mode, string? hostname,
+        Guid tenantId, Guid componentId, bool enabled, OpenLdapExposeMode mode, string? hostname,
         string serviceName, string? issuer, CancellationToken ct)
     {
         if (!enabled || mode != OpenLdapExposeMode.Gateway || string.IsNullOrWhiteSpace(hostname))
@@ -235,7 +235,7 @@ public class OpenLdapService(
             return;
         }
 
-        await routeService.AddRouteAsync(componentId, new ExternalRouteRequest
+        await routeService.AddRouteAsync(tenantId, componentId, new ExternalRouteRequest
         {
             Hostname = hostname.Trim(),
             ServiceName = serviceName,

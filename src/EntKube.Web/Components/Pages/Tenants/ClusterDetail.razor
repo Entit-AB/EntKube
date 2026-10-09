@@ -3653,7 +3653,7 @@ else if (section == "components")
             TlsPrivateKey = isManual && !string.IsNullOrWhiteSpace(tlsKey) ? tlsKey : null
         };
 
-        await RouteService.AddRouteAsync(componentId, routeRequest);
+        await RouteService.AddRouteAsync(TenantId, componentId, routeRequest);
     }
 
 
@@ -3958,7 +3958,7 @@ else if (section == "components")
             RequestTimeoutSeconds = ExternalRouteService.RegistryRequestTimeoutSeconds
         };
 
-        await RouteService.AddRouteAsync(componentId, routeRequest);
+        await RouteService.AddRouteAsync(TenantId, componentId, routeRequest);
     }
 
     private bool IsFieldVisible(ComponentFormField field, Dictionary<string, string> fieldValues)
@@ -3987,7 +3987,7 @@ else if (section == "components")
         routeError = null;
         routeYamlPreview = null;
         componentRoutes = await RouteService.GetRoutesAsync(componentId);
-        shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(componentId);
+        shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(TenantId, componentId);
         await LoadRouteUptimes();
     }
 
@@ -4020,7 +4020,7 @@ else if (section == "components")
                 RequestTimeoutSeconds = routeTimeoutSeconds
             };
 
-            await RouteService.AddRouteAsync(componentId, request);
+            await RouteService.AddRouteAsync(TenantId, componentId, request);
 
             // Reset form fields after successful add.
 
@@ -4032,7 +4032,7 @@ else if (section == "components")
             routeTlsKey = "";
 
             componentRoutes = await RouteService.GetRoutesAsync(componentId);
-            shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(componentId);
+            shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(TenantId, componentId);
             await LifecycleService.ApplyExternalRoutesAsync(componentId);
         }
         catch (InvalidOperationException ex)
@@ -4169,7 +4169,7 @@ else if (section == "components")
         {
             await RouteService.UpdateRouteTimeoutAsync(route.Id, seconds);
             componentRoutes = await RouteService.GetRoutesAsync(componentId);
-            shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(componentId);
+            shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(TenantId, componentId);
             await LifecycleService.ApplyExternalRoutesAsync(componentId);
         }
         catch (InvalidOperationException ex)
@@ -4182,7 +4182,7 @@ else if (section == "components")
     {
         await RouteService.DeleteRouteAsync(routeId);
         componentRoutes = await RouteService.GetRoutesAsync(componentId);
-        shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(componentId);
+        shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(TenantId, componentId);
         routeYamlPreview = null;
     }
 

@@ -18,26 +18,46 @@ namespace EntKube.Web.Tests;
 /// this test asks the module map who owns the file and ignores the owner, which is the difference
 /// between a number that means something and a number that is merely alarming.</para>
 ///
-/// <para><b>The five that remain are a different problem.</b> None of them has a tenant in scope,
-/// so closing them means changing a signature and then its callers — real work with a blast radius,
-/// not a one-line predicate. They are named rather than counted so that fixing one is visibly
-/// progress and adding one is visibly not.</para>
+/// <para><b>The five that remained were not all the same problem, and this file said they were.</b>
+/// It claimed none had a tenant in scope. Two did: <c>SupportMailboxService</c> was holding
+/// <c>mailbox.TenantId</c> and using it two lines above, and all three callers of
+/// <c>StalwartService.StoreManifestAsync</c> had already resolved the component <em>with</em> a
+/// tenant predicate before handing its id to a method that wrote to it without one. Both were
+/// one-line fixes mislabelled as blast radius. The other two were real signature changes, done:
+/// six of the seven chains reaching <c>ExternalRouteService.AddRouteAsync</c> turned out to have a
+/// genuine tenant to pass.</para>
+///
+/// <para><b>One remains and it is deliberate.</b> See <see cref="CannotBeScoped"/> — a tenant
+/// check is only worth anything when the tenant comes from the caller's authority, and on that
+/// path there is no caller with any.</para>
 /// </summary>
 public class ComponentTenantScopingTests
 {
     private const string Web = "../../../../../src/EntKube.Web";
 
     /// <summary>
-    /// Sites still fetching a component by id without a tenant, outside Catalog. Each needs a
-    /// <c>tenantId</c> threaded in from its callers first.
+    /// Sites still fetching a component by id without a tenant, outside Catalog. Empty: every one
+    /// that could carry a caller's tenant now does, and the one that cannot is in
+    /// <see cref="CannotBeScoped"/> rather than here — a list of debt should contain only debt.
     /// </summary>
-    private static readonly string[] Baseline =
+    private static readonly string[] Baseline = [];
+
+    /// <summary>
+    /// The lookup that cannot be meaningfully scoped, with the reason, because the alternative is
+    /// a number that reads zero while nothing changed.
+    ///
+    /// <para><c>HeadscaleService.EnsureExternalRouteAfterInstallAsync</c> is called only by
+    /// <c>ComponentInstallOrchestrator</c> — Catalog's own code, working by component id by design
+    /// and holding no tenant of its own. The only value a <c>tenantId</c> parameter could be given
+    /// is <c>comp.Cluster.TenantId</c>, read from the very row it would then filter, and a
+    /// predicate comparing a row against itself can never fail.</para>
+    ///
+    /// <para>So it stays, named here. If an install path ever gains a real caller identity, this
+    /// is the site to revisit — and until then the entry says why it is not simply forgotten.</para>
+    /// </summary>
+    private static readonly string[] CannotBeScoped =
     [
-        "ExternalRouteService.AddRouteAsync",
-        "ExternalRouteService.ShadowedHostnamesAsync",
         "HeadscaleService.EnsureExternalRouteAfterInstallAsync",
-        "StalwartService.StoreManifestAsync",
-        "SupportMailboxService.DisposeOfAsync",
     ];
 
     [Fact]
@@ -45,7 +65,7 @@ public class ComponentTenantScopingTests
     {
         List<string> found = Measure();
 
-        found.Should().BeSubsetOf(Baseline,
+        found.Should().BeSubsetOf([.. Baseline, .. CannotBeScoped],
             "a component fetched by id with no tenant predicate answers about any component in the "
             + "installation. Add `&& c.Cluster.TenantId == tenantId`, or ask ICatalogApi, whose "
             + "tenant is a parameter rather than a filter you have to remember");
@@ -56,7 +76,7 @@ public class ComponentTenantScopingTests
     {
         List<string> found = Measure();
 
-        found.Should().BeEquivalentTo(Baseline,
+        found.Should().BeEquivalentTo([.. Baseline, .. CannotBeScoped],
             "a site that gained a tenant predicate should leave this list, so the next reader is "
             + "not told there is more left than there is");
     }
@@ -123,13 +143,19 @@ public class ComponentTenantScopingTests
     /// The method a line sits in. Walks back to the nearest declaration — which is why the
     /// baseline names methods rather than line numbers: a line number moves every time anything
     /// above it is edited, and then the list reads as churn instead of as a debt.
+    ///
+    /// <para>⚠️ The return type must allow parentheses. Without them this could not read
+    /// <c>private async Task&lt;(MailboxConnection Where, string Credential)&gt; ResolveAsync(</c>,
+    /// walked straight past it to the method above, and so published the wrong name: the baseline
+    /// said <c>SupportMailboxService.DisposeOfAsync</c>, which contains no component lookup at
+    /// all. A measurement that names the wrong place sends the next reader to the wrong file.</para>
     /// </summary>
     private static string EnclosingMethod(string[] lines, int index)
     {
         for (int i = index; i >= 0; i--)
         {
             Match m = Regex.Match(lines[i],
-                @"^\s+(?:public|private|internal|protected)\s+(?:static\s+)?(?:async\s+)?[\w<>?,\.\s\[\]]+?\s(\w+)\(");
+                @"^\s+(?:public|private|internal|protected)\s+(?:static\s+)?(?:async\s+)?[\w<>?,\.\s\[\]\(\)]+?\s(\w+)\(");
 
             if (m.Success) return m.Groups[1].Value;
         }

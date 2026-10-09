@@ -61,8 +61,15 @@ public class ExternalRouteService(
     /// (gateway name from the cluster's ingress controller, service name from the
     /// component's release name, etc.).
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose component this must be. It is a predicate, not a hint: without it this answers about
+    /// any component in the installation, and exposing one means creating a public hostname for
+    /// it. Every caller but one has a real tenant to pass — see
+    /// <c>HeadscaleService.EnsureExternalRouteAfterInstallAsync</c> for the exception and why it
+    /// cannot be made to mean anything.
+    /// </param>
     public async Task<ExternalRoute> AddRouteAsync(
-        Guid componentId, ExternalRouteRequest request, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, ExternalRouteRequest request, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -71,7 +78,7 @@ public class ExternalRouteService(
         ClusterComponent component = await db.ClusterComponents
             .Include(c => c.Cluster)
                 .ThenInclude(cl => cl.Components)
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         // Validate the hostname is not empty.
@@ -199,14 +206,14 @@ public class ExternalRouteService(
     /// check existed.
     /// </summary>
     public async Task<IReadOnlySet<string>> ShadowedHostnamesAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         // The cluster this component belongs to — an AppRoute only shadows a route on the same
         // cluster, since that is where the two would collide.
         Guid? clusterId = await db.ClusterComponents
-            .Where(c => c.Id == componentId)
+            .Where(c => c.Id == componentId && c.Cluster.TenantId == tenantId)
             .Select(c => (Guid?)c.ClusterId)
             .FirstOrDefaultAsync(ct);
 

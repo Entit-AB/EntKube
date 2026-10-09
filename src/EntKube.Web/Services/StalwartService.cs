@@ -1213,7 +1213,7 @@ public class StalwartService(
             return;
         }
 
-        await routeService.AddRouteAsync(clusterComponentId, new ExternalRouteRequest
+        await routeService.AddRouteAsync(tenantId, clusterComponentId, new ExternalRouteRequest
         {
             Hostname = config.AdminHostname!.Trim(),
             ServiceName = releaseName,
@@ -2829,7 +2829,7 @@ public class StalwartService(
         }
 
         await StoreManifestAsync(
-            clusterComponentId, RspamdManifestBuilder.Build(settings, releaseName, ns), ct);
+            tenantId, clusterComponentId, RspamdManifestBuilder.Build(settings, releaseName, ns), ct);
 
         await EnsureSimpleRouteAsync(
             tenantId, clusterComponentId, releaseName,
@@ -3072,7 +3072,7 @@ public class StalwartService(
             StorageClass: await Secret(tenantId, clusterComponentId, "RC_STORAGE_CLASS", ct));
 
         await StoreManifestAsync(
-            clusterComponentId, WebmailManifestBuilder.BuildRoundcube(settings, releaseName, ns), ct);
+            tenantId, clusterComponentId, WebmailManifestBuilder.BuildRoundcube(settings, releaseName, ns), ct);
 
         await EnsureSimpleRouteAsync(
             tenantId, clusterComponentId, releaseName,
@@ -3101,7 +3101,7 @@ public class StalwartService(
             StorageClass: await Secret(tenantId, clusterComponentId, "SM_STORAGE_CLASS", ct));
 
         await StoreManifestAsync(
-            clusterComponentId, WebmailManifestBuilder.BuildSnappyMail(settings, releaseName, ns), ct);
+            tenantId, clusterComponentId, WebmailManifestBuilder.BuildSnappyMail(settings, releaseName, ns), ct);
 
         await EnsureSimpleRouteAsync(
             tenantId, clusterComponentId, releaseName,
@@ -3122,11 +3122,20 @@ public class StalwartService(
             : (component, component.ReleaseName ?? component.Name, component.Namespace ?? expectedName);
     }
 
-    private async Task StoreManifestAsync(Guid clusterComponentId, string manifest, CancellationToken ct)
+    /// <summary>
+    /// Writes a rendered manifest back onto the component row.
+    ///
+    /// <para>Scoped by tenant although all three callers have already resolved the component
+    /// through <see cref="ResolveComponentAsync"/>, which scopes it too. The write is the thing
+    /// that matters: this overwrites <c>HelmValues</c>, so an id that slipped past the resolve
+    /// would replace another tenant's rendered manifest with this one's.</para>
+    /// </summary>
+    private async Task StoreManifestAsync(
+        Guid tenantId, Guid clusterComponentId, string manifest, CancellationToken ct)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         ClusterComponent? component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId, ct);
+            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
         if (component is null)
         {
             return;
@@ -3184,7 +3193,7 @@ public class StalwartService(
 
         string issuer = await SecretOr(tenantId, clusterComponentId, issuerSecret, "letsencrypt-prod", ct);
 
-        await routeService.AddRouteAsync(clusterComponentId, new ExternalRouteRequest
+        await routeService.AddRouteAsync(tenantId, clusterComponentId, new ExternalRouteRequest
         {
             Hostname = hostname!,
             ServiceName = releaseName,
