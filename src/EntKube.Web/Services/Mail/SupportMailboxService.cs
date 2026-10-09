@@ -941,8 +941,12 @@ public class SupportMailboxService(
                 : (MailboxConnectionResolver.FromStoredSettings(mailbox), password);
         }
 
+        // Scoped to the mailbox's own tenant. A mailbox row naming another tenant's Stalwart
+        // component would otherwise resolve, and this method goes on to mint a token and connect:
+        // the mailbox would be read over IMAP from a server its tenant does not own.
         ClusterComponent component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(
+                c => c.Id == componentId && c.Cluster.TenantId == mailbox.TenantId, ct)
             ?? throw new InvalidOperationException(
                 "The mail server this mailbox is on no longer exists. Choose another on the "
                 + "Support mailbox tab.");

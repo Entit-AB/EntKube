@@ -102,7 +102,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         };
 
-        ExternalRoute route = await sut.AddRouteAsync(componentId, request);
+        ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, request);
 
         route.Hostname.Should().Be("grafana.example.com");
         route.ServiceName.Should().Be("kube-prometheus-stack-grafana");
@@ -127,7 +127,7 @@ public class ExternalRouteServiceTests : IDisposable
             TlsPrivateKey = "-----BEGIN PRIVATE KEY-----\nMIIE...\n-----END PRIVATE KEY-----"
         };
 
-        ExternalRoute route = await sut.AddRouteAsync(componentId, request);
+        ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, request);
 
         route.TlsMode.Should().Be(TlsMode.Manual);
         route.TlsCertificate.Should().StartWith("-----BEGIN CERTIFICATE-----");
@@ -147,7 +147,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         };
 
-        ExternalRoute route = await sut.AddRouteAsync(componentId, request);
+        ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, request);
 
         route.ServiceName.Should().Be("kube-prometheus-stack");
     }
@@ -164,7 +164,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         };
 
-        Func<Task> act = () => sut.AddRouteAsync(componentId, request);
+        Func<Task> act = () => sut.AddRouteAsync(tenantId, componentId, request);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*Hostname is required*");
@@ -180,7 +180,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = null
         };
 
-        Func<Task> act = () => sut.AddRouteAsync(componentId, request);
+        Func<Task> act = () => sut.AddRouteAsync(tenantId, componentId, request);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*ClusterIssuer name is required*");
@@ -196,7 +196,7 @@ public class ExternalRouteServiceTests : IDisposable
             TlsCertificate = null
         };
 
-        Func<Task> act = () => sut.AddRouteAsync(componentId, request);
+        Func<Task> act = () => sut.AddRouteAsync(tenantId, componentId, request);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*TLS certificate is required*");
@@ -214,9 +214,9 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         };
 
-        await sut.AddRouteAsync(componentId, request);
+        await sut.AddRouteAsync(tenantId, componentId, request);
 
-        Func<Task> duplicate = () => sut.AddRouteAsync(componentId, request);
+        Func<Task> duplicate = () => sut.AddRouteAsync(tenantId, componentId, request);
 
         await duplicate.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*already in use*");
@@ -241,8 +241,8 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         };
 
-        await sut.AddRouteAsync(componentId, request1);
-        await sut.AddRouteAsync(componentId, request2);
+        await sut.AddRouteAsync(tenantId, componentId, request1);
+        await sut.AddRouteAsync(tenantId, componentId, request2);
 
         List<ExternalRoute> routes = await sut.GetRoutesAsync(componentId);
 
@@ -260,7 +260,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         };
 
-        ExternalRoute route = await sut.AddRouteAsync(componentId, request);
+        ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, request);
         await sut.DeleteRouteAsync(route.Id);
 
         List<ExternalRoute> routes = await sut.GetRoutesAsync(componentId);
@@ -281,7 +281,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         };
 
-        ExternalRoute route = await sut.AddRouteAsync(componentId, request);
+        ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, request);
         string yaml = await sut.GenerateFullManifestYamlAsync(route.Id);
 
         // ClusterIssuer mode appends a cert-manager Certificate (issuerRef → ClusterIssuer),
@@ -307,7 +307,7 @@ public class ExternalRouteServiceTests : IDisposable
             TlsCertificate = "-----BEGIN CERTIFICATE-----\ntest\n-----END CERTIFICATE-----"
         };
 
-        ExternalRoute route = await sut.AddRouteAsync(componentId, request);
+        ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, request);
 
         // The applied route manifest is just the HTTPRoute (TLS terminates at the gateway)…
         string yaml = await sut.GenerateHttpRouteYamlAsync(route.Id);
@@ -511,7 +511,7 @@ public class ExternalRouteServiceTests : IDisposable
             RequestTimeoutSeconds = 0
         };
 
-        ExternalRoute route = await sut.AddRouteAsync(componentId, request);
+        ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, request);
 
         route.RequestTimeoutSeconds.Should().Be(0);
     }
@@ -519,7 +519,7 @@ public class ExternalRouteServiceTests : IDisposable
     [Fact]
     public async Task UpdateRouteTimeout_ChangesStoredValue()
     {
-        ExternalRoute route = await sut.AddRouteAsync(componentId, new ExternalRouteRequest
+        ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, new ExternalRouteRequest
         {
             Hostname = "adjust.example.com",
             TlsMode = TlsMode.ClusterIssuer,
@@ -535,7 +535,7 @@ public class ExternalRouteServiceTests : IDisposable
     [Fact]
     public async Task UpdateRouteTimeout_NegativeValue_Throws()
     {
-        ExternalRoute route = await sut.AddRouteAsync(componentId, new ExternalRouteRequest
+        ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, new ExternalRouteRequest
         {
             Hostname = "negative.example.com",
             TlsMode = TlsMode.ClusterIssuer,
@@ -927,7 +927,7 @@ public class ExternalRouteServiceTests : IDisposable
     }
 
     private Task<ExternalRoute> AddRouteForAffinityTestAsync() =>
-        sut.AddRouteAsync(componentId, new ExternalRouteRequest
+        sut.AddRouteAsync(tenantId, componentId, new ExternalRouteRequest
         {
             Hostname = $"affinity-{Guid.NewGuid():N}.example.com",
             ServiceName = "sticky-app",
@@ -977,7 +977,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         };
 
-        ExternalRoute route = await sut.AddRouteAsync(componentId, request);
+        ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, request);
 
         route.GatewayName.Should().Be("traefik-gateway");
         route.GatewayNamespace.Should().Be("traefik");
@@ -1054,7 +1054,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         };
 
-        Func<Task> add = () => sut.AddRouteAsync(componentId, request);
+        Func<Task> add = () => sut.AddRouteAsync(tenantId, componentId, request);
 
         await add.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*already served by an application route*");
@@ -1079,7 +1079,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         };
 
-        Func<Task> add = () => sut.AddRouteAsync(componentId, request);
+        Func<Task> add = () => sut.AddRouteAsync(tenantId, componentId, request);
 
         await add.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*already served by an application route*");
@@ -1101,7 +1101,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         };
 
-        ExternalRoute route = await sut.AddRouteAsync(componentId, request);
+        ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, request);
 
         route.Hostname.Should().Be("grafana.example.com");
     }
@@ -1115,7 +1115,7 @@ public class ExternalRouteServiceTests : IDisposable
     public async Task ShadowedHostnames_NamesTheRoutesTheApplyStepHoldsBack()
     {
         // Saved first, while the hostname was still free — exactly how the real one got there.
-        await sut.AddRouteAsync(componentId, new ExternalRouteRequest
+        await sut.AddRouteAsync(tenantId, componentId, new ExternalRouteRequest
         {
             Hostname = "flow.sto2.entit.eu",
             ServiceName = "flow-definition-store",
@@ -1124,7 +1124,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         });
 
-        await sut.AddRouteAsync(componentId, new ExternalRouteRequest
+        await sut.AddRouteAsync(tenantId, componentId, new ExternalRouteRequest
         {
             Hostname = "grafana.example.com",
             ServicePort = 80,
@@ -1134,7 +1134,7 @@ public class ExternalRouteServiceTests : IDisposable
 
         SeedAppRouteFor("flow.sto2.entit.eu");
 
-        IReadOnlySet<string> shadowed = await sut.ShadowedHostnamesAsync(componentId);
+        IReadOnlySet<string> shadowed = await sut.ShadowedHostnamesAsync(tenantId, componentId);
 
         shadowed.Should().BeEquivalentTo(["flow.sto2.entit.eu"]);
     }
@@ -1145,7 +1145,7 @@ public class ExternalRouteServiceTests : IDisposable
     [Fact]
     public async Task ShadowedHostnames_IsEmptyWhenNoAppRouteCompetes()
     {
-        await sut.AddRouteAsync(componentId, new ExternalRouteRequest
+        await sut.AddRouteAsync(tenantId, componentId, new ExternalRouteRequest
         {
             Hostname = "grafana.example.com",
             ServicePort = 80,
@@ -1153,7 +1153,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         });
 
-        IReadOnlySet<string> shadowed = await sut.ShadowedHostnamesAsync(componentId);
+        IReadOnlySet<string> shadowed = await sut.ShadowedHostnamesAsync(tenantId, componentId);
 
         shadowed.Should().BeEmpty();
     }

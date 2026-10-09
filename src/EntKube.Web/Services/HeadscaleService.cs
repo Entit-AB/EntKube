@@ -322,6 +322,16 @@ public class HeadscaleService(
     /// has server-url + cluster-issuer configured in vault, auto-creates the external
     /// route so headscale is immediately reachable without any manual steps.
     /// Safe to call for any component — silently no-ops if not headscale or config is missing.
+    ///
+    /// <para><b>This is the one component lookup that cannot be meaningfully scoped.</b> Its only
+    /// caller is <c>ComponentInstallOrchestrator</c>, which is Catalog's own code working by
+    /// component id by design and holds no tenant. A <c>tenantId</c> parameter here could only be
+    /// filled with <c>comp.Cluster.TenantId</c> — read from the row it would then be used to
+    /// filter — and a predicate that compares a row against itself can never fail. Adding one
+    /// would take <see cref="ComponentTenantScopingTests"/> to zero while changing nothing, so it
+    /// is left as it is and the reason is written down. For a tenant check to mean anything the
+    /// tenant has to come from the caller's authority, and on this path there is no caller with
+    /// any.</para>
     /// </summary>
     public async Task EnsureExternalRouteAfterInstallAsync(
         Guid componentId, CancellationToken ct = default)
@@ -341,7 +351,12 @@ public class HeadscaleService(
 
         if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(issuer)) return;
 
-        await EnsureExternalRouteAsync(componentId, url, issuer, ct);
+        // The tenant passed on is the component's own, because this runs from the install
+        // orchestrator, which addresses components by id and has no caller to speak for. So the
+        // check downstream is tautological here — it compares the row against itself. It is passed
+        // anyway so the route creation has one code path, and the limit is recorded rather than
+        // dressed up: see the comment on this method.
+        await EnsureExternalRouteAsync(comp.Cluster.TenantId, componentId, url, issuer, ct);
         await EnsureIstioPermissiveAsync(comp.ClusterId, ct);
     }
 
@@ -352,7 +367,8 @@ public class HeadscaleService(
     /// not yet exposed.
     /// </summary>
     public async Task EnsureExternalRouteAsync(
-        Guid componentId, string serverUrl, string clusterIssuer, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, string serverUrl, string clusterIssuer,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -377,7 +393,7 @@ public class HeadscaleService(
             RequestTimeoutSeconds = 0
         };
 
-        await externalRouteService.AddRouteAsync(componentId, req, ct);
+        await externalRouteService.AddRouteAsync(tenantId, componentId, req, ct);
         await lifecycleService.ApplyExternalRoutesAsync(componentId, ct);
     }
 
