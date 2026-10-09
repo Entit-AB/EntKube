@@ -34,6 +34,12 @@ public sealed class ClusterClient(
     public Task EnsureNamespaceAsync(string ns, CancellationToken ct = default)
         => inner.EnsureNamespaceAsync(ns, kubeconfig, ct);
 
+    public Task<ManifestDiff> DiffManifestAsync(string manifest, string ns, CancellationToken ct = default)
+        => inner.DiffManifestAsync(manifest, ns, kubeconfig, ct);
+
+    public Task<string?> GetServerVersionAsync(CancellationToken ct = default)
+        => inner.GetServerVersionAsync(kubeconfig, ct);
+
     public Task<string> DeleteManifestSetAsync(string manifest, CancellationToken ct = default)
         => inner.DeleteManifestSetAsync(manifest, kubeconfig, ct);
 
