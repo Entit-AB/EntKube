@@ -37,7 +37,7 @@ public class MinioBucketInfo
 /// External providers are registered manually — the service stores metadata
 /// in StorageLink entities and credentials in the VaultSecret table.
 /// </summary>
-public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, OpenStackKeystoneClient keystone, ClusterEgressRelay egressRelay, ClusterEgressTunnel egressTunnel, AgentRegistry agentRegistry, IKubernetesClientFactory k8sFactory, StorageLinkClientFactory storageClientFactory, IConfiguration? configuration = null)
+public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, OpenStackKeystoneClient keystone, ClusterEgressRelay egressRelay, ClusterEgressTunnel egressTunnel, AgentRegistry agentRegistry, IKubernetesClientFactory k8sFactory, EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients, StorageLinkClientFactory storageClientFactory, IConfiguration? configuration = null)
 {
     // CubeFS service coordinates for in-cluster access, overridable per deployment via config
     // (the CubeFS Helm chart's service names/ports can differ). Defaults match the chart's
@@ -103,14 +103,19 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         foreach (KubernetesCluster cluster in clusters)
         {
-            if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            // The seam resolves the credential, so the "has no kubeconfig" check is now the same
+            // null it already returns for "not this tenant's".
+            EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
+                await clusterClients.ForAsync(tenantId, cluster.Id, ct);
+
+            if (clusterAccess is null)
             {
                 continue;
             }
 
             try
             {
-                List<MinioBucketInfo> instances = await QueryMinioTenantsAsync(cluster, ct);
+                List<MinioBucketInfo> instances = await QueryMinioTenantsAsync(clusterAccess, cluster, ct);
                 results.AddRange(instances);
             }
             catch
@@ -126,9 +131,12 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     /// Queries a cluster for MinIO Tenant CRDs (minio.min.io/v2).
     /// </summary>
     private static async Task<List<MinioBucketInfo>> QueryMinioTenantsAsync(
-        KubernetesCluster cluster, CancellationToken ct)
+        EntKube.Web.Services.Clusters.IClusterClient clusterAccess, KubernetesCluster cluster,
+        CancellationToken ct)
     {
-        using Kubernetes client = CreateClient(cluster.Kubeconfig!);
+        // The cluster row is still passed, for the environment and display names this builds its
+        // results from. What it no longer carries out of here is the credential.
+        using Kubernetes client = clusterAccess.CreateSdkClient();
 
         object response = await client.CustomObjects.ListClusterCustomObjectAsync(
             group: "minio.min.io",
@@ -617,14 +625,16 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
                 ?? throw new InvalidOperationException("CubeFS component not found.");
         }
 
-        string kubeconfig = component.Cluster.Kubeconfig
+        EntKube.Web.Services.Clusters.IClusterClient clusterAccess =
+            await clusterClients.ForAsync(tenantId, component.ClusterId, ct)
             ?? throw new InvalidOperationException("CubeFS component's cluster has no kubeconfig.");
+
         string ns = string.IsNullOrWhiteSpace(component.Namespace) ? "cubefs-system" : component.Namespace;
         string endpoint = $"http://{CubeFsObjectNodeService}.{ns}.svc.cluster.local:{CubeFsObjectNodePort}";
 
         // Mint (or read back) a dedicated object user for this backup target.
         (string accessKey, string secretKey) = await MintCubeFSObjectUserAsync(
-            kubeconfig, ns, bucketName, CubeFsMasterService, CubeFsMasterPort, ct);
+            clusterAccess, ns, bucketName, CubeFsMasterService, CubeFsMasterPort, ct);
 
         return await ProvisionCubeFSBucketAsync(
             tenantId, environmentId, cubefsComponentId, endpoint, accessKey, secretKey, bucketName,
@@ -639,12 +649,10 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     /// <c>/user/info</c> to read the persisted keys.
     /// </summary>
     private static async Task<(string AccessKey, string SecretKey)> MintCubeFSObjectUserAsync(
-        string kubeconfig, string masterNamespace, string userId,
-        string masterService, int masterPort, CancellationToken ct)
+        EntKube.Web.Services.Clusters.IClusterClient clusterAccess, string masterNamespace,
+        string userId, string masterService, int masterPort, CancellationToken ct)
     {
-        using MemoryStream stream = new(Encoding.UTF8.GetBytes(kubeconfig));
-        KubernetesClientConfiguration cfg = KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
-        using Kubernetes k8s = new(cfg);
+        using Kubernetes k8s = clusterAccess.CreateSdkClient();
         // The master client-facing service is reached via the K8s API-server service proxy.
         string proxyBase =
             $"{k8s.BaseUri.ToString().TrimEnd('/')}/api/v1/namespaces/{masterNamespace}/services/{masterService}:{masterPort}/proxy";
@@ -1761,10 +1769,16 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // Scoped to the tenant. It was not: the binding was found by id alone and only the vault
+        // reads below used the tenant, so a binding id from another tenant resolved and had its
+        // deployment's cluster written to. The seam would refuse the credential a moment later,
+        // but with a message about a missing kubeconfig rather than about whose binding it is.
         StorageBinding binding = await db.Set<StorageBinding>()
             .Include(b => b.StorageLink)
             .Include(b => b.AppDeployment!).ThenInclude(d => d.Cluster)
-            .FirstOrDefaultAsync(b => b.Id == bindingId && b.AppDeploymentId.HasValue, ct)
+            .FirstOrDefaultAsync(
+                b => b.Id == bindingId && b.AppDeploymentId.HasValue
+                  && b.AppDeployment!.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Storage binding not found.");
 
         string? accessKey = await vaultService.GetStorageLinkSecretValueAsync(
@@ -1777,10 +1791,14 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         StorageLink link = binding.StorageLink;
         AppDeployment deployment = binding.AppDeployment!;
-        string kubeconfig = deployment.Cluster.Kubeconfig!;
         string ns = deployment.Namespace;
 
-        await k8sFactory.EnsureNamespaceAsync(ns, kubeconfig, ct);
+        EntKube.Web.Services.Clusters.IClusterClient clusterAccess =
+            await clusterClients.ForAsync(tenantId, deployment.ClusterId, ct)
+            ?? throw new InvalidOperationException(
+                "The deployment's cluster has no kubeconfig, so storage credentials cannot be synced.");
+
+        await clusterAccess.EnsureNamespaceAsync(ns, ct);
 
         string secretManifest = $"""
             apiVersion: v1
@@ -1800,7 +1818,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
               STORAGE_REGION: {B64(link.Region ?? "")}
             """;
 
-        await k8sFactory.ApplyManifestAsync(secretManifest, kubeconfig, ct);
+        await clusterAccess.ApplyManifestAsync(secretManifest, ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
         using ApplicationDbContext db2 = dbFactory.CreateDbContext();

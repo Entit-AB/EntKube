@@ -53,7 +53,9 @@ public class StorageServiceTests : IDisposable
         OpenStackKeystoneClient keystone = new(httpFactory, vaultService, egressTunnel, dbFactory);
         OpenStackS3Service openStackS3 = new(vaultService, httpFactory, keystone);
         StorageLinkClientFactory storageClientFactory = new(vaultService, dbFactory, httpFactory, keystone);
-        sut = new StorageService(dbFactory, vaultService, openStackS3, keystone, egressRelay, egressTunnel, agentRegistry, k8sMock.Object, storageClientFactory);
+        sut = new StorageService(dbFactory, vaultService, openStackS3, keystone, egressRelay, egressTunnel, agentRegistry, k8sMock.Object,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sMock.Object),
+            storageClientFactory);
     }
 
     public void Dispose()
