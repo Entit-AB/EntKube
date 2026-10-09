@@ -35,6 +35,25 @@ public static class TestServices
     }
 
     /// <summary>A 32-byte base64 key — enough for the vault encryption service and to derive ingest tokens.</summary>
+    /// <summary>
+    /// An <see cref="EntKube.Web.Services.Clusters.IClusterClientFactory"/> that resolves nothing.
+    ///
+    /// <para>For the many tests that construct a <see cref="VaultService"/> to exercise encryption
+    /// and storage and never push a secret to a cluster. Returning null is what the real factory
+    /// returns for a cluster it has no credential for, so these tests take the same branch they
+    /// always did — and a test that unexpectedly starts syncing gets "no kubeconfig" rather than a
+    /// null reference.</para>
+    /// </summary>
+    public static EntKube.Web.Services.Clusters.IClusterClientFactory NoClusterAccess { get; } =
+        new NoClusterAccessFactory();
+
+    private sealed class NoClusterAccessFactory : EntKube.Web.Services.Clusters.IClusterClientFactory
+    {
+        public Task<EntKube.Web.Services.Clusters.IClusterClient?> ForAsync(
+            Guid tenantId, Guid clusterId, CancellationToken ct = default)
+            => Task.FromResult<EntKube.Web.Services.Clusters.IClusterClient?>(null);
+    }
+
     public const string TestRootKeyBase64 = "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=";
 
     /// <summary>
@@ -193,8 +212,16 @@ public sealed class InterceptingTestDb : IDisposable
     /// <summary>A context for seeding/reading test data. Also intercepting, like production reads.</summary>
     public ApplicationDbContext CreateContext() => Factory.CreateDbContext();
 
-    /// <summary>Builds a VaultService bound to this database and resolver.</summary>
-    public VaultService CreateVaultService() => new(Factory, Encryption, Resolver);
+    /// <summary>
+    /// Builds a VaultService bound to this database and resolver.
+    ///
+    /// <para><paramref name="clusterClients"/> is for the tests that push a secret to a cluster;
+    /// everything else gets <see cref="TestServices.NoClusterAccess"/>, which refuses in the same
+    /// way the real factory refuses a cluster it holds no credential for.</para>
+    /// </summary>
+    public VaultService CreateVaultService(
+        EntKube.Web.Services.Clusters.IClusterClientFactory? clusterClients = null)
+        => new(Factory, Encryption, clusterClients ?? TestServices.NoClusterAccess, Resolver);
 
     /// <summary>
     /// Stores a kubeconfig for a cluster in the vault (as production would), so subsequent loads

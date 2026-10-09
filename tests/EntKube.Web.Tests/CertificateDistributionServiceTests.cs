@@ -38,7 +38,7 @@ public sealed class CertificateDistributionServiceTests : IDisposable
             db.Database.EnsureCreated();
 
         VaultEncryptionService encryption = new(TestRootKey);
-        VaultService vault = new(dbFactory, encryption);
+        VaultService vault = new(dbFactory, encryption, TestServices.NoClusterAccess);
         ClusterChangeGate gate = new(new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
         sut = new CertificateDistributionService(
             dbFactory, vault,

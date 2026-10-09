@@ -41,7 +41,7 @@ public class KeycloakComponentTenancyTests : IDisposable
         db.SaveChanges();
 
         sut = TestServices.BuildKeycloak(factory, new VaultService(factory, new VaultEncryptionService(
-            Convert.FromBase64String(TestServices.TestRootKeyBase64))));
+            Convert.FromBase64String(TestServices.TestRootKeyBase64)), TestServices.NoClusterAccess));
     }
 
     public void Dispose()

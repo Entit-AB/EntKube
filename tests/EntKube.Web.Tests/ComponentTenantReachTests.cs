@@ -264,7 +264,7 @@ public class ComponentTenantReachTests : IDisposable
 
         SupportMailboxService mailboxes = new(
             dbFactory,
-            new VaultService(dbFactory, new VaultEncryptionService(TestRootKey)),
+            new VaultService(dbFactory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess),
             null!, null!, null!,
             NullLogger<SupportMailboxService>.Instance);
 

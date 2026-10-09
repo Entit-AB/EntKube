@@ -15,6 +15,7 @@ namespace EntKube.Web.Services;
 public class VaultService(
     IDbContextFactory<SecretsDbContext> dbFactory,
     VaultEncryptionService encryption,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     // Optional: used only to evict the cached kubeconfig plaintext after an update. Absent in
     // unit tests, where there is no resolver cache to invalidate.
     KubeconfigResolver? kubeconfigResolver = null)
@@ -2193,14 +2194,18 @@ public class VaultService(
         KubernetesCluster? cluster = await db.KubernetesClusters
             .FirstOrDefaultAsync(c => c.Id == secret.KubernetesClusterId, ct);
 
-        if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess = cluster is null
+            ? null
+            : await clusterClients.ForAsync(secret.Vault.TenantId, cluster.Id, ct);
+
+        if (clusterAccess is null)
         {
             return ClusterRefreshResult.NoTarget;
         }
 
         string ns = secret.KubernetesNamespace ?? "default";
         Dictionary<string, string>? liveData = await ReadLiveSecretDataAsync(
-            secret.KubernetesSecretName!, ns, cluster.Kubeconfig!, ct);
+            secret.KubernetesSecretName!, ns, clusterAccess, ct);
 
         if (liveData is null)
         {
@@ -2393,22 +2398,22 @@ public class VaultService(
     /// Secret with no data section returns an empty map.
     /// </summary>
     private static async Task<Dictionary<string, string>?> ReadLiveSecretDataAsync(
-        string secretName, string ns, string kubeconfig, CancellationToken ct)
+        string secretName, string ns, EntKube.Web.Services.Clusters.IClusterClient clusterAccess,
+        CancellationToken ct)
     {
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
+            // One named Secret, so the seam's resource/namespace read with the name as a field
+            // selector rather than a list — the parse below already expects a single object's
+            // "data", and the caller reads null as "gone from the cluster".
+            string json = await clusterAccess.GetJsonAsync($"secret/{secretName}", ns, ct: ct);
 
-            HelmExecutionResult result = await RunProcessAsync(
-                "kubectl", $"get secret {secretName} -n {ns} --kubeconfig {tempKubeconfig} -o json", ct);
-
-            if (!result.Success || string.IsNullOrWhiteSpace(result.Output))
+            if (string.IsNullOrWhiteSpace(json))
             {
                 return null;
             }
 
-            System.Text.Json.Nodes.JsonNode? node = System.Text.Json.Nodes.JsonNode.Parse(result.Output);
+            System.Text.Json.Nodes.JsonNode? node = System.Text.Json.Nodes.JsonNode.Parse(json);
             if (node?["data"] is not System.Text.Json.Nodes.JsonObject data)
             {
                 return new Dictionary<string, string>(StringComparer.Ordinal);
@@ -2436,14 +2441,9 @@ public class VaultService(
         }
         catch
         {
+            // The credential file is the seam's business now, so there is nothing to clean up —
+            // and a read that fails is still "gone or unreadable" to the caller.
             return null;
-        }
-        finally
-        {
-            if (File.Exists(tempKubeconfig))
-            {
-                File.Delete(tempKubeconfig);
-            }
         }
     }
 
@@ -2534,18 +2534,24 @@ public class VaultService(
         foreach (IGrouping<Guid, VaultSecret> clusterGroup in clusterGroups)
         {
             KubernetesCluster? cluster = clusterGroup.First().KubernetesCluster;
-            if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+
+            // Through the seam, which also closes a hole the environment check above cannot see.
+            // That check refuses an environment-bound secret whose target cluster is in a
+            // different environment — but a SHARED secret has no environment, so the check is
+            // skipped entirely and nothing else here compared the cluster's tenant to this one.
+            // A shared app secret naming another tenant's cluster would have been written to it.
+            // ForAsync returns null for "not this tenant's" and for "no kubeconfig" alike.
+            EntKube.Web.Services.Clusters.IClusterClient? clusterAccess = cluster is null
+                ? null
+                : await clusterClients.ForAsync(tenantId, cluster.Id, ct);
+
+            if (clusterAccess is null)
             {
-                results.Add($"✗ Cluster '{clusterGroup.Key}' has no kubeconfig — skipping {clusterGroup.Count()} secret(s).");
+                results.Add($"✗ Cluster '{clusterGroup.Key}' has no kubeconfig, or is not this tenant's — skipping {clusterGroup.Count()} secret(s).");
                 continue;
             }
 
-            string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-
-            try
             {
-                await SecretFile.WriteAsync(tempKubeconfig, cluster.Kubeconfig, ct);
-
                 // Within this cluster, group OPAQUE secrets by (K8sSecretName, Namespace)
                 // so multiple values land as keys in one generic Secret. Certificate
                 // secrets are handled separately below — each is its own kubernetes.io/tls
@@ -2563,80 +2569,63 @@ public class VaultService(
                     string k8sSecretName = group.Key.SecretName;
                     string ns = group.Key.Namespace;
 
-                    // Ensure namespace exists.
-                    await RunProcessAsync("kubectl",
-                        $"create namespace {ns} --kubeconfig {tempKubeconfig}", ct);
+                    await clusterAccess.EnsureNamespaceAsync(ns, ct);
 
                     // Decrypt each secret value. If a shared and an environment-bound
                     // secret share the same key name in this target, the environment
                     // -bound value wins (an explicit per-environment override).
-                    List<string> literals = [];
-
                     IEnumerable<VaultSecret> effective = group
                         .GroupBy(s => s.Name)
                         .Select(g => g.OrderByDescending(s => s.EnvironmentId.HasValue).First());
 
+                    Dictionary<string, string> values = [];
+
                     foreach (VaultSecret vaultSecret in effective)
                     {
-                        string plainValue = encryption.Decrypt(dataKey, vaultSecret.EncryptedValue, vaultSecret.Nonce);
-
-                        // Shell-safe: write value to a temp file so we avoid quoting issues.
-                        string tmpVal = Path.Combine(Path.GetTempPath(), $"entkube-val-{Guid.NewGuid()}");
-                        await SecretFile.WriteAsync(tmpVal, plainValue, ct);
-                        literals.Add($"--from-file={vaultSecret.Name}={tmpVal}");
+                        values[vaultSecret.Name] =
+                            encryption.Decrypt(dataKey, vaultSecret.EncryptedValue, vaultSecret.Nonce);
                     }
 
-                    if (literals.Count == 0)
+                    if (values.Count == 0)
                     {
                         results.Add($"  (skipped '{k8sSecretName}/{ns}' — no decryptable values)");
                         continue;
                     }
 
-                    // Delete and recreate for clean state.
-                    await RunProcessAsync("kubectl",
-                        $"delete secret {k8sSecretName} --namespace {ns} --ignore-not-found --kubeconfig {tempKubeconfig}", ct);
-
-                    HelmExecutionResult createResult = await RunProcessAsync("kubectl",
-                        $"create secret generic {k8sSecretName} --namespace {ns} {string.Join(" ", literals)} --kubeconfig {tempKubeconfig}", ct);
-
-                    // Clean up temp value files.
-                    foreach (string lit in literals)
+                    try
                     {
-                        // Extract file path from "--from-file=KEY=PATH"
-                        int eq2 = lit.IndexOf('=', lit.IndexOf('=') + 1);
-                        if (eq2 >= 0)
-                        {
-                            string tmpFile = lit[(eq2 + 1)..];
-                            if (File.Exists(tmpFile)) File.Delete(tmpFile);
-                        }
+                        // Replace rather than apply: these Secrets carry no last-applied
+                        // annotation, so an apply would merge and a key removed from the vault
+                        // would survive in the cluster. See IKubernetesClientFactory.
+                        await clusterAccess.ReplaceSecretAsync(
+                            k8sSecretName, ns,
+                            BuildSecretManifest(k8sSecretName, ns, "Opaque", values),
+                            $"Sync {values.Count} secret key(s) into '{k8sSecretName}' in {ns}",
+                            ct);
+
+                        results.Add($"✓ Secret '{k8sSecretName}' synced to '{ns}' on '{cluster!.Name}' ({group.Count()} keys)");
                     }
-
-                    if (createResult.Success)
+                    catch (OperationCanceledException)
                     {
-                        await LabelManagedSecretAsync(k8sSecretName, ns, tempKubeconfig, ct);
-                        results.Add($"✓ Secret '{k8sSecretName}' synced to '{ns}' on '{cluster.Name}' ({group.Count()} keys)");
+                        throw;
                     }
-                    else
+                    catch (Exception ex)
                     {
-                        results.Add($"✗ Secret '{k8sSecretName}' failed on '{cluster.Name}': {createResult.Output}");
+                        results.Add($"✗ Secret '{k8sSecretName}' failed on '{cluster!.Name}': {ex.Message}");
                     }
                 }
 
                 // Certificate secrets → one kubernetes.io/tls Secret each.
                 foreach (VaultSecret certSecret in clusterGroup.Where(s => s.SecretType == VaultSecretType.Certificate))
                 {
-                    await SyncCertificateSecretAsync(certSecret, dataKey, cluster!, tempKubeconfig, results, ct);
+                    await SyncCertificateSecretAsync(certSecret, dataKey, cluster!, clusterAccess, results, ct);
                 }
 
                 // OAuth/OIDC client secrets → one Opaque Secret each (named keys).
                 foreach (VaultSecret oauthSecret in clusterGroup.Where(s => s.SecretType == VaultSecretType.OAuthClient))
                 {
-                    await SyncOAuthClientSecretAsync(oauthSecret, dataKey, cluster!, tempKubeconfig, results, ct);
+                    await SyncOAuthClientSecretAsync(oauthSecret, dataKey, cluster!, clusterAccess, results, ct);
                 }
-            }
-            finally
-            {
-                if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
             }
         }
 
@@ -2657,13 +2646,47 @@ public class VaultService(
     public const string ManagedByLabelValue = "entkube";
 
     /// <summary>
-    /// Stamps the EntKube managed-by labels onto a freshly-synced Secret. Best-effort:
-    /// a labeling failure must not fail the sync, so the result is not inspected.
+    /// Renders a Secret as a manifest, base64-encoding each value.
+    ///
+    /// <para><b>Why a manifest rather than <c>--from-file</c>.</b> The temp-file form existed to
+    /// keep values out of the argument list, which a process table exposes — and a manifest keeps
+    /// them out of it just as well, in one 0600 file written by the seam instead of one per value
+    /// written here. What it additionally buys is that the change goes through
+    /// <c>IClusterClient</c>, so it is acknowledged and recorded like every other cluster change.
+    /// It is NOT <c>--from-literal</c>, which would put the values in argv; that remains the thing
+    /// never to do.</para>
+    ///
+    /// <para>The managed-by labels are part of the manifest, which removes the separate
+    /// <c>kubectl label</c> call that used to follow every sync — a call that was best-effort, so
+    /// a Secret could end up written but unlabelled, and the deployment importer would then
+    /// re-adopt EntKube's own Secret back into the vault.</para>
+    ///
+    /// <para>Keys are quoted. Kubernetes allows <c>.</c> and <c>-</c> in a Secret key, and
+    /// <c>tls.crt</c> unquoted is valid YAML but relies on it; quoting removes the question.</para>
     /// </summary>
-    private async Task LabelManagedSecretAsync(string name, string ns, string tempKubeconfig, CancellationToken ct)
+    public static string BuildSecretManifest(
+        string name, string ns, string type, IReadOnlyDictionary<string, string> values)
     {
-        await RunProcessAsync("kubectl",
-            $"label secret {name} --namespace {ns} {ManagedByLabelKey}={ManagedByLabelValue} entkube.io/managed=true --overwrite --kubeconfig {tempKubeconfig}", ct);
+        System.Text.StringBuilder manifest = new();
+
+        manifest.AppendLine("apiVersion: v1");
+        manifest.AppendLine("kind: Secret");
+        manifest.AppendLine("metadata:");
+        manifest.AppendLine($"  name: {name}");
+        manifest.AppendLine($"  namespace: {ns}");
+        manifest.AppendLine("  labels:");
+        manifest.AppendLine($"    {ManagedByLabelKey}: {ManagedByLabelValue}");
+        manifest.AppendLine("    entkube.io/managed: \"true\"");
+        manifest.AppendLine($"type: {type}");
+        manifest.AppendLine("data:");
+
+        foreach ((string key, string value) in values.OrderBy(v => v.Key, StringComparer.Ordinal))
+        {
+            string encoded = Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(value));
+            manifest.AppendLine($"  \"{key}\": {encoded}");
+        }
+
+        return manifest.ToString();
     }
 
     /// <summary>
@@ -2674,7 +2697,8 @@ public class VaultService(
     /// </summary>
     private async Task SyncCertificateSecretAsync(
         VaultSecret certSecret, byte[] dataKey, KubernetesCluster cluster,
-        string tempKubeconfig, List<string> results, CancellationToken ct)
+        EntKube.Web.Services.Clusters.IClusterClient clusterAccess, List<string> results,
+        CancellationToken ct)
     {
         string ns = certSecret.KubernetesNamespace ?? "default";
         string k8sSecretName = certSecret.KubernetesSecretName!;
@@ -2703,56 +2727,42 @@ public class VaultService(
             return;
         }
 
-        // Ensure namespace exists.
-        await RunProcessAsync("kubectl", $"create namespace {ns} --kubeconfig {tempKubeconfig}", ct);
+        await clusterAccess.EnsureNamespaceAsync(ns, ct);
 
-        string crtFile = Path.Combine(Path.GetTempPath(), $"entkube-tls-crt-{Guid.NewGuid()}");
-        string keyFile = Path.Combine(Path.GetTempPath(), $"entkube-tls-key-{Guid.NewGuid()}");
-        string fullChainFile = Path.Combine(Path.GetTempPath(), $"entkube-tls-fullchain-{Guid.NewGuid()}");
-        string? caFile = bundle.HasCaCertificate ? Path.Combine(Path.GetTempPath(), $"entkube-tls-ca-{Guid.NewGuid()}") : null;
+        // The same four keys as before, with the same bodies — including the trailing newline on
+        // the private key and the CA, which some consumers require and which the temp-file form
+        // added explicitly.
+        Dictionary<string, string> values = new(StringComparer.Ordinal)
+        {
+            ["tls.crt"] = bundle.CombinedCertificateChain,
+            ["tls.key"] = bundle.PrivateKey!.Trim() + "\n",
+            // fullchain.crt = leaf + intermediates + CA (everything but the private key),
+            // for consumers that want the complete chain in a single file.
+            ["fullchain.crt"] = bundle.FullChain,
+        };
+
+        if (bundle.HasCaCertificate)
+        {
+            values["ca.crt"] = bundle.CaCertificate!.Trim() + "\n";
+        }
 
         try
         {
-            await SecretFile.WriteAsync(crtFile, bundle.CombinedCertificateChain, ct);
-            await SecretFile.WriteAsync(keyFile, bundle.PrivateKey!.Trim() + "\n", ct);
-            // fullchain.crt = leaf + intermediates + CA (everything but the private key),
-            // for consumers that want the complete chain in a single file.
-            await SecretFile.WriteAsync(fullChainFile, bundle.FullChain, ct);
+            await clusterAccess.ReplaceSecretAsync(
+                k8sSecretName, ns,
+                BuildSecretManifest(k8sSecretName, ns, "kubernetes.io/tls", values),
+                $"Sync TLS certificate '{k8sSecretName}' into {ns}",
+                ct);
 
-            List<string> fromFiles =
-            [
-                $"--from-file=tls.crt={crtFile}",
-                $"--from-file=tls.key={keyFile}",
-                $"--from-file=fullchain.crt={fullChainFile}",
-            ];
-            if (caFile is not null)
-            {
-                await File.WriteAllTextAsync(caFile, bundle.CaCertificate!.Trim() + "\n", ct);
-                fromFiles.Add($"--from-file=ca.crt={caFile}");
-            }
-
-            await RunProcessAsync("kubectl",
-                $"delete secret {k8sSecretName} --namespace {ns} --ignore-not-found --kubeconfig {tempKubeconfig}", ct);
-
-            HelmExecutionResult createResult = await RunProcessAsync("kubectl",
-                $"create secret generic {k8sSecretName} --namespace {ns} --type=kubernetes.io/tls {string.Join(" ", fromFiles)} --kubeconfig {tempKubeconfig}", ct);
-
-            if (createResult.Success)
-            {
-                await LabelManagedSecretAsync(k8sSecretName, ns, tempKubeconfig, ct);
-                results.Add($"✓ Certificate '{k8sSecretName}' synced to '{ns}' on '{cluster.Name}' (kubernetes.io/tls, tls.crt + tls.key + fullchain.crt{(caFile is not null ? " + ca.crt" : "")})");
-            }
-            else
-            {
-                results.Add($"✗ Certificate '{k8sSecretName}' failed on '{cluster.Name}': {createResult.Output}");
-            }
+            results.Add($"✓ Certificate '{k8sSecretName}' synced to '{ns}' on '{cluster.Name}' (kubernetes.io/tls, tls.crt + tls.key + fullchain.crt{(bundle.HasCaCertificate ? " + ca.crt" : "")})");
         }
-        finally
+        catch (OperationCanceledException)
         {
-            if (File.Exists(crtFile)) File.Delete(crtFile);
-            if (File.Exists(keyFile)) File.Delete(keyFile);
-            if (File.Exists(fullChainFile)) File.Delete(fullChainFile);
-            if (caFile is not null && File.Exists(caFile)) File.Delete(caFile);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            results.Add($"✗ Certificate '{k8sSecretName}' failed on '{cluster.Name}': {ex.Message}");
         }
     }
 
@@ -2764,7 +2774,8 @@ public class VaultService(
     /// </summary>
     private async Task SyncOAuthClientSecretAsync(
         VaultSecret oauthSecret, byte[] dataKey, KubernetesCluster cluster,
-        string tempKubeconfig, List<string> results, CancellationToken ct)
+        EntKube.Web.Services.Clusters.IClusterClient clusterAccess, List<string> results,
+        CancellationToken ct)
     {
         string ns = oauthSecret.KubernetesNamespace ?? "default";
         string k8sSecretName = oauthSecret.KubernetesSecretName!;
@@ -2797,46 +2808,27 @@ public class VaultService(
         if (!string.IsNullOrWhiteSpace(bundle.TenantId)) data["tenant-id"] = bundle.TenantId.Trim();
         if (!string.IsNullOrWhiteSpace(bundle.Scopes)) data["scopes"] = bundle.Scopes.Trim();
 
-        // Ensure namespace exists.
-        await RunProcessAsync("kubectl", $"create namespace {ns} --kubeconfig {tempKubeconfig}", ct);
+        await clusterAccess.EnsureNamespaceAsync(ns, ct);
 
-        List<string> fromFiles = [];
-        List<string> tmpFiles = [];
         try
         {
-            foreach ((string key, string value) in data)
-            {
-                string tmp = Path.Combine(Path.GetTempPath(), $"entkube-oauth-{Guid.NewGuid()}");
-                await SecretFile.WriteAsync(tmp, value, ct);
-                tmpFiles.Add(tmp);
-                fromFiles.Add($"--from-file={key}={tmp}");
-            }
+            await clusterAccess.ReplaceSecretAsync(
+                k8sSecretName, ns,
+                BuildSecretManifest(k8sSecretName, ns, "Opaque", data),
+                $"Sync OAuth client '{k8sSecretName}' into {ns}",
+                ct);
 
-            await RunProcessAsync("kubectl",
-                $"delete secret {k8sSecretName} --namespace {ns} --ignore-not-found --kubeconfig {tempKubeconfig}", ct);
-
-            HelmExecutionResult createResult = await RunProcessAsync("kubectl",
-                $"create secret generic {k8sSecretName} --namespace {ns} {string.Join(" ", fromFiles)} --kubeconfig {tempKubeconfig}", ct);
-
-            if (createResult.Success)
-            {
-                await LabelManagedSecretAsync(k8sSecretName, ns, tempKubeconfig, ct);
-                results.Add($"✓ OAuth client '{k8sSecretName}' synced to '{ns}' on '{cluster.Name}' ({data.Count} keys)");
-            }
-            else
-            {
-                results.Add($"✗ OAuth client '{k8sSecretName}' failed on '{cluster.Name}': {createResult.Output}");
-            }
+            results.Add($"✓ OAuth client '{k8sSecretName}' synced to '{ns}' on '{cluster.Name}' ({data.Count} keys)");
         }
-        finally
+        catch (OperationCanceledException)
         {
-            foreach (string tmp in tmpFiles)
-            {
-                if (File.Exists(tmp)) File.Delete(tmp);
-            }
+            throw;
+        }
+        catch (Exception ex)
+        {
+            results.Add($"✗ OAuth client '{k8sSecretName}' failed on '{cluster.Name}': {ex.Message}");
         }
     }
-
     // --- Git Repository Secrets ---
 
     /// <summary>

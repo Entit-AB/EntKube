@@ -354,6 +354,81 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     }
 
     /// <summary>
+    /// Replaces one Secret's contents. See <see cref="IKubernetesClientFactory.ReplaceSecretAsync"/>
+    /// for why this is delete-then-apply behind a single acknowledgment.
+    /// </summary>
+    public async Task<string> ReplaceSecretAsync(
+        string name, string ns, string manifest, string kubeconfig, string? summary = null,
+        CancellationToken ct = default)
+    {
+        // Asked about the apply, not the delete: the diff is then the real before-and-after, and
+        // the values in it are removed by SecretRedaction on the way into ClusterChangeDiff.
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Apply,
+            Manifest = manifest,
+            Kubeconfig = kubeconfig,
+            Namespace = ns,
+            Summary = summary,
+        }, ct);
+
+        string kubeconfigPath = Path.GetTempFileName();
+        string manifestPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+            await SecretFile.WriteAsync(manifestPath, manifest, ct);
+
+            // The values are in the manifest file, never in the argument list — which is the
+            // property the --from-file form this replaces existed to get. A process argument list
+            // is readable by anything that can see the process table.
+            string output = "";
+
+            foreach (string arguments in BuildReplaceSecretSequence(
+                         name, ns, manifestPath, kubeconfigPath))
+            {
+                output = await RunKubectlAsync(arguments, ct);
+            }
+
+            return output;
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+            File.Delete(manifestPath);
+        }
+    }
+
+    /// <summary>
+    /// The command line for clearing a Secret before it is rewritten.
+    ///
+    /// <para><c>--ignore-not-found</c> is what makes a first-time sync work: there is nothing to
+    /// remove, and without it the whole replace would fail on a Secret that does not exist yet.
+    /// Extracted and asserted because every test on these paths reaches the cluster through a
+    /// mocked factory, so argv built inline is argv no test runs.</para>
+    /// </summary>
+    public static string BuildSecretDeleteArguments(string name, string ns, string kubeconfigPath)
+        => $"delete secret {name} --namespace {ns} --ignore-not-found --kubeconfig={kubeconfigPath}";
+
+    /// <summary>
+    /// The two commands a replace runs, in order.
+    ///
+    /// <para>Returned as data so the <em>ordering and the presence of both steps</em> can be
+    /// asserted. Every caller of <see cref="ReplaceSecretAsync"/> reaches the cluster through a
+    /// mocked factory, so a mutant that drops the delete — turning the replace into a plain apply,
+    /// and letting a revoked key survive in the cluster — is invisible to all of their tests. That
+    /// is the fourth time a mock at the seam has hidden the seam, so this time the sequence is
+    /// extracted while the operation is being written rather than after a mutant found it.</para>
+    /// </summary>
+    public static IReadOnlyList<string> BuildReplaceSecretSequence(
+        string name, string ns, string manifestPath, string kubeconfigPath) =>
+    [
+        BuildSecretDeleteArguments(name, ns, kubeconfigPath),
+        BuildApplyArguments(manifestPath, kubeconfigPath, ns),
+    ];
+
+    /// <summary>
     /// The command line for deleting a manifest set.
     ///
     /// <para>Split out so <c>--ignore-not-found</c> can be asserted on. It was inline, and a

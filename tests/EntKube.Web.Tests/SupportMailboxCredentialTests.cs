@@ -46,7 +46,7 @@ public class SupportMailboxCredentialTests : IDisposable
         db.SaveChanges();
 
         TestDbContextFactory factory = new(connection);
-        vault = new VaultService(factory, new VaultEncryptionService(TestRootKey));
+        vault = new VaultService(factory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess);
 
         // A real vault: creating the password is the thing under test, and a null one would be
         // swallowed by the same catch that reports a Keycloak failure — so every test here would pass

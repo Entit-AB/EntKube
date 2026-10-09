@@ -93,7 +93,7 @@ public class KubeconfigResolverTests : IDisposable
 
         resolver = new KubeconfigResolver(sp, encryption);
         interceptor = new KubeconfigMaterializationInterceptor(resolver);
-        vault = new VaultService(dbFactory, encryption, resolver);
+        vault = new VaultService(dbFactory, encryption, TestServices.NoClusterAccess, resolver);
     }
 
     public void Dispose()

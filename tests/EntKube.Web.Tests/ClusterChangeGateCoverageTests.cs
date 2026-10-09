@@ -59,14 +59,25 @@ public class ClusterChangeGateCoverageTests
     /// converted. The slack half earned itself again there — I banked 34, having subtracted the
     /// exemption and forgotten the conversion.</para>
     ///
-    /// <para>Now <b>28</b>, from <c>ComponentLifecycleService</c>: the namespace LimitRange
+    /// <para>Then <b>28</b>, from <c>ComponentLifecycleService</c>: the namespace LimitRange
     /// defaults, two stalled-workload reads and the ClusterIssuer listing. That file held 15 and
-    /// holds 10. Of those ten, four are <c>SyncComponentSecretsAsync</c>'s deliberate
-    /// <c>--from-file</c> path, two apply an image-pull Secret, one applies a manifest from a URL
-    /// (which the seam cannot express) and one is <c>kubectl describe</c> (likewise). Only the
-    /// Secret-bearing pairs are a decision rather than a missing operation.</para>
+    /// holds 10.</para>
+    ///
+    /// <para>Now <b>17</b>, because <c>VaultService</c> is at zero. All eleven of its invocations
+    /// went: the three namespace creations, the three delete/create Secret pairs, the live Secret
+    /// read, and the <c>kubectl label</c> that followed every sync — the labels are part of the
+    /// manifest now, so that call stopped existing rather than moving. What unblocked it was
+    /// deciding what the acknowledgment dialog shows for a Secret; the values are removed by
+    /// <c>SecretRedaction</c>, so routing these through the seam no longer puts credentials on a
+    /// screen.</para>
+    ///
+    /// <para>Of the 17 left, 10 are in <c>ComponentLifecycleService</c>: four are
+    /// <c>SyncComponentSecretsAsync</c>'s deliberate <c>--from-file</c> path — which could now
+    /// follow VaultService onto <c>ReplaceSecretAsync</c> — two apply an image-pull Secret,
+    /// one applies a manifest from a URL and one is <c>kubectl describe</c>, neither of which the
+    /// seam can express.</para>
     /// </summary>
-    private const int BaselineUngatedInvocations = 28;
+    private const int BaselineUngatedInvocations = 17;
 
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the
@@ -80,7 +91,6 @@ public class ClusterChangeGateCoverageTests
         "DriftDetectionService",
         "ReleaseVolumeGuard",
         "RolloutService",
-        "VaultService",
         "VpnService",
     ];
 

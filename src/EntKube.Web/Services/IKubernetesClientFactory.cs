@@ -73,6 +73,28 @@ public interface IKubernetesClientFactory
         CancellationToken ct = default);
 
     /// <summary>
+    /// Replaces one Secret's contents wholesale: removes what is there and applies this manifest,
+    /// as a single acknowledged change.
+    ///
+    /// <para><b>Why not just apply.</b> These Secrets are not created by <c>apply</c>, so they
+    /// carry no last-applied annotation — which is the only thing that tells kubectl which keys it
+    /// previously owned. A plain apply therefore <em>merges</em>, and a key removed from the vault
+    /// stays in the cluster. For a credential that has been revoked, that is the one outcome that
+    /// must not happen, and it is why the code being replaced said "delete and recreate for clean
+    /// state".</para>
+    ///
+    /// <para><b>Why one operation and not two.</b> Raising an acknowledgment for the delete and
+    /// another for the apply would ask the operator twice about one decision — and the first
+    /// dialog would describe destroying a Secret that is about to be rewritten, which reads as
+    /// far more alarming than what is happening. The operator is asked once, about the apply, so
+    /// the diff they see is the real before-and-after. The delete is how that result is reached,
+    /// not a separate choice.</para>
+    /// </summary>
+    Task<string> ReplaceSecretAsync(
+        string name, string ns, string manifest, string kubeconfig, string? summary = null,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Deletes every resource in a manifest set, by <c>kubectl delete -f --ignore-not-found</c>.
     ///
     /// <para>Distinct from <see cref="DeleteManifestAsync"/>, which deletes one named resource.

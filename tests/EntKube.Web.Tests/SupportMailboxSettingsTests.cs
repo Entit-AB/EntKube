@@ -233,7 +233,8 @@ public class SupportMailboxSettingsTests : IDisposable
             new VaultService(
                 new TestDbContextFactory(connection),
                 new VaultEncryptionService(Convert.FromBase64String(
-                    "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg="))),
+                    "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=")),
+                TestServices.NoClusterAccess),
             null!, null!, null!,
             NullLogger<SupportMailboxService>.Instance);
     }

@@ -44,6 +44,11 @@ public sealed class ClusterClient(
         string manifest, string ns, string? summary = null, CancellationToken ct = default)
         => inner.ApplyManifestInNamespaceAsync(manifest, ns, kubeconfig, summary, ct);
 
+    public Task<string> ReplaceSecretAsync(
+        string name, string ns, string manifest, string? summary = null,
+        CancellationToken ct = default)
+        => inner.ReplaceSecretAsync(name, ns, manifest, kubeconfig, summary, ct);
+
     public Task<string> DeleteManifestSetAsync(
         string manifest, string ns = "", string? summary = null, CancellationToken ct = default)
         => inner.DeleteManifestSetAsync(manifest, kubeconfig, ns, summary, ct);
