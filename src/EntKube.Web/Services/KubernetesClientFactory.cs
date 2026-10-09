@@ -24,13 +24,30 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// Applies a YAML manifest by writing it to a temp file and running kubectl apply.
     /// The kubeconfig is written to a separate temp file for authentication.
     /// </summary>
-    public async Task<string> ApplyManifestAsync(string manifest, string kubeconfig, CancellationToken ct = default)
+    public Task<string> ApplyManifestAsync(string manifest, string kubeconfig, CancellationToken ct = default)
+        => ApplyManifestInNamespaceAsync(manifest, "", kubeconfig, ct: ct);
+
+    /// <summary>
+    /// Applies a manifest set, defaulting documents that name no namespace to <paramref name="ns"/>.
+    /// Some callers rely on that: KEDA's manifests deliberately omit a namespace so a structured
+    /// ScaledObject and a user's own YAML both land in the app's.
+    /// </summary>
+    /// <param name="summary">
+    /// What the operator is shown in the acknowledgment dialog. Worth passing: a caller that used
+    /// to raise its own acknowledgment knows things this does not — which deployment, how many
+    /// documents — and without it the dialog degrades to "Apply manifest".
+    /// </param>
+    public async Task<string> ApplyManifestInNamespaceAsync(
+        string manifest, string ns, string kubeconfig, string? summary = null,
+        CancellationToken ct = default)
     {
         await _gate.AcknowledgeAsync(new PlannedClusterChange
         {
             Verb = ChangeVerb.Apply,
             Manifest = manifest,
             Kubeconfig = kubeconfig,
+            Namespace = string.IsNullOrEmpty(ns) ? null : ns,
+            Summary = summary,
         }, ct);
 
         string kubeconfigPath = Path.GetTempFileName();
@@ -42,7 +59,7 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             await File.WriteAllTextAsync(manifestPath, manifest, ct);
 
             return await RunKubectlAsync(
-                $"apply -f {manifestPath} --kubeconfig={kubeconfigPath}", ct);
+                BuildApplyArguments(manifestPath, kubeconfigPath, ns), ct);
         }
         finally
         {
@@ -50,6 +67,18 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             File.Delete(manifestPath);
         }
     }
+
+    /// <summary>
+    /// The command line for applying a manifest set.
+    ///
+    /// <para>Split out for the same reason as <see cref="BuildDeleteSetArguments"/>: every test on
+    /// these paths reaches the cluster through a mocked factory, so an argv built inline is argv no
+    /// test ever runs. <c>--namespace</c> is a default here, not a filter — drop it and documents
+    /// that name no namespace of their own land in <c>default</c> instead of the app's.</para>
+    /// </summary>
+    public static string BuildApplyArguments(string manifestPath, string kubeconfigPath, string ns = "")
+        => $"apply -f {manifestPath} --kubeconfig={kubeconfigPath}"
+         + (string.IsNullOrEmpty(ns) ? "" : $" --namespace {ns}");
 
     /// <summary>
     /// Deletes a specific Kubernetes resource by kind, name, and namespace.
@@ -294,13 +323,16 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// has no single kind and name to look up, so its preview is the set itself.</para>
     /// </summary>
     public async Task<string> DeleteManifestSetAsync(
-        string manifest, string kubeconfig, CancellationToken ct = default)
+        string manifest, string kubeconfig, string ns = "", string? summary = null,
+        CancellationToken ct = default)
     {
         await _gate.AcknowledgeAsync(new PlannedClusterChange
         {
             Verb = ChangeVerb.Delete,
             Manifest = manifest,
             Kubeconfig = kubeconfig,
+            Namespace = string.IsNullOrEmpty(ns) ? null : ns,
+            Summary = summary,
         }, ct);
 
         string kubeconfigPath = Path.GetTempFileName();
@@ -312,7 +344,7 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             await SecretFile.WriteAsync(manifestPath, manifest, ct);
 
             return await RunKubectlAsync(
-                BuildDeleteSetArguments(manifestPath, kubeconfigPath), ct);
+                BuildDeleteSetArguments(manifestPath, kubeconfigPath, ns), ct);
         }
         finally
         {
@@ -329,8 +361,10 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// so the argv never ran. The flag is load-bearing: these run on teardown paths where some of
     /// the set is already gone, and without it kubectl fails the whole call.</para>
     /// </summary>
-    public static string BuildDeleteSetArguments(string manifestPath, string kubeconfigPath)
-        => $"delete -f {manifestPath} --kubeconfig={kubeconfigPath} --ignore-not-found";
+    public static string BuildDeleteSetArguments(string manifestPath, string kubeconfigPath, string ns = "")
+        => $"delete -f {manifestPath} --kubeconfig={kubeconfigPath}"
+         + (string.IsNullOrEmpty(ns) ? "" : $" --namespace {ns}")
+         + " --ignore-not-found";
 
     /// <summary>
     /// Runs one helm invocation against a cluster.

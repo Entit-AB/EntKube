@@ -40,10 +40,21 @@ public interface IClusterClient
     Task<string?> GetServerVersionAsync(CancellationToken ct = default);
 
     /// <summary>
+    /// Applies a manifest set, defaulting documents that name no namespace to this one.
+    ///
+    /// <para><paramref name="summary"/> is what the operator reads in the acknowledgment dialog.
+    /// Pass it: the seam knows the manifest but not which deployment it belongs to, so without one
+    /// the dialog says "Apply manifest".</para>
+    /// </summary>
+    Task<string> ApplyManifestInNamespaceAsync(
+        string manifest, string ns, string? summary = null, CancellationToken ct = default);
+
+    /// <summary>
     /// Deletes every resource in a manifest set. Use when holding a multi-document manifest;
     /// <see cref="DeleteManifestAsync"/> is for one named resource.
     /// </summary>
-    Task<string> DeleteManifestSetAsync(string manifest, CancellationToken ct = default);
+    Task<string> DeleteManifestSetAsync(
+        string manifest, string ns = "", string? summary = null, CancellationToken ct = default);
 
     /// <summary>
     /// Runs one helm invocation against this cluster. The credential is supplied from here and the

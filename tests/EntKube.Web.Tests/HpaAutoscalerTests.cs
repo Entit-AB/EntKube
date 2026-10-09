@@ -40,9 +40,12 @@ public class HpaAutoscalerTests : IDisposable
         db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "billing" });
         db.SaveChanges();
 
+        TestDbContextFactory factory = new(connection);
+
         sut = new KedaScalerService(
-            new TestDbContextFactory(connection),
-            new Mock<IClusterChangeGate>().Object,
+            factory,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(
+                factory, new Mock<IKubernetesClientFactory>().Object),
             NullLogger<KedaScalerService>.Instance);
     }
 

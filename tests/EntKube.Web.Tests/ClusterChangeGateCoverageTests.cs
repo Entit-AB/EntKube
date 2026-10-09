@@ -50,7 +50,7 @@ public class ClusterChangeGateCoverageTests
     /// slack half of this ratchet is what said so — it failed on <c>main</c> rather than letting a
     /// stale ceiling sit there granting four sites of free headroom.</para>
     /// </summary>
-    private const int BaselineUngatedInvocations = 41;
+    private const int BaselineUngatedInvocations = 40;
 
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the
