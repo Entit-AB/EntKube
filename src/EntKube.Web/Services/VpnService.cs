@@ -20,7 +20,8 @@ namespace EntKube.Web.Services;
 public class VpnService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
-    ComponentLifecycleService lifecycleService)
+    ComponentLifecycleService lifecycleService,
+    EntKube.Contracts.Catalog.ICatalogApi catalog)
 {
     // ── Tunnel CRUD ─────────────────────────────────────────────────────────────
 
@@ -531,17 +532,22 @@ public class VpnService(
                     ? ["submariner-broker", "submariner"]
                     : ["submariner", "submariner-gateway"];
 
-            ClusterComponent? match = await db.ClusterComponents
+            // Asked of Catalog. The cluster filter stays, and asking for the tenant's
+            // components rather than the table's adds a check this never had: the endpoint's
+            // ClusterId was trusted on its own, so a tunnel endpoint pointing at another tenant's
+            // cluster would have matched a component there and recorded its id and status.
+            EntKube.Contracts.Catalog.InstalledComponent? match =
+                (await catalog.GetComponentsForTenantAsync(tenantId, ct))
                 .Where(c => c.ClusterId == ep.ClusterId
                          && (candidateNames.Contains(c.Name)
                              || (c.ReleaseName != null && candidateNames.Contains(c.ReleaseName))))
                 .OrderByDescending(c => c.InstalledAt)
-                .FirstOrDefaultAsync(ct);
+                .FirstOrDefault();
 
             if (match is not null)
             {
                 ep.ComponentId = match.Id;
-                ep.Status = match.Status == ComponentStatus.Installed
+                ep.Status = match.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed
                     ? VpnEndpointStatus.Ready
                     : VpnEndpointStatus.Pending;
                 changed = true;

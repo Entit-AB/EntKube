@@ -44,7 +44,8 @@ public class ElasticsearchServiceTests : IDisposable
         sut = new ElasticsearchService(
             testDb.Factory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
-            vault, audit, NullLogger<ElasticsearchService>.Instance);
+            vault, audit, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+            NullLogger<ElasticsearchService>.Instance);
     }
 
     public void Dispose()

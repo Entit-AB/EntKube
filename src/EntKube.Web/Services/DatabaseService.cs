@@ -63,7 +63,8 @@ public class DatabaseOperatorStatus
 /// </summary>
 public class DatabaseService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess)
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
+    EntKube.Contracts.Catalog.ICatalogApi catalog)
 {
     // ──────── Operator Availability ────────
 
@@ -78,19 +79,22 @@ public class DatabaseService(
 
         // Find all clusters belonging to this tenant that have the relevant components installed.
 
-        List<ClusterComponent> installedComponents = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .Where(c => c.Cluster.TenantId == tenantId
-                && c.Status == ComponentStatus.Installed
+        // Asked of Catalog rather than of its table. The predicate is unchanged and
+        // applied here: these alias lists are not symmetrical across Name,
+        // ReleaseName and HelmChartName, so a contract method matching every key
+        // against every column would answer about installations these never accepted.
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> installedComponents =
+            (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+            .Where(c => c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed
                 && (c.Name == "cloudnative-pg" || c.ReleaseName == "cnpg"
                     || c.Name == "mongodb-community-operator" || c.Name == "mongodb-operator"
                     || c.ReleaseName == "mongodb-community-operator" || c.ReleaseName == "mongodb-operator"
                     || c.HelmChartName == "community-operator"))
-            .ToListAsync(ct);
+            .ToList();
 
-        ClusterComponent? cnpg = installedComponents.FirstOrDefault(c =>
+        EntKube.Contracts.Catalog.InstalledComponent? cnpg = installedComponents.FirstOrDefault(c =>
             c.Name == "cloudnative-pg" || c.ReleaseName == "cnpg");
-        ClusterComponent? mongo = installedComponents.FirstOrDefault(c =>
+        EntKube.Contracts.Catalog.InstalledComponent? mongo = installedComponents.FirstOrDefault(c =>
             c.Name is "mongodb-community-operator" or "mongodb-operator"
             || c.ReleaseName is "mongodb-community-operator" or "mongodb-operator"
             || c.HelmChartName == "community-operator");
@@ -99,8 +103,8 @@ public class DatabaseService(
         {
             CnpgAvailable = cnpg is not null,
             MongoDbAvailable = mongo is not null,
-            CnpgClusterName = cnpg?.Cluster.Name,
-            MongoDbClusterName = mongo?.Cluster.Name
+            CnpgClusterName = cnpg?.ClusterName,
+            MongoDbClusterName = mongo?.ClusterName
         };
     }
 

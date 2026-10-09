@@ -53,7 +53,7 @@ public class CustomerTabRenderTests : BunitContext, IDisposable
         VaultService vault = testDb.CreateVaultService();
 
         Services.AddSingleton(testDb.Factory);
-        Services.AddSingleton(new TenantService(testDb.Factory, vault));
+        Services.AddSingleton(new TenantService(testDb.Factory, vault, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory)));
         Services.AddSingleton(new CustomerAccessService(testDb.Factory));
         Services.AddSingleton(new PrometheusService(
             testDb.Factory,

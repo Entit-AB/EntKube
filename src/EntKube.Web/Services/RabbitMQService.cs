@@ -158,6 +158,7 @@ public class RabbitMQService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     VaultService vaultService,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<RabbitMQService>? logger = null)
 {
     /// <summary>
@@ -273,22 +274,26 @@ public class RabbitMQService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        List<ClusterComponent> installed = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .Where(c => c.Cluster.TenantId == tenantId
-                        && c.Status == ComponentStatus.Installed
+        // Asked of Catalog rather than of its table. The predicate is unchanged and applied
+        // here: the alias lists are not symmetrical across Name and ReleaseName — the topology
+        // operator answers to two release names and one component name — so a contract method
+        // matching every key against every column would answer about installations this never
+        // accepted.
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> installed =
+            (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+            .Where(c => c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed
                         && (c.Name == "rabbitmq-cluster-operator"
                             || c.ReleaseName == "rabbitmq-cluster-operator"
                             || c.Name == "rabbitmq-messaging-topology-operator"
                             || c.ReleaseName == "rabbitmq-topology-operator"
                             || c.ReleaseName == "rabbitmq-messaging-topology-operator"))
-            .ToListAsync(ct);
+            .ToList();
 
-        ClusterComponent? clusterOp = installed.FirstOrDefault(
+        EntKube.Contracts.Catalog.InstalledComponent? clusterOp = installed.FirstOrDefault(
             c => c.Name == "rabbitmq-cluster-operator"
               || c.ReleaseName == "rabbitmq-cluster-operator");
 
-        ClusterComponent? topologyOp = installed.FirstOrDefault(
+        EntKube.Contracts.Catalog.InstalledComponent? topologyOp = installed.FirstOrDefault(
             c => c.Name == "rabbitmq-messaging-topology-operator"
               || c.ReleaseName is "rabbitmq-topology-operator" or "rabbitmq-messaging-topology-operator");
 
@@ -296,8 +301,8 @@ public class RabbitMQService(
         {
             ClusterOperatorAvailable = clusterOp is not null,
             TopologyOperatorAvailable = topologyOp is not null,
-            ClusterOperatorClusterName = clusterOp?.Cluster.Name,
-            TopologyOperatorClusterName = topologyOp?.Cluster.Name
+            ClusterOperatorClusterName = clusterOp?.ClusterName,
+            TopologyOperatorClusterName = topologyOp?.ClusterName
         };
     }
 

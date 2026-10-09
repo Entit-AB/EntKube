@@ -22,7 +22,7 @@ public class CustomerEnvironmentMembershipTests : IDisposable
     public CustomerEnvironmentMembershipTests()
     {
         db = new InterceptingTestDb(new byte[32]);
-        service = new TenantService(db.Factory, db.CreateVaultService());
+        service = new TenantService(db.Factory, db.CreateVaultService(), new EntKube.Web.Modules.Api.CatalogApi(db.Factory));
 
         using ApplicationDbContext ctx = db.CreateContext();
         ctx.Tenants.Add(new Tenant { Id = tenantId, Name = "Acme", Slug = "acme" });
