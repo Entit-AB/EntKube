@@ -58,11 +58,12 @@ public class CustodyTriageTests
     /// <c>StalwartDnsService</c>. <c>ClusterClient</c>'s own two are the seam resolving the
     /// credential, which is the one place that should.</para>
     ///
-    /// <para><c>VaultService</c>'s two are gone: they were held up on what the acknowledgment
-    /// dialog should show for a Secret, which is now decided and built — the values are redacted,
-    /// so the sync could move onto <c>ReplaceSecretAsync</c>. The same reasoning now applies to
-    /// <c>ComponentLifecycleService.SyncComponentSecretsAsync</c>, which is the last place still
-    /// building Secrets with <c>--from-file</c>.</para>
+    /// <para><c>VaultService</c>'s two are gone, and so is
+    /// <c>ComponentLifecycleService.SyncComponentSecretsAsync</c>. Both were held up on what the
+    /// acknowledgment dialog should show for a Secret; that is decided and built, so the values
+    /// are redacted and both syncs moved onto <c>ReplaceSecretAsync</c>. <b>Nothing in the
+    /// codebase builds a Secret with <c>--from-file</c> any more</b> — and nothing should use
+    /// <c>--from-literal</c>, which is what the prohibition was always about.</para>
     /// </summary>
     private const int BaselineReachable = 24;
 

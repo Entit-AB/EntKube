@@ -21,9 +21,11 @@ namespace EntKube.Web.Tests;
 /// <item>two Helm values files — and a values file is where a catalog component's
 /// <c>Secret = true</c> form fields land, such as grafana's
 /// <c>grafana.adminPassword</c>;</item>
-/// <item>the per-value files in <c>SyncComponentSecretsAsync</c>, which exist <em>specifically</em>
-/// to keep secret values out of an argument list ("NEVER --from-literal") and then wrote them to a
-/// world-readable file instead;</item>
+/// <item>the per-value files in <c>SyncComponentSecretsAsync</c>, which existed
+/// <em>specifically</em> to keep secret values out of an argument list ("NEVER --from-literal")
+/// and then wrote them to a world-readable file instead. Those files are gone now: the values go
+/// into one manifest the seam writes, which keeps them out of the argument list without a file
+/// per value;</item>
 /// <item>eleven manifests, which routinely contain <c>Secret</c> objects.</item>
 /// </list>
 ///

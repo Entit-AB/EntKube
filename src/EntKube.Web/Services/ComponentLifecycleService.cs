@@ -1403,7 +1403,17 @@ public class ComponentLifecycleService(
             .FirstOrDefaultAsync(c => c.Id == componentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
-        if (string.IsNullOrWhiteSpace(component.Cluster.Kubeconfig))
+        // The tenant comes from the component's own cluster row, so the tenant check inside
+        // ForAsync is vacuous here — this is Catalog's own service resolving a credential for a
+        // component Catalog owns, and it is reached by component id by design. What the seam
+        // changes is not the authorization but the custody: the kubeconfig stops being lifted out
+        // of the row and written to a file here.
+        Guid tenantId = component.Cluster.TenantId;
+
+        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
+            await clusterClients.ForAsync(tenantId, component.ClusterId, ct);
+
+        if (clusterAccess is null)
         {
             return new HelmExecutionResult
             {
@@ -1414,7 +1424,6 @@ public class ComponentLifecycleService(
 
         // Retrieve all secrets for this component that are marked for K8s sync.
 
-        Guid tenantId = component.Cluster.TenantId;
         List<VaultSecret> allSecrets = await db.Set<VaultSecret>()
             .Where(s => s.ComponentId == componentId && s.SyncToKubernetes)
             .ToListAsync(ct);
@@ -1446,110 +1455,90 @@ public class ComponentLifecycleService(
                 Namespace: s.KubernetesNamespace ?? component.Namespace ?? "default"
             ));
 
-        // Build kubectl apply commands for each K8s Secret.
-        // We create an Opaque secret with all grouped vault secret values as data keys.
-
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         List<string> results = [];
 
-        try
+        foreach (IGrouping<(string SecretName, string Namespace), VaultSecret> group in groups)
         {
-            await SecretFile.WriteAsync(tempKubeconfig, component.Cluster.Kubeconfig, ct);
+            string k8sSecretName = group.Key.SecretName;
+            string ns = group.Key.Namespace;
 
-            foreach (IGrouping<(string SecretName, string Namespace), VaultSecret> group in groups)
+            // Ensure the namespace exists before writing the secret.
+            // The pod needs the secret at startup, which may be before Helm creates the namespace.
+            await clusterAccess.EnsureNamespaceAsync(ns, ct);
+
+            // Decrypt each value and put it in the manifest, base64-encoded.
+            //
+            // The old form staged one temp file per value and passed --from-file, to keep values
+            // out of the argument list. The reasons were worth keeping and the manifest keeps them
+            // better: RunProcessAsync passed one argument STRING which .NET split itself, so a
+            // value with a space became several arguments and a value with a double quote had the
+            // quote eaten and the rest of the command line swallowed into it — a Secret that
+            // applies cleanly while holding the wrong password. Process arguments are also
+            // world-readable in `ps`. Base64 contains no spaces and no quotes, and goes in a file
+            // the seam writes 0600, so none of that is reachable.
+            //
+            // It is still NEVER --from-literal, which is what those reasons were really about.
+            Dictionary<string, string> values = [];
+
+            foreach (VaultSecret vaultSecret in group)
             {
-                string k8sSecretName = group.Key.SecretName;
-                string ns = group.Key.Namespace;
+                string? plainValue = await vaultService.GetComponentSecretValueAsync(
+                    tenantId, componentId, vaultSecret.Name, ct);
 
-                // Ensure the namespace exists before writing the secret.
-                // The pod needs the secret at startup, which may be before Helm creates the namespace.
-                await RunProcessAsync("kubectl", $"create namespace {ns} --kubeconfig {tempKubeconfig}", ct);
-
-                // Decrypt each secret value and stage it in a temp file.
-                //
-                // NEVER --from-literal: RunProcessAsync passes one argument STRING, which .NET splits
-                // itself, so a value with a space becomes several arguments (kubectl then rejects the
-                // whole command) and a value with a double quote has the quote eaten and the rest of
-                // the command line swallowed into it — a Secret that applies cleanly while holding the
-                // wrong password. Process arguments are also world-readable in `ps` and routinely land
-                // in logs. --from-file passes only paths we generate; the file holds the value verbatim.
-
-                List<string> literals = [];
-                List<string> stagedFiles = [];
-
-                foreach (VaultSecret vaultSecret in group)
-                {
-                    string? plainValue = await vaultService.GetComponentSecretValueAsync(
-                        tenantId, componentId, vaultSecret.Name, ct);
-
-                    if (plainValue is not null)
-                    {
-                        // If the catalog field requests bcrypt transformation, hash the
-                        // plaintext before writing it to the K8s Secret. The vault retains
-                        // the original plaintext so it can be revealed in the UI.
-                        if (secretFieldsByName.TryGetValue(vaultSecret.Name, out ComponentFormField? field)
-                            && field.BcryptOnSync)
-                        {
-                            plainValue = BCrypt.Net.BCrypt.HashPassword(plainValue, workFactor: 12);
-                        }
-
-                        string valuePath = Path.Combine(Path.GetTempPath(), $"entkube-val-{Guid.NewGuid()}");
-                        await SecretFile.WriteAsync(valuePath, plainValue, ct);
-                        if (!OperatingSystem.IsWindows())
-                        {
-                        }
-                        stagedFiles.Add(valuePath);
-                        literals.Add($"--from-file={vaultSecret.Name}={valuePath}");
-                    }
-                }
-
-                if (literals.Count == 0)
+                if (plainValue is null)
                 {
                     continue;
                 }
 
-                // Delete existing secret (if any) then recreate.
-                // This is simpler than patch/merge for the common case.
-
-                string deleteArgs = $"delete secret {k8sSecretName} --namespace {ns} --ignore-not-found --kubeconfig {tempKubeconfig}";
-                await RunProcessAsync("kubectl", deleteArgs, ct);
-
-                string createArgs = $"create secret generic {k8sSecretName} --namespace {ns} {string.Join(" ", literals)} --kubeconfig {tempKubeconfig}";
-                HelmExecutionResult createResult = await RunProcessAsync("kubectl", createArgs, ct);
-
-                foreach (string staged in stagedFiles)
+                // If the catalog field requests bcrypt transformation, hash the
+                // plaintext before writing it to the K8s Secret. The vault retains
+                // the original plaintext so it can be revealed in the UI.
+                if (secretFieldsByName.TryGetValue(vaultSecret.Name, out ComponentFormField? field)
+                    && field.BcryptOnSync)
                 {
-                    if (File.Exists(staged)) File.Delete(staged);
+                    plainValue = BCrypt.Net.BCrypt.HashPassword(plainValue, workFactor: 12);
                 }
 
-                if (createResult.Success)
-                {
-                    // Mark as EntKube-managed so the deployment importer won't re-adopt it.
-                    await RunProcessAsync("kubectl",
-                        $"label secret {k8sSecretName} --namespace {ns} {VaultService.ManagedByLabelKey}={VaultService.ManagedByLabelValue} entkube.io/managed=true --overwrite --kubeconfig {tempKubeconfig}", ct);
-                    results.Add($"✓ Secret '{k8sSecretName}' synced to namespace '{ns}' ({group.Count()} keys)");
-                }
-                else
-                {
-                    results.Add($"✗ Secret '{k8sSecretName}' failed: {createResult.Output}");
-                }
+                values[vaultSecret.Name] = plainValue;
             }
 
-            bool allSucceeded = results.All(r => r.StartsWith("✓"));
-
-            return new HelmExecutionResult
+            if (values.Count == 0)
             {
-                Success = allSucceeded,
-                Output = string.Join("\n", results)
-            };
+                continue;
+            }
+
+            try
+            {
+                // Replace, not apply: these Secrets carry no last-applied annotation, so an apply
+                // would merge and a key removed from the component's configuration would survive
+                // in the cluster. The managed-by labels are in the manifest, which is what the
+                // separate `kubectl label` call used to do — best-effort, so a Secret could be
+                // written and left unlabelled for the deployment importer to re-adopt.
+                await clusterAccess.ReplaceSecretAsync(
+                    k8sSecretName, ns,
+                    VaultService.BuildSecretManifest(k8sSecretName, ns, "Opaque", values),
+                    $"Sync {values.Count} secret key(s) into '{k8sSecretName}' in {ns}",
+                    ct);
+
+                results.Add($"✓ Secret '{k8sSecretName}' synced to namespace '{ns}' ({group.Count()} keys)");
+            }
+            catch (OperationCanceledException)
+            {
+                throw;
+            }
+            catch (Exception ex)
+            {
+                results.Add($"✗ Secret '{k8sSecretName}' failed: {ex.Message}");
+            }
         }
-        finally
+
+        bool allSucceeded = results.All(r => r.StartsWith("✓"));
+
+        return new HelmExecutionResult
         {
-            if (File.Exists(tempKubeconfig))
-            {
-                File.Delete(tempKubeconfig);
-            }
-        }
+            Success = allSucceeded,
+            Output = string.Join("\n", results)
+        };
     }
 
     /// <summary>
