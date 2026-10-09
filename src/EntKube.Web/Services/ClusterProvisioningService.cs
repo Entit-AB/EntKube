@@ -40,6 +40,7 @@ public class ClusterProvisioningService(
     VaultService vaultService,
     OpenStackKeystoneClient keystone,
     OpenStackComputeService compute,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     ILogger<ClusterProvisioningService> logger)
 {
     // Cluster-scoped vault secret names for provisioning artifacts.
@@ -174,7 +175,7 @@ public class ClusterProvisioningService(
             Log($"Registered cluster kubeconfig (API server {apiServerUrl}).");
 
             // ── 10. Record nodes as ClusterServer inventory ──
-            await RecordNodesAsync(clusterId, config, targetKubeconfigPath, workDir, Log, ct);
+            await RecordNodesAsync(tenantId, clusterId, config, Log, ct);
 
             // ── 11. Tear down the ephemeral bootstrap VM ──
             Log("Destroying ephemeral bootstrap VM…");
@@ -359,25 +360,107 @@ public class ClusterProvisioningService(
         await RunAsync("kubectl", $"apply -f {secretYamlPath}", workDir, EnvFor(targetKubeconfigPath), _ => { }, ct);
     }
 
+    /// <summary>
+    /// Records the target cluster's nodes as server inventory.
+    ///
+    /// <para><b>The one step here that can go through the seam.</b> This runs at step 10, after
+    /// <see cref="RegisterProvisionedClusterAsync"/> has put the kubeconfig in the vault — so by
+    /// now there IS a registered cluster to ask for, which is not true of any earlier step. The
+    /// ordering is the whole reason, so moving this call earlier in the sequence would break it;
+    /// the seam returns null for a cluster it has no credential for.</para>
+    ///
+    /// <para>The jsonpath query became a JSON read and a parse, which is more than moving the
+    /// transport and so is called out: the seam has no way to pass a jsonpath expression, and
+    /// deliberately so. The replacement is also less fragile than splitting kubectl's output on
+    /// <c>|</c> and newlines — a node whose name contained either produced a silently wrong
+    /// inventory row.</para>
+    /// </summary>
+    /// <summary>
+    /// Node names and their internal IPs, out of a <c>kubectl get nodes -o json</c> document.
+    ///
+    /// <para>Public and static so the parse can be asserted on its own: this is the part the
+    /// conversion rewrote, and the rest of the method writes database rows from whatever it
+    /// returns. A node with no InternalIP yields a null address rather than being dropped,
+    /// because the row is inventory — a node that exists but has not been given an address yet is
+    /// exactly the state an operator is looking at the list to see.</para>
+    /// </summary>
+    public static IEnumerable<(string NodeName, string? InternalIp)> ParseNodeInventory(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) yield break;
+
+        JsonDocument document;
+        try
+        {
+            document = JsonDocument.Parse(json);
+        }
+        catch (JsonException)
+        {
+            // An unparseable answer is the same as no answer here: inventory is best-effort and
+            // the caller logs a skip rather than failing a provision that otherwise succeeded.
+            yield break;
+        }
+
+        using (document)
+        {
+            if (!document.RootElement.TryGetProperty("items", out JsonElement items)
+                || items.ValueKind != JsonValueKind.Array)
+            {
+                yield break;
+            }
+
+            foreach (JsonElement node in items.EnumerateArray())
+            {
+                if (!node.TryGetProperty("metadata", out JsonElement metadata)
+                    || !metadata.TryGetProperty("name", out JsonElement nameElement)
+                    || nameElement.GetString() is not { Length: > 0 } nodeName)
+                {
+                    continue;
+                }
+
+                string? ip = null;
+
+                if (node.TryGetProperty("status", out JsonElement status)
+                    && status.TryGetProperty("addresses", out JsonElement addresses)
+                    && addresses.ValueKind == JsonValueKind.Array)
+                {
+                    foreach (JsonElement address in addresses.EnumerateArray())
+                    {
+                        if (address.TryGetProperty("type", out JsonElement type)
+                            && type.GetString() == "InternalIP"
+                            && address.TryGetProperty("address", out JsonElement value)
+                            && value.GetString() is { Length: > 0 } found)
+                        {
+                            ip = found;
+                            break;
+                        }
+                    }
+                }
+
+                yield return (nodeName, ip);
+            }
+        }
+    }
+
     private async Task RecordNodesAsync(
-        Guid clusterId, OpenStackProvisioningConfig config, string targetKubeconfig, string workDir, Action<string> log, CancellationToken ct)
+        Guid tenantId, Guid clusterId, OpenStackProvisioningConfig config, Action<string> log,
+        CancellationToken ct)
     {
         try
         {
-            CliResult r = await RunAsync(
-                "kubectl",
-                "get nodes -o jsonpath={range .items[*]}{.metadata.name}{\"|\"}{.status.addresses[?(@.type==\"InternalIP\")].address}{\"\\n\"}{end}",
-                workDir, EnvFor(targetKubeconfig), _ => { }, ct, timeout: TimeSpan.FromSeconds(30), quiet: true);
-            if (!r.Success) { log("Node inventory skipped (kubectl get nodes failed)."); return; }
+            EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
+                await clusterClients.ForAsync(tenantId, clusterId, ct);
+
+            if (clusterAccess is null)
+            {
+                log("Node inventory skipped (the cluster has no stored kubeconfig yet).");
+                return;
+            }
+
+            string json = await clusterAccess.GetJsonAllNamespacesAsync("nodes", ct: ct);
 
             using FleetDbContext db = dbFactory.CreateDbContext();
-            foreach (string line in r.Stdout.Split('\n', StringSplitOptions.RemoveEmptyEntries))
+            foreach ((string nodeName, string? ip) in ParseNodeInventory(json))
             {
-                string[] parts = line.Split('|', 2);
-                string nodeName = parts[0].Trim();
-                if (nodeName.Length == 0) continue;
-                string? ip = parts.Length > 1 && parts[1].Trim().Length > 0 ? parts[1].Trim() : null;
-
                 bool exists = await db.Set<ClusterServer>().AnyAsync(s => s.ClusterId == clusterId && s.NodeName == nodeName, ct);
                 if (exists) continue;
 

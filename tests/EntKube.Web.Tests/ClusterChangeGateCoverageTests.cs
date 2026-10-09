@@ -15,10 +15,14 @@ namespace EntKube.Web.Tests;
 /// <c>IClusterChangeRecorder</c> cannot see these: there is no outcome to record when nothing
 /// asked.</para>
 ///
-/// <para><b>46 invocations, across seven files that contain no acknowledgment call whatsoever.</b>
-/// <c>ComponentLifecycleService</c> holds 21 of them and is the service that installs, upgrades
-/// and removes every catalog component on every cluster. <c>VaultService</c> holds 11, syncing
-/// secrets into namespaces. <c>ClusterProvisioningService</c> holds 7.</para>
+/// <para><b>46 invocations when first measured, across seven files that contain no acknowledgment
+/// call whatsoever.</b> <c>ComponentLifecycleService</c> held 21 of them and is the service that
+/// installs, upgrades and removes every catalog component on every cluster; it holds 15 now.
+/// <c>VaultService</c> holds 11, syncing secrets into namespaces — and those are not the easy
+/// win they look like, because they are <c>create secret generic --from-file=</c> with a temp file
+/// per value, so routing them through the seam hands the acknowledgment dialog a Secret manifest
+/// and shows the values to whoever is at the screen. <c>ClusterProvisioningService</c> held 7 and
+/// now holds none that this counts: see <see cref="CannotReachTheSeam"/>.</para>
 ///
 /// <para><b>This is a lower bound, deliberately.</b> A file is counted only when it has <em>no</em>
 /// acknowledgment call at all, so one that acknowledges some paths and not others scores zero here
@@ -49,8 +53,13 @@ public class ClusterChangeGateCoverageTests
     /// its own branch. Two independent reductions to one baseline cannot both be right, and the
     /// slack half of this ratchet is what said so — it failed on <c>main</c> rather than letting a
     /// stale ceiling sit there granting four sites of free headroom.</para>
+    ///
+    /// <para>Then 40, and now <b>33</b>: six of <c>ClusterProvisioningService</c>'s seven are
+    /// excluded as unreachable (see <see cref="CannotReachTheSeam"/>) and the seventh was
+    /// converted. The slack half earned itself again here — I banked 34, having subtracted the
+    /// exemption and forgotten the conversion.</para>
     /// </summary>
-    private const int BaselineUngatedInvocations = 40;
+    private const int BaselineUngatedInvocations = 33;
 
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the
@@ -59,7 +68,6 @@ public class ClusterChangeGateCoverageTests
     private static readonly string[] Baseline =
     [
         "ClusterEgressTunnel",
-        "ClusterProvisioningService",
         "ComponentLifecycleService",
         "DockerRegistryService",
         "DriftDetectionService",
@@ -77,6 +85,31 @@ public class ClusterChangeGateCoverageTests
     /// </summary>
     private static readonly HashSet<string> IsTheGate =
         new(StringComparer.Ordinal) { "ClusterChangeGate", "KubernetesClientFactory" };
+
+    /// <summary>
+    /// Excluded because <b>no seam operation can ever express these</b>, so counting them made
+    /// this number mean something other than its name — the same correction as dropping
+    /// <c>helm repo</c>, for the same reason.
+    ///
+    /// <para><c>ClusterProvisioningService</c> creates a cluster that does not exist yet. Six of
+    /// its seven invocations target either the ephemeral k3s bootstrap VM or the target cluster
+    /// mid-build, and <c>IClusterClientFactory.ForAsync(tenantId, clusterId)</c> resolves a
+    /// credential from a <em>registered</em> cluster row — which is written at step 9 of the
+    /// sequence, after all six have run. The kubeconfigs they use come from SSH-ing the bootstrap
+    /// VM and from clusterctl's output, not from the vault, so there is nothing for the seam to
+    /// hand them.</para>
+    ///
+    /// <para>The seventh was convertible and is converted: <c>RecordNodesAsync</c> runs at step
+    /// 10, after registration. The ordering is load-bearing and verified by reading the sequence
+    /// rather than the file's header comment, which describes registration as step 5.</para>
+    ///
+    /// <para>Exempt from the <em>seam</em>, not from scrutiny. These still change a cluster with
+    /// no acknowledgment — but the cluster is one being born, with no workloads on it, started by
+    /// an operator who is watching the progress log. Asking them to acknowledge each step of a
+    /// provision they just began would be ceremony.</para>
+    /// </summary>
+    private static readonly HashSet<string> CannotReachTheSeam =
+        new(StringComparer.Ordinal) { "ClusterProvisioningService" };
 
     [Fact]
     public void No_new_code_changes_a_cluster_outside_the_gate()
@@ -149,7 +182,7 @@ public class ClusterChangeGateCoverageTests
                               && !p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}")))
         {
             string name = Path.GetFileNameWithoutExtension(path);
-            if (IsTheGate.Contains(name)) continue;
+            if (IsTheGate.Contains(name) || CannotReachTheSeam.Contains(name)) continue;
 
             // Comments only, as with the custody metric: prose naming kubectl is not a call to it.
             string code = string.Join('\n', File.ReadLines(path)
