@@ -967,7 +967,7 @@ public class KubernetesOperationsService(
                     result = new HelmExecutionResult
                     {
                         Success = true,
-                        Output = await clusterAccess.DeleteManifestSetAsync(combined, ct),
+                        Output = await clusterAccess.DeleteManifestSetAsync(combined, ct: ct),
                     };
                 }
                 catch (Exception ex)
@@ -1065,7 +1065,11 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Failure(
                 "This deployment is observed only (imported / managed by ArgoCD or Flux). Enable management to let EntKube apply it.");
 
-        if (deployment.Cluster is null || string.IsNullOrWhiteSpace(deployment.Cluster.Kubeconfig))
+        IClusterClient? clusterAccess = deployment.Cluster is null
+            ? null
+            : await clusterClients.ForAsync(deployment.Cluster.TenantId, deployment.ClusterId, ct);
+
+        if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
                 "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
 
@@ -1106,84 +1110,85 @@ public class KubernetesOperationsService(
         string combined = EntKube.Web.Services.Upgrades.DeploymentManifestComposer.Combine(
             deployment.Namespace, manifests);
 
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-        string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-manifest-{Guid.NewGuid()}.yaml");
-
+        // The acknowledgment is raised by the seam, which is why there is no longer one here:
+        // two would ask the operator twice for one apply. The summary is passed through so the
+        // dialog still names the deployment and counts its documents.
+        //
+        // The namespace is a default for documents that do not carry one of their own, which
+        // is why this is the namespace-aware apply and not the plain one.
+        HelmExecutionResult result;
         try
         {
-            await gate.AcknowledgeAsync(new PlannedClusterChange
+            result = new HelmExecutionResult
             {
-                Verb = ChangeVerb.Apply,
-                Kubeconfig = deployment.Cluster.Kubeconfig,
-                ClusterLabel = deployment.Cluster.Name,
-                Namespace = deployment.Namespace,
-                Summary = $"Apply '{deployment.Name}' ({manifests.Count} manifest(s)) to {deployment.Namespace}",
-                Manifest = combined,
-            }, ct);
-
-            await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
-            await SecretFile.WriteAsync(tempManifest, combined, ct);
-
-            HelmExecutionResult result = await RunCliAsync(
-                "kubectl",
-                $"apply -f {tempManifest} --kubeconfig {tempKubeconfig} --namespace {deployment.Namespace}",
-                ct);
-
-            string output = result.Output;
-
-            if (result.Success)
-            {
-                logger.LogInformation("YAML deployment {DeploymentId} applied to {Namespace} by {User}",
-                    deploymentId, deployment.Namespace, performedBy ?? "system");
-                await auditService.RecordAsync(deploymentId, "ApplyYaml", "Deployment",
-                    deployment.Name, performedBy: performedBy, ct: ct);
-
-                // Ensure the (possibly brand-new) namespace inherits the environment's Kyverno policies.
-                await ApplyKyvernoPoliciesAsync(deployment, ct);
-
-                // Prune resources that were applied before but are no longer in the manifest
-                // set — plain `kubectl apply` doesn't, so removed manifests orphan their
-                // resources. Failure here never fails the (already successful) apply.
-                try
-                {
-                    output += await PruneRemovedResourcesAsync(db, deployment, manifests, performedBy, ct);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "Prune after apply failed for deployment {DeploymentId}", deploymentId);
-                    output += $"\n\nWarning: pruning of removed resources failed: {ex.Message}";
-                }
-
-                // Open a rollout watch when the deployment has one configured. Deliberately
-                // fire-and-observe: the verdict arrives minutes later from the background
-                // watcher, because blocking this call — and therefore any CI job driving it —
-                // for a ten-minute analysis window would make the feature unusable in exactly
-                // the pipelines it exists to protect. A failure to open the watch must never
-                // fail an apply that already succeeded.
-                try
-                {
-                    await rollouts.OpenAsync(deploymentId, performedBy, DateTime.UtcNow, ct);
-                }
-                catch (Exception ex)
-                {
-                    logger.LogWarning(ex, "Could not open rollout watch for deployment {DeploymentId}", deploymentId);
-                }
-            }
-            else
-            {
-                logger.LogWarning("YAML apply failed for deployment {DeploymentId}: {Output}",
-                    deploymentId, result.Output);
-            }
-
-            return result.Success
-                ? KubernetesOperationResult<string>.Success(output)
-                : KubernetesOperationResult<string>.Failure(result.Output);
+                Success = true,
+                Output = await clusterAccess.ApplyManifestInNamespaceAsync(
+                    combined, deployment.Namespace,
+                    $"Apply '{deployment.Name}' ({manifests.Count} manifest(s)) to {deployment.Namespace}",
+                    ct),
+            };
         }
-        finally
+        catch (OperationCanceledException)
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
-            if (File.Exists(tempManifest)) File.Delete(tempManifest);
+            // An operator cancelling at the gate threw out of here before the seam existed,
+            // and the callers are written for that; swallowing it into a failed apply would
+            // report "cancelled by operator" as an error on the page.
+            throw;
         }
+        catch (Exception ex)
+        {
+            result = new HelmExecutionResult { Success = false, Output = ex.Message };
+        }
+
+        string output = result.Output;
+
+        if (result.Success)
+        {
+            logger.LogInformation("YAML deployment {DeploymentId} applied to {Namespace} by {User}",
+                deploymentId, deployment.Namespace, performedBy ?? "system");
+            await auditService.RecordAsync(deploymentId, "ApplyYaml", "Deployment",
+                deployment.Name, performedBy: performedBy, ct: ct);
+
+            // Ensure the (possibly brand-new) namespace inherits the environment's Kyverno policies.
+            await ApplyKyvernoPoliciesAsync(deployment, ct);
+
+            // Prune resources that were applied before but are no longer in the manifest
+            // set — plain `kubectl apply` doesn't, so removed manifests orphan their
+            // resources. Failure here never fails the (already successful) apply.
+            try
+            {
+                output += await PruneRemovedResourcesAsync(db, deployment, manifests, performedBy, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Prune after apply failed for deployment {DeploymentId}", deploymentId);
+                output += $"\n\nWarning: pruning of removed resources failed: {ex.Message}";
+            }
+
+            // Open a rollout watch when the deployment has one configured. Deliberately
+            // fire-and-observe: the verdict arrives minutes later from the background
+            // watcher, because blocking this call — and therefore any CI job driving it —
+            // for a ten-minute analysis window would make the feature unusable in exactly
+            // the pipelines it exists to protect. A failure to open the watch must never
+            // fail an apply that already succeeded.
+            try
+            {
+                await rollouts.OpenAsync(deploymentId, performedBy, DateTime.UtcNow, ct);
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "Could not open rollout watch for deployment {DeploymentId}", deploymentId);
+            }
+        }
+        else
+        {
+            logger.LogWarning("YAML apply failed for deployment {DeploymentId}: {Output}",
+                deploymentId, result.Output);
+        }
+
+        return result.Success
+            ? KubernetesOperationResult<string>.Success(output)
+            : KubernetesOperationResult<string>.Failure(result.Output);
     }
 
     // ──────── App route cluster sync ────────

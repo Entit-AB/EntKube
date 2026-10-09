@@ -13,8 +13,8 @@ namespace EntKube.Web.Tests;
 /// tenant and not one of that service's fifteen public methods receives one. Site count measures
 /// the size of the edit. This measures whether the edit is possible.</para>
 ///
-/// <para><b>What it says.</b> 35 of the 241 credential sites remaining are in a method with a
-/// tenant in scope; the other 206 are not. The second group is gated on threading a tenant down from
+/// <para><b>What it says.</b> 32 of the 235 credential sites remaining are in a method with a
+/// tenant in scope; the other 203 are not. The second group is gated on threading a tenant down from
 /// callers — which is not a refactor but an authorization question, because a method that reaches
 /// a cluster by id alone will reach any cluster in the installation. See
 /// docs/decomposition.md §4.0.1.</para>
@@ -39,11 +39,9 @@ public class CustodyTriageTests
     /// Credential sites whose enclosing method already has a tenant, measured 2026-10-08. These
     /// are the ones that could move onto <c>IClusterClient</c> without touching a signature.
     ///
-    /// <para>35 of 241. The other 206 are gated on a tenant — unchanged, because the five that
-    /// went were all in the reachable group: DriftDetectionService, which is now the first
-    /// service to hold no cluster credential anywhere.</para>
+    /// <para>32 of 235. The other 203 are gated on a tenant.</para>
     /// </summary>
-    private const int BaselineReachable = 35;
+    private const int BaselineReachable = 32;
 
     [Fact]
     public void The_sites_that_could_already_ask_the_seam_do_not_multiply()

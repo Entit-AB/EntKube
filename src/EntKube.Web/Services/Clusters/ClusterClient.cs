@@ -40,8 +40,13 @@ public sealed class ClusterClient(
     public Task<string?> GetServerVersionAsync(CancellationToken ct = default)
         => inner.GetServerVersionAsync(kubeconfig, ct);
 
-    public Task<string> DeleteManifestSetAsync(string manifest, CancellationToken ct = default)
-        => inner.DeleteManifestSetAsync(manifest, kubeconfig, ct);
+    public Task<string> ApplyManifestInNamespaceAsync(
+        string manifest, string ns, string? summary = null, CancellationToken ct = default)
+        => inner.ApplyManifestInNamespaceAsync(manifest, ns, kubeconfig, summary, ct);
+
+    public Task<string> DeleteManifestSetAsync(
+        string manifest, string ns = "", string? summary = null, CancellationToken ct = default)
+        => inner.DeleteManifestSetAsync(manifest, kubeconfig, ns, summary, ct);
 
     public Task<HelmExecutionResult> RunHelmAsync(HelmInvocation invocation, CancellationToken ct = default)
         => inner.RunHelmAsync(invocation, kubeconfig, ct);

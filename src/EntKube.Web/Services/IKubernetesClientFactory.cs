@@ -62,6 +62,17 @@ public interface IKubernetesClientFactory
     Task<string?> GetServerVersionAsync(string kubeconfig, CancellationToken ct = default);
 
     /// <summary>
+    /// Applies a manifest set, defaulting any document that names no namespace to this one.
+    ///
+    /// <para>Separate from <see cref="ApplyManifestAsync"/> rather than an optional parameter on
+    /// it: three call sites need the default and 153 do not, and adding a parameter there would
+    /// rewrite 65 Moq setups to serve those three. The two share one implementation.</para>
+    /// </summary>
+    Task<string> ApplyManifestInNamespaceAsync(
+        string manifest, string ns, string kubeconfig, string? summary = null,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Deletes every resource in a manifest set, by <c>kubectl delete -f --ignore-not-found</c>.
     ///
     /// <para>Distinct from <see cref="DeleteManifestAsync"/>, which deletes one named resource.
@@ -69,7 +80,9 @@ public interface IKubernetesClientFactory
     /// parsing the YAML to find each kind and name — which is why those callers kept writing the
     /// credential themselves.</para>
     /// </summary>
-    Task<string> DeleteManifestSetAsync(string manifest, string kubeconfig, CancellationToken ct = default);
+    Task<string> DeleteManifestSetAsync(
+        string manifest, string kubeconfig, string ns = "", string? summary = null,
+        CancellationToken ct = default);
 
     /// <summary>
     /// Runs one helm invocation against a cluster, supplying the credential and raising the

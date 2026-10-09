@@ -17,7 +17,7 @@ namespace EntKube.Web.Services;
 /// </summary>
 public class KedaScalerService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     ILogger<KedaScalerService> logger)
 {
     // ── CRUD ──────────────────────────────────────────────────────────────────
@@ -377,62 +377,43 @@ public class KedaScalerService(
     public async Task<(bool Success, string Output)> ApplyToNamespaceAsync(
         List<KedaScaler> scalers, KubernetesCluster cluster, string ns, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
+            await clusterClients.ForAsync(cluster.TenantId, cluster.Id, ct);
+
+        if (clusterAccess is null)
             return (false, "Cluster has no kubeconfig configured.");
 
         string yaml = BuildManifest(scalers, ns);
         if (string.IsNullOrWhiteSpace(yaml))
             return (false, "No manifests generated (check configuration).");
 
-        await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
-        {
-            Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
-            Kubeconfig = cluster.Kubeconfig,
-            ClusterLabel = cluster.Name,
-            Namespace = ns,
-            Summary = $"Apply autoscalers to {ns}",
-            Manifest = yaml,
-        }, ct);
-
-        string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-keda-{Guid.NewGuid():N}.kubeconfig");
-        string manifestPath   = Path.Combine(Path.GetTempPath(), $"entkube-keda-{Guid.NewGuid():N}.yaml");
         try
         {
-            await SecretFile.WriteAsync(kubeconfigPath, cluster.Kubeconfig, ct);
-            await SecretFile.WriteAsync(manifestPath, yaml, ct);
+            // The namespace is a default, not a filter: the manifests deliberately omit one so a
+            // structured ScaledObject and a user's own Custom YAML both land in the app's.
+            //
+            // The acknowledgment is raised by the seam now, and the summary this used to build for
+            // itself is passed along so the dialog still says what is being applied.
+            string output = await clusterAccess.ApplyManifestInNamespaceAsync(
+                yaml, ns, $"Apply autoscalers to {ns}", ct);
 
-            // -n {ns} targets the app's namespace; manifests omit an explicit namespace so
-            // both structured ScaledObjects and user-authored Custom YAML land there.
-            System.Diagnostics.ProcessStartInfo psi = new("kubectl",
-                $"apply -n {ns} -f {manifestPath} --kubeconfig {kubeconfigPath}")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError  = true,
-                UseShellExecute        = false,
-                CreateNoWindow         = true
-            };
+            logger.LogInformation("Autoscalers applied to {Cluster}/{Namespace}", cluster.Name, ns);
 
-            using System.Diagnostics.Process proc = new() { StartInfo = psi };
-            StringBuilder output = new();
-            proc.OutputDataReceived += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-            proc.ErrorDataReceived  += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-            proc.Start();
-            proc.BeginOutputReadLine();
-            proc.BeginErrorReadLine();
-            await proc.WaitForExitAsync(ct);
-
-            bool ok = proc.ExitCode == 0;
-            if (ok)
-                logger.LogInformation("Autoscalers applied to {Cluster}/{Namespace}", cluster.Name, ns);
-            else
-                logger.LogWarning("Autoscaler apply failed for {Cluster}/{Namespace}: {Output}", cluster.Name, ns, output);
-
-            return (ok, output.ToString().TrimEnd());
+            return (true, output.TrimEnd());
         }
-        finally
+        catch (OperationCanceledException)
         {
-            if (File.Exists(kubeconfigPath)) File.Delete(kubeconfigPath);
-            if (File.Exists(manifestPath))   File.Delete(manifestPath);
+            // An operator cancelling at the gate threw out of here before, and the page is written
+            // for that rather than for a tuple saying the apply failed.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // The caller reads the tuple rather than catching, and an autoscaler that would not
+            // apply is something an operator reads on the page.
+            logger.LogWarning(ex, "Autoscaler apply failed for {Cluster}/{Namespace}", cluster.Name, ns);
+
+            return (false, ex.Message);
         }
     }
 

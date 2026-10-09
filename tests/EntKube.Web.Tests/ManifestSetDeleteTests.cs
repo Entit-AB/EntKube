@@ -42,8 +42,9 @@ public class ManifestSetDeleteTests : IDisposable
             .Callback((string m, string _, CancellationToken _) => applied.Add(m))
             .ReturnsAsync("applied");
 
-        k8s.Setup(x => x.DeleteManifestSetAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Callback((string m, string _, CancellationToken _) => deletedSets.Add(m))
+        k8s.Setup(x => x.DeleteManifestSetAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .Callback((string m, string _, string _, string? _, CancellationToken _) => deletedSets.Add(m))
             .ReturnsAsync("deleted");
     }
 
@@ -208,6 +209,27 @@ public class ManifestSetDeleteTests : IDisposable
     }
 
     /// <summary>
+    /// The default namespace on the command line, asserted directly rather than through a mock of
+    /// the factory — written with the operation this time rather than after a mutant found it
+    /// missing, which is what the last three seam additions each needed.
+    ///
+    /// <para>It is a <em>default</em>, not a filter: KEDA's manifests deliberately omit a
+    /// namespace so a structured ScaledObject and a user's own YAML both land in the app's, so
+    /// dropping the flag would silently send them to <c>default</c>.</para>
+    /// </summary>
+    [Fact]
+    public void A_set_delete_can_default_the_namespace_and_omits_the_flag_when_it_has_none()
+    {
+        KubernetesClientFactory.BuildDeleteSetArguments("/tmp/m.yaml", "/tmp/kc.yaml", "billing-ns")
+            .Should().Be("delete -f /tmp/m.yaml --kubeconfig=/tmp/kc.yaml --namespace billing-ns --ignore-not-found");
+
+        // No namespace means no flag at all, not an empty one — `--namespace ` would make kubectl
+        // reject the whole call.
+        KubernetesClientFactory.BuildDeleteSetArguments("/tmp/m.yaml", "/tmp/kc.yaml")
+            .Should().Be("delete -f /tmp/m.yaml --kubeconfig=/tmp/kc.yaml --ignore-not-found");
+    }
+
+    /// <summary>
     /// <c>--ignore-not-found</c> asserted directly, because a mutant that dropped it passed
     /// everything else here: these tests reach the cluster through a mocked factory, so the real
     /// command line never runs. Same gap, same fix as the helm argv in #144.
@@ -218,6 +240,20 @@ public class ManifestSetDeleteTests : IDisposable
         string argv = KubernetesClientFactory.BuildDeleteSetArguments("/tmp/m.yaml", "/tmp/kc.yaml");
 
         argv.Should().Be("delete -f /tmp/m.yaml --kubeconfig=/tmp/kc.yaml --ignore-not-found");
+    }
+
+    /// <summary>
+    /// The apply side of the same argv, for the same reason: it is built inline in the factory and
+    /// every caller test reaches it through a mock, so an inline flag is one no test ever runs.
+    /// </summary>
+    [Fact]
+    public void An_apply_can_default_the_namespace_and_omits_the_flag_when_it_has_none()
+    {
+        KubernetesClientFactory.BuildApplyArguments("/tmp/m.yaml", "/tmp/kc.yaml", "billing-ns")
+            .Should().Be("apply -f /tmp/m.yaml --kubeconfig=/tmp/kc.yaml --namespace billing-ns");
+
+        KubernetesClientFactory.BuildApplyArguments("/tmp/m.yaml", "/tmp/kc.yaml")
+            .Should().Be("apply -f /tmp/m.yaml --kubeconfig=/tmp/kc.yaml");
     }
 
     private sealed class RecordingSink : IClusterChangeAckSink

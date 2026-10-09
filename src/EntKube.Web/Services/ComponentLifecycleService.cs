@@ -1620,7 +1620,7 @@ public class ComponentLifecycleService(
 
             if (command.Operation is "kubectl-apply" or "kubectl-delete")
             {
-                return await ExecuteKubectlAsync(command, tempKubeconfig, ct);
+                return await ExecuteKubectlAsync(command, clusterAccess, ct);
             }
 
             if (command.Operation == "kubectl-apply-url")
@@ -1659,7 +1659,7 @@ public class ComponentLifecycleService(
             // acknowledgment gate — this was applying and deleting customer resources with nobody
             // asked, because it spawned its own kubectl.
             string output = delete
-                ? await clusterAccess.DeleteManifestSetAsync(manifestYaml, ct)
+                ? await clusterAccess.DeleteManifestSetAsync(manifestYaml, ct: ct)
                 : await clusterAccess.ApplyManifestAsync(manifestYaml, ct);
 
             return new HelmExecutionResult { Success = true, Output = output };
@@ -1676,7 +1676,8 @@ public class ComponentLifecycleService(
     /// The manifest YAML is written to a temp file and applied/deleted.
     /// </summary>
     private async Task<HelmExecutionResult> ExecuteKubectlAsync(
-        HelmCommand command, string kubeconfigPath, CancellationToken ct)
+        HelmCommand command, EntKube.Web.Services.Clusters.IClusterClient clusterAccess,
+        CancellationToken ct)
     {
         if (!command.HasValues || string.IsNullOrWhiteSpace(command.ValuesYaml))
         {
@@ -1687,39 +1688,33 @@ public class ComponentLifecycleService(
             };
         }
 
-        // Write the manifest YAML to a temp file.
-
-        string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-manifest-{Guid.NewGuid()}.yaml");
+        string ns = command.Namespace ?? "";
 
         try
         {
-            await SecretFile.WriteAsync(tempManifest, command.ValuesYaml, ct);
+            // The namespace is a DEFAULT for documents that do not name one, which is what a
+            // Manifest-type component's YAML relies on — and it is why this goes through the
+            // namespace-aware apply rather than the plain one.
+            bool apply = command.Operation == "kubectl-apply";
+            string summary = $"{(apply ? "Apply" : "Delete")} manifests for {command.ReleaseName}"
+                           + (ns.Length > 0 ? $" in {ns}" : "");
 
-            string operation = command.Operation == "kubectl-apply" ? "apply" : "delete";
-            List<string> args = [operation, "-f", tempManifest, "--kubeconfig", kubeconfigPath];
+            string output = apply
+                ? await clusterAccess.ApplyManifestInNamespaceAsync(command.ValuesYaml, ns, summary, ct)
+                : await clusterAccess.DeleteManifestSetAsync(command.ValuesYaml, ns, summary, ct);
 
-            if (!string.IsNullOrWhiteSpace(command.Namespace))
-            {
-                args.Add("--namespace");
-                args.Add(command.Namespace);
-            }
-
-            // For delete, don't fail if the resource doesn't exist.
-
-            if (operation == "delete")
-            {
-                args.Add("--ignore-not-found");
-            }
-
-            string arguments = string.Join(" ", args);
-            return await RunProcessAsync("kubectl", arguments, ct);
+            return new HelmExecutionResult { Success = true, Output = output };
         }
-        finally
+        catch (OperationCanceledException)
         {
-            if (File.Exists(tempManifest))
-            {
-                File.Delete(tempManifest);
-            }
+            // Includes an operator cancelling at the gate. Reporting that as a failed install
+            // would put "cancelled by operator" in front of them as an error.
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // Every caller on this path reads the result rather than catching.
+            return new HelmExecutionResult { Success = false, Output = ex.Message };
         }
     }
 
