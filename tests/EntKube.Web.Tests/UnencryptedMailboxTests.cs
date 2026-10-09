@@ -55,7 +55,7 @@ public class UnencryptedMailboxTests : IDisposable
 
         TestDbContextFactory factory = new(connection);
         ContractService contracts = new(factory);
-        vault = new VaultService(factory, new VaultEncryptionService(TestRootKey));
+        vault = new VaultService(factory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess);
 
         SupportMailService mail = new(
             factory,

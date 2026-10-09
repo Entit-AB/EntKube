@@ -35,7 +35,7 @@ public class VaultServiceTests : IDisposable
         db.Database.EnsureCreated();
 
         VaultEncryptionService encryption = new(TestRootKey);
-        sut = new VaultService(dbFactory, encryption);
+        sut = new VaultService(dbFactory, encryption, TestServices.NoClusterAccess);
     }
 
     public void Dispose()

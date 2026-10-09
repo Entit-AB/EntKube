@@ -43,7 +43,7 @@ public class StorageServiceTests : IDisposable
         db.Database.EnsureCreated();
 
         VaultEncryptionService encryption = new(TestRootKey);
-        vaultService = new VaultService(dbFactory, encryption);
+        vaultService = new VaultService(dbFactory, encryption, TestServices.NoClusterAccess);
         Mock<IHttpClientFactory> innerHttpFactory = new();
         AgentRegistry agentRegistry = new(dbFactory, NullLogger<AgentRegistry>.Instance);
         OpenStackHttpFactory httpFactory = new(innerHttpFactory.Object, agentRegistry);

@@ -59,7 +59,7 @@ public class StalwartPreflightTests : IDisposable
         db.SaveChanges();
 
         TestDbContextFactory factory = new(connection);
-        vault = new VaultService(factory, new VaultEncryptionService(TestRootKey));
+        vault = new VaultService(factory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess);
 
         // A real vault, because the internal branch asks it whether an administrator password exists
         // and that question is the point of these tests. The Kubernetes client is only reached for a

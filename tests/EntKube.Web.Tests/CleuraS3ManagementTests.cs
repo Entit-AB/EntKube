@@ -47,7 +47,7 @@ public class CleuraS3ManagementTests : IDisposable
         db.Database.EnsureCreated();
 
         VaultEncryptionService encryption = new(TestRootKey);
-        vaultService = new VaultService(dbFactory, encryption);
+        vaultService = new VaultService(dbFactory, encryption, TestServices.NoClusterAccess);
         httpFactory = new Mock<IHttpClientFactory>();
         AgentRegistry agentRegistry = new(dbFactory, NullLogger<AgentRegistry>.Instance);
         OpenStackHttpFactory osHttpFactory = new(httpFactory.Object, agentRegistry);

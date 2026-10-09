@@ -57,7 +57,7 @@ public class ComponentCatalogTests : IDisposable
 
         byte[] testRootKey = Convert.FromBase64String("dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
         VaultEncryptionService encryption = new(testRootKey);
-        VaultService vaultService = new(dbFactory, encryption);
+        VaultService vaultService = new(dbFactory, encryption, TestServices.NoClusterAccess);
         lifecycleService = TestServices.BuildLifecycle(dbFactory, vaultService);
     }
 

@@ -50,6 +50,14 @@ public interface IClusterClient
         string manifest, string ns, string? summary = null, CancellationToken ct = default);
 
     /// <summary>
+    /// Replaces one Secret's contents wholesale, as a single acknowledged change. See
+    /// <see cref="IKubernetesClientFactory.ReplaceSecretAsync"/> for why this is not an apply.
+    /// </summary>
+    Task<string> ReplaceSecretAsync(
+        string name, string ns, string manifest, string? summary = null,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Deletes every resource in a manifest set. Use when holding a multi-document manifest;
     /// <see cref="DeleteManifestAsync"/> is for one named resource.
     /// </summary>

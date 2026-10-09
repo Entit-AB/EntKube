@@ -32,7 +32,7 @@ public class ClusterCredentialCustodyTests
     /// <summary>
     /// Places that take a cluster's credential out of the row, measured 2026-10-07.
     ///
-    /// <para><b>229 and falling</b>, from 508 once the count was corrected (below):
+    /// <para><b>225 and falling</b>, from 508 once the count was corrected (below):
     /// <c>RedisService</c> 9, <c>CnpgService</c> 48, <c>ElasticsearchService</c> 42,
     /// <c>RabbitMQService</c> 37, <c>MongoService</c> 47, then <c>KafkaService</c> 15 and
     /// <c>RegisteredPostgresService</c> 16. None of those seven injects
@@ -96,10 +96,15 @@ public class ClusterCredentialCustodyTests
     /// rather than a refactor. The gate can only change once its callers already route through
     /// the seam.</para>
     ///
-    private const int BaselineOccurrences = 229;
+    private const int BaselineOccurrences = 225;
 
-    /// <summary>Files doing so. A file that has stopped should not be able to start again quietly.</summary>
-    private const int BaselineFiles = 44;
+    /// <summary>
+    /// Files doing so. A file that has stopped should not be able to start again quietly.
+    ///
+    /// <para>43: <c>VaultService</c> left the list entirely, which is the first time a file has.
+    /// It had eleven own-process kubectl calls and held the credential for all of them.</para>
+    /// </summary>
+    private const int BaselineFiles = 43;
 
     private static (int Occurrences, int Files) Measure()
     {

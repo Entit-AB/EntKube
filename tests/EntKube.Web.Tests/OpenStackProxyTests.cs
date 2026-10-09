@@ -44,7 +44,7 @@ public class OpenStackProxyTests : IDisposable
         db.Database.EnsureCreated();
 
         VaultEncryptionService encryption = new(TestRootKey);
-        vaultService = new VaultService(dbFactory, encryption);
+        vaultService = new VaultService(dbFactory, encryption, TestServices.NoClusterAccess);
 
         Mock<IHttpClientFactory> innerHttpFactory = new();
         innerHttpFactory.Setup(f => f.CreateClient(It.IsAny<string>())).Returns(() => new HttpClient());

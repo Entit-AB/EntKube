@@ -238,7 +238,7 @@ public class EntKubeTelemetryCatalogTests
 
         TestDbContextFactory factory = new(connection);
         IConfiguration config = TestServices.TestConfiguration("https://entkube.example.com");
-        VaultService vault = new(factory, new VaultEncryptionService(TestRootKey));
+        VaultService vault = new(factory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess);
         EntKubeTelemetryService sut = new(factory, vault, new IngestTokenService(config),
                 new EntKube.Web.Modules.Api.CatalogApi(factory), config);
 
@@ -278,7 +278,7 @@ public class EntKubeTelemetryCatalogTests
 
         TestDbContextFactory factory = new(connection);
         IConfiguration config = TestServices.TestConfiguration("https://entkube.example.com");
-        VaultService vault = new(factory, new VaultEncryptionService(TestRootKey));
+        VaultService vault = new(factory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess);
         EntKubeTelemetryService sut = new(factory, vault, new IngestTokenService(config),
                 new EntKube.Web.Modules.Api.CatalogApi(factory), config);
 
@@ -431,7 +431,7 @@ public class EntKubeTelemetryCatalogTests
 
         TestDbContextFactory factory = new(connection);
         IConfiguration config = TestServices.TestConfiguration("https://entkube.example.com");
-        VaultService vault = new(factory, new VaultEncryptionService(TestRootKey));
+        VaultService vault = new(factory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess);
         EntKubeTelemetryService sut = new(factory, vault, new IngestTokenService(config),
                 new EntKube.Web.Modules.Api.CatalogApi(factory), config);
 
@@ -539,7 +539,7 @@ public class EntKubeTelemetryCatalogTests
 
         TestDbContextFactory factory = new(connection);
         IConfiguration config = TestServices.TestConfiguration("https://entkube.example.com");
-        VaultService vault = new(factory, new VaultEncryptionService(TestRootKey));
+        VaultService vault = new(factory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess);
         querier.Cluster = db.KubernetesClusters.First(c => c.Id == clusterId);
 
         return (new EntKubeTelemetryService(factory, vault, new IngestTokenService(config),

@@ -43,7 +43,7 @@ public class ComponentScanServiceTests : IDisposable
         db.Database.EnsureCreated();
 
         VaultEncryptionService encryption = new(TestRootKey);
-        VaultService vaultService = new(dbFactory, encryption);
+        VaultService vaultService = new(dbFactory, encryption, TestServices.NoClusterAccess);
         IKubernetesClientFactory k8sFactory = new Mock<IKubernetesClientFactory>().Object;
         EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate = new(
             new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),

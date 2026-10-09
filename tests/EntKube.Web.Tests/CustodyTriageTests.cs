@@ -51,20 +51,20 @@ public class CustodyTriageTests
     /// at 29. None of them was in a method with a tenant — which is exactly what the triage was
     /// built to tell apart, and it could not, because of the pattern above.</para>
     ///
-    /// <para>Where the 26 are: <c>StalwartService</c> 4, <c>VeleroService</c> 4,
+    /// <para>Where they are (24 now, after VaultService): <c>StalwartService</c> 4, <c>VeleroService</c> 4,
     /// <c>KyvernoPolicyService</c> 3, <c>DriftAdoptionService</c> 3, then two each in
     /// <c>VaultService</c>, <c>KeycloakService</c> and <c>StorageService</c>, and one each in
     /// <c>OpenLdapService</c>, <c>TenantService</c>, <c>IngressDashboardService</c> and
     /// <c>StalwartDnsService</c>. <c>ClusterClient</c>'s own two are the seam resolving the
     /// credential, which is the one place that should.</para>
     ///
-    /// <para>⚠️ <c>VaultService</c>'s two are not the free conversion they look like. Its kubectl
-    /// calls are <c>create secret generic --from-file=</c> with one temp file per value, the same
-    /// deliberate pattern as <c>SyncComponentSecretsAsync</c>: moving them onto the seam hands the
-    /// gate a Secret manifest, and the acknowledgment dialog shows the diff — the values — to
-    /// whoever is at the screen. That is a disclosure decision, not a refactor.</para>
+    /// <para><c>VaultService</c>'s two are gone: they were held up on what the acknowledgment
+    /// dialog should show for a Secret, which is now decided and built — the values are redacted,
+    /// so the sync could move onto <c>ReplaceSecretAsync</c>. The same reasoning now applies to
+    /// <c>ComponentLifecycleService.SyncComponentSecretsAsync</c>, which is the last place still
+    /// building Secrets with <c>--from-file</c>.</para>
     /// </summary>
-    private const int BaselineReachable = 26;
+    private const int BaselineReachable = 24;
 
     [Fact]
     public void The_sites_that_could_already_ask_the_seam_do_not_multiply()
