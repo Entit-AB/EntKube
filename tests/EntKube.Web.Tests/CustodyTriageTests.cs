@@ -39,7 +39,8 @@ public class CustodyTriageTests
     /// Credential sites whose enclosing method already has a tenant, measured 2026-10-09. These
     /// are the ones that could move onto <c>IClusterClient</c> without touching a signature.
     ///
-    /// <para><b>29 of 235, corrected from 32 — and the correction matters more than the number.</b>
+    /// <para><b>26 of 231, after StorageService. Corrected from 32 — and the correction matters
+    /// more than the number.</b>
     /// See <see cref="Declaration"/>: a method returning a tuple was not recognised as a
     /// declaration, so sites inside it were judged by the signature of the method above. Six were
     /// credited with a tenant they did not have. Every figure this test has published, including
@@ -50,14 +51,20 @@ public class CustodyTriageTests
     /// at 29. None of them was in a method with a tenant — which is exactly what the triage was
     /// built to tell apart, and it could not, because of the pattern above.</para>
     ///
-    /// <para>Where the 29 are: <c>StorageService</c> 5, <c>StalwartService</c> 4,
-    /// <c>VeleroService</c> 4, <c>KyvernoPolicyService</c> 3, <c>DriftAdoptionService</c> 3,
-    /// then two each in <c>VaultService</c> and <c>KeycloakService</c> and one each in
+    /// <para>Where the 26 are: <c>StalwartService</c> 4, <c>VeleroService</c> 4,
+    /// <c>KyvernoPolicyService</c> 3, <c>DriftAdoptionService</c> 3, then two each in
+    /// <c>VaultService</c>, <c>KeycloakService</c> and <c>StorageService</c>, and one each in
     /// <c>OpenLdapService</c>, <c>TenantService</c>, <c>IngressDashboardService</c> and
     /// <c>StalwartDnsService</c>. <c>ClusterClient</c>'s own two are the seam resolving the
     /// credential, which is the one place that should.</para>
+    ///
+    /// <para>⚠️ <c>VaultService</c>'s two are not the free conversion they look like. Its kubectl
+    /// calls are <c>create secret generic --from-file=</c> with one temp file per value, the same
+    /// deliberate pattern as <c>SyncComponentSecretsAsync</c>: moving them onto the seam hands the
+    /// gate a Secret manifest, and the acknowledgment dialog shows the diff — the values — to
+    /// whoever is at the screen. That is a disclosure decision, not a refactor.</para>
     /// </summary>
-    private const int BaselineReachable = 29;
+    private const int BaselineReachable = 26;
 
     [Fact]
     public void The_sites_that_could_already_ask_the_seam_do_not_multiply()
