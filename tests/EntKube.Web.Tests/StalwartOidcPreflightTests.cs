@@ -61,9 +61,11 @@ public class StalwartOidcPreflightTests : IDisposable
         // Only the database is reached on the OIDC path: the vault is consulted for an internal
         // administrator password and the Kubernetes client for a certificate, neither of which this
         // exercises. Passing nulls says so, and would fail loudly rather than quietly if that changed.
+        TestDbContextFactory oidcFactory = new(connection);
         mail = new StalwartService(
-            new TestDbContextFactory(connection),
+            oidcFactory,
             null!, null!, null!, null!, null!, null!,
+            new EntKube.Web.Modules.Api.CatalogApi(oidcFactory),
             NullLogger<StalwartService>.Instance);
     }
 

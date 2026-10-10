@@ -30,6 +30,7 @@ public class StalwartService(
     KeycloakService keycloakService,
     ComponentLifecycleService lifecycleService,
     RedisService redisService,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<StalwartService> logger) : IComponentFormValueProvider
 {
     // Explicit implementation: the class already exposes CatalogKey as a const, and the interface
@@ -58,7 +59,16 @@ public class StalwartService(
     private static readonly TimeSpan ApplyTimeout = TimeSpan.FromMinutes(5);
 
     /// <summary>A discovered Stalwart instance: its installed component and attached config (if any).</summary>
-    public sealed record StalwartInstance(ClusterComponent Component, StalwartComponentConfig? Config);
+    /// <summary>
+    /// An installed Stalwart component paired with its config.
+    ///
+    /// <para>Carries the contract's record rather than the EF entity. MailTab reached through the
+    /// old one for <c>Component.Id</c> and <c>Component.Cluster.Name</c> and nothing else, so what
+    /// it actually needed was the two fields the contract already returns — and a DTO that hands
+    /// a tracked entity to a Razor page is how a page ends up reading a cluster's kubeconfig,
+    /// which is exactly what stopped <c>TailscaleService</c> being converted alongside this.</para>
+    /// </summary>
+    public sealed record StalwartInstance(EntKube.Contracts.Catalog.InstalledComponent Component, StalwartComponentConfig? Config);
 
     // ── Discovery ─────────────────────────────────────────────────────────────
 
@@ -72,12 +82,14 @@ public class StalwartService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        List<ClusterComponent> components = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .Where(c => c.Name == CatalogKey && c.Cluster.TenantId == tenantId)
-            .Where(c => environmentId == null || c.Cluster.EnvironmentId == environmentId)
-            .OrderBy(c => c.Cluster.Name)
-            .ToListAsync(ct);
+        // Asked of Catalog. "Every installation of one catalog key across the tenant" is exactly
+        // FindComponentsAsync; the environment narrowing and the ordering stay here because they
+        // are this screen's, not Catalog's.
+        List<EntKube.Contracts.Catalog.InstalledComponent> components =
+            (await catalog.FindComponentsAsync(tenantId, CatalogKey, ct))
+            .Where(c => environmentId == null || c.EnvironmentId == environmentId)
+            .OrderBy(c => c.ClusterName, StringComparer.Ordinal)
+            .ToList();
 
         List<Guid> componentIds = components.Select(c => c.Id).ToList();
         Dictionary<Guid, StalwartComponentConfig> configs = await db.StalwartComponentConfigs
@@ -132,9 +144,8 @@ public class StalwartService(
 
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
-            ClusterComponent component = await db.ClusterComponents
-                .Include(c => c.Cluster)
-                .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+            EntKube.Contracts.Catalog.InstalledComponent component =
+                await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
                 ?? throw new InvalidOperationException("Component not found.");
 
             ns = component.Namespace ?? DefaultNamespace;
@@ -719,10 +730,9 @@ public class StalwartService(
             cnpg = await db.CnpgDatabases.Include(d => d.CnpgCluster)
                 .FirstOrDefaultAsync(d => d.Id == dbId, ct);
             link = await db.StorageLinks.FirstOrDefaultAsync(l => l.Id == linkId, ct);
-            kubernetesClusterId = await db.ClusterComponents
-                .Where(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId)
-                .Select(c => c.ClusterId)
-                .FirstOrDefaultAsync(ct);
+            kubernetesClusterId =
+                (await catalog.GetComponentAsync(tenantId, clusterComponentId, ct))?.ClusterId
+                ?? Guid.Empty;
         }
         if (cnpg?.CnpgCluster is null || link is null)
         {
@@ -788,8 +798,8 @@ public class StalwartService(
             return;
         }
 
-        ClusterComponent? component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+        EntKube.Contracts.Catalog.InstalledComponent? component =
+            await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
         if (component is null)
         {
             return;
@@ -800,8 +810,14 @@ public class StalwartService(
 
         StalwartPlanBuilder.StalwartHaBackend? ha =
             await BuildHaBackendAsync(tenantId, clusterComponentId, config, releaseName, ns, ct);
-        component.HelmValues = StalwartManifestBuilder.Build(config, releaseName, ns, ha: ha);
-        await db.SaveChangesAsync(ct);
+
+        // A tracked write becomes an explicit one. This used to be
+        // `component.HelmValues = …; SaveChangesAsync()` — a write with no Update() call anywhere
+        // near it, which is how the first measurement of this table concluded nothing outside
+        // Catalog wrote to it. SetHelmValuesAsync is the contract method that exists for it.
+        await catalog.SetHelmValuesAsync(
+            tenantId, clusterComponentId,
+            StalwartManifestBuilder.Build(config, releaseName, ns, ha: ha), ct: ct);
 
         logger.LogInformation(
             "Refreshed Stalwart manifest for component {ComponentId} ({Hostname}, auth {AuthMode}).",
@@ -1182,8 +1198,8 @@ public class StalwartService(
                 return;
             }
 
-            ClusterComponent? component = await db.ClusterComponents
-                .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+            EntKube.Contracts.Catalog.InstalledComponent? component =
+                await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
             if (component is null)
             {
                 return;
@@ -2751,17 +2767,21 @@ public class StalwartService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent? component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+        EntKube.Contracts.Catalog.InstalledComponent? component =
+            await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
         if (component is null)
         {
             return [];
         }
 
-        List<Guid> ldapComponentIds = await db.ClusterComponents
-            .Where(c => c.ClusterId == component.ClusterId && c.Name == OpenLdapService.CatalogKey)
+        // The directories on the SAME cluster. Asking Catalog for that cluster's components rather
+        // than filtering the table also means the cluster is checked against this tenant, which
+        // the second query never did on its own — it trusted the ClusterId the first one returned.
+        List<Guid> ldapComponentIds =
+            (await catalog.GetComponentsForClusterAsync(tenantId, component.ClusterId, ct))
+            .Where(c => c.Name == OpenLdapService.CatalogKey)
             .Select(c => c.Id)
-            .ToListAsync(ct);
+            .ToList();
 
         return await db.OpenLdapComponentConfigs
             .Where(c => c.TenantId == tenantId
@@ -2784,7 +2804,7 @@ public class StalwartService(
     public async Task RefreshRspamdManifestAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
-        (ClusterComponent? component, string releaseName, string ns) =
+        (EntKube.Contracts.Catalog.InstalledComponent? component, string releaseName, string ns) =
             await ResolveComponentAsync(tenantId, clusterComponentId, RspamdCatalogKey, ct);
         if (component is null)
         {
@@ -3001,7 +3021,7 @@ public class StalwartService(
     public async Task RefreshRoundcubeManifestAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
-        (ClusterComponent? component, string releaseName, string ns) =
+        (EntKube.Contracts.Catalog.InstalledComponent? component, string releaseName, string ns) =
             await ResolveComponentAsync(tenantId, clusterComponentId, RoundcubeCatalogKey, ct);
         if (component is null)
         {
@@ -3083,7 +3103,7 @@ public class StalwartService(
     public async Task RefreshSnappyMailManifestAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
-        (ClusterComponent? component, string releaseName, string ns) =
+        (EntKube.Contracts.Catalog.InstalledComponent? component, string releaseName, string ns) =
             await ResolveComponentAsync(tenantId, clusterComponentId, SnappyMailCatalogKey, ct);
         if (component is null)
         {
@@ -3108,16 +3128,18 @@ public class StalwartService(
             hostnameSecret: "SM_HOSTNAME", issuerSecret: "SM_CLUSTER_ISSUER", servicePort: 80, ct);
     }
 
-    private async Task<(ClusterComponent? Component, string ReleaseName, string Namespace)>
+    private async Task<(EntKube.Contracts.Catalog.InstalledComponent? Component, string ReleaseName, string Namespace)>
         ResolveComponentAsync(
             Guid tenantId, Guid clusterComponentId, string expectedName, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        // The expected-name check stays here. GetComponentAsync answers "this component, if it is
+        // this tenant's"; whether it is the component the caller meant — rspamd rather than
+        // roundcube — is this method's own question, and dropping it would let one webmail's
+        // manifest be rendered over the other's.
+        EntKube.Contracts.Catalog.InstalledComponent? component =
+            await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
 
-        ClusterComponent? component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId && c.Name == expectedName, ct);
-
-        return component is null
+        return component is null || component.Name != expectedName
             ? (null, "", "")
             : (component, component.ReleaseName ?? component.Name, component.Namespace ?? expectedName);
     }
@@ -3133,15 +3155,10 @@ public class StalwartService(
     private async Task StoreManifestAsync(
         Guid tenantId, Guid clusterComponentId, string manifest, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        ClusterComponent? component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
-        if (component is null)
-        {
-            return;
-        }
-        component.HelmValues = manifest;
-        await db.SaveChangesAsync(ct);
+        // A tracked write becomes an explicit one, and the read-then-write collapses into a single
+        // call that returns null for "not this tenant's" — so the tenant scoping and the write are
+        // no longer two things that have to agree.
+        await catalog.SetHelmValuesAsync(tenantId, clusterComponentId, manifest, ct: ct);
     }
 
     private async Task<string?> Secret(Guid tenantId, Guid componentId, string name, CancellationToken ct)
