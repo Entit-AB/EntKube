@@ -1397,7 +1397,7 @@ else
         if (EnvironmentId.HasValue && harborInstances is not null)
         {
             harborInstances = harborInstances
-                .Where(h => h.Component.Cluster.EnvironmentId == EnvironmentId.Value)
+                .Where(h => h.Component.EnvironmentId == EnvironmentId.Value)
                 .ToList();
         }
 

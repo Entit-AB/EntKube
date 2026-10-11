@@ -70,6 +70,7 @@ public class UnencryptedMailboxTests : IDisposable
             factory, vault, mail,
             new MailboxTokenProvider(new PlainClientFactory(), NullLogger<MailboxTokenProvider>.Instance),
             null!,
+            new EntKube.Web.Modules.Api.CatalogApi(factory),
             NullLogger<SupportMailboxService>.Instance);
     }
 

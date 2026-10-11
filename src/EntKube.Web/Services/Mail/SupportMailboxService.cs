@@ -55,6 +55,7 @@ public class SupportMailboxService(
     SupportMailService mail,
     MailboxTokenProvider tokens,
     KeycloakService keycloak,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<SupportMailboxService> logger)
 {
     /// <summary>
@@ -444,22 +445,29 @@ public class SupportMailboxService(
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        var rows = await db.StalwartComponentConfigs
+        // The join was across Catalog's table; the components now come from Catalog and the join
+        // happens here. Both sides are already a tenant's worth of rows, so this is a dictionary
+        // lookup rather than a query — and it is the contract that applies the tenant to the
+        // component side, which the old join never did: it filtered the CONFIGS by tenant and
+        // took whatever components their ids pointed at.
+        Dictionary<Guid, EntKube.Contracts.Catalog.InstalledComponent> installed =
+            (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+            .Where(c => c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed)
+            .ToDictionary(c => c.Id);
+
+        List<StalwartComponentConfig> configs = await db.StalwartComponentConfigs
             .Where(c => c.TenantId == tenantId && c.ImapEnabled)
-            .Join(
-                db.ClusterComponents.Include(k => k.Cluster)
-                    .Where(k => k.Status == ComponentStatus.Installed),
-                c => c.ClusterComponentId,
-                k => k.Id,
-                (c, k) => new { Config = c, Component = k })
             .ToListAsync(ct);
 
-        return [.. rows
+        return [.. configs
+            .Where(c => c.ClusterComponentId != null
+                     && installed.ContainsKey(c.ClusterComponentId!.Value))
+            .Select(c => new { Config = c, Component = installed[c.ClusterComponentId!.Value] })
             .Select(r => new StalwartMailServerOption(
                 r.Component.Id,
                 // The hostname is what an operator recognises; the cluster disambiguates two servers
                 // that serve the same domain from different clusters.
-                $"{r.Config.Hostname} ({r.Component.Cluster?.Name ?? r.Component.Name})",
+                $"{r.Config.Hostname} ({r.Component.ClusterName})",
                 r.Config.AuthMode))
             .OrderBy(o => o.Label, StringComparer.OrdinalIgnoreCase)];
     }

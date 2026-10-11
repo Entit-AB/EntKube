@@ -36,7 +36,20 @@ public class CatalogContractAdoptionTests
     /// 2026-10-09. Was 87 before Tempo, Mimir and Loki moved to the contract, then 66, now 63
     /// with CnpgService, MongoService and KyvernoPolicyService.
     ///
-    /// <para><b>45 now</b>, after <c>StalwartService</c>'s nine and <c>OpenLdapService</c>'s
+    /// <para><b>39 now</b>, after <c>HarborService</c> and <c>KeycloakService</c> reached zero
+    /// and <c>SupportMailboxService</c>'s server listing moved. Three of those were the same
+    /// correlated subquery — <c>db.ClusterComponents.Any(comp =&gt; comp.Id == c.ClusterComponentId
+    /// &amp;&amp; comp.ClusterId == clusterId)</c> — which never checked the cluster against the
+    /// tenant at all: a cluster id from elsewhere matched whatever configs pointed at its
+    /// components. <c>GetComponentsForClusterAsync</c> is tenant-first, so asking Catalog closed
+    /// that as a side effect.</para>
+    ///
+    /// <para>One of the two <c>.Include(c =&gt; c.ExternalRoutes)</c> on the detection queries was
+    /// <b>dead</b> — nothing read a detected Harbor's routes — so it stopped loading a collection
+    /// per component for nothing. Keycloak's was live (the suggested admin URL is built from the
+    /// hostnames) and became one query keyed by component id.</para>
+    ///
+    /// <para><b>Before that, 45</b>, after <c>StalwartService</c>'s nine and <c>OpenLdapService</c>'s
     /// write. Stalwart's were all the same shape — "fetch this component, scoped to the tenant",
     /// which is <c>GetComponentAsync</c> exactly — and converting them let its
     /// <c>StalwartInstance</c> DTO stop handing a tracked EF entity to a Razor page. MailTab
@@ -66,7 +79,7 @@ public class CatalogContractAdoptionTests
     /// same blocker as the credential work's remaining 206 — not a missing method but an unanswered
     /// question about who a background sweep acts as. The other 36 are movable now.</para>
     /// </summary>
-    private const int BaselineQueries = 45;
+    private const int BaselineQueries = 39;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

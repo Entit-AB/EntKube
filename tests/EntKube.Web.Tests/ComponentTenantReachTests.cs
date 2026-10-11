@@ -266,6 +266,7 @@ public class ComponentTenantReachTests : IDisposable
             dbFactory,
             new VaultService(dbFactory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess),
             null!, null!, null!,
+            new EntKube.Web.Modules.Api.CatalogApi(dbFactory),
             NullLogger<SupportMailboxService>.Instance);
 
         MailPollResult result = await mailboxes.TestAsync(ours);
