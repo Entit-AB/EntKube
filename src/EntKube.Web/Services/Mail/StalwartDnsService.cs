@@ -53,7 +53,7 @@ public class StalwartDnsService(
     VaultService vault,
     KeycloakService keycloak,
     MailboxTokenProvider tokens,
-    IKubernetesClientFactory k8s,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     ILogger<StalwartDnsService> logger)
 {
     /// <summary>The vault secret holding the client secret of the API identity.</summary>
@@ -83,10 +83,13 @@ public class StalwartDnsService(
             return [Failed("That mail server is no longer configured.")];
         }
 
-        KubernetesCluster? cluster = await db.KubernetesClusters.AsNoTracking()
-            .FirstOrDefaultAsync(c => c.Id == component.ClusterId, ct);
+        // The cluster used to be a second query by id alone, `c.Id == component.ClusterId`. Not a
+        // reachable hole -- the component above is fetched with `c.Cluster.TenantId == tenantId`,
+        // so that id was already tenant-verified -- but the scoping was implicit in a query three
+        // lines up. The seam states it.
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = await clusterClients.ForAsync(tenantId, component.ClusterId, ct);
 
-        if (cluster?.Kubeconfig is not string kubeconfig || string.IsNullOrWhiteSpace(kubeconfig))
+        if (cluster is null)
         {
             return [Failed("The cluster this mail server runs on has no kubeconfig stored.")];
         }
@@ -115,7 +118,7 @@ public class StalwartDnsService(
                 + "server's own domains. Set both on the mail server's settings.")];
         }
 
-        string? pod = await ReadyPodAsync(ns, release, kubeconfig, ct);
+        string? pod = await ReadyPodAsync(ns, release, cluster, ct);
 
         if (pod is null)
         {
@@ -125,7 +128,7 @@ public class StalwartDnsService(
         // One exec for the schema, because what holds the records is the part nobody here has
         // seen. What it finds decides the next call; what it cannot read is handed back.
         (int? status, string schema) = SplitStatus(
-            await AskAsync(pod, ns, "/api/schema", token, kubeconfig, ct));
+            await AskAsync(pod, ns, "/api/schema", token, cluster, ct));
 
         if (status is null)
         {
@@ -172,7 +175,7 @@ public class StalwartDnsService(
         foreach (StalwartMailDomain domain in config.Domains.OrderBy(d => d.Name))
         {
             (int? recordStatus, string body) = SplitStatus(await AskAsync(
-                pod, ns, $"/api/object/{Uri.EscapeDataString(objectName)}", token, kubeconfig, ct));
+                pod, ns, $"/api/object/{Uri.EscapeDataString(objectName)}", token, cluster, ct));
 
             string? records = recordStatus is 200 ? DkimLinesIn(body, domain.Name) : null;
 
@@ -318,11 +321,11 @@ public class StalwartDnsService(
 
     /// <summary>The first Ready pod of the mail server's StatefulSet.</summary>
     private async Task<string?> ReadyPodAsync(
-        string ns, string release, string kubeconfig, CancellationToken ct)
+        string ns, string release, EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         try
         {
-            string json = await k8s.GetJsonAsync("pods", ns, kubeconfig, $"app={release}", ct);
+            string json = await cluster.GetJsonAsync("pods", ns, $"app={release}", ct);
 
             using JsonDocument doc = JsonDocument.Parse(json);
 
@@ -357,12 +360,12 @@ public class StalwartDnsService(
     /// visible to anything that can read the process table in that container.</para>
     /// </summary>
     private async Task<string> AskAsync(
-        string pod, string ns, string path, string token, string kubeconfig, CancellationToken ct)
+        string pod, string ns, string path, string token, EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         try
         {
-            return await k8s.RunCommandOnPodWithStdinAsync(
-                pod, ns, ["sh", "-c", Query(path)], token + "\n", kubeconfig, ct, "stalwart");
+            return await cluster.RunCommandOnPodWithStdinAsync(
+                pod, ns, ["sh", "-c", Query(path)], token + "\n", ct, "stalwart");
         }
         catch (Exception ex)
         {

@@ -2,6 +2,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 
 namespace EntKube.Web.Tests;
 
@@ -151,7 +152,9 @@ public class CatalogWriteAdoptionTests : IDisposable
         await SeedAsync();
 
         OpenLdapService ldap = new(
-            testDb.Factory, testDb.CreateVaultService(), null!, null!, Catalog(),
+            testDb.Factory, testDb.CreateVaultService(), null!,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, new Mock<IKubernetesClientFactory>().Object),
+            null!, Catalog(),
             NullLogger<OpenLdapService>.Instance);
 
         db.Set<OpenLdapComponentConfig>().Add(new OpenLdapComponentConfig
@@ -205,7 +208,9 @@ public class CatalogWriteAdoptionTests : IDisposable
         await SeedAsync();
 
         OpenLdapService ldap = new(
-            testDb.Factory, testDb.CreateVaultService(), null!, null!, Catalog(),
+            testDb.Factory, testDb.CreateVaultService(), null!,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, new Mock<IKubernetesClientFactory>().Object),
+            null!, Catalog(),
             NullLogger<OpenLdapService>.Instance);
 
         db.Set<OpenLdapComponentConfig>().Add(new OpenLdapComponentConfig

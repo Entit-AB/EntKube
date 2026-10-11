@@ -41,6 +41,7 @@ public class KyvernoDiscoveryResult
 public class KyvernoPolicyService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     IKubernetesClientFactory k8s,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<KyvernoPolicyService> logger)
@@ -238,11 +239,18 @@ public class KyvernoPolicyService(
 
         foreach (KubernetesCluster cluster in clusters)
         {
+            EntKube.Web.Services.Clusters.IClusterClient? reachable =
+                await clusterClients.ForAsync(tenantId, cluster.Id, ct);
+
+            // No stored credential is one of the ordinary "skip this cluster" cases this loop
+            // already handles, and it used to be the `cluster.Kubeconfig!` below.
+            if (reachable is null) continue;
+
             string json;
             try
             {
-                json = await k8s.GetJsonAllNamespacesAsync(
-                    "clusterpolicies.kyverno.io", cluster.Kubeconfig!, ct: ct);
+                json = await reachable.GetJsonAllNamespacesAsync(
+                    "clusterpolicies.kyverno.io", ct: ct);
             }
             catch
             {
@@ -598,12 +606,15 @@ public class KyvernoPolicyService(
 
         foreach ((KubernetesCluster cluster, string ns) in targets)
         {
-            if (string.IsNullOrWhiteSpace(cluster.Kubeconfig)) continue;
+            EntKube.Web.Services.Clusters.IClusterClient? reachable =
+                await clusterClients.ForAsync(tenantId, cluster.Id, ct);
+
+            if (reachable is null) continue;
 
             string json;
             try
             {
-                json = await k8s.GetJsonAsync("policies.kyverno.io", ns, cluster.Kubeconfig!, ct: ct);
+                json = await reachable.GetJsonAsync("policies.kyverno.io", ns, ct: ct);
             }
             catch (Exception ex)
             {

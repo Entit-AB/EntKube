@@ -27,6 +27,7 @@ public class OpenLdapService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
     IKubernetesClientFactory k8sFactory,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     ExternalRouteService routeService,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<OpenLdapService> logger) : IComponentFormValueProvider
@@ -444,7 +445,14 @@ public class OpenLdapService(
         ClusterComponent? component = await db.ClusterComponents
             .Include(c => c.Cluster)
             .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
-        if (component?.Cluster?.Kubeconfig is not { Length: > 0 } kubeconfig)
+        if (component is null)
+        {
+            logger.LogWarning("OpenLDAP TLS certificate skipped — component {ComponentId} not found in this tenant.", clusterComponentId);
+            return;
+        }
+
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = await clusterClients.ForAsync(tenantId, component.ClusterId, ct);
+        if (cluster is null)
         {
             logger.LogWarning("OpenLDAP TLS certificate skipped — no kubeconfig for component {ComponentId}.", clusterComponentId);
             return;
@@ -454,7 +462,7 @@ public class OpenLdapService(
         string ns = component.Namespace ?? "openldap";
         string manifest = BuildTlsCertificateManifest(config.ClusterIssuer!, release, ns);
 
-        await k8sFactory.ApplyManifestAsync(manifest, kubeconfig, ct);
+        await cluster.ApplyManifestAsync(manifest, ct);
         logger.LogInformation(
             "Applied cert-manager Certificate '{Secret}' for OpenLDAP component {ComponentId} via ClusterIssuer '{Issuer}'.",
             TlsSecretName, clusterComponentId, config.ClusterIssuer);
@@ -462,7 +470,7 @@ public class OpenLdapService(
         // Wait for cert-manager to actually issue the Secret BEFORE the install proceeds — the chart
         // mounts it as a volume, so a missing Secret would hang every pod in ContainerCreating. Fail
         // fast with an actionable message instead of letting `helm --wait` block for the full timeout.
-        if (!await WaitForSecretAsync(ns, TlsSecretName, kubeconfig, TimeSpan.FromMinutes(2), ct))
+        if (!await WaitForSecretAsync(ns, TlsSecretName, cluster, TimeSpan.FromMinutes(2), ct))
         {
             throw new InvalidOperationException(
                 $"cert-manager did not issue the '{TlsSecretName}' TLS Secret in namespace '{ns}' within 2 minutes " +
@@ -473,14 +481,14 @@ public class OpenLdapService(
     }
 
     private async Task<bool> WaitForSecretAsync(
-        string ns, string secretName, string kubeconfig, TimeSpan timeout, CancellationToken ct)
+        string ns, string secretName, EntKube.Web.Services.Clusters.IClusterClient cluster, TimeSpan timeout, CancellationToken ct)
     {
         DateTime deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
         {
             try
             {
-                string json = await k8sFactory.GetJsonAsync($"secret/{secretName}", ns, kubeconfig, ct: ct);
+                string json = await cluster.GetJsonAsync($"secret/{secretName}", ns, ct: ct);
                 if (json.Contains("\"kind\"", StringComparison.Ordinal) && json.Contains("tls.crt", StringComparison.Ordinal))
                 {
                     return true;

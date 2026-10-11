@@ -49,7 +49,8 @@ public class YamlDeploymentApplyTests : IDisposable
         sut = new KubernetesOperationsService(
             testDb.Factory,
             new AuditService(testDb.Factory),
-            new KyvernoPolicyService(testDb.Factory, k8s.Object, gate.Object,
+            new KyvernoPolicyService(testDb.Factory, k8s.Object,
+                new ClusterClientFactory(testDb.Factory, k8s.Object), gate.Object,
                 new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
                 NullLogger<KyvernoPolicyService>.Instance),
             gate.Object,

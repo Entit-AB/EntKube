@@ -39,7 +39,12 @@ public class CustodyTriageTests
     /// Credential sites whose enclosing method already has a tenant, measured 2026-10-09. These
     /// are the ones that could move onto <c>IClusterClient</c> without touching a signature.
     ///
-    /// <para><b>26 of 231, after StorageService. Corrected from 32 — and the correction matters
+    /// <para><b>12 of 211.</b> Five services converted at once — <c>VeleroService</c>,
+    /// <c>DriftAdoptionService</c>, <c>StalwartDnsService</c> and <c>OpenLdapService</c> to zero,
+    /// <c>KyvernoPolicyService</c>'s three read-only discovery calls — which is what this test is
+    /// for: all five were picked because they had a tenant, not because they had many sites.</para>
+    ///
+    /// <para><b>Previously 26 of 231, corrected from 32 — and the correction mattered
     /// more than the number.</b>
     /// See <see cref="Declaration"/>: a method returning a tuple was not recognised as a
     /// declaration, so sites inside it were judged by the signature of the method above. Six were
@@ -51,21 +56,19 @@ public class CustodyTriageTests
     /// at 29. None of them was in a method with a tenant — which is exactly what the triage was
     /// built to tell apart, and it could not, because of the pattern above.</para>
     ///
-    /// <para>Where they are (24 now, after VaultService): <c>StalwartService</c> 4, <c>VeleroService</c> 4,
-    /// <c>KyvernoPolicyService</c> 3, <c>DriftAdoptionService</c> 3, then two each in
-    /// <c>VaultService</c>, <c>KeycloakService</c> and <c>StorageService</c>, and one each in
-    /// <c>OpenLdapService</c>, <c>TenantService</c>, <c>IngressDashboardService</c> and
-    /// <c>StalwartDnsService</c>. <c>ClusterClient</c>'s own two are the seam resolving the
-    /// credential, which is the one place that should.</para>
+    /// <para><b>Where the 12 are.</b> <c>StalwartService</c> 4, then two each in
+    /// <c>KeycloakService</c> and <c>StorageService</c>, and one each in
+    /// <c>IngressDashboardService</c> and <c>TenantService</c>. <c>ClusterClient</c>'s own two are
+    /// the seam resolving the credential, which is the one place that should.</para>
     ///
-    /// <para><c>VaultService</c>'s two are gone, and so is
-    /// <c>ComponentLifecycleService.SyncComponentSecretsAsync</c>. Both were held up on what the
-    /// acknowledgment dialog should show for a Secret; that is decided and built, so the values
-    /// are redacted and both syncs moved onto <c>ReplaceSecretAsync</c>. <b>Nothing in the
-    /// codebase builds a Secret with <c>--from-file</c> any more</b> — and nothing should use
-    /// <c>--from-literal</c>, which is what the prohibition was always about.</para>
-    /// </summary>
-    private const int BaselineReachable = 24;
+    /// <para><b>Two of the 12 are not conversions.</b> <c>TenantService.CreateClusterAsync</c>
+    /// <em>writes</em> <c>cluster.Kubeconfig</c> to reflect a value the caller just supplied onto
+    /// the returned entity — there is nothing to route through a seam. And
+    /// <c>IngressDashboardService</c> threads its credential through six private helpers, so it is
+    /// one site by this count and a six-signature change in practice; it wants its own commit, not
+    /// a line in a batch.</para>
+    ///
+    private const int BaselineReachable = 12;
 
     [Fact]
     public void The_sites_that_could_already_ask_the_seam_do_not_multiply()

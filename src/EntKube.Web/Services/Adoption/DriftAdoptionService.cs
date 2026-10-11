@@ -66,7 +66,7 @@ public sealed record AdoptionProposal
 /// </summary>
 public class DriftAdoptionService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    IKubernetesClientFactory k8s,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     ILogger<DriftAdoptionService> logger)
 {
     /// <summary>
@@ -81,7 +81,7 @@ public class DriftAdoptionService(
         var deployment = await db.AppDeployments
             .AsNoTracking()
             .Where(d => d.Id == deploymentId && d.App.Customer.TenantId == tenantId)
-            .Select(d => new { d.Id, d.Namespace, Kubeconfig = d.Cluster.Kubeconfig })
+            .Select(d => new { d.Id, d.Namespace, d.ClusterId })
             .FirstOrDefaultAsync(ct);
 
         if (deployment is null)
@@ -89,7 +89,13 @@ public class DriftAdoptionService(
             return Failed(deploymentId, "Deployment not found in this tenant.");
         }
 
-        if (string.IsNullOrWhiteSpace(deployment.Kubeconfig))
+        // The deployment was already fetched under the tenant, so this cannot fail for the
+        // wrong-tenant reason -- but it is the seam that decides that, not this query, and the
+        // credential never enters this method either way.
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusters.ForAsync(tenantId, deployment.ClusterId, ct);
+
+        if (cluster is null)
         {
             return Failed(deploymentId, "The cluster has no kubeconfig configured.");
         }
@@ -109,14 +115,15 @@ public class DriftAdoptionService(
 
         foreach (DeploymentManifest manifest in manifests)
         {
-            entries.Add(await BuildEntryAsync(manifest, deployment.Namespace, deployment.Kubeconfig, ct));
+            entries.Add(await BuildEntryAsync(manifest, deployment.Namespace, cluster, ct));
         }
 
         return new AdoptionProposal { DeploymentId = deploymentId, Entries = entries };
     }
 
     private async Task<AdoptionEntry> BuildEntryAsync(
-        DeploymentManifest manifest, string ns, string kubeconfig, CancellationToken ct)
+        DeploymentManifest manifest, string ns,
+        EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         AdoptionEntry Base(AdoptionStatus status, params string[] notes) => new()
         {
@@ -133,8 +140,8 @@ public class DriftAdoptionService(
         {
             // kubectl resolves "kind/name" against the cluster's own API discovery, so an
             // abbreviation or a custom resource works without EntKube knowing its group.
-            liveJson = await k8s.GetJsonAsync(
-                $"{manifest.Kind.ToLowerInvariant()}/{manifest.Name}", ns, kubeconfig, "", ct);
+            liveJson = await cluster.GetJsonAsync(
+                $"{manifest.Kind.ToLowerInvariant()}/{manifest.Name}", ns, "", ct);
         }
         catch (Exception ex)
         {
