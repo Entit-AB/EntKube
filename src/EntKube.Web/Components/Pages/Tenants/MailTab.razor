@@ -52,7 +52,7 @@
                     bool active = selected?.Component.Id == inst.Component.Id;
                     <button class="btn btn-sm @(active ? "btn-primary" : "btn-outline-secondary")"
                             @onclick="() => SelectInstanceAsync(inst)">
-                        <i class="bi bi-envelope-at me-1"></i>@inst.Component.Cluster.Name
+                        <i class="bi bi-envelope-at me-1"></i>@inst.Component.ClusterName
                         @if (inst.Config is null)
                         {
                             <span class="badge bg-warning text-dark ms-1">unconfigured</span>

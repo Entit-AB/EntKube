@@ -66,6 +66,7 @@ public class StalwartPreflightTests : IDisposable
         // cert-manager certificate on an installed component, which none of these is.
         mail = new StalwartService(
             factory, vault, null!, null!, null!, null!, null!,
+            new EntKube.Web.Modules.Api.CatalogApi(factory),
             NullLogger<StalwartService>.Instance);
     }
 

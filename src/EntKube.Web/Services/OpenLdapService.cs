@@ -28,6 +28,7 @@ public class OpenLdapService(
     VaultService vaultService,
     IKubernetesClientFactory k8sFactory,
     ExternalRouteService routeService,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<OpenLdapService> logger) : IComponentFormValueProvider
 {
     // Explicit implementation: the class already exposes CatalogKey as a const, and the interface
@@ -395,7 +396,8 @@ public class OpenLdapService(
             return;
         }
 
-        ClusterComponent? component = await db.ClusterComponents.FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+        EntKube.Contracts.Catalog.InstalledComponent? component =
+            await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
         if (component is null)
         {
             return;
@@ -406,8 +408,12 @@ public class OpenLdapService(
         string seed = BuildSeedLdif(config, usersById);
         string credSecretName = $"{component.ReleaseName ?? component.Name}-credentials";
 
-        component.HelmValues = BuildHelmValues(config, seed, credSecretName);
-        await db.SaveChangesAsync(ct);
+        // The last tracked write to Catalog's table from outside Catalog. It was
+        // `component.HelmValues = …; SaveChangesAsync()` — a write with no Update() call near it,
+        // which is why the first measurement of this table reported that nothing outside Catalog
+        // wrote to it at all.
+        await catalog.SetHelmValuesAsync(
+            tenantId, clusterComponentId, BuildHelmValues(config, seed, credSecretName), ct: ct);
 
         logger.LogInformation(
             "Refreshed OpenLDAP Helm values for component {ComponentId}: {Ous} OUs, {Users} users, {Groups} groups.",

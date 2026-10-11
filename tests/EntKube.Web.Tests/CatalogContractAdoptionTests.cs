@@ -36,7 +36,14 @@ public class CatalogContractAdoptionTests
     /// 2026-10-09. Was 87 before Tempo, Mimir and Loki moved to the contract, then 66, now 63
     /// with CnpgService, MongoService and KyvernoPolicyService.
     ///
-    /// <para><b>55 now.</b> Eight more services stopped touching the table, each of which had
+    /// <para><b>45 now</b>, after <c>StalwartService</c>'s nine and <c>OpenLdapService</c>'s
+    /// write. Stalwart's were all the same shape — "fetch this component, scoped to the tenant",
+    /// which is <c>GetComponentAsync</c> exactly — and converting them let its
+    /// <c>StalwartInstance</c> DTO stop handing a tracked EF entity to a Razor page. MailTab
+    /// reached through it for <c>Component.Id</c> and <c>Component.Cluster.Name</c> and nothing
+    /// else, which is two fields the contract already returns.</para>
+    ///
+    /// <para><b>Before that, 55.</b> Eight more services stopped touching the table, each of which had
     /// exactly one query: <c>DatabaseService</c>, <c>ElasticsearchService</c>, <c>KafkaService</c>,
     /// <c>KedaScalerService</c>, <c>RabbitMQService</c>, <c>RedisService</c>, <c>TenantService</c>
     /// and <c>VpnService</c>. Every one asked a variant of "is this operator installed", and every
@@ -59,13 +66,25 @@ public class CatalogContractAdoptionTests
     /// same blocker as the credential work's remaining 206 — not a missing method but an unanswered
     /// question about who a background sweep acts as. The other 36 are movable now.</para>
     /// </summary>
-    private const int BaselineQueries = 55;
+    private const int BaselineQueries = 45;
 
     /// <summary>
-    /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22;
-    /// the same three services accounted for six of them.
+    /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,
+    /// then 3, and now <b>zero</b>.
+    ///
+    /// <para>This is the number that mattered most, because it is the one the first measurement
+    /// got wrong. It looked for <c>.ClusterComponents.Add/Remove/Update</c>, found none, and
+    /// concluded the table was read-only outside Catalog — a conclusion that was written into
+    /// <c>ICatalogApi</c>'s own documentation as the reason it had no write methods. EF writes
+    /// through change tracking, so <c>component.HelmValues = x</c> followed by
+    /// <c>SaveChangesAsync</c> is a write with no <c>Update()</c> anywhere near it.</para>
+    ///
+    /// <para>The last three were <c>StalwartService</c> twice and <c>OpenLdapService</c> once, and
+    /// all three are now <see cref="EntKube.Contracts.Catalog.ICatalogApi.SetHelmValuesAsync"/> —
+    /// which until this point had no callers at all, so the contract's write half existed only on
+    /// paper.</para>
     /// </summary>
-    private const int BaselineWrites = 3;
+    private const int BaselineWrites = 0;
 
     [Fact]
     public void No_new_service_reaches_past_the_catalog_contract()
