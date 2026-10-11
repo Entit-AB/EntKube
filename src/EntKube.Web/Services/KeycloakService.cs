@@ -144,8 +144,14 @@ public class KeycloakRealmSettings
 /// </summary>
 public class DetectedKeycloak
 {
-    /// <summary>Set for EntKube-managed installs; null for external instances.</summary>
-    public ClusterComponent? Component { get; set; }
+    /// <summary>
+    /// Set for EntKube-managed installs; null for external instances.
+    ///
+    /// <para>Catalog's record, not the EF entity. The Identity tab reads <c>Id</c>,
+    /// <c>Cluster.EnvironmentId</c>, <c>Namespace</c> and <c>Status</c> off it — all four are on
+    /// the contract record, so nothing needed a tracked entity.</para>
+    /// </summary>
+    public EntKube.Contracts.Catalog.InstalledComponent? Component { get; set; }
     public KeycloakComponentConfig? Config { get; set; }
 
     /// <summary>External URL from the component's ExternalRoutes, if any.</summary>
@@ -163,7 +169,7 @@ public class DetectedKeycloak
     public Guid ComponentId => Component?.Id ?? Config!.Id;
 
     public string DisplayName => Component?.Name ?? Config?.DisplayName ?? "External Keycloak";
-    public string? ClusterDisplayName => Component?.Cluster.Name;
+    public string? ClusterDisplayName => Component?.ClusterName;
 }
 
 /// <summary>
@@ -198,17 +204,31 @@ public class KeycloakService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        List<ClusterComponent> components = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .Include(c => c.ExternalRoutes)
-            .Where(c => c.Cluster.TenantId == tenantId
-                && (c.Status == ComponentStatus.Installed || c.Status == ComponentStatus.Failed)
+        // Asked of Catalog. Failed installs are included on purpose — a Keycloak that failed to
+        // come up is what an operator opens this tab to look at.
+        List<EntKube.Contracts.Catalog.InstalledComponent> components =
+            (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+            .Where(c => (c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed || c.Status == EntKube.Contracts.Catalog.ComponentStatus.Failed)
                 && (c.Name == "keycloak"
                     || c.ReleaseName == "keycloak"
                     || c.HelmChartName == "keycloakx"
                     || c.HelmChartName == "keycloak"))
-            .OrderBy(c => c.Cluster.Name).ThenBy(c => c.Name)
-            .ToListAsync(ct);
+            .OrderBy(c => c.ClusterName, StringComparer.Ordinal)
+            .ThenBy(c => c.Name, StringComparer.Ordinal)
+            .ToList();
+
+        // The routes come from their own table rather than from an .Include on the component.
+        // Unlike Harbor's, this Include was NOT dead — the suggested admin URL below is built from
+        // the component's hostnames — so it becomes one query keyed by component id. Earliest
+        // first, which is the order the old OrderBy(r => r.CreatedAt) picked from.
+        HashSet<Guid> componentIds = components.Select(c => c.Id).ToHashSet();
+        Dictionary<Guid, List<string>> hostnamesByComponent = (await db.ExternalRoutes
+                .Where(r => componentIds.Contains(r.ComponentId))
+                .OrderBy(r => r.CreatedAt)
+                .Select(r => new { r.ComponentId, r.Hostname })
+                .ToListAsync(ct))
+            .GroupBy(r => r.ComponentId)
+            .ToDictionary(g => g.Key, g => g.Select(r => r.Hostname).ToList());
 
         List<KeycloakComponentConfig> configs = await db.KeycloakComponentConfigs
             .Include(cfg => cfg.CnpgDatabase).ThenInclude(d => d!.CnpgCluster)
@@ -227,10 +247,10 @@ public class KeycloakService(
             if (relativePath != "/" && !relativePath.StartsWith('/'))
                 relativePath = "/" + relativePath;
 
-            string? suggestedUrl = comp.ExternalRoutes
-                .OrderBy(r => r.CreatedAt)
-                .Select(r => $"https://{r.Hostname}{(relativePath == "/" ? "" : relativePath)}")
-                .FirstOrDefault();
+            string? suggestedUrl = hostnamesByComponent.TryGetValue(comp.Id, out List<string>? hosts)
+                ? hosts.Select(h => $"https://{h}{(relativePath == "/" ? "" : relativePath)}")
+                    .FirstOrDefault()
+                : null;
 
             return new DetectedKeycloak
             {
@@ -1900,11 +1920,20 @@ public class KeycloakService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // The component ids on that cluster, from Catalog. This was a correlated subquery
+        // against its table — which also means the cluster was never checked against this
+        // tenant: a cluster id from elsewhere would have matched whatever configs pointed at
+        // its components. GetComponentsForClusterAsync is tenant-first.
+        HashSet<Guid> onCluster =
+            (await catalog.GetComponentsForClusterAsync(tenantId, kubernetesClusterId, ct))
+            .Select(c => c.Id)
+            .ToHashSet();
+
         return await db.KeycloakComponentConfigs
             .Include(c => c.CnpgDatabase)
             .Where(c => c.TenantId == tenantId
-                && db.ClusterComponents
-                    .Any(comp => comp.Id == c.ClusterComponentId && comp.ClusterId == kubernetesClusterId))
+                && c.ClusterComponentId != null
+                && onCluster.Contains(c.ClusterComponentId!.Value))
             .ToListAsync(ct);
     }
 
@@ -3812,11 +3841,20 @@ public class KeycloakService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // The component ids on that cluster, from Catalog. This was a correlated subquery
+        // against its table — which also means the cluster was never checked against this
+        // tenant: a cluster id from elsewhere would have matched whatever configs pointed at
+        // its components. GetComponentsForClusterAsync is tenant-first.
+        HashSet<Guid> onCluster =
+            (await catalog.GetComponentsForClusterAsync(tenantId, kubernetesClusterId, ct))
+            .Select(c => c.Id)
+            .ToHashSet();
+
         return await db.KeycloakRealms
             .Include(r => r.ComponentConfig)
             .Where(r => r.TenantId == tenantId
-                && db.ClusterComponents.Any(comp =>
-                    comp.Id == r.ComponentConfig.ClusterComponentId && comp.ClusterId == kubernetesClusterId))
+                && r.ComponentConfig.ClusterComponentId != null
+                && onCluster.Contains(r.ComponentConfig.ClusterComponentId!.Value))
             .OrderBy(r => r.DisplayName)
             .ToListAsync(ct);
     }

@@ -14,13 +14,18 @@ namespace EntKube.Web.Services;
 
 public class DetectedHarbor
 {
-    public ClusterComponent Component { get; set; } = null!;
+    /// <summary>
+    /// Carries Catalog's record rather than the EF entity. The page reads
+    /// <c>Component.Cluster.EnvironmentId</c> and the three computed properties below, which is
+    /// four fields the contract already returns — so nothing here needed a tracked entity.
+    /// </summary>
+    public EntKube.Contracts.Catalog.InstalledComponent Component { get; set; } = null!;
     public HarborComponentConfig? Config { get; set; }
 
     public bool IsConfigured => Config is not null;
     public Guid ComponentId => Component.Id;
     public string DisplayName => Component.Name;
-    public string? ClusterDisplayName => Component.Cluster.Name;
+    public string? ClusterDisplayName => Component.ClusterName;
 }
 
 /// <summary>Result of checking the stored Harbor admin credentials against the live instance.</summary>
@@ -812,10 +817,17 @@ public class HarborService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // The component ids on that cluster, from Catalog. This was a correlated subquery
+        // against its table — which also means the cluster was never checked against this
+        // tenant: a cluster id from elsewhere would have matched whatever configs pointed at
+        // its components. GetComponentsForClusterAsync is tenant-first.
+        HashSet<Guid> onCluster =
+            (await catalog.GetComponentsForClusterAsync(tenantId, kubernetesClusterId, ct))
+            .Select(c => c.Id)
+            .ToHashSet();
+
         return await db.HarborComponentConfigs
-            .Where(c => c.TenantId == tenantId
-                && db.ClusterComponents
-                    .Any(comp => comp.Id == c.ClusterComponentId && comp.ClusterId == kubernetesClusterId))
+            .Where(c => c.TenantId == tenantId && onCluster.Contains(c.ClusterComponentId))
             .ToListAsync(ct);
     }
 
@@ -848,14 +860,19 @@ public class HarborService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        List<ClusterComponent> components = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .Include(c => c.ExternalRoutes)
-            .Where(c => c.Cluster.TenantId == tenantId
-                && (c.Status == ComponentStatus.Installed || c.Status == ComponentStatus.Failed)
+        // Asked of Catalog. Failed installs are included on purpose — a Harbor that failed to
+        // come up is exactly what an operator opens this tab to look at.
+        //
+        // The .Include(c => c.ExternalRoutes) this replaces was dead: nothing read a detected
+        // Harbor's routes, here or on the page, so it loaded a collection per component for
+        // nothing.
+        List<EntKube.Contracts.Catalog.InstalledComponent> components =
+            (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+            .Where(c => (c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed || c.Status == EntKube.Contracts.Catalog.ComponentStatus.Failed)
                 && (c.Name == "harbor" || c.HelmChartName == "harbor"))
-            .OrderBy(c => c.Cluster.Name).ThenBy(c => c.Name)
-            .ToListAsync(ct);
+            .OrderBy(c => c.ClusterName, StringComparer.Ordinal)
+            .ThenBy(c => c.Name, StringComparer.Ordinal)
+            .ToList();
 
         List<HarborComponentConfig> configs = await db.HarborComponentConfigs
             .Where(c => c.TenantId == tenantId)

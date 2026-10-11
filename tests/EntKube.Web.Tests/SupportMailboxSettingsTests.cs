@@ -236,6 +236,7 @@ public class SupportMailboxSettingsTests : IDisposable
                     "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=")),
                 TestServices.NoClusterAccess),
             null!, null!, null!,
+            new EntKube.Web.Modules.Api.CatalogApi(new TestDbContextFactory(connection)),
             NullLogger<SupportMailboxService>.Instance);
     }
 

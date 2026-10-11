@@ -53,6 +53,7 @@ public class SupportMailboxCredentialTests : IDisposable
         // while nothing was minted.
         mailboxes = new SupportMailboxService(
             factory, vault, null!, null!, null!,
+            new EntKube.Web.Modules.Api.CatalogApi(factory),
             NullLogger<SupportMailboxService>.Instance);
     }
 
