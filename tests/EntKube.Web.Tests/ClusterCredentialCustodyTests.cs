@@ -125,7 +125,18 @@ public class ClusterCredentialCustodyTests
     /// See <see cref="The_custody_baseline_does_not_carry_slack"/>, which is the half of the
     /// ratchet that exists for exactly this and nothing else.</para>
     ///
-    private const int BaselineOccurrences = 200;
+    /// <para><b>183 — the first fall after the sweep decision, and the largest single one.</b>
+    /// <c>HeadscaleService</c> went 17 → 0. Not because anything new was built: the decision
+    /// (docs/decomposition.md §4.0.1.2) is that a background sweep acts as <em>each tenant in
+    /// turn</em>, so <c>HeadscaleCertSyncService</c> now loops tenants and
+    /// <c>HeadscaleService</c>'s 29 public methods take the tenant its callers always had. Its
+    /// <c>GetComponentAsync</c> funnel — thirteen internal callers — asks Catalog tenant-first,
+    /// and the credential comes from the seam.</para>
+    ///
+    /// <para>That is what the 197 were waiting for. They were never a refactor; they were this
+    /// question.</para>
+    ///
+    private const int BaselineOccurrences = 183;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -140,7 +151,7 @@ public class ClusterCredentialCustodyTests
     /// parameter rather than reading one, so it never appeared in this count. It now takes an
     /// <c>IClusterClient</c>, which is what let <c>StorageService</c>'s relay path go.</para>
     /// </summary>
-    private const int BaselineFiles = 36;
+    private const int BaselineFiles = 35;
 
     private static (int Occurrences, int Files) Measure()
     {

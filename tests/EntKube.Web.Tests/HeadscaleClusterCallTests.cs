@@ -72,7 +72,12 @@ public class HeadscaleClusterCallTests : IDisposable
             // for these, and neither is exercised here. Null rather than a half-built graph, so a
             // test that strays into those paths fails loudly instead of passing for a bad reason.
             lifecycleService: null!,
-            httpClientFactory: null!);
+            httpClientFactory: null!,
+            // Both real: the contract is how the component is found at all now, and the seam is
+            // how the cluster is reached. A mock of either would make every assertion below about
+            // the mock rather than about what HeadscaleService asks of a cluster.
+            catalog: new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+            clusterClients: new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object));
     }
 
     public void Dispose()
@@ -149,7 +154,7 @@ public class HeadscaleClusterCallTests : IDisposable
     {
         await SeedAsync();
 
-        await sut.DeploySubnetRouterAsync(clusterId, "https://vpn.example.com", "10.96.0.0/12");
+        await sut.DeploySubnetRouterAsync(tenantId, clusterId, "https://vpn.example.com", "10.96.0.0/12");
 
         string manifest = applied.Should().ContainSingle().Subject;
         manifest.Should().Contain("kind: DaemonSet")
@@ -166,7 +171,7 @@ public class HeadscaleClusterCallTests : IDisposable
     {
         await SeedAsync(withKubeconfig: false);
 
-        Func<Task> act = () => sut.DeploySubnetRouterAsync(clusterId, "https://vpn.example.com", "10.96.0.0/12");
+        Func<Task> act = () => sut.DeploySubnetRouterAsync(tenantId, clusterId, "https://vpn.example.com", "10.96.0.0/12");
 
         await act.Should().ThrowAsync<InvalidOperationException>();
         applied.Should().BeEmpty();
@@ -177,7 +182,7 @@ public class HeadscaleClusterCallTests : IDisposable
     {
         await SeedAsync();
 
-        await sut.RemoveSubnetRouterAsync(clusterId);
+        await sut.RemoveSubnetRouterAsync(tenantId, clusterId);
 
         deleted.Should().ContainSingle()
             .Which.Should().Be(("daemonset", "headscale-subnet-router", "headscale"));
@@ -190,7 +195,7 @@ public class HeadscaleClusterCallTests : IDisposable
 
         // Deliberately unlike Deploy, which throws. Removal is called on teardown paths where a
         // cluster that can no longer be reached should not block the rest of the cleanup.
-        Func<Task> act = () => sut.RemoveSubnetRouterAsync(clusterId);
+        Func<Task> act = () => sut.RemoveSubnetRouterAsync(tenantId, clusterId);
 
         await act.Should().NotThrowAsync();
         deleted.Should().BeEmpty();
@@ -204,7 +209,7 @@ public class HeadscaleClusterCallTests : IDisposable
                 "app=headscale-subnet-router", It.IsAny<CancellationToken>()))
             .ReturnsAsync("{\"items\":[{\"metadata\":{\"name\":\"headscale-subnet-router\"}}]}");
 
-        bool running = await sut.IsSubnetRouterRunningAsync(clusterId);
+        bool running = await sut.IsSubnetRouterRunningAsync(tenantId, clusterId);
 
         running.Should().BeTrue();
     }
@@ -217,7 +222,7 @@ public class HeadscaleClusterCallTests : IDisposable
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync("{\"items\":[]}");
 
-        (await sut.IsSubnetRouterRunningAsync(clusterId)).Should().BeFalse();
+        (await sut.IsSubnetRouterRunningAsync(tenantId, clusterId)).Should().BeFalse();
     }
 
     /// <summary>
@@ -233,7 +238,7 @@ public class HeadscaleClusterCallTests : IDisposable
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("kubectl failed (exit 1): connection refused"));
 
-        (await sut.IsSubnetRouterRunningAsync(clusterId)).Should().BeFalse();
+        (await sut.IsSubnetRouterRunningAsync(tenantId, clusterId)).Should().BeFalse();
     }
 
     // ════════════════════════════════════════════════════════════════
@@ -255,7 +260,7 @@ public class HeadscaleClusterCallTests : IDisposable
                 commands.Add((pod, ns, string.Join(' ', cmd))))
             .ReturnsAsync("abcdef0123456789");
 
-        string key = await sut.GenerateApiKeyAsync(clusterId);
+        string key = await sut.GenerateApiKeyAsync(tenantId, clusterId);
 
         key.Should().Be("abcdef0123456789");
 
@@ -283,7 +288,7 @@ public class HeadscaleClusterCallTests : IDisposable
 
                 """);
 
-        (await sut.GenerateApiKeyAsync(clusterId)).Should().Be("deadbeefcafe1234");
+        (await sut.GenerateApiKeyAsync(tenantId, clusterId)).Should().Be("deadbeefcafe1234");
     }
 
     [Fact]
@@ -300,7 +305,7 @@ public class HeadscaleClusterCallTests : IDisposable
 
         // Returning "" here would store an empty API key in the vault and fail much later, on a
         // call that has nothing to do with bootstrap.
-        Func<Task> act = () => sut.GenerateApiKeyAsync(clusterId);
+        Func<Task> act = () => sut.GenerateApiKeyAsync(tenantId, clusterId);
 
         (await act.Should().ThrowAsync<InvalidOperationException>())
             .Which.Message.Should().Contain("database is locked");
@@ -314,7 +319,7 @@ public class HeadscaleClusterCallTests : IDisposable
                 It.IsAny<CancellationToken>()))
             .ReturnsAsync("{\"items\":[]}");
 
-        Func<Task> act = () => sut.GenerateApiKeyAsync(clusterId);
+        Func<Task> act = () => sut.GenerateApiKeyAsync(tenantId, clusterId);
 
         (await act.Should().ThrowAsync<InvalidOperationException>())
             .Which.Message.Should().Contain("pod not found");
@@ -330,7 +335,7 @@ public class HeadscaleClusterCallTests : IDisposable
         await SeedAsync();
         await vault.SetComponentSecretAsync(tenantId, componentId, "server-url", "https://vpn.example.com");
 
-        await sut.EnsureIstioPermissiveAsync(clusterId);
+        await sut.EnsureIstioPermissiveAsync(tenantId, clusterId);
 
         // Tailscale's noise protocol needs an HTTP Upgrade, which HTTP/2 cannot express, so the
         // gateway must stop advertising h2 for this host.
@@ -349,7 +354,7 @@ public class HeadscaleClusterCallTests : IDisposable
         await SeedAsync();
         await vault.SetComponentSecretAsync(tenantId, componentId, "server-url", "https://vpn.example.com");
 
-        await sut.EnsureIstioPermissiveAsync(clusterId);
+        await sut.EnsureIstioPermissiveAsync(tenantId, clusterId);
 
         // Four resources, and all four matter: either filter alone leaves the handshake broken,
         // and without the mesh pair the gateway cannot reach a sidecar-less headscale pod.
@@ -366,7 +371,7 @@ public class HeadscaleClusterCallTests : IDisposable
         await SeedAsync(istio: false);
         await vault.SetComponentSecretAsync(tenantId, componentId, "server-url", "https://vpn.example.com");
 
-        await sut.EnsureIstioPermissiveAsync(clusterId);
+        await sut.EnsureIstioPermissiveAsync(tenantId, clusterId);
 
         // EnvoyFilter and PeerAuthentication are Istio resources. Applying them where there is no
         // Istio would fail on the CRD, which is why the gateway class is checked first.
@@ -380,7 +385,7 @@ public class HeadscaleClusterCallTests : IDisposable
 
         // No server-url in the vault: there is no hostname to scope the SNI match to, and an
         // unscoped filter would strip h2 from every host on the gateway.
-        await sut.EnsureIstioPermissiveAsync(clusterId);
+        await sut.EnsureIstioPermissiveAsync(tenantId, clusterId);
 
         applied.Should().BeEmpty();
     }
@@ -391,8 +396,69 @@ public class HeadscaleClusterCallTests : IDisposable
         await SeedAsync(withKubeconfig: false);
         await vault.SetComponentSecretAsync(tenantId, componentId, "server-url", "https://vpn.example.com");
 
-        await sut.EnsureIstioPermissiveAsync(clusterId);
+        await sut.EnsureIstioPermissiveAsync(tenantId, clusterId);
 
         applied.Should().BeEmpty();
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  The refusal the sweep decision bought
+    // ════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// A tenant asking about a cluster that is not theirs gets nothing.
+    ///
+    /// <para><b>This assertion could not exist before.</b> Every one of these methods took a
+    /// cluster id and no tenant, so there was nothing to compare the cluster against — a crafted
+    /// id answered about any cluster in the installation, and the thirteen methods behind
+    /// <c>GetComponentAsync</c> all inherited that. The tenant is a parameter now because the
+    /// sweep that drove the design has one (docs/decomposition.md §4.0.1.2: a sweep acts as each
+    /// tenant in turn), and its callers — two Razor pages — always had one to give.</para>
+    ///
+    /// <para>Asserted on what reached the cluster, not on the returned value: a method that read
+    /// another tenant's cluster and then returned null has still read it.</para>
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_cluster_is_not_reachable()
+    {
+        await SeedAsync();
+
+        Guid stranger = Guid.NewGuid();
+        await using (ApplicationDbContext write = testDb.CreateContext())
+        {
+            write.Tenants.Add(new Tenant
+            {
+                Id = stranger, Name = "Stranger", Slug = $"stranger-{stranger:N}",
+            });
+            await write.SaveChangesAsync();
+        }
+
+        // Our cluster, their tenant.
+        (await sut.GetComponentAsync(stranger, clusterId)).Should().BeNull(
+            "the component belongs to a cluster this tenant does not own");
+
+        await sut.EnsureIstioPermissiveAsync(stranger, clusterId);
+        await sut.RemoveSubnetRouterAsync(stranger, clusterId);
+        (await sut.IsSubnetRouterRunningAsync(stranger, clusterId)).Should().BeFalse();
+
+        applied.Should().BeEmpty("nothing may be applied to a cluster the asking tenant does not own");
+        deleted.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// And the component is still found for the tenant that does own it — without this, the
+    /// refusal above would hold just as well against a lookup that had stopped working.
+    /// </summary>
+    [Fact]
+    public async Task Our_own_cluster_still_resolves_its_component()
+    {
+        await SeedAsync();
+
+        EntKube.Contracts.Catalog.InstalledComponent? comp =
+            await sut.GetComponentAsync(tenantId, clusterId);
+
+        comp.Should().NotBeNull();
+        comp!.Id.Should().Be(componentId);
+        comp.ClusterId.Should().Be(clusterId);
     }
 }

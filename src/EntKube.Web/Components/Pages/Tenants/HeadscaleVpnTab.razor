@@ -862,7 +862,7 @@ else
     private string vpnTab = "setup";
     private string? tabError;
 
-    private EntKube.Web.Data.ClusterComponent? component;
+    private EntKube.Contracts.Catalog.InstalledComponent? component;
     private string? serverUrl;
     private string? apiKey;
     private bool? reachable;
@@ -933,11 +933,11 @@ else
         tabError = null;
         try
         {
-            component = await HeadscaleService.GetComponentAsync(ClusterId);
+            component = await HeadscaleService.GetComponentAsync(TenantId, ClusterId);
             if (component is null) return;
 
-            serverUrl = await HeadscaleService.GetServerUrlAsync(ClusterId);
-            apiKey = await HeadscaleService.GetApiKeyAsync(ClusterId);
+            serverUrl = await HeadscaleService.GetServerUrlAsync(TenantId, ClusterId);
+            apiKey = await HeadscaleService.GetApiKeyAsync(TenantId, ClusterId);
             hasExternalRoute = await ExternalRouteExistsAsync();
             if (hasExternalRoute && component is not null)
             {
@@ -945,9 +945,9 @@ else
                     await RouteService.GetRoutesAsync(component.Id);
                 routeTlsMode = exRoutes.FirstOrDefault()?.TlsMode;
             }
-            routerRunning = await HeadscaleService.IsSubnetRouterRunningAsync(ClusterId);
+            routerRunning = await HeadscaleService.IsSubnetRouterRunningAsync(TenantId, ClusterId);
             clusterIssuers = await LifecycleService.ListClusterIssuersAsync(TenantId, ClusterId);
-            string? storedIssuer = await HeadscaleService.GetClusterIssuerAsync(ClusterId);
+            string? storedIssuer = await HeadscaleService.GetClusterIssuerAsync(TenantId, ClusterId);
             routeClusterIssuer = storedIssuer
                 ?? (clusterIssuers.Count > 0 ? clusterIssuers[0] : "");
 
@@ -1041,8 +1041,8 @@ else
         tabError = null;
         try
         {
-            string key = await HeadscaleService.GenerateApiKeyAsync(ClusterId);
-            await HeadscaleService.SaveApiKeyAsync(ClusterId, key);
+            string key = await HeadscaleService.GenerateApiKeyAsync(TenantId, ClusterId);
+            await HeadscaleService.SaveApiKeyAsync(TenantId, ClusterId, key);
             apiKey = key;
         }
         catch (Exception ex)
@@ -1061,8 +1061,8 @@ else
         tabError = null;
         try
         {
-            string key = await HeadscaleService.GenerateApiKeyAsync(ClusterId);
-            await HeadscaleService.SaveApiKeyAsync(ClusterId, key);
+            string key = await HeadscaleService.GenerateApiKeyAsync(TenantId, ClusterId);
+            await HeadscaleService.SaveApiKeyAsync(TenantId, ClusterId, key);
             apiKey = key;
         }
         catch (Exception ex)
@@ -1080,7 +1080,7 @@ else
         if (string.IsNullOrWhiteSpace(manualApiKey)) return;
         try
         {
-            await HeadscaleService.SaveApiKeyAsync(ClusterId, manualApiKey.Trim());
+            await HeadscaleService.SaveApiKeyAsync(TenantId, ClusterId, manualApiKey.Trim());
             apiKey = manualApiKey.Trim();
             manualApiKey = null;
         }
@@ -1096,7 +1096,7 @@ else
         passthroughMsg = null;
         try
         {
-            await HeadscaleService.SwitchToTlsPassthroughAsync(ClusterId);
+            await HeadscaleService.SwitchToTlsPassthroughAsync(TenantId, ClusterId);
             routeTlsMode = TlsMode.Passthrough;
             passthroughMsg = "Done. cert-manager is provisioning the certificate (~1–2 min for Let's Encrypt); the pod will restart automatically once the secret is ready.";
         }
@@ -1117,8 +1117,8 @@ else
         tabError = null;
         try
         {
-            await HeadscaleService.SetupInfraAuthKeyAsync(ClusterId, serverUrl, apiKey!);
-            await HeadscaleService.DeploySubnetRouterAsync(ClusterId, serverUrl, serviceCidr);
+            await HeadscaleService.SetupInfraAuthKeyAsync(TenantId, ClusterId, serverUrl, apiKey!);
+            await HeadscaleService.DeploySubnetRouterAsync(TenantId, ClusterId, serverUrl, serviceCidr);
             routerRunning = true;
         }
         catch (Exception ex)
@@ -1137,7 +1137,7 @@ else
         tabError = null;
         try
         {
-            await HeadscaleService.RemoveSubnetRouterAsync(ClusterId);
+            await HeadscaleService.RemoveSubnetRouterAsync(TenantId, ClusterId);
             routerRunning = false;
         }
         catch (Exception ex)
