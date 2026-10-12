@@ -184,7 +184,32 @@ public class ClusterCredentialCustodyTests
     /// <para><c>ClusterHealthPanel.razor</c> deleted — 225 lines, rendered by nothing, and one of
     /// <c>GetClusterHealthAsync</c>'s four callers.</para>
     ///
-    private const int BaselineOccurrences = 169;
+    /// <para><b>167 — step 5, the deployment metrics.</b> <c>GetDeploymentMetricsAsync</c> used to
+    /// take a deployment id and nothing else: it loaded that deployment's cluster by the id the
+    /// row carried and read the kubeconfig off it, so the id was the entire authorization. The id
+    /// is now an input — the cluster id goes into <c>ForAsync</c>, which is what compares it
+    /// against the asking tenant.</para>
+    ///
+    /// <para>Its second caller, <c>RolloutService.MeasureAsync</c>, had no tenant, so
+    /// <c>RolloutWatcherService</c> became the fourth sweep this programme has turned into a tenant
+    /// loop — the ninth of the twenty-six that loops tenants at all: the due rollouts are
+    /// selected per tenant through <c>Deployment.App.Customer.TenantId</c> rather than
+    /// installation-wide. That also retired the lookup <c>MeasureAsync</c> did for its error
+    /// budget, which asked the deployment to name the tenant that was about to authorize it.</para>
+    ///
+    /// <para><c>PrometheusService</c> is at 4 of its original 20, with <b>one</b> old-path caller
+    /// left: the <c>GetMetricRangeAsync</c>/<c>GetLabelValuesAsync</c> pair behind
+    /// <c>IMetricsQuery</c>. When it goes, so do <c>ResolvedPrometheusInfo</c>, the
+    /// <c>string kubeconfig</c> overload of <c>WithServiceAsync</c>, and the four sites here.</para>
+    ///
+    /// <para><b>165 — and the rollback with it.</b> Giving the watcher a tenant made its two
+    /// remaining sites <em>reachable</em> in <see cref="CustodyTriageTests"/>'s sense — a
+    /// credential read in a method that now knows its tenant — so that ratchet failed, correctly:
+    /// the conversion had created the easy case rather than taking it. The rollback moved onto a
+    /// new seam verb, <c>UndoDeploymentsAsync</c>, and <c>RolloutWatcherService</c> left the
+    /// file list.</para>
+    ///
+    private const int BaselineOccurrences = 165;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -198,8 +223,11 @@ public class ClusterCredentialCustodyTests
     /// <para><c>ClusterEgressRelay</c> left too, and differently: it took a kubeconfig as a
     /// parameter rather than reading one, so it never appeared in this count. It now takes an
     /// <c>IClusterClient</c>, which is what let <c>StorageService</c>'s relay path go.</para>
+    ///
+    /// <para>34. <c>RolloutWatcherService</c> stopped reading <c>deployment.Cluster.Kubeconfig</c>
+    /// to hand to a rollback, so it no longer includes the cluster row at all.</para>
     /// </summary>
-    private const int BaselineFiles = 35;
+    private const int BaselineFiles = 34;
 
     private static (int Occurrences, int Files) Measure()
     {

@@ -107,6 +107,20 @@ public interface IKubernetesClientFactory
         CancellationToken ct = default);
 
     /// <summary>
+    /// Rolls every Deployment in a namespace back to the revision Kubernetes last recorded for
+    /// it (<c>kubectl rollout undo</c>), as one acknowledged change.
+    ///
+    /// <para>The namespace is the unit, not a single workload: a release is a set of Deployments,
+    /// and undoing one of three would leave a combination that never ran.</para>
+    ///
+    /// <para>The per-workload outcome is returned rather than thrown. A rollback that partly
+    /// succeeded is the single most important thing for a caller to be able to record, and an
+    /// exception would collapse it into "it failed".</para>
+    /// </summary>
+    Task<EntKube.Web.Services.Clusters.WorkloadUndoResult> UndoDeploymentsAsync(
+        string ns, string kubeconfig, string? summary = null, CancellationToken ct = default);
+
+    /// <summary>
     /// Runs one helm invocation against a cluster, supplying the credential and raising the
     /// acknowledgment. See <see cref="EntKube.Web.Services.Clusters.HelmInvocation"/> for why the
     /// caller passes arguments rather than a modelled chart API.

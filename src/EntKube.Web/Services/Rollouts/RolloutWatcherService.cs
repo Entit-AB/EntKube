@@ -79,37 +79,53 @@ public class RolloutWatcherService(
         using IServiceScope scope = scopeFactory.CreateScope();
         using IDisposable unattended = scope.DeclareUnattended("rollout-watcher");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
+        var appDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
         var rollouts = scope.ServiceProvider.GetRequiredService<RolloutService>();
         var notifications = scope.ServiceProvider.GetRequiredService<NotificationService>();
 
-        List<Guid> due;
-        await using (DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        // One tenant at a time, which is the decided shape for every sweep: the tenant is an
+        // INPUT to the query that finds the work, so each measurement is authorized as that
+        // tenant. Selecting every due rollout installation-wide and then reading a tenant back
+        // off the rollout would make the check compare a row against itself.
+        List<Guid> tenantIds;
+        await using (ApplicationDbContext appDb = await appDbFactory.CreateDbContextAsync(ct))
         {
-            due = await db.DeploymentRollouts
-                .Where(r => r.Status == DeploymentRolloutStatus.Watching && r.DecideAt <= now)
-                .Select(r => r.Id)
-                .ToListAsync(ct);
+            tenantIds = await appDb.Tenants.Select(t => t.Id).ToListAsync(ct);
         }
 
-        foreach (Guid rolloutId in due)
+        foreach (Guid tenantId in tenantIds)
         {
-            try
+            List<Guid> due;
+            await using (DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct))
             {
-                await DecideAsync(rolloutId, now, dbFactory, rollouts, notifications, ct);
+                due = await db.DeploymentRollouts
+                    .Where(r => r.Status == DeploymentRolloutStatus.Watching && r.DecideAt <= now
+                        && r.Deployment.App.Customer.TenantId == tenantId)
+                    .Select(r => r.Id)
+                    .ToListAsync(ct);
             }
-            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+
+            foreach (Guid rolloutId in due)
             {
-                throw;
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Could not decide rollout {RolloutId}", rolloutId);
+                try
+                {
+                    await DecideAsync(tenantId, rolloutId, now, dbFactory, rollouts, notifications, ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex,
+                        "Could not decide rollout {RolloutId} of tenant {TenantId}", rolloutId, tenantId);
+                }
             }
         }
     }
 
     private async Task DecideAsync(
-        Guid rolloutId, DateTime now,
+        Guid tenantId, Guid rolloutId, DateTime now,
         IDbContextFactory<DeliveryDbContext> dbFactory, RolloutService rollouts,
         NotificationService notifications, CancellationToken ct)
     {
@@ -132,8 +148,9 @@ public class RolloutWatcherService(
             startedAt = rollout.StartedAt;
             decideAt = rollout.DecideAt;
 
+            // No Include of the cluster any more: nothing here reads it. The rollback asks the
+            // seam for a client by cluster id, so the credential never travels through this row.
             deployment = await db.AppDeployments
-                .Include(d => d.Cluster)
                 .FirstOrDefaultAsync(d => d.Id == rollout.DeploymentId, ct);
 
             policy = await db.RolloutPolicies
@@ -160,7 +177,8 @@ public class RolloutWatcherService(
         // rollout itself would otherwise be counted against the new release.
         DateTime windowStart = startedAt.AddMinutes(policy.WarmupMinutes);
 
-        RolloutSignals signals = await rollouts.MeasureAsync(deployment, policy, windowStart, now, ct);
+        RolloutSignals signals =
+            await rollouts.MeasureAsync(tenantId, deployment, policy, windowStart, now, ct);
         RolloutJudgement judgement = RolloutAnalysis.Evaluate(signals, policy);
         DeploymentRolloutStatus outcome = RolloutAnalysis.Decide(judgement, policy);
 
@@ -168,17 +186,12 @@ public class RolloutWatcherService(
 
         if (outcome == DeploymentRolloutStatus.RolledBack)
         {
-            if (string.IsNullOrWhiteSpace(deployment.Cluster?.Kubeconfig))
-            {
-                await rollouts.CloseAsync(rolloutId, DeploymentRolloutStatus.RollbackFailed,
-                    $"{verdict} — rollback could not run: the cluster has no kubeconfig.", signals, now, ct);
-                return;
-            }
-
             logger.LogWarning(
                 "Rolling back deployment {DeploymentId} automatically: {Verdict}", deployment.Id, verdict);
 
-            (bool ok, string output) = await rollouts.RollbackAsync(deployment, deployment.Cluster.Kubeconfig, ct);
+            // No kubeconfig check here any more: whether this tenant may act on that cluster is
+            // the seam's decision, and it is the same decision as whether a credential exists.
+            (bool ok, string output) = await rollouts.RollbackAsync(tenantId, deployment, ct);
 
             DeploymentRolloutStatus rollbackStatus = ok
                 ? DeploymentRolloutStatus.RolledBack

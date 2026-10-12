@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text.Json;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
@@ -44,6 +43,7 @@ public class RolloutService(
     PrometheusService prometheus,
     ITraceQueryService traces,
     ErrorBudgetService errorBudgets,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     ILogger<RolloutService> logger) : IRolloutStarter
 {
     /// <summary>
@@ -101,8 +101,8 @@ public class RolloutService(
 
     /// <summary>Gathers whatever signals are available for a deployment over the analysis window.</summary>
     public async Task<RolloutSignals> MeasureAsync(
-        AppDeployment deployment, RolloutPolicy policy, DateTime windowStart, DateTime now,
-        CancellationToken ct = default)
+        Guid tenantId, AppDeployment deployment, RolloutPolicy policy, DateTime windowStart,
+        DateTime now, CancellationToken ct = default)
     {
         double? readyFraction = null;
         int? restarts = null;
@@ -137,7 +137,7 @@ public class RolloutService(
         try
         {
             KubernetesOperationResult<DeploymentMetricsSummary> metrics =
-                await prometheus.GetDeploymentMetricsAsync(deployment.Id, ct);
+                await prometheus.GetDeploymentMetricsAsync(tenantId, deployment.Id, ct);
 
             if (metrics.IsSuccess && metrics.Data is not null)
             {
@@ -183,12 +183,9 @@ public class RolloutService(
         {
             try
             {
-                await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
-                Guid tenantId = await db.Apps
-                    .Where(a => a.Id == deployment.AppId)
-                    .Select(a => a.Customer.TenantId)
-                    .FirstAsync(ct);
-
+                // The tenant the watcher is acting as, not one read back off the deployment:
+                // the caller selected this rollout under that tenant, so re-deriving it here
+                // would only ask the same row to vouch for itself.
                 List<ErrorBudgetStatus> budgets = await errorBudgets.GetTenantErrorBudgetsAsync(tenantId, ct);
                 burnRate = budgets.FirstOrDefault(b => b.DeploymentId == deployment.Id)?.BurnRateRecent;
             }
@@ -218,57 +215,31 @@ public class RolloutService(
     /// had, and a wrong guess during an incident is the worst possible time to find out.
     /// </summary>
     public async Task<(bool Success, string Output)> RollbackAsync(
-        AppDeployment deployment, string kubeconfig, CancellationToken ct = default)
+        Guid tenantId, AppDeployment deployment, CancellationToken ct = default)
     {
-        string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-rollback-{Guid.NewGuid()}.kubeconfig");
-
         try
         {
-            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+            EntKube.Web.Services.Clusters.IClusterClient? cluster =
+                await clusterClients.ForAsync(tenantId, deployment.ClusterId, ct);
 
-            // Every Deployment in the namespace that EntKube applied for this release is
-            // undone: a release is a set of workloads, and rolling back only one of them
-            // would leave the namespace in a state that never existed.
-            (int listCode, string listOut, string listErr) = await RunKubectlAsync(
-                $"get deployments -n {deployment.Namespace} --kubeconfig {kubeconfigPath} -o name", ct);
-
-            if (listCode != 0)
+            if (cluster is null)
             {
-                return (false, $"Could not list workloads to roll back: {listErr.Trim()}");
+                return (false,
+                    "The deployment's cluster is not this tenant's, or has no kubeconfig configured.");
             }
 
-            string[] workloads = listOut
-                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            // The namespace is the unit: a release is a set of workloads, and rolling back only
+            // one of them would leave the namespace in a state that never existed. The seam owns
+            // the credential and the acknowledgment; what belongs here is the decision to undo.
+            EntKube.Web.Services.Clusters.WorkloadUndoResult undone = await cluster.UndoDeploymentsAsync(
+                deployment.Namespace,
+                $"Roll back {deployment.Name} in {deployment.Namespace} after a failed release", ct);
 
-            if (workloads.Length == 0)
-            {
-                return (false, $"No Deployments found in namespace {deployment.Namespace}.");
-            }
-
-            List<string> results = [];
-            bool allSucceeded = true;
-
-            foreach (string workload in workloads)
-            {
-                (int code, string output, string error) = await RunKubectlAsync(
-                    $"rollout undo {workload} -n {deployment.Namespace} --kubeconfig {kubeconfigPath}", ct);
-
-                results.Add($"{workload}: {(code == 0 ? output.Trim() : error.Trim())}");
-                if (code != 0)
-                {
-                    allSucceeded = false;
-                }
-            }
-
-            return (allSucceeded, string.Join('\n', results));
+            return (undone.Success, undone.Output);
         }
         catch (Exception ex)
         {
             return (false, ex.Message);
-        }
-        finally
-        {
-            try { File.Delete(kubeconfigPath); } catch (IOException) { /* best effort */ }
         }
     }
 
@@ -291,42 +262,5 @@ public class RolloutService(
         rollout.SignalsJson = JsonSerializer.Serialize(signals);
 
         await db.SaveChangesAsync(ct);
-    }
-
-    private static async Task<(int Code, string Stdout, string Stderr)> RunKubectlAsync(
-        string arguments, CancellationToken ct)
-    {
-        ProcessStartInfo psi = new()
-        {
-            FileName = "kubectl",
-            Arguments = arguments,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            // Closed immediately: a kubeconfig without usable credentials makes kubectl
-            // prompt, and an inherited stdin never delivers the EOF that ends the prompt.
-            RedirectStandardInput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        psi.EnvironmentVariables["HOME"] = "/tmp";
-
-        using Process process = new() { StartInfo = psi };
-        process.Start();
-        process.StandardInput.Close();
-
-        Task<string> stdout = process.StandardOutput.ReadToEndAsync(ct);
-        Task<string> stderr = process.StandardError.ReadToEndAsync(ct);
-
-        try
-        {
-            await process.WaitForExitAsync(ct);
-        }
-        catch (OperationCanceledException)
-        {
-            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch (Exception) { }
-            throw;
-        }
-
-        return (process.ExitCode, await stdout, await stderr);
     }
 }

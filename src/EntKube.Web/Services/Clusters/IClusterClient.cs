@@ -71,6 +71,14 @@ public interface IClusterClient
     Task<HelmExecutionResult> RunHelmAsync(HelmInvocation invocation, CancellationToken ct = default);
 
     /// <summary>
+    /// Rolls every Deployment in a namespace back to the revision Kubernetes last recorded for it.
+    /// See <see cref="IKubernetesClientFactory.UndoDeploymentsAsync"/> for why the namespace is
+    /// the unit and why a partial result is returned rather than thrown.
+    /// </summary>
+    Task<WorkloadUndoResult> UndoDeploymentsAsync(
+        string ns, string? summary = null, CancellationToken ct = default);
+
+    /// <summary>
     /// Whether one named resource exists on this cluster. Pass an empty <paramref name="ns"/> for
     /// cluster-scoped resources such as CRDs.
     /// </summary>
@@ -152,6 +160,14 @@ public interface IClusterClient
 /// Hands out <see cref="IClusterClient"/>s. Fleet owns this, because Fleet owns clusters and
 /// therefore owns reaching them.
 /// </summary>
+/// <summary>
+/// What a namespace-wide rollback did, workload by workload.
+///
+/// <para><see cref="Success"/> is true only if every Deployment came back; <see cref="Output"/> is
+/// what to show and record either way, which during an incident is the part that matters.</para>
+/// </summary>
+public sealed record WorkloadUndoResult(bool Success, string Output);
+
 public interface IClusterClientFactory
 {
     /// <summary>

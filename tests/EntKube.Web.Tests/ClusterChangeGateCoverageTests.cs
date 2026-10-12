@@ -78,6 +78,13 @@ public class ClusterChangeGateCoverageTests
     /// to anyone — and base64 in a 0600 manifest satisfies every one of them better. The
     /// prohibition was on <c>--from-literal</c>, which still stands.</para>
     ///
+    /// <para>Now <b>12</b>: <c>RolloutService</c>'s own <c>kubectl</c>, which listed a namespace's
+    /// Deployments and then ran <c>rollout undo</c> on each. It is the first gate conversion that
+    /// needed a new <em>verb</em> rather than an existing one — <c>UndoDeploymentsAsync</c>, and a
+    /// <c>ChangeVerb.Rollback</c> to describe it, because nothing in a rollback says what state is
+    /// being moved to: the cluster is the one that remembers the revision, not EntKube. An
+    /// automatic rollback still runs unattended, which the watcher declares.</para>
+    ///
     /// <para>Of the 13, six are in <c>ComponentLifecycleService</c>: two apply an image-pull
     /// Secret, one applies a manifest from a URL, one is <c>kubectl describe</c>, and two are the
     /// rest of the stalled-workload path including <c>kubectl logs -c &lt;container&gt;</c>. The
@@ -85,7 +92,7 @@ public class ClusterChangeGateCoverageTests
     /// <c>GetPodLogsAsync</c> takes no container. Only the image-pull pair is work rather than a
     /// missing operation.</para>
     /// </summary>
-    private const int BaselineUngatedInvocations = 13;
+    private const int BaselineUngatedInvocations = 12;
 
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the
@@ -98,7 +105,6 @@ public class ClusterChangeGateCoverageTests
         "DockerRegistryService",
         "DriftDetectionService",
         "ReleaseVolumeGuard",
-        "RolloutService",
         "VpnService",
     ];
 

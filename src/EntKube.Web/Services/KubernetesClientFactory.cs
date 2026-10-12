@@ -300,16 +300,31 @@ public class KubernetesClientFactory : IKubernetesClientFactory
                 Arguments = arguments,
                 RedirectStandardOutput = true,
                 RedirectStandardError = true,
+                // Closed immediately: a kubeconfig without usable credentials makes kubectl
+                // prompt, and an inherited stdin never delivers the EOF that ends the prompt —
+                // which in a background sweep is a hang with nobody there to see it.
+                RedirectStandardInput = true,
                 UseShellExecute = false,
                 CreateNoWindow = true,
             },
         };
         process.StartInfo.EnvironmentVariables["HOME"] = "/tmp";
         process.Start();
+        process.StandardInput.Close();
 
         Task<string> stdout = process.StandardOutput.ReadToEndAsync(ct);
         Task<string> stderr = process.StandardError.ReadToEndAsync(ct);
-        await process.WaitForExitAsync(ct);
+
+        try
+        {
+            await process.WaitForExitAsync(ct);
+        }
+        catch (OperationCanceledException)
+        {
+            // Otherwise a cancelled shutdown leaves kubectl running against the cluster.
+            try { if (!process.HasExited) process.Kill(entireProcessTree: true); } catch (Exception) { }
+            throw;
+        }
 
         return (process.ExitCode, await stdout, await stderr);
     }
@@ -350,6 +365,73 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         {
             File.Delete(kubeconfigPath);
             File.Delete(manifestPath);
+        }
+    }
+
+    /// <summary>
+    /// Rolls every Deployment in a namespace back to its previous recorded revision. See
+    /// <see cref="IKubernetesClientFactory.UndoDeploymentsAsync"/>.
+    ///
+    /// <para>The list and the undos run under one acknowledgment, because they are one decision:
+    /// asking per workload would put the operator in the middle of a half-rolled-back
+    /// namespace.</para>
+    /// </summary>
+    public async Task<Clusters.WorkloadUndoResult> UndoDeploymentsAsync(
+        string ns, string kubeconfig, string? summary = null, CancellationToken ct = default)
+    {
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Rollback,
+            Resource = "every Deployment",
+            Kubeconfig = kubeconfig,
+            Namespace = ns,
+            Summary = summary,
+        }, ct);
+
+        string kubeconfigPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+
+            (int listCode, string listOut, string listErr) = await RunKubectlRawAsync(
+                $"get deployments -n {ns} --kubeconfig={kubeconfigPath} -o name", ct);
+
+            if (listCode != 0)
+            {
+                return new Clusters.WorkloadUndoResult(
+                    false, $"Could not list workloads to roll back: {listErr.Trim()}");
+            }
+
+            string[] workloads = listOut
+                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+
+            if (workloads.Length == 0)
+            {
+                return new Clusters.WorkloadUndoResult(false, $"No Deployments found in namespace {ns}.");
+            }
+
+            List<string> results = [];
+            bool allSucceeded = true;
+
+            foreach (string workload in workloads)
+            {
+                (int code, string output, string error) = await RunKubectlRawAsync(
+                    $"rollout undo {workload} -n {ns} --kubeconfig={kubeconfigPath}", ct);
+
+                results.Add($"{workload}: {(code == 0 ? output.Trim() : error.Trim())}");
+
+                if (code != 0)
+                {
+                    allSucceeded = false;
+                }
+            }
+
+            return new Clusters.WorkloadUndoResult(allSucceeded, string.Join('\n', results));
+        }
+        finally
+        {
+            try { File.Delete(kubeconfigPath); } catch (IOException) { /* best effort */ }
         }
     }
 

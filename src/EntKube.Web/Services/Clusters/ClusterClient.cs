@@ -57,6 +57,10 @@ public sealed class ClusterClient(
     public Task<HelmExecutionResult> RunHelmAsync(HelmInvocation invocation, CancellationToken ct = default)
         => inner.RunHelmAsync(invocation, kubeconfig, ct);
 
+    public Task<WorkloadUndoResult> UndoDeploymentsAsync(
+        string ns, string? summary = null, CancellationToken ct = default)
+        => inner.UndoDeploymentsAsync(ns, kubeconfig, summary, ct);
+
     public Task<bool> ResourceExistsAsync(string resource, string name, string ns = "", CancellationToken ct = default)
         => inner.ResourceExistsAsync(resource, name, ns, kubeconfig, ct);
 
