@@ -71,6 +71,15 @@ public interface IClusterClient
     Task<HelmExecutionResult> RunHelmAsync(HelmInvocation invocation, CancellationToken ct = default);
 
     /// <summary>
+    /// Raises the acknowledgment for a change this caller is about to carry out itself, through
+    /// the SDK client rather than through an operation here. The credential and the cluster's
+    /// label are supplied from this client, which is the point: asking the gate no longer requires
+    /// holding a kubeconfig.
+    /// </summary>
+    Task AcknowledgeAsync(
+        EntKube.Web.Services.ClusterChanges.PlannedChange change, CancellationToken ct = default);
+
+    /// <summary>
     /// Rolls every Deployment in a namespace back to the revision Kubernetes last recorded for it.
     /// See <see cref="IKubernetesClientFactory.UndoDeploymentsAsync"/> for why the namespace is
     /// the unit and why a partial result is returned rather than thrown.
@@ -85,6 +94,14 @@ public interface IClusterClient
     Task<bool> ResourceExistsAsync(string resource, string name, string ns = "", CancellationToken ct = default);
 
     Task<string> GetJsonAsync(string resource, string ns, string labelSelector = "", CancellationToken ct = default);
+
+    /// <summary>
+    /// One named resource as the YAML kubectl would print. See
+    /// <see cref="IKubernetesClientFactory.GetResourceYamlAsync"/> for why this is not
+    /// <see cref="GetJsonAsync"/>.
+    /// </summary>
+    Task<string> GetResourceYamlAsync(
+        string resource, string name, string ns, CancellationToken ct = default);
 
     Task<string> GetJsonAllNamespacesAsync(string resource, string labelSelector = "", CancellationToken ct = default);
 

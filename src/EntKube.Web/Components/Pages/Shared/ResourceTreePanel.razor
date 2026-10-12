@@ -415,6 +415,13 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
     [Parameter] public List<DeploymentResource>? Resources { get; set; }
     [Parameter] public string? Namespace { get; set; }
     [Parameter] public Guid DeploymentId { get; set; }
+
+    /// <summary>
+    /// The tenant whose deployment this is. Every action on this panel is authorized as them —
+    /// scaling, restarting, deleting and reading logs all used to go by deployment id alone, so
+    /// the credential came out of whatever cluster row that id named.
+    /// </summary>
+    [Parameter] public Guid TenantId { get; set; }
     [Parameter] public CustomerAccessRole? AccessRole { get; set; }
     [Parameter] public EventCallback OnRefresh { get; set; }
     [Parameter] public DateTime? LastRefreshed { get; set; }
@@ -611,7 +618,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
         _panelLoading = true; _panelText = null; _panelError = null;
         StateHasChanged();
 
-        var cr = await K8sOps.GetPodContainersAsync(DeploymentId, node.Name);
+        var cr = await K8sOps.GetPodContainersAsync(TenantId, DeploymentId, node.Name);
         if (!cr.IsSuccess) { _panelError = cr.Error; _panelLoading = false; StateHasChanged(); return; }
 
         _containers = cr.Data ?? [];
@@ -627,7 +634,8 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
     {
         _panelLoading = true; _panelText = null; _panelError = null;
         StateHasChanged();
-        var r = await K8sOps.GetPodLogsAsync(DeploymentId, podName, _selectedContainer, _panelTailLines);
+        var r = await K8sOps.GetPodLogsAsync(
+            TenantId, DeploymentId, podName, _selectedContainer, _panelTailLines);
         _panelLoading = false;
         if (r.IsSuccess)
         {
@@ -659,7 +667,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
     {
         _panelLoading = true; _panelText = null; _panelError = null;
         StateHasChanged();
-        var r = await K8sOps.GetResourceYamlAsync(DeploymentId, node.Kind, node.Name);
+        var r = await K8sOps.GetResourceYamlAsync(TenantId, DeploymentId, node.Kind, node.Name);
         _panelLoading = false;
         if (r.IsSuccess)
         {
@@ -704,7 +712,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
     {
         _panelLoading = true; _panelText = null; _panelError = null;
         StateHasChanged();
-        var r = await K8sOps.GetResourceEventsAsync(DeploymentId, node.Kind, node.Name);
+        var r = await K8sOps.GetResourceEventsAsync(TenantId, DeploymentId, node.Kind, node.Name);
         _panelLoading = false;
         if (r.IsSuccess)
             _panelText = r.Data is { Count: > 0 } l ? string.Join("\n", l) : "(no events)";
@@ -721,7 +729,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
     private async Task ApplyScaleAsync(DeploymentResource node)
     {
         _opBusy = true; StateHasChanged();
-        var r = await K8sOps.ScaleWorkloadAsync(DeploymentId, node.Kind, node.Name, _scaleValue);
+        var r = await K8sOps.ScaleWorkloadAsync(TenantId, DeploymentId, node.Kind, node.Name, _scaleValue);
         _opBusy = false; ClosePanel();
         SetFeedback(r.IsSuccess, r.IsSuccess
             ? $"{node.Kind} {node.Name} scaled to {_scaleValue}."
@@ -731,7 +739,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
     private async Task ApplyRestartAsync(DeploymentResource node)
     {
         _opBusy = true; StateHasChanged();
-        var r = await K8sOps.RestartWorkloadAsync(DeploymentId, node.Kind, node.Name);
+        var r = await K8sOps.RestartWorkloadAsync(TenantId, DeploymentId, node.Kind, node.Name);
         _opBusy = false; ClosePanel();
         SetFeedback(r.IsSuccess, r.IsSuccess
             ? $"Rolling restart triggered for {node.Name}."
@@ -756,7 +764,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
         _opBusy = true;
         StateHasChanged();
         bool wasSuspended = node.HealthStatus == HealthStatus.Suspended;
-        var r = await K8sOps.SetCronJobSuspendedAsync(DeploymentId, node.Name, !wasSuspended);
+        var r = await K8sOps.SetCronJobSuspendedAsync(TenantId, DeploymentId, node.Name, !wasSuspended);
         _opBusy = false;
         SetFeedback(r.IsSuccess, r.IsSuccess
             ? $"CronJob {node.Name} {(!wasSuspended ? "suspended" : "resumed")}."
@@ -768,7 +776,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
     private async Task ApplyDeleteAsync(DeploymentResource node)
     {
         _opBusy = true; StateHasChanged();
-        var r = await K8sOps.DeleteResourceAsync(DeploymentId, node.Kind, node.Name);
+        var r = await K8sOps.DeleteResourceAsync(TenantId, DeploymentId, node.Kind, node.Name);
         _opBusy = false; ClosePanel();
         SetFeedback(r.IsSuccess, r.IsSuccess
             ? $"{node.Kind} {node.Name} deleted."

@@ -369,6 +369,15 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     }
 
     /// <summary>
+    /// Raises the acknowledgment for a change carried out by the caller rather than here. See
+    /// <see cref="IKubernetesClientFactory.AcknowledgeAsync"/>.
+    /// </summary>
+    public Task AcknowledgeAsync(
+        ClusterChanges.PlannedChange change, string kubeconfig, string clusterLabel,
+        CancellationToken ct = default)
+        => _gate.AcknowledgeAsync(change.WithCredential(kubeconfig, clusterLabel), ct);
+
+    /// <summary>
     /// Rolls every Deployment in a namespace back to its previous recorded revision. See
     /// <see cref="IKubernetesClientFactory.UndoDeploymentsAsync"/>.
     ///
@@ -675,6 +684,34 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             File.Delete(kubeconfigPath);
         }
     }
+
+    /// <summary>One named resource as YAML. See <see cref="IKubernetesClientFactory.GetResourceYamlAsync"/>.</summary>
+    public async Task<string> GetResourceYamlAsync(
+        string resource, string name, string ns, string kubeconfig, CancellationToken ct = default)
+    {
+        string kubeconfigPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+
+            return await RunKubectlAsync(
+                BuildResourceYamlArguments(resource, name, ns, kubeconfigPath), ct);
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+        }
+    }
+
+    /// <summary>
+    /// The command line for one resource's YAML. Public and static so it can be asserted without
+    /// a cluster, as <see cref="BuildDeleteSetArguments"/> already is — the last three seam
+    /// additions each needed a mutant to find a missing flag before it was written this way.
+    /// </summary>
+    public static string BuildResourceYamlArguments(
+        string resource, string name, string ns, string kubeconfigPath)
+        => $"get {resource} {name} -n {ns} --kubeconfig={kubeconfigPath} -o yaml";
 
     public async Task<string> GetPodLogsAsync(
         string target, string ns, string kubeconfig, int tailLines = 200, CancellationToken ct = default)
