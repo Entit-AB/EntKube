@@ -51,13 +51,29 @@ public class ResourceUsageCollectorService(
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
         var prometheus = scope.ServiceProvider.GetRequiredService<PrometheusService>();
 
-        List<Guid> clusterIds;
+        var catalog = scope.ServiceProvider.GetRequiredService<EntKube.Contracts.Catalog.ICatalogApi>();
+
+        // One tenant at a time (docs/decomposition.md §4.0.1.2), so the cluster list is each
+        // tenant's own rather than every installation running kube-prometheus-stack.
+        //
+        // ⚠️ HALF CONVERTED, deliberately. The tenant now bounds WHICH clusters are collected,
+        // but PrometheusService.GetMetricRangeAsync below still takes a cluster id and no tenant
+        // — all fifteen of its public methods do, which is its own change and the reason its 20
+        // credential sites are the largest remaining block. What this fixes is the sweep; what it
+        // does not fix is that the call it makes would answer about any cluster.
+        List<Guid> clusterIds = [];
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
-            clusterIds = await db.ClusterComponents
-                .Where(c => c.HelmChartName == "kube-prometheus-stack" && c.Status == ComponentStatus.Installed)
-                .Select(c => c.ClusterId).Distinct().ToListAsync(ct);
+            foreach (Guid tenantId in await db.Tenants.Select(t => t.Id).ToListAsync(ct))
+            {
+                clusterIds.AddRange(
+                    (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+                        .Where(c => c.HelmChartName == "kube-prometheus-stack"
+                                 && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed)
+                        .Select(c => c.ClusterId));
+            }
         }
+        clusterIds = [.. clusterIds.Distinct()];
         if (clusterIds.Count == 0) return;
 
         DateTime now = DateTime.UtcNow;
