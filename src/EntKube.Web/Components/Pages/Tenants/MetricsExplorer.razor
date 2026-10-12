@@ -89,6 +89,9 @@ else
 }
 
 @code {
+    /// <summary>The tenant asking; every query below is authorized as them, not as the cluster.</summary>
+    [Parameter] public required Guid TenantId { get; set; }
+
     [Parameter] public required Guid ClusterId { get; set; }
     /// <summary>Optional namespace scope (customer portal). When set, metric queries are restricted to
     /// these namespaces so a customer only sees their own apps' metrics. Null = cluster-wide (tenant view).</summary>
@@ -122,15 +125,15 @@ else
         series = []; grouped = []; charted = false; selectedMetric = "";
 
         isLoading = true;
-        available = await Metrics.HasDataAsync(ClusterId);
+        available = await Metrics.HasDataAsync(TenantId, ClusterId);
         if (available)
         {
             // The name and service dropdowns are independent DISTINCT queries — run them
             // concurrently so the load waits on the slower, not the sum.
             Task<KubernetesOperationResult<List<string>>> namesTask =
-                Metrics.GetMetricNamesAsync(ClusterId, namespaces: Namespaces, podPattern: PodPattern);
+                Metrics.GetMetricNamesAsync(TenantId, ClusterId, namespaces: Namespaces, podPattern: PodPattern);
             Task<KubernetesOperationResult<List<string>>> servicesTask =
-                Metrics.GetServicesAsync(ClusterId, namespaces: Namespaces, podPattern: PodPattern);
+                Metrics.GetServicesAsync(TenantId, ClusterId, namespaces: Namespaces, podPattern: PodPattern);
             await Task.WhenAll(namesTask, servicesTask);
 
             metricNames = namesTask.Result.IsSuccess ? namesTask.Result.Data ?? [] : [];
@@ -152,13 +155,13 @@ else
 
         if (string.IsNullOrEmpty(breakdown))
         {
-            KubernetesOperationResult<List<TimeSeriesDataPoint>> res = await Metrics.GetSeriesAsync(ClusterId, selectedMetric, svc, from, to, namespaces: Namespaces, podPattern: PodPattern);
+            KubernetesOperationResult<List<TimeSeriesDataPoint>> res = await Metrics.GetSeriesAsync(TenantId, ClusterId, selectedMetric, svc, from, to, namespaces: Namespaces, podPattern: PodPattern);
             if (res.IsSuccess && res.Data is not null) series = res.Data;
             else queryError = res.Error;
         }
         else
         {
-            KubernetesOperationResult<List<MetricSeriesGroup>> res = await Metrics.GetSeriesByAsync(ClusterId, selectedMetric, svc, breakdown, from, to, namespaces: Namespaces, podPattern: PodPattern);
+            KubernetesOperationResult<List<MetricSeriesGroup>> res = await Metrics.GetSeriesByAsync(TenantId, ClusterId, selectedMetric, svc, breakdown, from, to, namespaces: Namespaces, podPattern: PodPattern);
             if (res.IsSuccess && res.Data is not null) grouped = res.Data;
             else queryError = res.Error;
         }

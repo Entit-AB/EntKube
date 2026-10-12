@@ -73,6 +73,10 @@
 
 @code {
     [Parameter] public required DashboardPanel Panel { get; set; }
+
+    /// <summary>The tenant whose dashboard this is; the metrics query is authorized as them.</summary>
+    [Parameter] public required Guid TenantId { get; set; }
+
     [Parameter] public required Guid ClusterId { get; set; }
     [Parameter] public DateTime From { get; set; }
     [Parameter] public DateTime To { get; set; }
@@ -107,7 +111,7 @@
                 series = [];
                 if (!string.IsNullOrEmpty(Panel.Metric))
                 {
-                    var r = await Metrics.GetSeriesAsync(ClusterId, Panel.Metric,
+                    var r = await Metrics.GetSeriesAsync(TenantId, ClusterId, Panel.Metric,
                         string.IsNullOrEmpty(Panel.Service) ? null : Panel.Service, From, To);
                     if (r.IsSuccess && r.Data is not null) series = r.Data;
                 }

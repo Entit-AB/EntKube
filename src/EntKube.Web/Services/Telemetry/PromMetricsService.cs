@@ -14,32 +14,36 @@ public sealed class PromMetricsService(PrometheusService prometheus, ILogger<Pro
 {
     private static readonly TimeSpan DiscoveryLookback = TimeSpan.FromHours(24);
 
-    public async Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<bool> HasDataAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        var names = await prometheus.GetLabelValuesAsync(clusterId, "__name__", null, DiscoveryLookback, ct);
+        var names = await prometheus.GetLabelValuesAsync(
+            tenantId, clusterId, "__name__", null, DiscoveryLookback, ct);
         return names.IsSuccess && names.Data is { Count: > 0 };
     }
 
     public Task<KubernetesOperationResult<List<string>>> GetMetricNamesAsync(
-        Guid clusterId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null, string? podPattern = null)
-        => prometheus.GetLabelValuesAsync(clusterId, "__name__",
+        Guid tenantId, Guid clusterId, CancellationToken ct = default,
+        IReadOnlyList<string>? namespaces = null, string? podPattern = null)
+        => prometheus.GetLabelValuesAsync(tenantId, clusterId, "__name__",
             NullIfEmpty(PromMetricsQueryBuilder.BuildSelector(namespaces, podPattern, null)), DiscoveryLookback, ct);
 
     public Task<KubernetesOperationResult<List<string>>> GetServicesAsync(
-        Guid clusterId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null, string? podPattern = null)
-        => prometheus.GetLabelValuesAsync(clusterId, PromMetricsQueryBuilder.ServiceLabel,
+        Guid tenantId, Guid clusterId, CancellationToken ct = default,
+        IReadOnlyList<string>? namespaces = null, string? podPattern = null)
+        => prometheus.GetLabelValuesAsync(tenantId, clusterId, PromMetricsQueryBuilder.ServiceLabel,
             NullIfEmpty(PromMetricsQueryBuilder.BuildSelector(namespaces, podPattern, null)), DiscoveryLookback, ct);
 
     public async Task<KubernetesOperationResult<List<TimeSeriesDataPoint>>> GetSeriesAsync(
-        Guid clusterId, string name, string? service, DateTime from, DateTime to, int buckets = 60,
-        CancellationToken ct = default, IReadOnlyList<string>? namespaces = null, string? podPattern = null)
+        Guid tenantId, Guid clusterId, string name, string? service, DateTime from, DateTime to,
+        int buckets = 60, CancellationToken ct = default,
+        IReadOnlyList<string>? namespaces = null, string? podPattern = null)
     {
         string selector = PromMetricsQueryBuilder.BuildSelector(namespaces, podPattern, service);
         int rate = PromMetricsQueryBuilder.RateWindowSeconds(from, to, buckets);
         string promql = PromMetricsQueryBuilder.BuildSeriesQuery(name, selector, rate);
 
         KubernetesOperationResult<List<PrometheusTimeSeries>> res =
-            await prometheus.GetMetricRangeAsync(clusterId, promql, to - from, ct);
+            await prometheus.GetMetricRangeAsync(tenantId, clusterId, promql, to - from, ct);
         if (!res.IsSuccess)
             return KubernetesOperationResult<List<TimeSeriesDataPoint>>.Failure(res.Error!);
 
@@ -49,8 +53,9 @@ public sealed class PromMetricsService(PrometheusService prometheus, ILogger<Pro
     }
 
     public async Task<KubernetesOperationResult<List<MetricSeriesGroup>>> GetSeriesByAsync(
-        Guid clusterId, string name, string? service, string dimension, DateTime from, DateTime to,
-        int buckets = 60, int maxSeries = 24, CancellationToken ct = default,
+        Guid tenantId, Guid clusterId, string name, string? service, string dimension,
+        DateTime from, DateTime to, int buckets = 60, int maxSeries = 24,
+        CancellationToken ct = default,
         IReadOnlyList<string>? namespaces = null, string? podPattern = null)
     {
         string selector = PromMetricsQueryBuilder.BuildSelector(namespaces, podPattern, service);
@@ -59,7 +64,7 @@ public sealed class PromMetricsService(PrometheusService prometheus, ILogger<Pro
         string promql = PromMetricsQueryBuilder.BuildSeriesByQuery(name, selector, label, rate, maxSeries);
 
         KubernetesOperationResult<List<PrometheusTimeSeries>> res =
-            await prometheus.GetMetricRangeAsync(clusterId, promql, to - from, ct);
+            await prometheus.GetMetricRangeAsync(tenantId, clusterId, promql, to - from, ct);
         if (!res.IsSuccess)
             return KubernetesOperationResult<List<MetricSeriesGroup>>.Failure(res.Error!);
 

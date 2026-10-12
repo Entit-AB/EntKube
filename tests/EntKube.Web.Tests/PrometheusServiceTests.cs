@@ -34,7 +34,6 @@ public class PrometheusServiceTests : IDisposable
 
         sut = new PrometheusService(
             testDb.Factory,
-            new KubernetesProxyClientPool(NullLogger<KubernetesProxyClientPool>.Instance),
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, new Mock<IKubernetesClientFactory>().Object),
             new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             new PromQueryCache(),
@@ -971,6 +970,60 @@ public class PrometheusServiceTests : IDisposable
         await db.SaveChangesAsync();
 
         return (tenantId, deployment.Id);
+    }
+
+    // ──────── The last two: the raw query surface ────────
+
+    /// <summary>
+    /// The range query and the label lookup were the last two methods on the old resolution, and
+    /// the ones with the widest reach: every dashboard panel, the metrics explorer's dropdowns,
+    /// the cost report, the resource-usage sweep and the ingress traffic sparkline go through
+    /// them. A cluster id was the whole question each one asked.
+    /// </summary>
+    [Fact]
+    public async Task GetMetricRangeAsync_AnotherTenantsCluster_IsRefused()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedReachableClusterAsync();
+        Guid stranger = Guid.NewGuid();
+        db.Set<Tenant>().Add(new Tenant { Id = stranger, Name = "Stranger", Slug = $"s-{stranger:N}" });
+        await db.SaveChangesAsync();
+
+        KubernetesOperationResult<List<PrometheusTimeSeries>> result =
+            await sut.GetMetricRangeAsync(stranger, clusterId, "up", TimeSpan.FromMinutes(5));
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("not found for this tenant");
+    }
+
+    [Fact]
+    public async Task GetLabelValuesAsync_AnotherTenantsCluster_IsRefused()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedReachableClusterAsync();
+        Guid stranger = Guid.NewGuid();
+        db.Set<Tenant>().Add(new Tenant { Id = stranger, Name = "Stranger", Slug = $"s-{stranger:N}" });
+        await db.SaveChangesAsync();
+
+        KubernetesOperationResult<List<string>> result = await sut.GetLabelValuesAsync(
+            stranger, clusterId, "__name__", null, TimeSpan.FromHours(24));
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("not found for this tenant");
+    }
+
+    /// <summary>
+    /// And the sibling, so neither test above can pass for the wrong reason: the same cluster
+    /// asked by its owner gets past the tenant check and fails on the missing component instead.
+    /// </summary>
+    [Fact]
+    public async Task GetMetricRangeAsync_OwnCluster_GetsPastTheTenantCheck()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedReachableClusterAsync();
+
+        KubernetesOperationResult<List<PrometheusTimeSeries>> result =
+            await sut.GetMetricRangeAsync(tenantId, clusterId, "up", TimeSpan.FromMinutes(5));
+
+        result.IsSuccess.Should().BeFalse("there is no prometheus component on this cluster");
+        result.Error.Should().Contain("No prometheus component");
     }
 
     /// <summary>A tenant with one cluster whose kubeconfig is in the vault.</summary>

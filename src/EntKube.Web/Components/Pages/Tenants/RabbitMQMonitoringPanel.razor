@@ -313,9 +313,12 @@ else
 @code {
     [Parameter] public required Guid ClusterId { get; set; }
 
-    /// <summary>Set when the panel is scoped to one tenant's brokers; required for queue depth,
-    /// which is read through the tenant-scoped RabbitMQService.</summary>
-    [Parameter] public Guid? TenantId { get; set; }
+    /// <summary>
+    /// The tenant whose brokers these are. Was optional, for the cluster-wide view that had no
+    /// tenant to give; that view has one now, and the metrics queries need it — without a tenant
+    /// the chart was read by cluster id alone, which is no check at all.
+    /// </summary>
+    [Parameter] public required Guid TenantId { get; set; }
 
     private const int TopQueues = 15;
 
@@ -371,9 +374,11 @@ else
             List<RabbitMQCluster> clusters;
             using (ApplicationDbContext db = DbFactory.CreateDbContext())
             {
+                // Always this tenant's brokers now. The null branch existed for the cluster-wide
+                // view, which listed every tenant's broker on a shared cluster; that view supplies
+                // a tenant, so the unbounded case has no callers rather than a safer default.
                 clusters = await db.RabbitMQClusters
-                    .Where(c => c.KubernetesClusterId == ClusterId
-                                && (TenantId == null || c.TenantId == TenantId))
+                    .Where(c => c.KubernetesClusterId == ClusterId && c.TenantId == TenantId)
                     .OrderBy(c => c.Name)
                     .ToListAsync();
             }
@@ -461,7 +466,7 @@ else
         List<PrometheusTimeSeries>[] series = await Task.WhenAll(specs.Select(async s =>
         {
             KubernetesOperationResult<List<PrometheusTimeSeries>> r =
-                await PrometheusService.GetMetricRangeAsync(ClusterId, s.Query, window);
+                await PrometheusService.GetMetricRangeAsync(TenantId, ClusterId, s.Query, window);
             return r.IsSuccess && r.Data is not null ? r.Data : [];
         }));
 

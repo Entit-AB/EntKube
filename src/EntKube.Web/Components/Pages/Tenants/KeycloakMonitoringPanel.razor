@@ -291,7 +291,7 @@ else
         List<PrometheusTimeSeries>[] series = await Task.WhenAll(specs.Select(async s =>
         {
             KubernetesOperationResult<List<PrometheusTimeSeries>> r =
-                await PrometheusService.GetMetricRangeAsync(ClusterId, s.Query, window);
+                await PrometheusService.GetMetricRangeAsync(TenantId, ClusterId, s.Query, window);
             return r.IsSuccess && r.Data is not null ? r.Data : [];
         }));
 

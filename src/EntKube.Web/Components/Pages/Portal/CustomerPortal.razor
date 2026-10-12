@@ -380,7 +380,7 @@ else
                     <span class="bi bi-graph-up fs-4 me-2 text-primary"></span>
                     <h4 class="mb-0">Traces, Metrics &amp; RUM — @selectedCustomer.Name</h4>
                 </div>
-                <CustomerObservability Customer="selectedCustomer" />
+                <CustomerObservability Customer="selectedCustomer" TenantId="selectedCustomer.TenantId" />
             }
             else if (selectedCustomerOp == "cost" && currentAccessRole >= CustomerAccessRole.Operator)
             {

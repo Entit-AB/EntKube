@@ -144,7 +144,8 @@ else
             }
             else if (tab == "metrics")
             {
-                <MetricsExplorer @key="@ScopeKey" ClusterId="selectedClusterId.Value" Namespaces="Namespaces" PodPattern="@podPattern" />
+                <MetricsExplorer @key="@ScopeKey" TenantId="TenantId" ClusterId="selectedClusterId.Value"
+                                 Namespaces="Namespaces" PodPattern="@podPattern" />
             }
         }
     }
@@ -152,6 +153,12 @@ else
 
 @code {
     [Parameter] public Customer? Customer { get; set; }
+
+    /// <summary>
+    /// The tenant the portal resolved this customer under. Passed in rather than read off
+    /// <see cref="Customer"/> here, which is how every other child of CustomerPortal takes it.
+    /// </summary>
+    [Parameter] public required Guid TenantId { get; set; }
 
     private Guid? loadedCustomerId;
     private List<DeploymentRow> deployments = [];

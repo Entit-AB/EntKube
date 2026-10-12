@@ -56,30 +56,29 @@ public class ResourceUsageCollectorService(
         // One tenant at a time (docs/decomposition.md §4.0.1.2), so the cluster list is each
         // tenant's own rather than every installation running kube-prometheus-stack.
         //
-        // ⚠️ HALF CONVERTED, deliberately. The tenant now bounds WHICH clusters are collected,
-        // but PrometheusService.GetMetricRangeAsync below still takes a cluster id and no tenant
-        // — all fifteen of its public methods do, which is its own change and the reason its 20
-        // credential sites are the largest remaining block. What this fixes is the sweep; what it
-        // does not fix is that the call it makes would answer about any cluster.
-        List<Guid> clusterIds = [];
+        // The pair is kept, not flattened to cluster ids: the query below is authorized as the
+        // tenant that was asked, so discarding it here and recovering it there is precisely the
+        // move that turns a check into a tautology. This was half converted for three steps while
+        // PrometheusService still took a cluster id and no tenant.
+        List<(Guid TenantId, Guid ClusterId)> targets = [];
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
             foreach (Guid tenantId in await db.Tenants.Select(t => t.Id).ToListAsync(ct))
             {
-                clusterIds.AddRange(
+                targets.AddRange(
                     (await catalog.GetComponentsForTenantAsync(tenantId, ct))
                         .Where(c => c.HelmChartName == "kube-prometheus-stack"
                                  && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed)
-                        .Select(c => c.ClusterId));
+                        .Select(c => (tenantId, c.ClusterId)));
             }
         }
-        clusterIds = [.. clusterIds.Distinct()];
-        if (clusterIds.Count == 0) return;
+        targets = [.. targets.Distinct()];
+        if (targets.Count == 0) return;
 
         DateTime now = DateTime.UtcNow;
         int written = 0;
 
-        foreach (Guid clusterId in clusterIds)
+        foreach ((Guid tenantId, Guid clusterId) in targets)
         {
             var batch = new List<ResourceUsageSnapshot>();
             foreach ((ResourceUsageKind kind, string query, string nameLabel) in Queries)
@@ -87,7 +86,7 @@ public class ResourceUsageCollectorService(
                 try
                 {
                     KubernetesOperationResult<List<PrometheusTimeSeries>> res =
-                        await prometheus.GetMetricRangeAsync(clusterId, query, SampleWindow, ct);
+                        await prometheus.GetMetricRangeAsync(tenantId, clusterId, query, SampleWindow, ct);
                     if (!res.IsSuccess || res.Data is null) continue;
 
                     foreach (PrometheusTimeSeries series in res.Data)

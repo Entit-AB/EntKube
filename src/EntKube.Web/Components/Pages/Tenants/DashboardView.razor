@@ -110,7 +110,7 @@ else
         @foreach (var p in panels)
         {
             <div class="col-md-@p.Width">
-                <DashboardPanelCard Panel="p" ClusterId="@(Guid.Parse(selectedClusterId))" From="_from" To="_to"
+                <DashboardPanelCard Panel="p" TenantId="TenantId" ClusterId="@(Guid.Parse(selectedClusterId))" From="_from" To="_to"
                                     Editable="editMode" OnRemove="RemovePanelAsync" OnEdit="EditPanel" />
             </div>
         }

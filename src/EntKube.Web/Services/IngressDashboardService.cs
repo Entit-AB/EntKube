@@ -525,7 +525,7 @@ public partial class IngressDashboardService(
     /// render a graceful "no traffic data" state rather than erroring.
     /// </summary>
     public async Task<List<TimeSeriesDataPoint>> GetRouteTrafficAsync(
-        IngressRouteView route, TimeSpan window, CancellationToken ct = default)
+        Guid tenantId, IngressRouteView route, TimeSpan window, CancellationToken ct = default)
     {
         IngressBackend? backend = route.Backends.FirstOrDefault();
         if (backend is null) return [];
@@ -539,7 +539,7 @@ public partial class IngressDashboardService(
         try
         {
             KubernetesOperationResult<List<PrometheusTimeSeries>> res =
-                await prometheus.GetMetricRangeAsync(route.ClusterId, q, window, ct);
+                await prometheus.GetMetricRangeAsync(tenantId, route.ClusterId, q, window, ct);
             if (!res.IsSuccess || res.Data is null || res.Data.Count == 0) return [];
 
             // Collapse every returned series into one line by summing per timestamp.
