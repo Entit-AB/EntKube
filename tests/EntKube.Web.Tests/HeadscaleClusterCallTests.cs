@@ -66,7 +66,8 @@ public class HeadscaleClusterCallTests : IDisposable
             testDb.Factory,
             k8s.Object,
             vault,
-            new ExternalRouteService(testDb.Factory, NullLogger<ExternalRouteService>.Instance),
+            new ExternalRouteService(testDb.Factory, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+                NullLogger<ExternalRouteService>.Instance),
             // Not supplied: only EnsureExternalRouteAsync and SwitchToTlsPassthroughAsync reach
             // for these, and neither is exercised here. Null rather than a half-built graph, so a
             // test that strays into those paths fails loudly instead of passing for a bad reason.
