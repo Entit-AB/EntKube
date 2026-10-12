@@ -856,6 +856,50 @@ public class PrometheusServiceTests : IDisposable
             + "test above would prove nothing");
     }
 
+    // ──────── The aggregate: skipped is not zero ────────
+
+    /// <summary>
+    /// An app whose only deployment is on a cluster belonging to someone else must come back a
+    /// FAILURE, not a successful set of zeroes.
+    ///
+    /// <para><b>This is the risk the conversion introduced.</b> <c>AggregateMetricsAsync</c> sums
+    /// across a tenant's clusters, so a cluster it cannot reach has to be skipped rather than
+    /// abort the whole answer. Skipping is one line; the danger is that skipping every cluster
+    /// then returns <c>Success</c> with 0 CPU and 0 pods — and a dashboard cannot tell that from
+    /// an app that is genuinely idle. <c>anySuccess</c> is what stops it, and this is the test
+    /// that says so.</para>
+    /// </summary>
+    [Fact]
+    public async Task GetAppMetricsAsync_WhenEveryClusterIsSkipped_FailsRatherThanReturningZeroes()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedReachableClusterAsync();
+
+        Customer customer = new() { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Contoso" };
+        App app = new() { Id = Guid.NewGuid(), CustomerId = customer.Id, Name = "billing" };
+        db.Customers.Add(customer);
+        db.Apps.Add(app);
+        db.AppDeployments.Add(new AppDeployment
+        {
+            Id = Guid.NewGuid(), AppId = app.Id, Name = "prod", Type = DeploymentType.Manual,
+            EnvironmentId = db.Set<Data.Environment>().First(e => e.TenantId == tenantId).Id,
+            ClusterId = clusterId, Namespace = "billing", IsManaged = true,
+        });
+        await db.SaveChangesAsync();
+
+        // Asked by a tenant that owns neither the app nor the cluster, so every cluster in the
+        // fan-out is skipped.
+        Guid stranger = Guid.NewGuid();
+        db.Set<Tenant>().Add(new Tenant { Id = stranger, Name = "Stranger", Slug = $"s-{stranger:N}" });
+        await db.SaveChangesAsync();
+
+        KubernetesOperationResult<DeploymentMetricsSummary> result =
+            await sut.GetAppMetricsAsync(stranger, app.Id);
+
+        result.IsSuccess.Should().BeFalse(
+            "every cluster was skipped, and a skipped cluster must not read as a measured zero");
+        result.Data.Should().BeNull();
+    }
+
     /// <summary>A tenant with one cluster whose kubeconfig is in the vault.</summary>
     private async Task<(Guid TenantId, Guid ClusterId)> SeedReachableClusterAsync()
     {

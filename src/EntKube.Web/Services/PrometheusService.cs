@@ -878,9 +878,9 @@ public class PrometheusService(
     /// by querying each cluster's Prometheus with a namespace regex filter.
     /// </summary>
     public async Task<KubernetesOperationResult<DeploymentMetricsSummary>> GetAppMetricsAsync(
-        Guid appId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, CancellationToken ct = default)
     {
-        List<(string Kubeconfig, PrometheusConfig Config, string NsRegex)> clusterQueries;
+        List<(Guid ClusterId, PrometheusConfig Config, string NsRegex)> clusterQueries;
 
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
@@ -902,21 +902,21 @@ public class PrometheusService(
                         .FirstOrDefault(c => c.Name.Contains("prometheus", StringComparison.OrdinalIgnoreCase));
                     PrometheusConfig cfg = pc is not null ? GetPrometheusConfig(pc) : new PrometheusConfig();
                     string nsRegex = string.Join("|", g.Select(d => Regex.Escape(d.Namespace)));
-                    return (first.Cluster.Kubeconfig!, cfg, nsRegex);
+                    return (first.ClusterId, cfg, nsRegex);
                 })
                 .ToList();
         }
 
-        return await AggregateMetricsAsync(clusterQueries, $"app metrics {appId}", ct);
+        return await AggregateMetricsAsync(tenantId, clusterQueries, $"app metrics {appId}", ct);
     }
 
     /// <summary>
     /// Aggregate CPU, memory, and pod metrics across all apps belonging to a customer.
     /// </summary>
     public async Task<KubernetesOperationResult<DeploymentMetricsSummary>> GetCustomerMetricsAsync(
-        Guid customerId, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, CancellationToken ct = default)
     {
-        List<(string Kubeconfig, PrometheusConfig Config, string NsRegex)> clusterQueries;
+        List<(Guid ClusterId, PrometheusConfig Config, string NsRegex)> clusterQueries;
 
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
@@ -940,12 +940,12 @@ public class PrometheusService(
                         .FirstOrDefault(c => c.Name.Contains("prometheus", StringComparison.OrdinalIgnoreCase));
                     PrometheusConfig cfg = pc is not null ? GetPrometheusConfig(pc) : new PrometheusConfig();
                     string nsRegex = string.Join("|", g.Select(d => Regex.Escape(d.Namespace)).Distinct());
-                    return (first.Cluster.Kubeconfig!, cfg, nsRegex);
+                    return (first.ClusterId, cfg, nsRegex);
                 })
                 .ToList();
         }
 
-        return await AggregateMetricsAsync(clusterQueries, $"customer metrics {customerId}", ct);
+        return await AggregateMetricsAsync(tenantId, clusterQueries, $"customer metrics {customerId}", ct);
     }
 
     /// <summary>
@@ -2040,19 +2040,32 @@ public class PrometheusService(
     /// Queries each cluster/namespace-regex pair, sums CPU, memory, pods across all clusters,
     /// and returns a single aggregated DeploymentMetricsSummary.
     /// </summary>
+    /// <summary>
+    /// Sums one metric set across several clusters. Takes cluster <em>ids</em> and resolves each
+    /// through the seam, so a cluster this tenant does not own is skipped rather than queried —
+    /// the tuple used to carry a kubeconfig, which made every producer of it a custodian.
+    /// </summary>
     private async Task<KubernetesOperationResult<DeploymentMetricsSummary>> AggregateMetricsAsync(
-        IEnumerable<(string Kubeconfig, PrometheusConfig Config, string NsRegex)> clusterQueries,
+        Guid tenantId,
+        IEnumerable<(Guid ClusterId, PrometheusConfig Config, string NsRegex)> clusterQueries,
         string logContext,
         CancellationToken ct)
     {
         double totalCpu = 0, totalMemBytes = 0, totalPods = 0, totalRestarts = 0;
         bool anySuccess = false;
 
-        foreach ((string kubeconfig, PrometheusConfig cfg, string nsRegex) in clusterQueries)
+        foreach ((Guid clusterId, PrometheusConfig cfg, string nsRegex) in clusterQueries)
         {
+            EntKube.Web.Services.Clusters.IClusterClient? cluster = await clusterClients.ForAsync(tenantId, clusterId, ct);
+
+            // Skipped, not failed: this aggregates across a tenant's clusters and one it cannot
+            // reach contributes nothing. `anySuccess` below is what decides whether the whole
+            // answer is a failure, so an unreachable cluster cannot masquerade as a zero.
+            if (cluster is null) continue;
+
             KubernetesOperationResult<(double, double, double, double)> result =
                 await WithServiceAsync<(double, double, double, double)>(
-                    kubeconfig, cfg.Namespace, cfg.ServiceName, cfg.ServicePort,
+                    cluster, cfg.Namespace, cfg.ServiceName, cfg.ServicePort,
                     async (http, baseUrl, token) =>
                     {
                         string cpuQ = Q($"sum(rate(container_cpu_usage_seconds_total{{namespace=~\"{nsRegex}\",container!=\"\"}}[5m]))");

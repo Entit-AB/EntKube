@@ -3494,7 +3494,7 @@
         section = "metrics";
         envMetricsLoading = true; envMetricsError = null; envMetrics = null; StateHasChanged();
         KubernetesOperationResult<DeploymentMetricsSummary> result =
-            await PrometheusService.GetAppMetricsAsync(App.Id);
+            await PrometheusService.GetAppMetricsAsync(TenantId, App.Id);
         if (result.IsSuccess) envMetrics = result.Data;
         else envMetricsError = result.Error;
         envMetricsLoading = false;
