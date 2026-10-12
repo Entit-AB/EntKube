@@ -241,6 +241,70 @@ additions**, and **206 sites behind an authorization question that is not ours t
 refactoring**. The third is the large one, and it is the same question §5.4 asks about the gate —
 who is acting, and on whose behalf.
 
+#### 4.0.1.1 Two things the custody count does not say (measured 2026-10-11)
+
+The 508→223 figure counts kubeconfigs that stopped travelling. That is real, and it is not
+the same as calls that became authorized. Two measurements separate them.
+
+**19 of the 48 seam calls get their tenant from the cluster row they are naming.**
+`IClusterClientFactory.ForAsync` enforces `c.TenantId == tenantId`, so
+
+```csharp
+await clusterClients.ForAsync(cluster.TenantId, cluster.Id, ct)
+```
+
+asks for the cluster whose tenant equals its own tenant. The wrong-tenant branch cannot fire.
+At the call site it is indistinguishable from a real check, and it satisfies the custody
+ratchet. The split is 22 **independent** (a `tenantId` from the caller — the only kind that
+authorizes anything), 7 **cross-row** (a tenant column on a different row that holds a foreign
+key to the cluster, which compares two tables and so catches a mismatched row: an integrity
+check, not an authorization one), and 19 **tautological**.
+
+This is not carelessness. Every one of the 19 is in a method with no tenant in its signature,
+so the cluster row was the only tenant in scope. One of them says so in a comment already.
+They are concentrated — eleven are `KubernetesOperationsService`'s, four
+`ComponentLifecycleService`'s — which is the useful part of the figure: the 206 gated sites are
+not 206 separate decisions.
+
+`VacuousTenantCheckTests` bans growth and resolves a tenant laundered through a local, because
+otherwise the cheapest way to satisfy it would be to assign the expression to a variable first.
+
+**`PlannedClusterChange.Kubeconfig` is `required`, and it costs less than it looks.** The gate
+is constructed in **13 places across 5 files**, and in only **2** of them is the gate the last
+reader of a stored credential.
+
+*(First written here as "35 gate call sites across 18 files". That counted `Kubeconfig = ` as
+text, which caught `VaultSecretType.Kubeconfig = 3` — an **enum member** — along with the
+materialization interceptor and the client factory's own parameter plumbing. It is the identical
+mistake this section already records two paragraphs above, made against the same field. The
+count is `new PlannedClusterChange`, and it is 13.)*
+
+Where the 13 are:
+
+- **7 in `KubernetesClientFactory`** and **1 in `KubernetesOperationsService.RequireAckAsync`**,
+  where the kubeconfig is already the method's own `string kubeconfig` parameter. The gate adds
+  no custody whatever: it is handed what the caller handed in.
+- **1 in `KubernetesJitProvisioner`** for a kubeconfig the provisioner **generates** for a JIT
+  grant. Not a stored credential at all.
+- **2** (`TrustBundleService`, `CertificateDistributionService`) that sit directly above a client
+  call passing the same credential, so the gate is not why it is in scope.
+- **2** — `TrustBundleService.ApplyBundleAsync` and
+  `CertificateDistributionService.DistributeAsync` — where the apply itself already goes through
+  `IClusterClient` and the gate's field plus its null guard are the **only** remaining reason the
+  method touches `.Kubeconfig`.
+
+So this is not an independent ceiling, and changing the model first would be the wrong order. The
+gate becomes the last reader only *after* a file's client calls move to the seam, which is what
+happened in those 2. The sequencing is: convert the client calls, and the gate's requirement
+turns into the final site in that file — then it is worth changing, and by then the shape is
+obvious, because something has to tell the gate which cluster it is diffing.
+
+Note also that the gate cannot simply take `IClusterClientFactory`: `KubernetesClientFactory`
+depends on `IClusterChangeGate`, and `ClusterClientFactory` depends on that, so the gate asking
+the seam for a client is a dependency cycle. Whatever resolves the credential for the gate has to
+sit below both — sharing the `c.Id == clusterId && c.TenantId == tenantId` predicate, not the
+seam that applies it.
+
 **It also strengthens the case for §5's agent model.** An agent running *inside* the cluster
 needs no kubeconfig at all — there is nothing to hand out, because the work happens where the
 credentials already are. Credential custody was presented there as a side benefit of
