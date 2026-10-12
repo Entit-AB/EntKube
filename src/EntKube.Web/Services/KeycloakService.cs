@@ -188,7 +188,7 @@ public class KeycloakService(
     IHttpClientFactory httpClientFactory,
     CnpgService cnpgService,
     ICatalogApi catalog,
-    IKubernetesClientFactory k8sFactory)
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients)
 {
     private readonly record struct TokenCacheKey(Guid ComponentId);
     private readonly Dictionary<TokenCacheKey, (string Token, DateTime Expiry)> _tokenCache = [];
@@ -1792,10 +1792,13 @@ public class KeycloakService(
 
         string adminUrl = binding.KeycloakRealm.ComponentConfig.AdminUrl!.TrimEnd('/');
         string issuerUrl = $"{adminUrl}/realms/{binding.KeycloakRealm.RealmName}";
-        string kubeconfig = binding.AppDeployment.Cluster.Kubeconfig!;
+        EntKube.Web.Services.Clusters.IClusterClient cluster = await clusterClients.ForAsync(tenantId, binding.AppDeployment.ClusterId, ct)
+            ?? throw new InvalidOperationException(
+                "The deployment's cluster has no stored kubeconfig, so the client secret cannot be "
+                + "written into its namespace.");
         string ns = binding.AppDeployment.Namespace;
 
-        await k8sFactory.EnsureNamespaceAsync(ns, kubeconfig, ct);
+        await cluster.EnsureNamespaceAsync(ns, ct);
 
         string secretManifest = $"""
             apiVersion: v1
@@ -1810,7 +1813,7 @@ public class KeycloakService(
               OIDC_CLIENT_SECRET: {B64Id(clientSecret)}
             """;
 
-        await k8sFactory.ApplyManifestAsync(secretManifest, kubeconfig, ct);
+        await cluster.ApplyManifestAsync(secretManifest, ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
         using ApplicationDbContext db2 = dbFactory.CreateDbContext();
@@ -2948,8 +2951,8 @@ public class KeycloakService(
             return;
 
         ClusterComponent comp = theme.ComponentConfig.ClusterComponent;
-        string? kubeconfig = comp.Cluster.Kubeconfig;
-        if (string.IsNullOrEmpty(kubeconfig) || string.IsNullOrEmpty(comp.Namespace))
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = await clusterClients.ForAsync(tenantId, comp.ClusterId, ct);
+        if (cluster is null || string.IsNullOrEmpty(comp.Namespace))
             return;
 
         Guid componentVaultId = comp.Id;
@@ -2960,7 +2963,7 @@ public class KeycloakService(
         // Find the Keycloak Deployment by the standard Helm instance label.
         // The keycloakx chart names the Deployment "{release}-keycloakx" (not just "{release}"),
         // so we resolve dynamically rather than hard-coding the naming convention.
-        string deployName = await ResolveKeycloakDeploymentNameAsync(releaseName, ns, kubeconfig, ct);
+        string deployName = await ResolveKeycloakDeploymentNameAsync(releaseName, ns, cluster, ct);
 
         // Load login CSS from vault.
         string loginCss = await vaultService.GetComponentSecretValueAsync(
@@ -3017,12 +3020,12 @@ public class KeycloakService(
             {loginCssYaml}{binaryDataSection}
             """;
 
-        await k8sFactory.ApplyManifestAsync(configMap, kubeconfig, ct);
+        await cluster.ApplyManifestAsync(configMap, ct);
 
         // Read the StatefulSet to discover the actual container name — keycloakx chart uses
         // ".Chart.Name" as the container name, which may be "keycloakx" not "keycloak".
         string containerName = await GetFirstContainerNameAsync(
-            "statefulset", deployName, ns, kubeconfig, ct)
+            "statefulset", deployName, ns, cluster, ct)
             ?? throw new InvalidOperationException(
                 $"StatefulSet '{deployName}' has no containers in spec.template.spec.containers.");
 
@@ -3122,12 +3125,12 @@ public class KeycloakService(
             }
             """;
 
-        await k8sFactory.PatchStrategicAsync("statefulset", deployName, ns, patchJson, kubeconfig, ct);
+        await cluster.PatchStrategicAsync("statefulset", deployName, ns, patchJson, ct);
 
         // Rolling restart so Keycloak reloads theme files from the new subPath mounts.
         string restartPatch =
             $"{{\"spec\":{{\"template\":{{\"metadata\":{{\"annotations\":{{\"kubectl.kubernetes.io/restartedAt\":\"{DateTime.UtcNow:O}\"}}}}}}}}}}";
-        await k8sFactory.PatchJsonAsync("statefulset", deployName, ns, restartPatch, kubeconfig, ct);
+        await cluster.PatchJsonAsync("statefulset", deployName, ns, restartPatch, ct);
     }
 
     private static string IndentForYaml(string content, int spaces)
@@ -3147,14 +3150,13 @@ public class KeycloakService(
     /// diagnostic message (including all names found) when nothing matches.
     /// </summary>
     private async Task<string> ResolveKeycloakDeploymentNameAsync(
-        string releaseName, string ns, string kubeconfig, CancellationToken ct)
+        string releaseName, string ns, EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         // Strategy 1: Helm instance label.
         try
         {
-            string json = await k8sFactory.GetJsonAsync(
-                "statefulset", ns, kubeconfig,
-                $"app.kubernetes.io/instance={releaseName}", ct);
+            string json = await cluster.GetJsonAsync(
+                "statefulset", ns, $"app.kubernetes.io/instance={releaseName}", ct);
             string? name = FirstDeploymentName(json);
             if (!string.IsNullOrEmpty(name))
                 return name;
@@ -3166,7 +3168,7 @@ public class KeycloakService(
         string? listError = null;
         try
         {
-            string json = await k8sFactory.GetJsonAsync("statefulset", ns, kubeconfig, "", ct);
+            string json = await cluster.GetJsonAsync("statefulset", ns, "", ct);
             using JsonDocument doc = JsonDocument.Parse(json);
             if (doc.RootElement.TryGetProperty("items", out JsonElement items))
             {
@@ -3215,9 +3217,9 @@ public class KeycloakService(
     }
 
     private async Task<string?> GetFirstContainerNameAsync(
-        string resource, string name, string ns, string kubeconfig, CancellationToken ct)
+        string resource, string name, string ns, EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
-        string json = await k8sFactory.GetJsonAsync($"{resource}/{name}", ns, kubeconfig, ct: ct);
+        string json = await cluster.GetJsonAsync($"{resource}/{name}", ns, ct: ct);
         using JsonDocument doc = JsonDocument.Parse(json);
         JsonElement root = doc.RootElement;
         if (root.TryGetProperty("spec", out JsonElement spec)

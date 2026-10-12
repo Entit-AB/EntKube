@@ -16,8 +16,31 @@ namespace EntKube.Web.Tests;
 /// </summary>
 public class ClusterEgressRelayTests
 {
-    private static ClusterEgressRelay CreateRelay(Mock<IKubernetesClientFactory>? k8s = null) =>
-        new((k8s ?? new Mock<IKubernetesClientFactory>()).Object, NullLogger<ClusterEgressRelay>.Instance);
+    private static ClusterEgressRelay CreateRelay() =>
+        new(NullLogger<ClusterEgressRelay>.Instance);
+
+    /// <summary>
+    /// A cluster the relay can be applied to. The relay used to take a kubeconfig and resolve a
+    /// client from an injected factory, so a test could only mock the factory and could not say
+    /// <em>which</em> cluster was targeted. Now the target is the argument.
+    /// </summary>
+    private static Mock<EntKube.Web.Services.Clusters.IClusterClient> Cluster(
+        string? kubeDnsJson = """{"items":[{"metadata":{"name":"kube-dns"},"spec":{"clusterIP":"10.96.0.10"}}]}""")
+    {
+        Mock<EntKube.Web.Services.Clusters.IClusterClient> cluster = new();
+
+        var dns = cluster.Setup(x => x.GetJsonAsync("svc", "kube-system", It.IsAny<string>(), It.IsAny<CancellationToken>()));
+        if (kubeDnsJson is null)
+            dns.ThrowsAsync(new InvalidOperationException("forbidden"));
+        else
+            dns.ReturnsAsync(kubeDnsJson);
+
+        cluster.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(string.Empty);
+
+        return cluster;
+    }
+
 
     // ──────── Host normalization ────────
 
@@ -232,7 +255,7 @@ public class ClusterEgressRelayTests
         // is a worse failure than refusing up front.
         ClusterEgressRelay relay = CreateRelay();
 
-        Func<Task> act = async () => await relay.EnsureAsync("kubeconfig", []);
+        Func<Task> act = async () => await relay.EnsureAsync(Cluster().Object, []);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*empty allowlist*");
     }
@@ -240,16 +263,14 @@ public class ClusterEgressRelayTests
     [Fact]
     public async Task Ensure_applies_the_manifest_to_the_target_cluster()
     {
-        Mock<IKubernetesClientFactory> k8s = new();
-        k8s.Setup(x => x.GetJsonAsync("svc", "kube-system", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-           .ReturnsAsync("""{"items":[{"metadata":{"name":"kube-dns"},"spec":{"clusterIP":"10.96.0.10"}}]}""");
+        Mock<EntKube.Web.Services.Clusters.IClusterClient> cluster = Cluster();
 
         string? applied = null;
-        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-           .Callback<string, string, CancellationToken>((m, _, _) => applied = m)
-           .ReturnsAsync(string.Empty);
+        cluster.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback((string m, CancellationToken _) => applied = m)
+            .ReturnsAsync(string.Empty);
 
-        await CreateRelay(k8s).EnsureAsync("kubeconfig", ["https://identity.example.com:5000/v3"]);
+        await CreateRelay().EnsureAsync(cluster.Object, ["https://identity.example.com:5000/v3"]);
 
         applied.Should().NotBeNull();
         applied.Should().Contain("kind: Deployment");
@@ -262,16 +283,14 @@ public class ClusterEgressRelayTests
     {
         // A wrong resolver breaks every lookup, so the fallback needs to be a real
         // address rather than a placeholder.
-        Mock<IKubernetesClientFactory> k8s = new();
-        k8s.Setup(x => x.GetJsonAsync("svc", "kube-system", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-           .ThrowsAsync(new InvalidOperationException("forbidden"));
+        Mock<EntKube.Web.Services.Clusters.IClusterClient> cluster = Cluster(kubeDnsJson: null);
 
         string? applied = null;
-        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-           .Callback<string, string, CancellationToken>((m, _, _) => applied = m)
-           .ReturnsAsync(string.Empty);
+        cluster.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback((string m, CancellationToken _) => applied = m)
+            .ReturnsAsync(string.Empty);
 
-        await CreateRelay(k8s).EnsureAsync("kubeconfig", ["identity.example.com"]);
+        await CreateRelay().EnsureAsync(cluster.Object, ["identity.example.com"]);
 
         applied.Should().Contain("resolver 10.96.0.10");
     }

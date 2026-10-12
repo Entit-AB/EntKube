@@ -31,7 +31,8 @@ public static class TestServices
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory),
             new EntKube.Web.Modules.Api.CatalogApi(dbFactory));
         return new KeycloakService(dbFactory, vaultService, httpFactory, cnpgService,
-            new EntKube.Web.Modules.Api.CatalogApi(dbFactory), k8sFactory);
+            new EntKube.Web.Modules.Api.CatalogApi(dbFactory),
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory));
     }
 
     /// <summary>A 32-byte base64 key — enough for the vault encryption service and to derive ingest tokens.</summary>
@@ -92,7 +93,8 @@ public static class TestServices
         return new ComponentLifecycleService(
             testDb.Factory, vaultService,
             new KeycloakService(testDb.Factory, vaultService, httpFactory, cnpg,
-                new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), k8sFactory),
+                new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+                new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory)),
             tokens,
             new EntKubeTelemetryService(testDb.Factory, vaultService, tokens,
                 new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), config),

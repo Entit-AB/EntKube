@@ -1382,7 +1382,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         Guid tenantId, Guid connectionId, CancellationToken ct = default)
     {
         OpenStackConnection connection;
-        string kubeconfig;
+        EntKube.Web.Services.Clusters.IClusterClient cluster;
 
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
@@ -1399,16 +1399,15 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
                 return (false, "This connection is not set to route through a cluster.");
             }
 
-            KubernetesCluster? cluster = await db.KubernetesClusters
-                .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
+            EntKube.Web.Services.Clusters.IClusterClient? reachable = await clusterClients.ForAsync(tenantId, clusterId, ct);
 
-            if (string.IsNullOrWhiteSpace(cluster?.Kubeconfig))
+            if (reachable is null)
             {
                 return (false, "The selected cluster has no kubeconfig, so EntKube cannot deploy the relay.");
             }
 
             connection = found;
-            kubeconfig = cluster.Kubeconfig;
+            cluster = reachable;
         }
 
         try
@@ -1421,8 +1420,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
                 connection.S3Endpoint ?? OpenStackS3Service.GetS3Endpoint(connection.Region ?? "Kna1")
             ];
 
-            await egressRelay.EnsureAsync(kubeconfig, hosts, ct);
-            await WaitForRelayAsync(kubeconfig, ct);
+            await egressRelay.EnsureAsync(cluster, hosts, ct);
+            await WaitForRelayAsync(cluster, ct);
 
             // Drop any forward from a previous generation of the relay pod.
             egressTunnel.Close(connection.RouteViaClusterId!.Value);
@@ -1443,8 +1442,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
             if (normalized.Count > ClusterEgressRelay.NormalizeHosts(hosts).Count)
             {
-                await egressRelay.EnsureAsync(kubeconfig, catalogHosts, ct);
-                await WaitForRelayAsync(kubeconfig, ct);
+                await egressRelay.EnsureAsync(cluster, catalogHosts, ct);
+                await WaitForRelayAsync(cluster, ct);
                 egressTunnel.Close(connection.RouteViaClusterId.Value);
             }
 
@@ -1462,7 +1461,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     /// Waits for the relay Deployment to report a ready replica. Without this the
     /// port-forward races the rollout and fails with a confusing "no pods" error.
     /// </summary>
-    private async Task WaitForRelayAsync(string kubeconfig, CancellationToken ct)
+    private async Task WaitForRelayAsync(EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         for (int attempt = 0; attempt < 30; attempt++)
         {
@@ -1470,8 +1469,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
             try
             {
-                string json = await k8sFactory.GetJsonAsync(
-                    "deployment", ClusterEgressRelay.Namespace, kubeconfig, ct: ct);
+                string json = await cluster.GetJsonAsync(
+                    "deployment", ClusterEgressRelay.Namespace, ct: ct);
 
                 using JsonDocument doc = JsonDocument.Parse(json);
 

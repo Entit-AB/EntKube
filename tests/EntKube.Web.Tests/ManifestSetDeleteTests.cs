@@ -97,7 +97,8 @@ public class ManifestSetDeleteTests : IDisposable
         return new ComponentLifecycleService(
             testDb.Factory, vault,
             new KeycloakService(testDb.Factory, vault, httpFactory, cnpg,
-                new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), k8s.Object),
+                new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+                new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object)),
             tokens,
             new EntKubeTelemetryService(testDb.Factory, vault, tokens,
                 new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), config),

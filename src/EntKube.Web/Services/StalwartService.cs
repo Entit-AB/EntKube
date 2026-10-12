@@ -25,7 +25,7 @@ namespace EntKube.Web.Services;
 public class StalwartService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
-    IKubernetesClientFactory k8sFactory,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     ExternalRouteService routeService,
     KeycloakService keycloakService,
     ComponentLifecycleService lifecycleService,
@@ -845,7 +845,13 @@ public class StalwartService(
         ClusterComponent? component = await db.ClusterComponents
             .Include(c => c.Cluster)
             .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
-        if (component?.Cluster?.Kubeconfig is not { Length: > 0 } kubeconfig)
+        if (component is null)
+        {
+            return;
+        }
+
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = await clusterClients.ForAsync(tenantId, component.ClusterId, ct);
+        if (cluster is null)
         {
             return;
         }
@@ -856,7 +862,7 @@ public class StalwartService(
         StalwartPlanBuilder.StalwartHaBackend? ha =
             await BuildHaBackendAsync(tenantId, clusterComponentId, config, releaseName, ns, ct);
 
-        if (await PrepareStatefulSetShapeChangeAsync(releaseName, ns, kubeconfig, ha, ct) is string reshaped)
+        if (await PrepareStatefulSetShapeChangeAsync(releaseName, ns, cluster, ha, ct) is string reshaped)
         {
             logger.LogInformation("Stalwart storage shape change for {ComponentId}: {Detail}", clusterComponentId, reshaped);
         }
@@ -883,10 +889,19 @@ public class StalwartService(
         ClusterComponent? component = await db.ClusterComponents
             .Include(c => c.Cluster)
             .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
-        if (component?.Cluster?.Kubeconfig is not { Length: > 0 } kubeconfig)
+        if (component is null)
         {
             logger.LogWarning(
-                "Stalwart TLS certificate skipped — no kubeconfig for component {ComponentId}.", clusterComponentId);
+                "Stalwart TLS certificate skipped — component {ComponentId} not found in this tenant.",
+                clusterComponentId);
+            return;
+        }
+
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = await clusterClients.ForAsync(tenantId, component.ClusterId, ct);
+        if (cluster is null)
+        {
+            logger.LogWarning(
+                "Stalwart TLS certificate skipped — no cluster for component {ComponentId}.", clusterComponentId);
             return;
         }
 
@@ -902,14 +917,12 @@ public class StalwartService(
             .OrderByDescending(d => d.IsPrimary).ThenBy(d => d.Name)
             .ToListAsync(ct);
 
-        await k8sFactory.EnsureNamespaceAsync(ns, kubeconfig, ct);
-        await k8sFactory.ApplyManifestAsync(
-            StalwartManifestBuilder.BuildTlsCertificateManifest(
-                config.ClusterIssuer!, config.Hostname.Trim(), releaseName, ns, domains),
-            kubeconfig, ct);
+        await cluster.EnsureNamespaceAsync(ns, ct);
+        await cluster.ApplyManifestAsync(
+            StalwartManifestBuilder.BuildTlsCertificateManifest( config.ClusterIssuer!, config.Hostname.Trim(), releaseName, ns, domains), ct);
 
         string secretName = $"{releaseName}{StalwartManifestBuilder.TlsSecretSuffix}";
-        if (!await WaitForSecretAsync(ns, secretName, kubeconfig, TimeSpan.FromMinutes(3), ct))
+        if (!await WaitForSecretAsync(ns, secretName, cluster, TimeSpan.FromMinutes(3), ct))
         {
             IReadOnlyList<string> names =
                 StalwartPlanBuilder.CertificateNames(config.Hostname.Trim(), domains);
@@ -1047,14 +1060,14 @@ public class StalwartService(
     /// nothing rather than inventing a verdict.
     /// </summary>
     private async Task<List<ServerLogIssue>> ReadServerErrorsAsync(
-        string releaseName, string ns, string kubeconfig, CancellationToken ct)
+        string releaseName, string ns, EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         try
         {
             // Every replica, prefixed, so an error on one node of a cluster is not missed because
             // kubectl happened to pick a healthy one.
-            string logs = await k8sFactory.GetPodLogsAsync(
-                $"-l app={releaseName} --prefix", ns, kubeconfig, tailLines: 100, ct);
+            string logs = await cluster.GetPodLogsAsync(
+                $"-l app={releaseName} --prefix", ns, tailLines: 100, ct: ct);
             return ParseServerErrors(logs);
         }
         catch (Exception ex)
@@ -1084,13 +1097,13 @@ public class StalwartService(
     /// </summary>
     /// <returns>A line for the operator when something was deleted, otherwise null.</returns>
     private async Task<string?> PrepareStatefulSetShapeChangeAsync(
-        string releaseName, string ns, string kubeconfig,
+        string releaseName, string ns, EntKube.Web.Services.Clusters.IClusterClient cluster,
         StalwartPlanBuilder.StalwartHaBackend? ha, CancellationToken ct)
     {
         string json;
         try
         {
-            json = await k8sFactory.GetJsonAsync($"statefulset/{releaseName}", ns, kubeconfig, ct: ct);
+            json = await cluster.GetJsonAsync($"statefulset/{releaseName}", ns, ct: ct);
         }
         catch (Exception ex)
         {
@@ -1106,7 +1119,7 @@ public class StalwartService(
             return null;
         }
 
-        await k8sFactory.DeleteManifestAsync("statefulset", releaseName, ns, kubeconfig, ct);
+        await cluster.DeleteManifestAsync("statefulset", releaseName, ns, ct);
 
         return ha is null
             ? $"High availability is off, so the {releaseName} StatefulSet has been deleted and will be "
@@ -1150,14 +1163,14 @@ public class StalwartService(
     }
 
     private async Task<bool> WaitForSecretAsync(
-        string ns, string secretName, string kubeconfig, TimeSpan timeout, CancellationToken ct)
+        string ns, string secretName, EntKube.Web.Services.Clusters.IClusterClient cluster, TimeSpan timeout, CancellationToken ct)
     {
         DateTime deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
         {
             try
             {
-                string json = await k8sFactory.GetJsonAsync($"secret/{secretName}", ns, kubeconfig, ct: ct);
+                string json = await cluster.GetJsonAsync($"secret/{secretName}", ns, ct: ct);
                 if (json.Contains("tls.crt", StringComparison.Ordinal))
                 {
                     return true;
@@ -1344,8 +1357,12 @@ public class StalwartService(
                 .Include(c => c.Cluster)
                 .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
 
+            // Resolved inside the condition, so a component that is not installed is never
+            // looked up — which is the short-circuit the original
+            // `component.Cluster?.Kubeconfig is { Length: > 0 }` had.
             if (component?.Status == ComponentStatus.Installed
-                && component.Cluster?.Kubeconfig is { Length: > 0 } certKubeconfig)
+                && await clusterClients.ForAsync(tenantId, component.ClusterId, ct)
+                    is EntKube.Web.Services.Clusters.IClusterClient cluster)
             {
                 string release = component.ReleaseName ?? component.Name;
                 string certNs = component.Namespace ?? DefaultNamespace;
@@ -1353,8 +1370,7 @@ public class StalwartService(
 
                 try
                 {
-                    string json = await k8sFactory.GetJsonAsync(
-                        $"certificate/{certName}", certNs, certKubeconfig, ct: ct);
+                    string json = await cluster.GetJsonAsync($"certificate/{certName}", certNs, ct: ct);
 
                     if (DescribeCertificateProblem(json) is string problem)
                     {
@@ -1623,7 +1639,14 @@ public class StalwartService(
             ? await db.ClusterComponents.Include(c => c.Cluster).FirstOrDefaultAsync(c => c.Id == id, ct)
             : null;
 
-        if (ldap is null || ldapComponent?.Cluster?.Kubeconfig is not { Length: > 0 } kubeconfig)
+        // No tenantId parameter here, but the config has one, and it belongs to a DIFFERENT row
+        // than the cluster — so the seam compares the mail config's tenant against the directory
+        // cluster's, which is a real check rather than a row compared with itself.
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = ldap is null || ldapComponent is null
+            ? null
+            : await clusterClients.ForAsync(config.TenantId, ldapComponent.ClusterId, ct);
+
+        if (cluster is null)
         {
             return NotRun("The linked directory's component or cluster kubeconfig could not be found.");
         }
@@ -1640,8 +1663,8 @@ public class StalwartService(
         string output;
         try
         {
-            output = await k8sFactory.RunCommandOnPodWithStdinAsync(
-                pod, ns, command, bindPassword ?? "", kubeconfig, ct, container);
+            output = await cluster.RunCommandOnPodWithStdinAsync(
+                pod, ns, command, bindPassword ?? "", ct, container);
         }
         catch (Exception ex)
         {
@@ -1865,7 +1888,7 @@ public class StalwartService(
         List<string> trustedSenderDomains;
         string releaseName;
         string ns;
-        string kubeconfig;
+        EntKube.Web.Services.Clusters.IClusterClient cluster;
 
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
@@ -1883,7 +1906,8 @@ public class StalwartService(
             {
                 return Failure("Component not found.");
             }
-            if (component.Cluster?.Kubeconfig is not { Length: > 0 } kc)
+            EntKube.Web.Services.Clusters.IClusterClient? reachable = await clusterClients.ForAsync(tenantId, component.ClusterId, ct);
+            if (reachable is null)
             {
                 return Failure("The cluster has no kubeconfig, so the configuration cannot be applied.");
             }
@@ -1897,7 +1921,7 @@ public class StalwartService(
                     + "Use \u201cRe-deploy pod\u201d, or install it from the cluster's Components tab.");
             }
 
-            kubeconfig = kc;
+            cluster = reachable;
             releaseName = component.ReleaseName ?? component.Name;
             ns = component.Namespace ?? DefaultNamespace;
 
@@ -1944,7 +1968,7 @@ public class StalwartService(
 
         // The gateway's pod addresses are what Stalwart sees as the TCP peer for every web request.
         // Resolved fresh on every apply because they change whenever the gateway restarts.
-        List<string> proxyAddresses = await ResolveGatewayAddressesAsync(clusterComponents, kubeconfig, ct);
+        List<string> proxyAddresses = await ResolveGatewayAddressesAsync(clusterComponents, cluster, ct);
 
         StalwartPlanBuilder.StalwartHaBackend? ha =
             await BuildHaBackendAsync(tenantId, clusterComponentId, config, releaseName, ns, ct);
@@ -2048,10 +2072,10 @@ public class StalwartService(
             }
 
             string credentialsSecret = $"{releaseName}{StalwartManifestBuilder.CredentialsSecretSuffix}";
-            string? recovery = await k8sFactory.GetSecretValueAsync(
-                credentialsSecret, StalwartManifestBuilder.RecoveryAdminSecretName, ns, kubeconfig, ct);
-            string? cliPassword = await k8sFactory.GetSecretValueAsync(
-                credentialsSecret, StalwartManifestBuilder.AdminPasswordSecretName, ns, kubeconfig, ct);
+            string? recovery = await cluster.GetSecretValueAsync(
+                credentialsSecret, StalwartManifestBuilder.RecoveryAdminSecretName, ns, ct);
+            string? cliPassword = await cluster.GetSecretValueAsync(
+                credentialsSecret, StalwartManifestBuilder.AdminPasswordSecretName, ns, ct);
 
             string? mismatch = DescribeCredentialMismatch(config.AdminUsername, recovery, cliPassword);
             if (mismatch is not null)
@@ -2066,13 +2090,13 @@ public class StalwartService(
             output.Add($"Recovery identity on the cluster matches the CLI identity ({config.AdminUsername}).");
 
             output.Add("--- Entering recovery mode ---");
-            if (await PrepareStatefulSetShapeChangeAsync(releaseName, ns, kubeconfig, ha, ct) is string reshaped)
+            if (await PrepareStatefulSetShapeChangeAsync(releaseName, ns, cluster, ha, ct) is string reshaped)
             {
                 output.Add(reshaped);
             }
-            await k8sFactory.ApplyManifestAsync(
-                StalwartManifestBuilder.Build(config, releaseName, ns, recoveryMode: true, ha: ha), kubeconfig, ct);
-            if (!await WaitForRolloutAsync(releaseName, ns, kubeconfig, RolloutTimeout, ct))
+            await cluster.ApplyManifestAsync(
+                StalwartManifestBuilder.Build(config, releaseName, ns, recoveryMode: true, ha: ha), ct: ct);
+            if (!await WaitForRolloutAsync(releaseName, ns, cluster, RolloutTimeout, ct))
             {
                 return Failure(string.Join("\n", output)
                     + $"\nThe {releaseName} StatefulSet did not become ready in recovery mode within "
@@ -2082,7 +2106,7 @@ public class StalwartService(
 
             output.Add("--- Applying configuration ---");
             (bool applied, string applyLog) =
-                await RunApplyJobAsync(config, releaseName, ns, kubeconfig, plan, ct);
+                await RunApplyJobAsync(config, releaseName, ns, cluster, plan, ct);
             output.Add(applyLog);
 
             // Still in recovery, which is the only window in which anything here can ask the
@@ -2092,13 +2116,13 @@ public class StalwartService(
             if (applied)
             {
                 output.AddRange(
-                    await CaptureDkimAsync(config, releaseName, ns, kubeconfig, ct));
+                    await CaptureDkimAsync(config, releaseName, ns, cluster, ct));
             }
 
             output.Add("--- Leaving recovery mode ---");
-            await k8sFactory.ApplyManifestAsync(
-                StalwartManifestBuilder.Build(config, releaseName, ns, ha: ha), kubeconfig, ct);
-            bool back = await WaitForRolloutAsync(releaseName, ns, kubeconfig, RolloutTimeout, ct);
+            await cluster.ApplyManifestAsync(
+                StalwartManifestBuilder.Build(config, releaseName, ns, ha: ha), ct: ct);
+            bool back = await WaitForRolloutAsync(releaseName, ns, cluster, RolloutTimeout, ct);
             if (!back)
             {
                 output.Add(
@@ -2113,7 +2137,7 @@ public class StalwartService(
 
             // The server has just restarted onto this configuration. Ask it what it thinks of it,
             // rather than reporting success and leaving the answer in kubectl logs.
-            List<ServerLogIssue> serverIssues = await ReadServerErrorsAsync(releaseName, ns, kubeconfig, ct);
+            List<ServerLogIssue> serverIssues = await ReadServerErrorsAsync(releaseName, ns, cluster, ct);
             bool rejectedConfiguration = serverIssues.Any(i => i.IsConfigurationError);
             if (serverIssues.Count > 0)
             {
@@ -2168,13 +2192,13 @@ public class StalwartService(
     /// the gap called out in the output.
     /// </summary>
     private async Task<List<string>> ResolveGatewayAddressesAsync(
-        IReadOnlyList<ClusterComponent> components, string kubeconfig, CancellationToken ct)
+        IReadOnlyList<ClusterComponent> components, EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         (_, string gatewayNamespace) = ExternalRouteService.ResolveGateway(components);
 
         try
         {
-            string json = await k8sFactory.GetJsonAsync("pods", gatewayNamespace, kubeconfig, ct: ct);
+            string json = await cluster.GetJsonAsync("pods", gatewayNamespace, ct: ct);
             using JsonDocument doc = JsonDocument.Parse(json);
 
             List<string> addresses = [];
@@ -2206,23 +2230,22 @@ public class StalwartService(
     /// a Job's pod template is immutable, so a second apply would otherwise be rejected outright.
     /// </summary>
     private async Task<(bool Success, string Log)> RunApplyJobAsync(
-        StalwartComponentConfig config, string releaseName, string ns, string kubeconfig,
+        StalwartComponentConfig config, string releaseName, string ns, EntKube.Web.Services.Clusters.IClusterClient cluster,
         string plan, CancellationToken ct)
     {
         string jobName = StalwartManifestBuilder.ApplyJobName(releaseName);
 
         try
         {
-            await k8sFactory.DeleteManifestAsync("job", jobName, ns, kubeconfig, ct);
+            await cluster.DeleteManifestAsync("job", jobName, ns, ct);
         }
         catch (Exception ex)
         {
             logger.LogDebug(ex, "No previous {Job} Job to delete in {Namespace}.", jobName, ns);
         }
 
-        await k8sFactory.ApplyManifestAsync(
-            StalwartManifestBuilder.BuildApplyJobManifest(releaseName, ns, plan, config.AdminUsername),
-            kubeconfig, ct);
+        await cluster.ApplyManifestAsync(
+            StalwartManifestBuilder.BuildApplyJobManifest(releaseName, ns, plan, config.AdminUsername), ct);
 
         DateTime deadline = DateTime.UtcNow + ApplyTimeout;
         bool? succeeded = null;
@@ -2234,7 +2257,7 @@ public class StalwartService(
             string json;
             try
             {
-                json = await k8sFactory.GetJsonAsync($"job/{jobName}", ns, kubeconfig, ct: ct);
+                json = await cluster.GetJsonAsync($"job/{jobName}", ns, ct: ct);
             }
             catch (Exception ex)
             {
@@ -2255,7 +2278,7 @@ public class StalwartService(
             }
         }
 
-        string log = await ReadJobLogAsync(jobName, ns, kubeconfig, ct);
+        string log = await ReadJobLogAsync(jobName, ns, cluster, ct);
 
         return succeeded switch
         {
@@ -2354,7 +2377,7 @@ public class StalwartService(
     /// than swallowed.</para>
     /// </summary>
     private async Task<List<string>> CaptureDkimAsync(
-        StalwartComponentConfig config, string releaseName, string ns, string kubeconfig,
+        StalwartComponentConfig config, string releaseName, string ns, EntKube.Web.Services.Clusters.IClusterClient cluster,
         CancellationToken ct)
     {
         List<string> output = ["--- Reading the DKIM records ---"];
@@ -2362,7 +2385,7 @@ public class StalwartService(
         try
         {
             string described = await RunCliJobAsync(
-                config, releaseName, ns, kubeconfig, "describe", ["describe"], ct);
+                config, releaseName, ns, cluster, "describe", ["describe"], ct);
 
             string? objectName = Mail.StalwartDnsService.DkimObjectIn(described)
                 ?? Mail.StalwartDnsService.DkimObjectInText(described);
@@ -2383,11 +2406,11 @@ public class StalwartService(
             // out the one field that matters and warns about secrets instead, which reads like
             // the whole story and is not. Asked directly, the server hands it over.
             string domains = await RunCliJobAsync(
-                config, releaseName, ns, kubeconfig, "dkim-domains",
+                config, releaseName, ns, cluster, "dkim-domains",
                 ["query", "Domain", "--json", "--fields", "id,name"], ct);
 
             string signatures = await RunCliJobAsync(
-                config, releaseName, ns, kubeconfig, "dkim",
+                config, releaseName, ns, cluster, "dkim",
                 ["query", objectName, "--json", "--fields", "selector,publicKey,domainId"], ct);
 
             int written = await StoreDkimAsync(config.Id, domains, signatures, ct);
@@ -2458,24 +2481,22 @@ public class StalwartService(
     /// apply Job is deleted before it is recreated.</para>
     /// </summary>
     private async Task<string> RunCliJobAsync(
-        StalwartComponentConfig config, string releaseName, string ns, string kubeconfig,
+        StalwartComponentConfig config, string releaseName, string ns, EntKube.Web.Services.Clusters.IClusterClient cluster,
         string purpose, IReadOnlyList<string> args, CancellationToken ct)
     {
         string jobName = StalwartManifestBuilder.CliJobName(releaseName, purpose);
 
         try
         {
-            await k8sFactory.DeleteManifestAsync("job", jobName, ns, kubeconfig, ct);
+            await cluster.DeleteManifestAsync("job", jobName, ns, ct);
         }
         catch (Exception ex)
         {
             logger.LogDebug(ex, "No previous {Job} Job to delete in {Namespace}.", jobName, ns);
         }
 
-        await k8sFactory.ApplyManifestAsync(
-            StalwartManifestBuilder.BuildCliJobManifest(
-                releaseName, ns, config.AdminUsername, purpose, args),
-            kubeconfig, ct);
+        await cluster.ApplyManifestAsync(
+            StalwartManifestBuilder.BuildCliJobManifest( releaseName, ns, config.AdminUsername, purpose, args), ct);
 
         // Same poll as the apply's, and the same timeout. A read that overruns it is reported as
         // whatever it managed to print rather than throwing: the configuration is already applied.
@@ -2488,7 +2509,7 @@ public class StalwartService(
             try
             {
                 (int completed, int failed) = ReadJobStatus(
-                    await k8sFactory.GetJsonAsync($"job/{jobName}", ns, kubeconfig, ct: ct));
+                    await cluster.GetJsonAsync($"job/{jobName}", ns, ct: ct));
 
                 if (completed > 0 || failed > 0)
                 {
@@ -2501,15 +2522,14 @@ public class StalwartService(
             }
         }
 
-        return await ReadJobLogAsync(jobName, ns, kubeconfig, ct);
+        return await ReadJobLogAsync(jobName, ns, cluster, ct);
     }
 
-    private async Task<string> ReadJobLogAsync(string jobName, string ns, string kubeconfig, CancellationToken ct)
+    private async Task<string> ReadJobLogAsync(string jobName, string ns, EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         try
         {
-            return (await k8sFactory.GetPodLogsAsync(
-                $"job/{jobName}", ns, kubeconfig, tailLines: 200, ct: ct)).Trim();
+            return (await cluster.GetPodLogsAsync($"job/{jobName}", ns, tailLines: 200, ct: ct)).Trim();
         }
         catch (Exception ex)
         {
@@ -2520,7 +2540,7 @@ public class StalwartService(
 
     /// <summary>Polls a StatefulSet until every replica reports ready on the current revision.</summary>
     private async Task<bool> WaitForRolloutAsync(
-        string releaseName, string ns, string kubeconfig, TimeSpan timeout, CancellationToken ct)
+        string releaseName, string ns, EntKube.Web.Services.Clusters.IClusterClient cluster, TimeSpan timeout, CancellationToken ct)
     {
         DateTime deadline = DateTime.UtcNow + timeout;
         while (DateTime.UtcNow < deadline)
@@ -2528,7 +2548,7 @@ public class StalwartService(
             await Task.Delay(TimeSpan.FromSeconds(5), ct);
             try
             {
-                string json = await k8sFactory.GetJsonAsync($"statefulset/{releaseName}", ns, kubeconfig, ct: ct);
+                string json = await cluster.GetJsonAsync($"statefulset/{releaseName}", ns, ct: ct);
                 if (IsStatefulSetReady(json))
                 {
                     return true;

@@ -110,17 +110,29 @@ public class ClusterCredentialCustodyTests
     /// seam makes the scoping local instead of inherited, which is worth having and is not a
     /// vulnerability fixed.</para>
     ///
-    private const int BaselineOccurrences = 211;
+    /// <para><b>202, and the reachable bucket is now empty of conversions.</b>
+    /// <c>StalwartService</c> (5), <c>KeycloakService</c> (2) and <c>StorageService</c>'s egress
+    /// relay (2) went, which leaves <see cref="CustodyTriageTests"/> at four — two of them
+    /// <c>ClusterClient</c>'s own, one a <em>write</em>, one a six-signature thread-through. So
+    /// every one of the 198 that remain is there because its method has no tenant, not because
+    /// nobody has got to it.</para>
+    ///
+    private const int BaselineOccurrences = 202;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
     ///
-    /// <para>39. <c>VaultService</c> left the list first, which was the first time a file had.
-    /// Then <c>VeleroService</c>, <c>DriftAdoptionService</c>, <c>StalwartDnsService</c> and
-    /// <c>OpenLdapService</c> — all four because they already had a tenant, which is the only
-    /// thing that decides whether a conversion is possible at all.</para>
+    /// <para>37. <c>VaultService</c> left the list first, which was the first time a file had.
+    /// Then <c>VeleroService</c>, <c>DriftAdoptionService</c>, <c>StalwartDnsService</c>,
+    /// <c>OpenLdapService</c>, and now <c>StalwartService</c> and <c>KeycloakService</c> — every
+    /// one because it already had a tenant, which is the only thing that decides whether a
+    /// conversion is possible at all.</para>
+    ///
+    /// <para><c>ClusterEgressRelay</c> left too, and differently: it took a kubeconfig as a
+    /// parameter rather than reading one, so it never appeared in this count. It now takes an
+    /// <c>IClusterClient</c>, which is what let <c>StorageService</c>'s relay path go.</para>
     /// </summary>
-    private const int BaselineFiles = 39;
+    private const int BaselineFiles = 37;
 
     private static (int Occurrences, int Files) Measure()
     {

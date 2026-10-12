@@ -48,7 +48,7 @@ public class StorageServiceTests : IDisposable
         AgentRegistry agentRegistry = new(dbFactory, NullLogger<AgentRegistry>.Instance);
         OpenStackHttpFactory httpFactory = new(innerHttpFactory.Object, agentRegistry);
         Mock<IKubernetesClientFactory> k8sMock = new();
-        ClusterEgressRelay egressRelay = new(k8sMock.Object, NullLogger<ClusterEgressRelay>.Instance);
+        ClusterEgressRelay egressRelay = new(NullLogger<ClusterEgressRelay>.Instance);
         ClusterEgressTunnel egressTunnel = new(NullLogger<ClusterEgressTunnel>.Instance);
         OpenStackKeystoneClient keystone = new(httpFactory, vaultService, egressTunnel, dbFactory);
         OpenStackS3Service openStackS3 = new(vaultService, httpFactory, keystone);

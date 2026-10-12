@@ -187,7 +187,7 @@ public class ClusterScopedConfigLookupTests : IDisposable
     private KeycloakService Keycloak() =>
         new(testDb.Factory, testDb.CreateVaultService(),
             new Mock<IHttpClientFactory>().Object, null!, Catalog(),
-            new Mock<IKubernetesClientFactory>().Object);
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, new Mock<IKubernetesClientFactory>().Object));
 
     private async Task GivenARouteAsync(Guid componentId, string hostname, DateTime createdAt)
     {

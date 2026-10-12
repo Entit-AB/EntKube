@@ -27,7 +27,7 @@ namespace EntKube.Web.Services;
 /// this is not an open relay: an unlisted SNI maps to an empty upstream and nginx
 /// drops the connection.
 /// </summary>
-public class ClusterEgressRelay(IKubernetesClientFactory k8s, ILogger<ClusterEgressRelay> logger)
+public class ClusterEgressRelay(ILogger<ClusterEgressRelay> logger)
 {
     /// <summary>Namespace the relay runs in. Dedicated so it is obvious what it is and easy to remove.</summary>
     public const string Namespace = "entkube-egress";
@@ -51,7 +51,7 @@ public class ClusterEgressRelay(IKubernetesClientFactory k8s, ILogger<ClusterEgr
     public string Image { get; init; } = "nginx:1.27-alpine";
 
     /// <summary>
-    /// Applies the relay to <paramref name="kubeconfig"/>, allowing exactly
+    /// Applies the relay to <paramref name="cluster"/>, allowing exactly
     /// <paramref name="allowedHosts"/> as upstreams.
     ///
     /// Safe to call repeatedly: the manifest is declarative, and the pod template
@@ -59,7 +59,7 @@ public class ClusterEgressRelay(IKubernetesClientFactory k8s, ILogger<ClusterEgr
     /// pods rather than leaving them serving a stale one.
     /// </summary>
     public async Task EnsureAsync(
-        string kubeconfig, IEnumerable<string> allowedHosts, CancellationToken ct = default)
+        EntKube.Web.Services.Clusters.IClusterClient cluster, IEnumerable<string> allowedHosts, CancellationToken ct = default)
     {
         List<string> hosts = NormalizeHosts(allowedHosts);
 
@@ -69,24 +69,24 @@ public class ClusterEgressRelay(IKubernetesClientFactory k8s, ILogger<ClusterEgr
                 "Refusing to deploy the egress relay with an empty allowlist — it would accept no traffic.");
         }
 
-        string dnsIp = await ResolveClusterDnsAsync(kubeconfig, ct);
+        string dnsIp = await ResolveClusterDnsAsync(cluster, ct);
         string nginxConf = BuildNginxConfig(hosts, dnsIp);
 
         logger.LogInformation(
             "Ensuring egress relay in {Namespace} for {HostCount} upstream host(s)", Namespace, hosts.Count);
 
-        await k8s.ApplyManifestAsync(BuildManifest(nginxConf), kubeconfig, ct);
+        await cluster.ApplyManifestAsync(BuildManifest(nginxConf), ct);
     }
 
     /// <summary>
     /// Removes the relay and its namespace. Used when a connection stops routing
     /// through the cluster, so nothing is left running that nobody asked for.
     /// </summary>
-    public async Task RemoveAsync(string kubeconfig, CancellationToken ct = default)
+    public async Task RemoveAsync(EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct = default)
     {
         try
         {
-            await k8s.DeleteManifestAsync("namespace", Namespace, "", kubeconfig, ct);
+            await cluster.DeleteManifestAsync("namespace", Namespace, "", ct);
         }
         catch (Exception ex)
         {
@@ -303,11 +303,11 @@ public class ClusterEgressRelay(IKubernetesClientFactory k8s, ILogger<ClusterEgr
     /// address rather than a name. Falls back to the common 10.96.0.10 only if the
     /// service cannot be read, since a wrong resolver breaks every lookup.
     /// </summary>
-    private async Task<string> ResolveClusterDnsAsync(string kubeconfig, CancellationToken ct)
+    private async Task<string> ResolveClusterDnsAsync(EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         try
         {
-            string json = await k8s.GetJsonAsync("svc", "kube-system", kubeconfig, ct: ct);
+            string json = await cluster.GetJsonAsync("svc", "kube-system", ct: ct);
             using JsonDocument doc = JsonDocument.Parse(json);
 
             if (doc.RootElement.TryGetProperty("items", out JsonElement items))
