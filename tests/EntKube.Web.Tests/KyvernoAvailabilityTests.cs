@@ -49,6 +49,7 @@ public class KyvernoAvailabilityTests : IDisposable
         sut = new KyvernoPolicyService(
             dbFactory,
             new Mock<IKubernetesClientFactory>().Object,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, new Mock<IKubernetesClientFactory>().Object),
             new EntKube.Web.Services.ClusterChanges.ClusterChangeGate(
                 new ConfigurationBuilder().Build(),
                 NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance),

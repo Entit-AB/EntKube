@@ -16,7 +16,7 @@ namespace EntKube.Web.Services.Dr;
 /// </summary>
 public class VeleroService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    IKubernetesClientFactory k8s,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     StorageService storageService,
     VaultService vaultService,
     ICatalogApi catalog,
@@ -251,23 +251,31 @@ public class VeleroService(
     /// an unreachable cluster or a missing CRD comes back as a status carrying the
     /// reason, so one broken cluster cannot fail a fleet-wide report.
     /// </summary>
-    public async Task<ClusterDrStatus> GetStatusAsync(
-        Guid clusterId, string clusterName, string? kubeconfig, CancellationToken ct = default)
+    private async Task<ClusterDrStatus> GetStatusAsync(
+        Guid tenantId, Guid clusterId, string clusterName, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(kubeconfig))
+        // The name is still a parameter: when the seam refuses there is no cluster to read it
+        // from, and a fleet report that lists an unreachable cluster without naming it is useless.
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusters.ForAsync(tenantId, clusterId, ct);
+
+        if (cluster is null)
         {
             return new ClusterDrStatus
             {
                 ClusterId = clusterId,
                 ClusterName = clusterName,
                 IsVeleroInstalled = false,
-                Error = "Cluster has no kubeconfig configured.",
+                // ForAsync returns null for "no stored kubeconfig" and for "not this tenant's"
+                // alike, and the report must not distinguish them: saying which one it was tells
+                // the asker whether a cluster id they guessed exists somewhere else.
+                Error = "Cluster is not reachable: no stored kubeconfig, or not this tenant's.",
             };
         }
 
         try
         {
-            string backupsJson = await k8s.GetJsonAsync("backups.velero.io", DefaultNamespace, kubeconfig, "", ct);
+            string backupsJson = await cluster.GetJsonAsync("backups.velero.io", DefaultNamespace, "", ct);
 
             // An empty or error response here means Velero's CRDs are not present, which is
             // simply "not installed" rather than a failure worth reporting as one.
@@ -286,11 +294,11 @@ public class VeleroService(
                 IsVeleroInstalled = true,
                 Backups = ParseBackups(backupsJson),
                 Schedules = ParseSchedules(
-                    await k8s.GetJsonAsync("schedules.velero.io", DefaultNamespace, kubeconfig, "", ct)),
+                    await cluster.GetJsonAsync("schedules.velero.io", DefaultNamespace, "", ct)),
                 Restores = ParseRestores(
-                    await k8s.GetJsonAsync("restores.velero.io", DefaultNamespace, kubeconfig, "", ct)),
+                    await cluster.GetJsonAsync("restores.velero.io", DefaultNamespace, "", ct)),
                 StorageLocations = ParseStorageLocations(
-                    await k8s.GetJsonAsync("backupstoragelocations.velero.io", DefaultNamespace, kubeconfig, "", ct)),
+                    await cluster.GetJsonAsync("backupstoragelocations.velero.io", DefaultNamespace, "", ct)),
             };
         }
         catch (OperationCanceledException) when (ct.IsCancellationRequested)
@@ -315,17 +323,17 @@ public class VeleroService(
     {
         await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        var clusters = await db.KubernetesClusters
+        var rows = await db.KubernetesClusters
             .AsNoTracking()
             .Where(c => c.TenantId == tenantId)
             .OrderBy(c => c.Name)
-            .Select(c => new { c.Id, c.Name, c.Kubeconfig })
+            .Select(c => new { c.Id, c.Name })
             .ToListAsync(ct);
 
         List<ClusterDrStatus> statuses = [];
-        foreach (var cluster in clusters)
+        foreach (var cluster in rows)
         {
-            statuses.Add(await GetStatusAsync(cluster.Id, cluster.Name, cluster.Kubeconfig, ct));
+            statuses.Add(await GetStatusAsync(tenantId, cluster.Id, cluster.Name, ct));
         }
 
         return statuses;
@@ -473,17 +481,18 @@ public class VeleroService(
         IReadOnlyList<string>? includedNamespaces, bool snapshotVolumes, string? storageLocation,
         CancellationToken ct = default)
     {
-        string? kubeconfig = await ResolveKubeconfigAsync(tenantId, clusterId, ct);
-        if (kubeconfig is null)
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusters.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null)
         {
             return (false, "Cluster not found in this tenant, or it has no kubeconfig.");
         }
 
         try
         {
-            await k8s.ApplyManifestAsync(
+            await cluster.ApplyManifestAsync(
                 BuildScheduleManifest(name, cron, retentionDays, includedNamespaces, snapshotVolumes, storageLocation),
-                kubeconfig, ct);
+                ct);
 
             return (true, $"Schedule '{name}' applied.");
         }
@@ -496,15 +505,16 @@ public class VeleroService(
     public async Task<(bool Success, string Message)> DeleteScheduleAsync(
         Guid tenantId, Guid clusterId, string name, CancellationToken ct = default)
     {
-        string? kubeconfig = await ResolveKubeconfigAsync(tenantId, clusterId, ct);
-        if (kubeconfig is null)
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusters.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null)
         {
             return (false, "Cluster not found in this tenant, or it has no kubeconfig.");
         }
 
         try
         {
-            await k8s.DeleteManifestAsync("schedule.velero.io", name, DefaultNamespace, kubeconfig, ct);
+            await cluster.DeleteManifestAsync("schedule.velero.io", name, DefaultNamespace, ct);
             return (true, $"Schedule '{name}' deleted. Existing backups it created are kept until they expire.");
         }
         catch (Exception ex)
@@ -518,8 +528,9 @@ public class VeleroService(
         Guid tenantId, Guid clusterId, string name, IReadOnlyList<string>? includedNamespaces,
         int retentionDays, string? storageLocation, CancellationToken ct = default)
     {
-        string? kubeconfig = await ResolveKubeconfigAsync(tenantId, clusterId, ct);
-        if (kubeconfig is null)
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusters.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null)
         {
             return (false, "Cluster not found in this tenant, or it has no kubeconfig.");
         }
@@ -553,25 +564,13 @@ public class VeleroService(
 
         try
         {
-            await k8s.ApplyManifestAsync(yaml.ToString(), kubeconfig, ct);
+            await cluster.ApplyManifestAsync(yaml.ToString(), ct);
             return (true, $"Backup '{name}' started.");
         }
         catch (Exception ex)
         {
             return (false, ex.Message);
         }
-    }
-
-    private async Task<string?> ResolveKubeconfigAsync(Guid tenantId, Guid clusterId, CancellationToken ct)
-    {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-
-        // Scoped by tenant as well as cluster id, so a crafted id cannot reach another
-        // tenant's cluster.
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
-
-        return string.IsNullOrWhiteSpace(cluster?.Kubeconfig) ? null : cluster.Kubeconfig;
     }
 
     // ── JSON helpers. Deliberately tolerant: a missing field is absent, never an exception. ──
