@@ -39,7 +39,7 @@ public class CustodyTriageTests
     /// Credential sites whose enclosing method already has a tenant, measured 2026-10-09. These
     /// are the ones that could move onto <c>IClusterClient</c> without touching a signature.
     ///
-    /// <para><b>11 of 209.</b> Six services converted at once — <c>VeleroService</c>,
+    /// <para><b>4 of 202.</b> Eight services converted over two batches — <c>VeleroService</c>,
     /// <c>DriftAdoptionService</c>, <c>StalwartDnsService</c> and <c>OpenLdapService</c> to zero,
     /// <c>KyvernoPolicyService</c>'s three read-only discovery calls — which is what this test is
     /// for: all five were picked because they had a tenant, not because they had many sites.</para>
@@ -56,23 +56,19 @@ public class CustodyTriageTests
     /// at 29. None of them was in a method with a tenant — which is exactly what the triage was
     /// built to tell apart, and it could not, because of the pattern above.</para>
     ///
-    /// <para><b>Where the 11 are.</b> <c>StalwartService</c> 4, then two each in
-    /// <c>KeycloakService</c> and <c>StorageService</c>, and one in <c>TenantService</c>.
-    /// <c>ClusterClient</c>'s own two are the seam resolving the credential, which is the one
-    /// place that should.</para>
+    /// <para><b>Four, and none of them is a conversion.</b> Two are <c>ClusterClient</c>'s own —
+    /// the seam resolving the credential, which is the one place that should.
+    /// <c>TenantService.CreateClusterAsync</c> <em>writes</em> <c>cluster.Kubeconfig</c> to reflect
+    /// a value the caller just supplied onto the returned entity; there is nothing to route
+    /// through a seam. And <c>IngressDashboardService</c> threads its credential through six
+    /// private helpers, so it is one site by this count and a six-signature change in practice.</para>
     ///
-    /// <para><b>One of the 11 is not a conversion.</b> <c>TenantService.CreateClusterAsync</c>
-    /// <em>writes</em> <c>cluster.Kubeconfig</c> to reflect a value the caller just supplied onto
-    /// the returned entity — there is nothing to route through a seam.</para>
+    /// <para><b>This number reaching zero would not mean the work is done</b>, and that is the
+    /// point of keeping the other bucket beside it. 198 sites remain, every one in a method with
+    /// no tenant in scope. What this measured was whether a conversion was <em>possible</em>, and
+    /// the answer is now "nothing easy is left" rather than "nothing is left".</para>
     ///
-    /// <para><c>IngressDashboardService</c> used to be listed here as a six-signature change and
-    /// so "its own commit, not a line in a batch". It was its own commit, and the estimate was
-    /// wrong in a useful direction: the six were six <em>pass-throughs</em> to a single
-    /// <c>SafeGetAsync</c> funnel, which is the only place that ever touched the client. Counting
-    /// signatures measured the diff; counting the places that use the credential would have
-    /// measured the work.</para>
-    ///
-    private const int BaselineReachable = 11;
+    private const int BaselineReachable = 4;
 
     [Fact]
     public void The_sites_that_could_already_ask_the_seam_do_not_multiply()

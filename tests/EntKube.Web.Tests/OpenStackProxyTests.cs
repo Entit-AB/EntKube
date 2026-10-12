@@ -52,7 +52,7 @@ public class OpenStackProxyTests : IDisposable
         AgentRegistry agentRegistry = new(dbFactory, NullLogger<AgentRegistry>.Instance);
         OpenStackHttpFactory httpFactory = new(innerHttpFactory.Object, agentRegistry);
         Mock<IKubernetesClientFactory> k8sMock = new();
-        ClusterEgressRelay egressRelay = new(k8sMock.Object, NullLogger<ClusterEgressRelay>.Instance);
+        ClusterEgressRelay egressRelay = new(NullLogger<ClusterEgressRelay>.Instance);
         ClusterEgressTunnel egressTunnel = new(NullLogger<ClusterEgressTunnel>.Instance);
         keystone = new OpenStackKeystoneClient(httpFactory, vaultService, egressTunnel, dbFactory);
 

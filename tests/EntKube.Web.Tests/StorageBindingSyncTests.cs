@@ -54,7 +54,7 @@ public class StorageBindingSyncTests : IDisposable
         Mock<IHttpClientFactory> http = new();
         AgentRegistry agents = new(testDb.Factory, NullLogger<AgentRegistry>.Instance);
         OpenStackHttpFactory httpFactory = new(http.Object, agents);
-        ClusterEgressRelay relay = new(k8s.Object, NullLogger<ClusterEgressRelay>.Instance);
+        ClusterEgressRelay relay = new(NullLogger<ClusterEgressRelay>.Instance);
         ClusterEgressTunnel tunnel = new(NullLogger<ClusterEgressTunnel>.Instance);
         OpenStackKeystoneClient keystone = new(httpFactory, vault, tunnel, testDb.Factory);
         OpenStackS3Service s3 = new(vault, httpFactory, keystone);
