@@ -900,6 +900,79 @@ public class PrometheusServiceTests : IDisposable
         result.Data.Should().BeNull();
     }
 
+    // ──────── The deployment path: the id is an input, not permission ────────
+
+    /// <summary>
+    /// A deployment id belonging to somebody else's cluster is refused.
+    ///
+    /// <para>This method used to take a deployment id and nothing else, load the deployment's
+    /// cluster by that id, and read the kubeconfig straight off it — so the id was the whole
+    /// authorization. It is now an input: the cluster id the deployment carries goes into the
+    /// seam, and the seam compares it against the asking tenant.</para>
+    /// </summary>
+    [Fact]
+    public async Task GetDeploymentMetricsAsync_DeploymentOnAnotherTenantsCluster_IsRefused()
+    {
+        (Guid tenantId, Guid deploymentId) = await SeedDeploymentAsync();
+        Guid stranger = Guid.NewGuid();
+        db.Set<Tenant>().Add(new Tenant { Id = stranger, Name = "Stranger", Slug = $"s-{stranger:N}" });
+        await db.SaveChangesAsync();
+
+        KubernetesOperationResult<DeploymentMetricsSummary> result =
+            await sut.GetDeploymentMetricsAsync(stranger, deploymentId);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("not found for this tenant",
+            "the deployment was found — it is the cluster behind it that this tenant may not hold");
+    }
+
+    [Fact]
+    public async Task GetDeploymentMetricsAsync_OwnDeployment_GetsPastTheTenantCheck()
+    {
+        (Guid tenantId, Guid deploymentId) = await SeedDeploymentAsync();
+
+        KubernetesOperationResult<DeploymentMetricsSummary> result =
+            await sut.GetDeploymentMetricsAsync(tenantId, deploymentId);
+
+        result.IsSuccess.Should().BeFalse("there is no prometheus component on this cluster");
+        result.Error.Should().Contain("No prometheus component",
+            "a different refusal from the tenant one, so the test above is not passing by accident");
+    }
+
+    [Fact]
+    public async Task GetDeploymentMetricsAsync_UnknownDeployment_SaysSo()
+    {
+        (Guid tenantId, _) = await SeedDeploymentAsync();
+
+        KubernetesOperationResult<DeploymentMetricsSummary> result =
+            await sut.GetDeploymentMetricsAsync(tenantId, Guid.NewGuid());
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("Deployment not found");
+    }
+
+    /// <summary>A tenant with a reachable cluster and one deployment on it.</summary>
+    private async Task<(Guid TenantId, Guid DeploymentId)> SeedDeploymentAsync()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedReachableClusterAsync();
+
+        Customer customer = new() { Id = Guid.NewGuid(), TenantId = tenantId, Name = "Contoso" };
+        App app = new() { Id = Guid.NewGuid(), CustomerId = customer.Id, Name = "billing" };
+        AppDeployment deployment = new()
+        {
+            Id = Guid.NewGuid(), AppId = app.Id, Name = "prod", Type = DeploymentType.Manual,
+            EnvironmentId = db.Set<Data.Environment>().First(e => e.TenantId == tenantId).Id,
+            ClusterId = clusterId, Namespace = "billing", IsManaged = true,
+        };
+
+        db.Customers.Add(customer);
+        db.Apps.Add(app);
+        db.AppDeployments.Add(deployment);
+        await db.SaveChangesAsync();
+
+        return (tenantId, deployment.Id);
+    }
+
     /// <summary>A tenant with one cluster whose kubeconfig is in the vault.</summary>
     private async Task<(Guid TenantId, Guid ClusterId)> SeedReachableClusterAsync()
     {

@@ -745,39 +745,35 @@ public class PrometheusService(
     /// specific app deployment. Requires kube-prometheus-stack on the target cluster.
     /// </summary>
     public async Task<KubernetesOperationResult<DeploymentMetricsSummary>> GetDeploymentMetricsAsync(
-        Guid deploymentId, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentId, CancellationToken ct = default)
     {
-        string kubeconfig;
-        PrometheusConfig config;
+        Guid clusterId;
         string ns;
 
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
-            AppDeployment? deployment = await db.AppDeployments
-                .Include(d => d.Cluster)
-                    .ThenInclude(c => c.Components)
-                .FirstOrDefaultAsync(d => d.Id == deploymentId, ct);
+            // The deployment is read by id alone, and the cluster id it carries is an input to
+            // the seam rather than permission to use that cluster: ForAsync is what decides
+            // whether this tenant may hold the credential, so a deployment pointing at another
+            // tenant's cluster fails there instead of being trusted here.
+            var deployment = await db.AppDeployments
+                .AsNoTracking()
+                .Where(d => d.Id == deploymentId)
+                .Select(d => new { d.ClusterId, d.Namespace })
+                .FirstOrDefaultAsync(ct);
 
             if (deployment is null)
                 return KubernetesOperationResult<DeploymentMetricsSummary>.Failure("Deployment not found.");
 
-            if (string.IsNullOrWhiteSpace(deployment.Cluster.Kubeconfig))
-                return KubernetesOperationResult<DeploymentMetricsSummary>.Failure("No kubeconfig configured.");
-
-            ClusterComponent? prometheusComponent = deployment.Cluster.Components.FirstOrDefault(c =>
-                c.Name.Contains("prometheus", StringComparison.OrdinalIgnoreCase));
-
-            if (prometheusComponent is null)
-                return KubernetesOperationResult<DeploymentMetricsSummary>.Failure(
-                    "No prometheus component found on this cluster.");
-
-            kubeconfig = deployment.Cluster.Kubeconfig;
-            config = GetPrometheusConfig(prometheusComponent) ?? new PrometheusConfig();
+            clusterId = deployment.ClusterId;
             ns = deployment.Namespace;
         }
 
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
+        if (info is null) return KubernetesOperationResult<DeploymentMetricsSummary>.Failure(error!);
+
         return await WithServiceAsync<DeploymentMetricsSummary>(
-            kubeconfig, config.Namespace, config.ServiceName, config.ServicePort,
+            info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             async (http, baseUrl, token) =>
             {
                 string cpuQ = Q($"sum(rate(container_cpu_usage_seconds_total{{namespace=\"{ns}\",container!=\"\"}}[5m]))");

@@ -13,6 +13,13 @@ public enum ChangeVerb
     Restart,
     Helm,
     EnsureNamespace,
+
+    /// <summary>
+    /// Restoring workloads to the revision Kubernetes last recorded for them
+    /// (<c>kubectl rollout undo</c>). Not a Patch: nothing here describes the state being
+    /// moved to, because the cluster — not EntKube — is the one that remembers it.
+    /// </summary>
+    Rollback,
 }
 
 /// <summary>
@@ -61,6 +68,7 @@ public sealed class PlannedClusterChange
             ChangeVerb.Patch or ChangeVerb.Scale or ChangeVerb.Restart
                 => $"{Verb} {Resource}/{Name} in {Namespace}",
             ChangeVerb.EnsureNamespace => $"Ensure namespace {Namespace ?? Name}",
+            ChangeVerb.Rollback => $"Roll back {Resource ?? "workloads"} in {Namespace}",
             _ => $"{Verb} manifest",
         };
     }

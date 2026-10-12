@@ -3483,7 +3483,7 @@
         if (selectedDeployment is null) return;
         deploymentMetricsLoading = true; deploymentMetricsError = null; deploymentMetrics = null; StateHasChanged();
         KubernetesOperationResult<DeploymentMetricsSummary> result =
-            await PrometheusService.GetDeploymentMetricsAsync(selectedDeployment.Id);
+            await PrometheusService.GetDeploymentMetricsAsync(TenantId, selectedDeployment.Id);
         if (result.IsSuccess) deploymentMetrics = result.Data;
         else deploymentMetricsError = result.Error;
         deploymentMetricsLoading = false;
