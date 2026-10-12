@@ -4,6 +4,7 @@ using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 using Xunit;
 
 namespace EntKube.Web.Tests;
@@ -65,7 +66,13 @@ public class StalwartPreflightTests : IDisposable
         // and that question is the point of these tests. The Kubernetes client is only reached for a
         // cert-manager certificate on an installed component, which none of these is.
         mail = new StalwartService(
-            factory, vault, null!, null!, null!, null!, null!,
+            factory, vault,
+            // The cluster seam, not a null: the certificate check now asks it whether the cluster
+            // is reachable instead of reading a kubeconfig off the row. Nothing seeds one here, so
+            // it answers "no" and the check is skipped -- which is the state these tests were in
+            // all along, just stated by the seam rather than by a null column.
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(factory, new Mock<IKubernetesClientFactory>().Object),
+            null!, null!, null!, null!,
             new EntKube.Web.Modules.Api.CatalogApi(factory),
             NullLogger<StalwartService>.Instance);
     }

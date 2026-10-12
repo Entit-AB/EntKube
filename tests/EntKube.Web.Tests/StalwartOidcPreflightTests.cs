@@ -4,6 +4,7 @@ using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 using Xunit;
 
 namespace EntKube.Web.Tests;
@@ -59,12 +60,16 @@ public class StalwartOidcPreflightTests : IDisposable
         db.SaveChanges();
 
         // Only the database is reached on the OIDC path: the vault is consulted for an internal
-        // administrator password and the Kubernetes client for a certificate, neither of which this
-        // exercises. Passing nulls says so, and would fail loudly rather than quietly if that changed.
+        // administrator password and the cluster for a certificate, neither of which this
+        // exercises. Passing nulls says so, and would fail loudly rather than quietly if that
+        // changed -- which it did: the certificate check used to read a kubeconfig off the cluster
+        // row and now asks the seam, so the seam has to be real. Nothing seeds a kubeconfig, so it
+        // answers "unreachable" and the check is skipped exactly as before.
         TestDbContextFactory oidcFactory = new(connection);
         mail = new StalwartService(
-            oidcFactory,
-            null!, null!, null!, null!, null!, null!,
+            oidcFactory, null!,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(oidcFactory, new Mock<IKubernetesClientFactory>().Object),
+            null!, null!, null!, null!,
             new EntKube.Web.Modules.Api.CatalogApi(oidcFactory),
             NullLogger<StalwartService>.Instance);
     }
