@@ -147,7 +147,24 @@ public class CatalogContractAdoptionTests
     /// work someone has to notice is needed. Serialise instead: land one, rebase the other. The
     /// author controls that; the merger cannot be expected to.</para>
     ///
-    private const int BaselineQueries = 21;
+    /// <para><b>19.</b> <c>AlertSyncService</c> and <c>ResourceUsageCollectorService</c> — the two
+    /// sweeps that were in <em>both</em> this count and the credential one — now loop tenants, so
+    /// each asks Catalog for its own clusters running kube-prometheus-stack instead of selecting
+    /// every installation that runs it.</para>
+    ///
+    /// <para><c>AlertSyncService</c> is the clearer win of the two: it loaded the cluster row
+    /// <em>in order to read a tenant off it</em>, then filtered routing rules, notification
+    /// channels and maintenance windows by that. The row is still loaded — an incident carries the
+    /// cluster as a navigation — but scoped by tenant now, so it no longer supplies the thing it
+    /// is checked against.</para>
+    ///
+    /// <para>⚠️ <c>ResourceUsageCollectorService</c> is <b>half converted, deliberately.</b> The
+    /// tenant bounds which clusters are collected, but <c>PrometheusService.GetMetricRangeAsync</c>
+    /// still takes a cluster id and no tenant — as do all fifteen of its public methods, which is
+    /// why its 20 credential sites are the largest remaining block. The sweep is fixed; the call
+    /// it makes would still answer about any cluster.</para>
+    ///
+    private const int BaselineQueries = 19;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

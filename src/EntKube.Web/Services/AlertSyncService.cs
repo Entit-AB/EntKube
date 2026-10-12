@@ -120,36 +120,57 @@ public class AlertSyncService(
 
     private async Task SyncAllClustersAsync(CancellationToken ct)
     {
-        List<Guid> clusterIds;
+        // One tenant at a time (docs/decomposition.md §4.0.1.2). This used to select every
+        // cluster in the installation running kube-prometheus-stack and then derive each one's
+        // tenant from the cluster row — so the rule and maintenance-window lookups downstream
+        // were filtered by a tenant the cluster itself had supplied.
+        Dictionary<Guid, List<Guid>> clustersByTenant = [];
         using (IServiceScope scope = scopeFactory.CreateScope())
         {
             using IDisposable unattended = scope.DeclareUnattended("alert-sync");
             var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+            var catalog = scope.ServiceProvider.GetRequiredService<EntKube.Contracts.Catalog.ICatalogApi>();
             using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-            // Only sync clusters that have a kube-prometheus-stack component installed
-            clusterIds = await db.ClusterComponents
-                .Where(c => c.HelmChartName == "kube-prometheus-stack"
-                         && c.Status == ComponentStatus.Installed)
-                .Select(c => c.ClusterId)
-                .Distinct()
-                .ToListAsync(ct);
+            foreach (Guid tenantId in await db.Tenants.Select(t => t.Id).ToListAsync(ct))
+            {
+                // Only the tenant's own clusters running kube-prometheus-stack.
+                List<Guid> ids =
+                [
+                    .. (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+                        .Where(c => c.HelmChartName == "kube-prometheus-stack"
+                                 && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed)
+                        .Select(c => c.ClusterId)
+                        .Distinct(),
+                ];
+
+                if (ids.Count > 0) clustersByTenant[tenantId] = ids;
+            }
         }
 
-        foreach (Guid clusterId in clusterIds)
+        foreach ((Guid tenantId, List<Guid> clusterIds) in clustersByTenant)
         {
-            try
+            foreach (Guid clusterId in clusterIds)
             {
-                await SyncClusterAsync(clusterId, ct);
-            }
-            catch (Exception ex)
-            {
-                logger.LogWarning(ex, "Alert sync failed for cluster {ClusterId}", clusterId);
+                try
+                {
+                    await SyncClusterAsync(tenantId, clusterId, ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex,
+                        "Alert sync failed for cluster {ClusterId} of tenant {TenantId}",
+                        clusterId, tenantId);
+                }
             }
         }
     }
 
-    private async Task SyncClusterAsync(Guid clusterId, CancellationToken ct)
+    private async Task SyncClusterAsync(Guid tenantId, Guid clusterId, CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
         using IDisposable unattended = scope.DeclareUnattended("alert-sync");
@@ -181,14 +202,17 @@ public class AlertSyncService(
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        // Load cluster to get tenant ID for rule lookup
-        KubernetesCluster? clusterEarly = await db.KubernetesClusters.FindAsync([clusterId], ct);
+        // Scoped by tenant as well as id. The row is still needed — an incident carries the
+        // cluster as a navigation — but it no longer *supplies* the tenant, so a cluster that is
+        // not this tenant's simply does not resolve.
+        KubernetesCluster? clusterEarly = await db.KubernetesClusters
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
         if (clusterEarly is null) return;
 
         // Load routing rules up front so suppression can be checked before incident creation
         List<AlertRoutingRule> allRoutingRules = await db.AlertRoutingRules
             .Include(r => r.Channel)
-            .Where(r => r.TenantId == clusterEarly.TenantId && r.IsEnabled)
+            .Where(r => r.TenantId == tenantId && r.IsEnabled)
             .OrderBy(r => r.Priority)
             .ToListAsync(ct);
 
@@ -293,19 +317,19 @@ public class AlertSyncService(
         // §14.3: an issue our monitoring finds is registered by us, timed at the alarm.
         // Done before the maintenance check below, which suppresses notifications rather
         // than the record — but only for alerts that map to an application under Annex A.
-        await alertTickets.OpenForIncidentsAsync(cluster.TenantId, newIncidents, ct);
+        await alertTickets.OpenForIncidentsAsync(tenantId, newIncidents, ct);
         await alertTickets.NoteIncidentResolvedAsync(resolvedIncidents, now, ct);
 
         // Dispatch notifications (need the saved incidents to have IDs)
         List<NotificationChannel> channels = await db.NotificationChannels
-            .Where(c => c.TenantId == cluster.TenantId && c.CustomerId == null && c.IsEnabled)
+            .Where(c => c.TenantId == tenantId && c.CustomerId == null && c.IsEnabled)
             .ToListAsync(ct);
 
         if (channels.Count == 0) return;
 
         // Skip notifications while a maintenance window is active for this cluster/tenant
         bool inMaintenance = await db.MaintenanceWindows.AnyAsync(w =>
-            w.TenantId == cluster.TenantId
+            w.TenantId == tenantId
             && w.StartsAt <= now
             && w.EndsAt >= now
             && (w.ClusterId == null || w.ClusterId == clusterId), ct);
