@@ -147,7 +147,21 @@ public class ClusterCredentialCustodyTests
     /// <para>When the last caller of the old path goes, it and the <c>clientPool</c> field go with
     /// it, and this number drops by the remaining eighteen in one step.</para>
     ///
-    private const int BaselineOccurrences = 181;
+    /// <para><b>179 — step 2, the aggregate pair.</b> <c>GetAppMetricsAsync</c> and
+    /// <c>GetCustomerMetricsAsync</c> both fan out over several clusters through
+    /// <c>AggregateMetricsAsync</c>, whose tuple carried a <c>string Kubeconfig</c> — so every
+    /// producer of that tuple had to read one. It carries a cluster id now and the aggregate
+    /// resolves each through the seam, which is why two sites went for two methods.</para>
+    ///
+    /// <para>An unreachable cluster is <em>skipped</em> there rather than failing the whole
+    /// answer, because the aggregate sums across a tenant's clusters — but <c>anySuccess</c> still
+    /// decides whether the result is a failure, so one that cannot be reached cannot masquerade
+    /// as a zero.</para>
+    ///
+    /// <para><c>PrometheusService</c> is at 16 of its original 20. Thirteen methods remain on the
+    /// old by-cluster-id path; each moves with its callers, one step at a time.</para>
+    ///
+    private const int BaselineOccurrences = 179;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.

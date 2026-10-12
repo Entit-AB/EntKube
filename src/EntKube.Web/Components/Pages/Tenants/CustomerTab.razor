@@ -540,7 +540,7 @@ else
         StateHasChanged();
 
         KubernetesOperationResult<DeploymentMetricsSummary> result =
-            await PrometheusService.GetCustomerMetricsAsync(selectedCustomer!.Id);
+            await PrometheusService.GetCustomerMetricsAsync(TenantId, selectedCustomer!.Id);
 
         if (result.IsSuccess)
             customerMetrics = result.Data;
