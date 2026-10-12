@@ -223,7 +223,7 @@ public sealed record CostReport
 public class CostReportService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     PrometheusService prometheus,
-    IKubernetesClientFactory k8s,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     ILogger<CostReportService> logger)
 {
     /// <summary>
@@ -335,7 +335,7 @@ public class CostReportService(
             IReadOnlyList<NamespaceConsumption> consumption;
             try
             {
-                consumption = await MeasureAsync(cluster.Id, rate.ChargeOnRequests, ct);
+                consumption = await MeasureAsync(tenantId, cluster.Id, rate.ChargeOnRequests, ct);
             }
             catch (Exception ex)
             {
@@ -354,7 +354,7 @@ public class CostReportService(
             // Measured whether or not the cluster charges for idle capacity: the nodes
             // against what runs on them is the comparison an operator makes with the
             // invoice, and it is worth having even where the idle line is switched off.
-            ClusterCapacity? capacity = await MeasureCapacityAsync(cluster.Id, ct);
+            ClusterCapacity? capacity = await MeasureCapacityAsync(tenantId, cluster.Id, ct);
             if (capacity is null && rate.ChargeIdleCapacity)
             {
                 warnings.Add(
@@ -388,23 +388,23 @@ public class CostReportService(
 
     /// <summary>Reads per-namespace consumption from a cluster's Prometheus.</summary>
     private async Task<IReadOnlyList<NamespaceConsumption>> MeasureAsync(
-        Guid clusterId, bool chargeOnRequests, CancellationToken ct)
+        Guid tenantId, Guid clusterId, bool chargeOnRequests, CancellationToken ct)
     {
         Dictionary<string, double> cpu = await SumByNamespaceAsync(
-            clusterId, chargeOnRequests ? CpuRequestsQuery : CpuUsageQuery, ct);
+            tenantId, clusterId, chargeOnRequests ? CpuRequestsQuery : CpuUsageQuery, ct);
 
         Dictionary<string, double> memory = await SumByNamespaceAsync(
-            clusterId, chargeOnRequests ? MemoryRequestsQuery : MemoryUsageQuery, ct);
+            tenantId, clusterId, chargeOnRequests ? MemoryRequestsQuery : MemoryUsageQuery, ct);
 
         // Storage is always charged on provisioned capacity, whatever the compute basis:
         // a half-empty volume still denies its full size to everyone else.
-        Dictionary<string, double> storage = await SumByNamespaceAsync(clusterId, StorageQuery, ct);
+        Dictionary<string, double> storage = await SumByNamespaceAsync(tenantId, clusterId, StorageQuery, ct);
 
         // Load balancers and public IPs come from the API server rather than Prometheus:
         // they are objects, not a metric, and counting them is exact where a metric would
         // be a scrape-interval approximation of something billed by the month.
         Dictionary<string, (int LoadBalancers, int PublicIps)> network =
-            await CountLoadBalancersAsync(clusterId, ct);
+            await CountLoadBalancersAsync(tenantId, clusterId, ct);
 
         HashSet<string> namespaces = [.. cpu.Keys, .. memory.Keys, .. storage.Keys, .. network.Keys];
 
@@ -424,12 +424,13 @@ public class CostReportService(
     /// no kube-state-metrics, or a cluster that could not be reached — so the caller can
     /// say so rather than price an idle line of zero as though the cluster were full.
     /// </summary>
-    private async Task<ClusterCapacity?> MeasureCapacityAsync(Guid clusterId, CancellationToken ct)
+    private async Task<ClusterCapacity?> MeasureCapacityAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct)
     {
         try
         {
-            double cpu = await ScalarMeanAsync(clusterId, NodeCpuCapacityQuery, ct);
-            double memory = await ScalarMeanAsync(clusterId, NodeMemoryCapacityQuery, ct);
+            double cpu = await ScalarMeanAsync(tenantId, clusterId, NodeCpuCapacityQuery, ct);
+            double memory = await ScalarMeanAsync(tenantId, clusterId, NodeMemoryCapacityQuery, ct);
 
             if (cpu <= 0d && memory <= 0d)
             {
@@ -438,7 +439,7 @@ public class CostReportService(
 
             return new ClusterCapacity
             {
-                Nodes = await ScalarMeanAsync(clusterId, NodeCountQuery, ct),
+                Nodes = await ScalarMeanAsync(tenantId, clusterId, NodeCountQuery, ct),
                 CpuCores = cpu,
                 MemoryGiB = CostAllocation.BytesToGiB(memory),
             };
@@ -498,27 +499,23 @@ public class CostReportService(
     /// API call failed is less useful than one that is missing a line.
     /// </summary>
     private async Task<Dictionary<string, (int LoadBalancers, int PublicIps)>> CountLoadBalancersAsync(
-        Guid clusterId, CancellationToken ct)
+        Guid tenantId, Guid clusterId, CancellationToken ct)
     {
         Dictionary<string, (int, int)> counts = [];
 
-        string? kubeconfig;
-        await using (ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct))
-        {
-            kubeconfig = await db.KubernetesClusters
-                .Where(c => c.Id == clusterId)
-                .Select(c => c.Kubeconfig)
-                .FirstOrDefaultAsync(ct);
-        }
+        // Was a kubeconfig read by cluster id with no tenant predicate — on a report that had
+        // the tenant at the top of the call chain and dropped it on the way down.
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
 
-        if (string.IsNullOrWhiteSpace(kubeconfig))
+        if (cluster is null)
         {
             return counts;
         }
 
         try
         {
-            string json = await k8s.GetJsonAllNamespacesAsync("services", kubeconfig, "", ct);
+            string json = await cluster.GetJsonAllNamespacesAsync("services", "", ct);
             return ParseLoadBalancerServices(json);
         }
         catch (Exception ex)
@@ -599,10 +596,11 @@ public class CostReportService(
     /// The mean of a single-valued query over the sample window. An aggregate with no
     /// grouping yields one unlabelled series; anything else, or nothing, reads as zero.
     /// </summary>
-    private async Task<double> ScalarMeanAsync(Guid clusterId, string query, CancellationToken ct)
+    private async Task<double> ScalarMeanAsync(
+        Guid tenantId, Guid clusterId, string query, CancellationToken ct)
     {
         KubernetesOperationResult<List<PrometheusTimeSeries>> result =
-            await prometheus.GetMetricRangeAsync(clusterId, query, SampleWindow, ct);
+            await prometheus.GetMetricRangeAsync(tenantId, clusterId, query, SampleWindow, ct);
 
         if (!result.IsSuccess || result.Data is null || result.Data.Count == 0)
         {
@@ -617,10 +615,10 @@ public class CostReportService(
     }
 
     private async Task<Dictionary<string, double>> SumByNamespaceAsync(
-        Guid clusterId, string query, CancellationToken ct)
+        Guid tenantId, Guid clusterId, string query, CancellationToken ct)
     {
         KubernetesOperationResult<List<PrometheusTimeSeries>> result =
-            await prometheus.GetMetricRangeAsync(clusterId, query, SampleWindow, ct);
+            await prometheus.GetMetricRangeAsync(tenantId, clusterId, query, SampleWindow, ct);
 
         Dictionary<string, double> values = [];
         if (!result.IsSuccess || result.Data is null)

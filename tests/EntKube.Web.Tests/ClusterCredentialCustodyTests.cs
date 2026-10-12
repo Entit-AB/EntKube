@@ -202,6 +202,25 @@ public class ClusterCredentialCustodyTests
     /// <c>IMetricsQuery</c>. When it goes, so do <c>ResolvedPrometheusInfo</c>, the
     /// <c>string kubeconfig</c> overload of <c>WithServiceAsync</c>, and the four sites here.</para>
     ///
+    /// <para><b>160 — step 6, and PrometheusService is at zero.</b> The range query and the label
+    /// lookup were the last two on the old resolution and the widest-reaching: every dashboard
+    /// panel, the metrics explorer's dropdowns, the cost report, the resource-usage sweep and the
+    /// ingress traffic sparkline. <c>IMetricsQuery</c>'s five methods all take a tenant now, which
+    /// reached five pages; <c>ResourceUsageCollectorService</c> stopped flattening its
+    /// <c>(tenant, cluster)</c> pairs to cluster ids, which is the move that turns a check back
+    /// into a tautology.</para>
+    ///
+    /// <para>Then the old path went: <c>ResolvedPrometheusInfo</c>, <c>ResolvePrometheusInfoAsync</c>,
+    /// the <c>string kubeconfig</c> overload of <c>WithServiceAsync</c>, <c>CreateK8sClient</c> and
+    /// the <c>clientPool</c> field. Pooling is not lost — <c>ClusterClient</c> holds it now, and
+    /// DI supplies the same singleton.</para>
+    ///
+    /// <para><c>CostReportService</c> came with it and left the list too: it had the tenant at the
+    /// top of <c>GetTenantReportAsync</c> and dropped it through five private helpers, the last of
+    /// which read a kubeconfig by cluster id to count load balancers. Those helpers are the
+    /// "private funnel" shape this programme keeps finding — convert the funnel, not the public
+    /// method.</para>
+    ///
     /// <para><b>165 — and the rollback with it.</b> Giving the watcher a tenant made its two
     /// remaining sites <em>reachable</em> in <see cref="CustodyTriageTests"/>'s sense — a
     /// credential read in a method that now knows its tenant — so that ratchet failed, correctly:
@@ -209,7 +228,7 @@ public class ClusterCredentialCustodyTests
     /// new seam verb, <c>UndoDeploymentsAsync</c>, and <c>RolloutWatcherService</c> left the
     /// file list.</para>
     ///
-    private const int BaselineOccurrences = 165;
+    private const int BaselineOccurrences = 160;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -226,8 +245,11 @@ public class ClusterCredentialCustodyTests
     ///
     /// <para>34. <c>RolloutWatcherService</c> stopped reading <c>deployment.Cluster.Kubeconfig</c>
     /// to hand to a rollback, so it no longer includes the cluster row at all.</para>
+    ///
+    /// <para>32. <c>PrometheusService</c> — which held twenty, the largest block in the whole
+    /// count — and <c>CostReportService</c> with it.</para>
     /// </summary>
-    private const int BaselineFiles = 34;
+    private const int BaselineFiles = 32;
 
     private static (int Occurrences, int Files) Measure()
     {

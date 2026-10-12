@@ -223,7 +223,8 @@ a tenant, and most of the code reaches clusters by id alone.
 
 `PrometheusService` is the clearest case and the reason this matters. Twenty sites, which reads as
 the obvious next job — and **all twenty are unreachable**, because not one of its fifteen public
-methods receives a tenant. Converting it is not a refactor; it is deciding who may read which
+methods receives a tenant. *(It is now at zero; §4.0.1.3 records how, and what the shape of that
+work turned out to be.)* Converting it is not a refactor; it is deciding who may read which
 cluster's metrics and where that tenant comes from, then changing fifteen signatures and their
 callers. The same is true of `KubernetesOperationsService` (49 sites, none with a tenant),
 `HeadscaleService` (17), `NodeManagementService` (13) and `ComponentScanService` (10).
@@ -347,6 +348,57 @@ conversion pays twice.
 needs no kubeconfig at all — there is nothing to hand out, because the work happens where the
 credentials already are. Credential custody was presented there as a side benefit of
 inverting control. On this measurement it is one of the main ones.
+
+#### 4.0.1.3 Done (2026-10-12): the largest block, and what it cost
+
+`PrometheusService` is at **zero**, from twenty. It is worth recording because §4.0.1 named it the
+clearest case of the hard kind — twenty sites, none reachable — and the way it actually went is
+now the method for the rest.
+
+**Custody 183 → 160, in six landed steps** (`#179`–`#184`), each one compiling and tested. The
+first attempt was one change threading all seventeen signatures at once; it never compiled, and the
+error count went up as often as down, because every signature threaded surfaced callers that had
+not been counted. What worked:
+
+- **Two resolutions side by side.** The old `ResolvedPrometheusInfo` (a kubeconfig string, found by
+  `c.Id == clusterId`) stayed while a new `ReachablePrometheus` (an `IClusterClient`, found
+  tenant-first) grew beside it, and methods crossed one at a time.
+- **Pick the method whose caller already holds a tenant.** The first two shared one caller whose
+  rows already carried `TenantId`, so there was no `[Parameter]` plumbing at all.
+- **When plumbing is needed, do the subtree in one step.** Seven methods moved together in `#182`
+  because they share exactly one act: giving `ClusterMonitoring` a `TenantId`, which then reaches
+  three panels. Splitting them would have added a parameter in one change and used it in another.
+- **The last step deletes more than it converts.** With the final caller gone,
+  `ResolvedPrometheusInfo`, `ResolvePrometheusInfoAsync`, the `string kubeconfig` overload of
+  `WithServiceAsync`, `CreateK8sClient` and the pool field all went at once.
+
+Three things this surfaced that apply to every remaining conversion:
+
+- **Threading a tenant into a method creates work inside it.** Giving `RolloutWatcherService` a
+  tenant made its two remaining credential reads *reachable* in the triage's sense — a kubeconfig
+  read in a method that now knows its tenant — and that ratchet failed, correctly. The conversion
+  had created the easy case rather than taking it. Budget for converting those in the same step.
+- **A conversion can need a new seam verb, not just a new caller.** `kubectl rollout undo` is none
+  of apply/delete/patch/scale/restart/helm: nothing in it names the state being moved to, because
+  the cluster remembers the revision. Hence `UndoDeploymentsAsync` and `ChangeVerb.Rollback` — and
+  one fewer own-process kubectl outside the gate (§5.4), 13 → 12.
+- **Moving a kubectl call can lose a protection its old caller had.** `RolloutService`'s own runner
+  closed stdin, because a kubeconfig without usable credentials makes kubectl *prompt* and an
+  inherited stdin never delivers the EOF that ends the prompt — in a sweep, a hang nobody sees. The
+  seam's runner did not. Read the runner being deleted.
+
+**A sweep must not flatten its pairs.** `ResourceUsageCollectorService` looped tenants to find
+clusters and then reduced them to a list of cluster ids, which threw away precisely what §4.0.1.2
+decided to keep: it knew the tenant, discarded it, and the call it then made would have answered
+about any cluster. The pair is the unit.
+
+**Convert the private funnel, not the public method** — the fourth file where that was the whole
+job. `CostReportService` had the tenant at the top of `GetTenantReportAsync` and dropped it through
+five private helpers, the last of which read a kubeconfig by cluster id to count load balancers.
+
+What is left is **160 sites in 32 files**, and the balance has shifted: the biggest single holding
+is `KubernetesOperationsService` with 46, which also holds eleven of the nineteen tautological seam
+calls (§4.0.1.1). It is the same question, now concentrated.
 
 ### 4.1 Modules (logical — inside the monolith first)
 

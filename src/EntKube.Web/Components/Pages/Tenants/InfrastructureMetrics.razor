@@ -76,6 +76,9 @@ else
 }
 
 @code {
+    /// <summary>The tenant asking. The cluster id alone used to decide which Prometheus answered.</summary>
+    [Parameter] public required Guid TenantId { get; set; }
+
     [Parameter] public required Guid ClusterId { get; set; }
 
     private int rangeMinutes = 60;
@@ -147,7 +150,7 @@ else
 
         // Fan out all panel queries concurrently — one Prometheus range query each.
         Dictionary<string, Task<KubernetesOperationResult<List<PrometheusTimeSeries>>>> tasks =
-            AllPanels.ToDictionary(p => p.Key, p => Prometheus.GetMetricRangeAsync(ClusterId, p.Query, window));
+            AllPanels.ToDictionary(p => p.Key, p => Prometheus.GetMetricRangeAsync(TenantId, ClusterId, p.Query, window));
         await Task.WhenAll(tasks.Values);
 
         results.Clear();

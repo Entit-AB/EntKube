@@ -35,7 +35,7 @@
 }
 else
 {
-    <InfrastructureMetrics ClusterId="@(Guid.Parse(selectedClusterId))" />
+    <InfrastructureMetrics TenantId="TenantId" ClusterId="@(Guid.Parse(selectedClusterId))" />
 }
 
 @code {

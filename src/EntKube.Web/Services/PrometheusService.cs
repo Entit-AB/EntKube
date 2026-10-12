@@ -426,7 +426,6 @@ public class CnpgDatabaseSize
 /// </summary>
 public class PrometheusService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    KubernetesProxyClientPool clientPool,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     EntKube.Web.Services.Telemetry.PromQueryCache queryCache,
@@ -606,9 +605,9 @@ public class PrometheusService(
     /// Queries a Prometheus range query over the given duration and returns time-series data.
     /// </summary>
     public async Task<KubernetesOperationResult<List<PrometheusTimeSeries>>> GetMetricRangeAsync(
-        Guid clusterId, string query, TimeSpan duration, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string query, TimeSpan duration, CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<PrometheusTimeSeries>>.Failure(error!);
 
         long end   = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -619,10 +618,13 @@ public class PrometheusService(
         // Keyed on the query and window, not on `end` — that moves every second, which would make every
         // call a distinct key and cache nothing. Within the cache's few seconds, a chart whose window
         // slid by that much is indistinguishable from a fresh one.
+        //
+        // No tenant in the key, deliberately: a cluster has exactly one owner, so the cluster id
+        // already implies it, and the resolution above has happened before anything is cached.
         return await queryCache.GetOrFetchAsync(
             EntKube.Web.Services.Telemetry.PromQueryCache.Key(clusterId, "range", query, (long)duration.TotalSeconds),
             async () => await WithServiceAsync<List<PrometheusTimeSeries>>(
-            info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+            info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             async (http, baseUrl, token) =>
             {
                 string json = await http.GetStringAsync(
@@ -639,9 +641,10 @@ public class PrometheusService(
     /// Prometheus rather than the native store.
     /// </summary>
     public async Task<KubernetesOperationResult<List<string>>> GetLabelValuesAsync(
-        Guid clusterId, string label, string? matchSelector, TimeSpan lookback, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string label, string? matchSelector, TimeSpan lookback,
+        CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<string>>.Failure(error!);
 
         long end = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -653,7 +656,7 @@ public class PrometheusService(
         return await queryCache.GetOrFetchAsync(
             EntKube.Web.Services.Telemetry.PromQueryCache.Key(clusterId, "labels", label, matchSelector, (long)lookback.TotalSeconds),
             async () => await WithServiceAsync<List<string>>(
-                info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+                info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
                 async (http, baseUrl, token) => ParseStringArray(await http.GetStringAsync($"{baseUrl}{path}", token)),
                 $"label values {label} for {clusterId}", ct));
     }
@@ -2106,18 +2109,16 @@ public class PrometheusService(
 
     // ──────── Internal Helpers ────────
 
-    private sealed record ResolvedPrometheusInfo(string Kubeconfig, PrometheusConfig Config);
-
     /// <summary>
     /// A prometheus this tenant may reach: the cluster as a seam client, and where on it to look.
     ///
-    /// <para><b>Why there are two of these.</b> <see cref="ResolvedPrometheusInfo"/> carries a
-    /// <c>string Kubeconfig</c> and is reached by cluster id alone — seventeen public methods
-    /// still use it. Converting all seventeen at once is what I tried and abandoned: every
-    /// signature threaded surfaces callers that were not counted, and the error count went up as
-    /// often as down. So this exists beside it and methods move across one at a time, each one
-    /// compiling and tested. When the last caller of the old one goes, both it and the
-    /// <c>clientPool</c> field go with it.</para>
+    /// <para><b>There used to be two of these.</b> The other, <c>ResolvedPrometheusInfo</c>,
+    /// carried a <c>string Kubeconfig</c> and was reached by cluster id alone — so a cluster id
+    /// answered about any cluster in the installation. Converting all seventeen methods that used
+    /// it at once is what I tried and abandoned: every signature threaded surfaced callers that
+    /// were not counted, and the error count went up as often as down. The two resolutions lived
+    /// side by side instead and the methods moved across in six steps, each compiling and tested.
+    /// This is what is left.</para>
     /// </summary>
     private sealed record ReachablePrometheus(EntKube.Web.Services.Clusters.IClusterClient Cluster, PrometheusConfig Config);
 
@@ -2143,31 +2144,6 @@ public class PrometheusService(
         return (new ReachablePrometheus(cluster, GetPrometheusConfig(prometheusComponent)), null);
     }
 
-    private async Task<(ResolvedPrometheusInfo? Info, string? Error)> ResolvePrometheusInfoAsync(
-        Guid clusterId, CancellationToken ct)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .Include(c => c.Components)
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
-
-        if (cluster is null)
-            return (null, "Cluster not found.");
-
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return (null, "No kubeconfig configured for this cluster.");
-
-        ClusterComponent? prometheusComponent = cluster.Components.FirstOrDefault(c =>
-            c.Name.Contains("prometheus", StringComparison.OrdinalIgnoreCase));
-
-        if (prometheusComponent is null)
-            return (null, "No prometheus component found on this cluster.");
-
-        PrometheusConfig config = GetPrometheusConfig(prometheusComponent) ?? new PrometheusConfig();
-        return (new ResolvedPrometheusInfo(cluster.Kubeconfig, config), null);
-    }
-
     /// <summary>
     /// Routes HTTP requests to an in-cluster service via the Kubernetes API server's
     /// pod proxy endpoint: /api/v1/namespaces/{ns}/pods/{pod}:{port}/proxy/{path}.
@@ -2181,9 +2157,9 @@ public class PrometheusService(
     /// in any standard cluster-admin or operator kubeconfig.
     /// </summary>
     /// <summary>
-    /// The same proxy round-trip for a cluster reached through the seam. The <c>string
-    /// kubeconfig</c> overload below still serves the fifteen methods not yet converted; it goes
-    /// when its last caller does.
+    /// The proxy round-trip for a cluster reached through the seam. There was a second overload
+    /// taking a raw <c>string kubeconfig</c>, for the methods not yet converted; it went with the
+    /// last of them, and with it the client pool this service used to hold.
     /// </summary>
     private async Task<KubernetesOperationResult<T>> WithServiceAsync<T>(
         EntKube.Web.Services.Clusters.IClusterClient cluster,
@@ -2196,19 +2172,6 @@ public class PrometheusService(
         bool probeHealthEndpoint = true)
         => await WithServiceCoreAsync(
             cluster.GetPooledSdkClient(), ns, svcName, svcPort, action, logContext, ct,
-            probeHealthEndpoint);
-
-    private async Task<KubernetesOperationResult<T>> WithServiceAsync<T>(
-        string kubeconfig,
-        string ns,
-        string svcName,
-        int svcPort,
-        Func<HttpClient, string, CancellationToken, Task<T>> action,
-        string logContext,
-        CancellationToken ct,
-        bool probeHealthEndpoint = true)
-        => await WithServiceCoreAsync(
-            CreateK8sClient(kubeconfig), ns, svcName, svcPort, action, logContext, ct,
             probeHealthEndpoint);
 
     private async Task<KubernetesOperationResult<T>> WithServiceCoreAsync<T>(
@@ -2446,7 +2409,6 @@ public class PrometheusService(
     /// kubeconfig so a dashboard's dozen PromQL queries reuse one warm TLS connection to the API server
     /// instead of handshaking once per panel. See <see cref="KubernetesProxyClientPool"/>.
     /// </summary>
-    private Kubernetes CreateK8sClient(string kubeconfig) => clientPool.Get(kubeconfig);
 
     private static string Q(string promQuery) => Uri.EscapeDataString(promQuery);
 

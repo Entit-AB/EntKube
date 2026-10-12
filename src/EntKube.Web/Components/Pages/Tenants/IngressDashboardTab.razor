@@ -594,7 +594,8 @@
 
     private async Task LoadMetrics(IngressRouteView r, string id)
     {
-        metrics[id] = await IngressService.GetRouteTrafficAsync(r, TimeSpan.FromMinutes(metricWindow));
+        metrics[id] = await IngressService.GetRouteTrafficAsync(
+            TenantId, r, TimeSpan.FromMinutes(metricWindow));
         StateHasChanged();
     }
 
