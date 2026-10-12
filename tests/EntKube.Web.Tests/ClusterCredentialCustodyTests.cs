@@ -110,29 +110,37 @@ public class ClusterCredentialCustodyTests
     /// seam makes the scoping local instead of inherited, which is worth having and is not a
     /// vulnerability fixed.</para>
     ///
-    /// <para><b>202, and the reachable bucket is now empty of conversions.</b>
-    /// <c>StalwartService</c> (5), <c>KeycloakService</c> (2) and <c>StorageService</c>'s egress
-    /// relay (2) went, which leaves <see cref="CustodyTriageTests"/> at four — two of them
-    /// <c>ClusterClient</c>'s own, one a <em>write</em>, one a six-signature thread-through. So
-    /// every one of the 198 that remain is there because its method has no tenant, not because
-    /// nobody has got to it.</para>
+    /// <para><b>200, and the reachable bucket is now empty of conversions.</b>
+    /// <c>StalwartService</c> (5), <c>KeycloakService</c> (2), <c>StorageService</c>'s egress
+    /// relay (2) and <c>IngressDashboardService</c> (2) went, which leaves
+    /// <see cref="CustodyTriageTests"/> at three — two of them <c>ClusterClient</c>'s own and one
+    /// a <em>write</em>. So every one of the 197 that remain is there because its method has no
+    /// tenant, not because nobody has got to it.</para>
     ///
-    private const int BaselineOccurrences = 202;
+    /// <para><b>⚠️ This number was 202 on main for one merge.</b> Two PRs lowered it
+    /// independently, their conflict was resolved by taking one side, and the result claimed 202
+    /// against a tree measuring 200. Nothing was lost — both sets of conversions landed — but the
+    /// baseline was a fiction for as long as it stood, and this test is the only reason anyone
+    /// knew. <b>A ratchet constant has no correct merge resolution: it has to be re-measured.</b>
+    /// See <see cref="The_custody_baseline_does_not_carry_slack"/>, which is the half of the
+    /// ratchet that exists for exactly this and nothing else.</para>
+    ///
+    private const int BaselineOccurrences = 200;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
     ///
-    /// <para>37. <c>VaultService</c> left the list first, which was the first time a file had.
+    /// <para>36. <c>VaultService</c> left the list first, which was the first time a file had.
     /// Then <c>VeleroService</c>, <c>DriftAdoptionService</c>, <c>StalwartDnsService</c>,
-    /// <c>OpenLdapService</c>, and now <c>StalwartService</c> and <c>KeycloakService</c> — every
-    /// one because it already had a tenant, which is the only thing that decides whether a
-    /// conversion is possible at all.</para>
+    /// <c>OpenLdapService</c>, <c>StalwartService</c>, <c>KeycloakService</c> and
+    /// <c>IngressDashboardService</c> — every one because it already had a tenant, which is the
+    /// only thing that decides whether a conversion is possible at all.</para>
     ///
     /// <para><c>ClusterEgressRelay</c> left too, and differently: it took a kubeconfig as a
     /// parameter rather than reading one, so it never appeared in this count. It now takes an
     /// <c>IClusterClient</c>, which is what let <c>StorageService</c>'s relay path go.</para>
     /// </summary>
-    private const int BaselineFiles = 37;
+    private const int BaselineFiles = 36;
 
     private static (int Occurrences, int Files) Measure()
     {

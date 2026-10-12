@@ -56,19 +56,25 @@ public class CustodyTriageTests
     /// at 29. None of them was in a method with a tenant — which is exactly what the triage was
     /// built to tell apart, and it could not, because of the pattern above.</para>
     ///
-    /// <para><b>Four, and none of them is a conversion.</b> Two are <c>ClusterClient</c>'s own —
-    /// the seam resolving the credential, which is the one place that should.
+    /// <para><b>Three, and none of them is a conversion.</b> Two are <c>ClusterClient</c>'s own —
+    /// the seam resolving the credential, which is the one place that should. And
     /// <c>TenantService.CreateClusterAsync</c> <em>writes</em> <c>cluster.Kubeconfig</c> to reflect
     /// a value the caller just supplied onto the returned entity; there is nothing to route
-    /// through a seam. And <c>IngressDashboardService</c> threads its credential through six
-    /// private helpers, so it is one site by this count and a six-signature change in practice.</para>
+    /// through a seam.</para>
+    ///
+    /// <para><b><c>IngressDashboardService</c> was listed here as "one site by this count and a
+    /// six-signature change in practice", and that estimate was wrong in a useful direction.</b>
+    /// The six were six <em>pass-throughs</em> to a single <c>SafeGetAsync</c> funnel, the only
+    /// place in 745 lines that ever touched the client. Counting signatures measured the diff;
+    /// counting the places that <em>use</em> the credential would have measured the work — which
+    /// is the same distinction this whole test exists to draw, applied one level down.</para>
     ///
     /// <para><b>This number reaching zero would not mean the work is done</b>, and that is the
     /// point of keeping the other bucket beside it. 198 sites remain, every one in a method with
     /// no tenant in scope. What this measured was whether a conversion was <em>possible</em>, and
     /// the answer is now "nothing easy is left" rather than "nothing is left".</para>
     ///
-    private const int BaselineReachable = 4;
+    private const int BaselineReachable = 3;
 
     [Fact]
     public void The_sites_that_could_already_ask_the_seam_do_not_multiply()
