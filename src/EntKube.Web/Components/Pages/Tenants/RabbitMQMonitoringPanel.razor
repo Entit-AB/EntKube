@@ -406,7 +406,7 @@ else
         // and vice versa. Nothing here may propagate — these run under one Task.WhenAll, and a
         // single throwing broker would abandon the others and leave the panel spinning.
         Task<KubernetesOperationResult<RabbitMQMetricsSummary>> metricsTask =
-            PrometheusService.GetRabbitMQMetricsAsync(ClusterId, b.Name);
+            PrometheusService.GetRabbitMQMetricsAsync(b.TenantId, ClusterId, b.Name);
 
         // Queue depth comes off the broker itself, so it still works when Prometheus does not.
         Task<List<RabbitMQQueueStats>> queuesTask = RabbitMQService.GetQueueStatsAsync(b.TenantId, b.Id);
@@ -512,7 +512,7 @@ else
 
             KubernetesOperationResult<ScrapeDiagnosis> result =
                 await PrometheusService.DiagnoseServiceMonitorScrapeAsync(
-                    ClusterId, ns, b.Name,
+                    b.TenantId, ClusterId, ns, b.Name,
                     b.IsOperatorManaged
                         ? "Use \"Enable metrics\" above — it creates the ServiceMonitor the operator does not."
                         : "This broker was not installed by EntKube. Create a ServiceMonitor for its "
