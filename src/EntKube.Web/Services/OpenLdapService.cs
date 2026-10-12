@@ -54,7 +54,11 @@ public class OpenLdapService(
     public const string TlsSecretName = "openldap-tls";
 
     /// <summary>A discovered OpenLDAP instance: its installed component and attached config (if any).</summary>
-    public sealed record OpenLdapInstance(ClusterComponent Component, OpenLdapComponentConfig? Config);
+    public sealed record OpenLdapInstance(EntKube.Contracts.Catalog.InstalledComponent Component, OpenLdapComponentConfig? Config)
+    {
+        /// <summary>The cluster's display name, which the contract carries inline.</summary>
+        public string ClusterDisplayName => Component.ClusterName;
+    }
 
     // ── Discovery ─────────────────────────────────────────────────────────────
 
@@ -68,12 +72,15 @@ public class OpenLdapService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        List<ClusterComponent> components = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .Where(c => c.Name == CatalogKey && c.Cluster.TenantId == tenantId)
-            .Where(c => environmentId == null || c.Cluster.EnvironmentId == environmentId)
-            .OrderBy(c => c.Cluster.Name)
-            .ToListAsync(ct);
+        // "Every installation of one catalog key across the tenant" is exactly what the
+        // contract's find-by-key is for. The environment filter and the ordering move in-memory
+        // because the DTO carries both fields.
+        List<EntKube.Contracts.Catalog.InstalledComponent> components =
+        [
+            .. (await catalog.FindComponentsAsync(tenantId, CatalogKey, ct))
+                .Where(c => environmentId == null || c.EnvironmentId == environmentId)
+                .OrderBy(c => c.ClusterName, StringComparer.OrdinalIgnoreCase),
+        ];
 
         List<Guid> componentIds = components.Select(c => c.Id).ToList();
         Dictionary<Guid, OpenLdapComponentConfig> configs = await db.OpenLdapComponentConfigs
@@ -126,9 +133,7 @@ public class OpenLdapService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct)
+        EntKube.Contracts.Catalog.InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         OpenLdapComponentConfig? config = await db.OpenLdapComponentConfigs
@@ -200,7 +205,7 @@ public class OpenLdapService(
                 .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId && c.TenantId == tenantId, ct);
             if (config is null) return;
 
-            ClusterComponent? component = await db.ClusterComponents.FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+            EntKube.Contracts.Catalog.InstalledComponent? component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
             if (component is null) return;
             release = component.ReleaseName ?? component.Name;
         }
@@ -442,9 +447,7 @@ public class OpenLdapService(
             return;
         }
 
-        ClusterComponent? component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+        EntKube.Contracts.Catalog.InstalledComponent? component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
         if (component is null)
         {
             logger.LogWarning("OpenLDAP TLS certificate skipped — component {ComponentId} not found in this tenant.", clusterComponentId);

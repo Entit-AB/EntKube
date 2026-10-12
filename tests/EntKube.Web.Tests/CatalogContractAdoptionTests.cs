@@ -79,7 +79,32 @@ public class CatalogContractAdoptionTests
     /// same blocker as the credential work's remaining 206 — not a missing method but an unanswered
     /// question about who a background sweep acts as. The other 36 are movable now.</para>
     /// </summary>
-    private const int BaselineQueries = 39;
+    /// <para><b>27, and the split is now the same one the credential work reached.</b> Of the 39
+    /// before this batch, <b>17 were in a method with a tenant in scope and 22 were not</b> —
+    /// measured, because "movable now" had been an estimate. Twelve of the 17 moved here:
+    /// <c>StalwartService</c> 7→2, <c>OpenLdapService</c> 4→0, <c>ExternalRouteService</c> 2→0,
+    /// <c>StalwartDnsService</c> 1→0.</para>
+    ///
+    /// <para><b>The gateway resolvers were the structural blocker, not a missing method.</b>
+    /// <c>ResolveGateway</c>, <c>ResolveGatewayClass</c>, <c>ResolveIngressClass</c>,
+    /// <c>ResolveL4Gateway</c> and the two private spellings took
+    /// <c>IEnumerable&lt;ClusterComponent&gt;</c> and read exactly four fields, so any caller
+    /// needing a gateway had to hold Catalog's entity — which is why the entity still flows
+    /// through seven services in five modules. They now take
+    /// <c>EntKube.Contracts.Catalog.IComponentNaming</c>, which both the entity and
+    /// <c>InstalledComponent</c> satisfy, so all twenty-odd existing callers compile untouched.
+    /// An overload would have duplicated logic that decides a GatewayClass, and a controller
+    /// handed the wrong class <em>silently ignores</em> the Gateway.</para>
+    ///
+    /// <para>⚠️ <b>Decoupling the resolvers was necessary and not sufficient.</b> The four sites
+    /// that most obviously wanted it — <c>HeadscaleService</c> and
+    /// <c>KubernetesOperationsService</c>, all four the same
+    /// <c>Where(c =&gt; c.ClusterId == clusterId)</c> feeding a resolver — have <b>no tenant in
+    /// scope</b>, so the contract still cannot serve them. I nearly built this batch around them
+    /// before measuring. Only <c>StalwartService.ApplyConfigurationAsync</c>'s list had a tenant
+    /// and so actually moved.</para>
+    ///
+    private const int BaselineQueries = 27;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

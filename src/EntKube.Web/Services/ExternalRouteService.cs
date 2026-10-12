@@ -53,6 +53,7 @@ public class ExternalRouteRequest
 /// </summary>
 public class ExternalRouteService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<ExternalRouteService> logger)
 {
     /// <summary>
@@ -75,11 +76,14 @@ public class ExternalRouteService(
 
         // Load the component to fill in defaults.
 
-        ClusterComponent component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-                .ThenInclude(cl => cl.Components)
-            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
+        EntKube.Contracts.Catalog.InstalledComponent component = await catalog.GetComponentAsync(tenantId, componentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
+
+        // The siblings on the same cluster, which the gateway resolvers read and which the
+        // `.ThenInclude(cl => cl.Components)` above used to carry. Asked for by cluster rather
+        // than navigated to, so the tenant is applied to this half as well.
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> clusterSiblings =
+            await catalog.GetComponentsForClusterAsync(tenantId, component.ClusterId, ct);
 
         // Validate the hostname is not empty.
 
@@ -111,7 +115,7 @@ public class ExternalRouteService(
 
         string normalizedHostname = request.Hostname.Trim().ToLowerInvariant();
 
-        List<Guid> clusterComponentIds = component.Cluster.Components.Select(c => c.Id).ToList();
+        List<Guid> clusterComponentIds = clusterSiblings.Select(c => c.Id).ToList();
         bool duplicateHostname = await db.ExternalRoutes
             .AnyAsync(r => clusterComponentIds.Contains(r.ComponentId)
                 && r.Hostname == normalizedHostname, ct);
@@ -133,7 +137,7 @@ public class ExternalRouteService(
             .AnyAsync(r => r.IsEnabled
                 && r.Hostname.ToLower() == normalizedHostname
                 && r.DeploymentRoutes.Any(dr =>
-                    dr.IsEnabled && dr.AppDeployment.ClusterId == component.Cluster.Id), ct);
+                    dr.IsEnabled && dr.AppDeployment.ClusterId == component.ClusterId), ct);
 
         if (servedByAppRoute)
         {
@@ -146,9 +150,9 @@ public class ExternalRouteService(
         // Resolve gateway details from the cluster's ingress controller if not provided.
 
         string gatewayName = request.GatewayName
-            ?? ResolveGatewayName(component.Cluster.Components);
+            ?? ResolveGatewayName(clusterSiblings);
         string gatewayNamespace = request.GatewayNamespace
-            ?? ResolveGatewayNamespace(component.Cluster.Components);
+            ?? ResolveGatewayNamespace(clusterSiblings);
 
         ExternalRoute route = new()
         {
@@ -212,10 +216,7 @@ public class ExternalRouteService(
 
         // The cluster this component belongs to — an AppRoute only shadows a route on the same
         // cluster, since that is where the two would collide.
-        Guid? clusterId = await db.ClusterComponents
-            .Where(c => c.Id == componentId && c.Cluster.TenantId == tenantId)
-            .Select(c => (Guid?)c.ClusterId)
-            .FirstOrDefaultAsync(ct);
+        Guid? clusterId = (await catalog.GetComponentAsync(tenantId, componentId, ct))?.ClusterId;
 
         if (clusterId is null)
         {
@@ -1290,7 +1291,7 @@ public class ExternalRouteService(
     /// installed ingress controller's namespace (istio-system for Istio) so the auto-provisioned
     /// gateway Deployment/Service lands beside the ingress it belongs to.
     /// </summary>
-    public static (string Name, string Namespace) ResolveL4Gateway(IEnumerable<ClusterComponent> components)
+    public static (string Name, string Namespace) ResolveL4Gateway(IEnumerable<EntKube.Contracts.Catalog.IComponentNaming> components)
     {
         (_, string ns) = ResolveGateway(components);
         return (L4GatewayName, ns);
@@ -1359,9 +1360,9 @@ public class ExternalRouteService(
     /// on the cluster. Checks both by component Name and by ReleaseName/HelmChartName
     /// to handle imported components and custom release names.
     /// </summary>
-    public static (string Name, string Namespace) ResolveGateway(IEnumerable<ClusterComponent> components)
+    public static (string Name, string Namespace) ResolveGateway(IEnumerable<EntKube.Contracts.Catalog.IComponentNaming> components)
     {
-        List<ClusterComponent> list = components.ToList();
+        List<EntKube.Contracts.Catalog.IComponentNaming> list = components.ToList();
 
         bool hasTraefik = list.Any(c =>
             string.Equals(c.Name, "traefik", StringComparison.OrdinalIgnoreCase)
@@ -1372,7 +1373,7 @@ public class ExternalRouteService(
             return ("traefik-gateway", "traefik");
         }
 
-        ClusterComponent? istio = list.FirstOrDefault(c =>
+        EntKube.Contracts.Catalog.IComponentNaming? istio = list.FirstOrDefault(c =>
             string.Equals(c.Name, "istio", StringComparison.OrdinalIgnoreCase)
             || string.Equals(c.HelmChartName, "gateway", StringComparison.OrdinalIgnoreCase)
             && (string.Equals(c.Namespace, "istio-system", StringComparison.OrdinalIgnoreCase)));
@@ -1391,7 +1392,7 @@ public class ExternalRouteService(
     /// Must match what the controller registers as its GatewayClass — using the wrong
     /// class causes the controller to silently ignore the Gateway resource.
     /// </summary>
-    public static string ResolveGatewayClass(IEnumerable<ClusterComponent> components)
+    public static string ResolveGatewayClass(IEnumerable<EntKube.Contracts.Catalog.IComponentNaming> components)
     {
         bool hasTraefik = components.Any(c =>
             string.Equals(c.Name, "traefik", StringComparison.OrdinalIgnoreCase)
@@ -1405,7 +1406,7 @@ public class ExternalRouteService(
     /// Uses standard Ingress (not gatewayHTTPRoute) so no cert-manager experimental
     /// feature gates are needed. Istio handles ingressClassName "istio" natively.
     /// </summary>
-    public static string ResolveIngressClass(IEnumerable<ClusterComponent> components)
+    public static string ResolveIngressClass(IEnumerable<EntKube.Contracts.Catalog.IComponentNaming> components)
     {
         bool hasTraefik = components.Any(c =>
             string.Equals(c.Name, "traefik", StringComparison.OrdinalIgnoreCase)
@@ -1438,10 +1439,10 @@ public class ExternalRouteService(
         return new RouteUptimeSummary(routeId, windowDays, Math.Round(uptimePct, 2), Math.Round(avgResponseMs), history);
     }
 
-    private static string ResolveGatewayName(IEnumerable<ClusterComponent> components) =>
+    private static string ResolveGatewayName(IEnumerable<EntKube.Contracts.Catalog.IComponentNaming> components) =>
         ResolveGateway(components).Name;
 
-    private static string ResolveGatewayNamespace(IEnumerable<ClusterComponent> components) =>
+    private static string ResolveGatewayNamespace(IEnumerable<EntKube.Contracts.Catalog.IComponentNaming> components) =>
         ResolveGateway(components).Namespace;
 }
 

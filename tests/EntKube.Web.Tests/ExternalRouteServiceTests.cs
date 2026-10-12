@@ -77,7 +77,7 @@ public class ExternalRouteServiceTests : IDisposable
         db.ClusterComponents.AddRange(traefik, monitoring);
         db.SaveChanges();
 
-        sut = new ExternalRouteService(dbFactory, NullLogger<ExternalRouteService>.Instance);
+        sut = new ExternalRouteService(dbFactory, new EntKube.Web.Modules.Api.CatalogApi(dbFactory), NullLogger<ExternalRouteService>.Instance);
     }
 
     public void Dispose()

@@ -24,7 +24,7 @@ public enum ComponentStatus
 /// can have secrets in the vault that are integrated with its Helm values or
 /// environment configuration during deployment.
 /// </summary>
-public class ClusterComponent
+public class ClusterComponent : EntKube.Contracts.Catalog.IComponentNaming
 {
     public Guid Id { get; set; }
 

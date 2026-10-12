@@ -99,7 +99,7 @@ public class ComponentTenantReachTests : IDisposable
     }
 
     private ExternalRouteService Routes() =>
-        new(dbFactory, NullLogger<ExternalRouteService>.Instance);
+        new(dbFactory, new EntKube.Web.Modules.Api.CatalogApi(dbFactory), NullLogger<ExternalRouteService>.Instance);
 
     // ════════════════════════════════════════════════════════════════
     //  ExternalRouteService

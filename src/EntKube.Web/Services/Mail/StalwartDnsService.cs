@@ -54,6 +54,7 @@ public class StalwartDnsService(
     KeycloakService keycloak,
     MailboxTokenProvider tokens,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<StalwartDnsService> logger)
 {
     /// <summary>The vault secret holding the client secret of the API identity.</summary>
@@ -75,8 +76,7 @@ public class StalwartDnsService(
             .Include(c => c.Domains)
             .FirstOrDefaultAsync(c => c.ClusterComponentId == componentId && c.TenantId == tenantId, ct);
 
-        ClusterComponent? component = await db.ClusterComponents.AsNoTracking()
-            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct);
+        EntKube.Contracts.Catalog.InstalledComponent? component = await catalog.GetComponentAsync(tenantId, componentId, ct);
 
         if (config is null || component is null)
         {

@@ -842,9 +842,7 @@ public class StalwartService(
             return;
         }
 
-        ClusterComponent? component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+        EntKube.Contracts.Catalog.InstalledComponent? component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
         if (component is null)
         {
             return;
@@ -886,9 +884,7 @@ public class StalwartService(
             return;
         }
 
-        ClusterComponent? component = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+        EntKube.Contracts.Catalog.InstalledComponent? component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
         if (component is null)
         {
             logger.LogWarning(
@@ -1353,14 +1349,13 @@ public class StalwartService(
         // a bad day must not stop an operator applying an unrelated change.
         if (config.TlsMode == StalwartTlsMode.ClusterIssuer)
         {
-            ClusterComponent? component = await db.ClusterComponents
-                .Include(c => c.Cluster)
-                .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+            EntKube.Contracts.Catalog.InstalledComponent? component =
+                await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
 
             // Resolved inside the condition, so a component that is not installed is never
             // looked up — which is the short-circuit the original
             // `component.Cluster?.Kubeconfig is { Length: > 0 }` had.
-            if (component?.Status == ComponentStatus.Installed
+            if (component?.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed
                 && await clusterClients.ForAsync(tenantId, component.ClusterId, ct)
                     is EntKube.Web.Services.Clusters.IClusterClient cluster)
             {
@@ -1884,7 +1879,7 @@ public class StalwartService(
         StalwartComponentConfig? config;
         List<StalwartMailDomain> domains;
         List<StalwartMailAccount> accounts;
-        List<ClusterComponent> clusterComponents;
+        List<EntKube.Contracts.Catalog.InstalledComponent> clusterComponents;
         List<string> trustedSenderDomains;
         string releaseName;
         string ns;
@@ -1899,9 +1894,7 @@ public class StalwartService(
                 return Failure("This Stalwart component has not been configured yet.");
             }
 
-            ClusterComponent? component = await db.ClusterComponents
-                .Include(c => c.Cluster)
-                .FirstOrDefaultAsync(c => c.Id == clusterComponentId && c.Cluster.TenantId == tenantId, ct);
+            EntKube.Contracts.Catalog.InstalledComponent? component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
             if (component is null)
             {
                 return Failure("Component not found.");
@@ -1911,7 +1904,7 @@ public class StalwartService(
             {
                 return Failure("The cluster has no kubeconfig, so the configuration cannot be applied.");
             }
-            if (component.Status != ComponentStatus.Installed)
+            if (component.Status != EntKube.Contracts.Catalog.ComponentStatus.Installed)
             {
                 // The plan is replayed against the running server by a Job that reads the
                 // administrator password out of the component's Secret. Neither exists until the
@@ -1935,9 +1928,10 @@ public class StalwartService(
                 .ToListAsync(ct);
 
             // Needed to find the ingress gateway whose pods must never be banned.
-            clusterComponents = await db.ClusterComponents
-                .Where(c => c.ClusterId == component.ClusterId)
-                .ToListAsync(ct);
+            // The gateway resolvers take IComponentNaming now, so the contract's list answers
+            // them — and this asks for the tenant's own cluster rather than any cluster by id.
+            clusterComponents =
+                [.. await catalog.GetComponentsForClusterAsync(tenantId, component.ClusterId, ct)];
 
             // The customers' own domains, exempted from block-list checks. The same register the
             // support mailbox uses to decide whose mail to rescue from Junk.
@@ -2192,7 +2186,7 @@ public class StalwartService(
     /// the gap called out in the output.
     /// </summary>
     private async Task<List<string>> ResolveGatewayAddressesAsync(
-        IReadOnlyList<ClusterComponent> components, EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> components, EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         (_, string gatewayNamespace) = ExternalRouteService.ResolveGateway(components);
 

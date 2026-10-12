@@ -40,6 +40,34 @@ public enum ComponentStatus
 /// </param>
 /// <param name="LastError">Why the last attempt failed, if it did.</param>
 /// <param name="InstalledAt">When it was installed.</param>
+/// <summary>
+/// The four fields that say <em>which</em> component something is: its catalog name, its chart,
+/// where it was released and into which namespace.
+///
+/// <para><b>Why this exists.</b> <c>ExternalRouteService.ResolveGateway</c>,
+/// <c>ResolveGatewayClass</c> and <c>ResolveIngressClass</c> answer "which ingress controller is
+/// installed on this cluster" and they read exactly these four fields — but they took
+/// <c>IEnumerable&lt;ClusterComponent&gt;</c>, so every one of their twenty-odd callers had to
+/// hold Catalog's entity. That made the resolvers, not the callers, the reason the entity keeps
+/// flowing through seven services in five modules.</para>
+///
+/// <para>Both <see cref="InstalledComponent"/> and Catalog's own entity satisfy this, so the
+/// existing callers keep compiling unchanged and a caller holding only the contract can ask too.
+/// An overload would have been the other option and the wrong one: the resolvers decide a
+/// GatewayClass, and a controller handed the wrong class <em>silently ignores</em> the Gateway —
+/// which is not a failure mode to duplicate the logic for.</para>
+/// </summary>
+public interface IComponentNaming
+{
+    string Name { get; }
+
+    string? HelmChartName { get; }
+
+    string? Namespace { get; }
+
+    string? ReleaseName { get; }
+}
+
 public sealed record InstalledComponent(
     Guid Id,
     Guid TenantId,
@@ -56,7 +84,7 @@ public sealed record InstalledComponent(
     string? HelmValues,
     string? Configuration,
     string? LastError,
-    DateTime? InstalledAt);
+    DateTime? InstalledAt) : IComponentNaming;
 
 /// <summary>
 /// What Catalog offers the rest of EntKube.
