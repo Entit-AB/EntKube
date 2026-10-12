@@ -189,14 +189,16 @@ else
                 .ToListAsync();
         }
 
-        List<string> cnpgNames = cnpgClusters.Select(c => c.Name).ToList();
+        // Over the refs, not their names: each already carries the tenant that owns it, which
+        // is what PrometheusService now needs in order to resolve the cluster at all.
 
         List<CnpgMetricsSummary> results = [];
         List<string> failures = [];
-        foreach (string name in cnpgNames)
+        foreach (CnpgRef cnpg in cnpgClusters)
         {
+            string name = cnpg.Name;
             KubernetesOperationResult<CnpgMetricsSummary> result =
-                await PrometheusService.GetCnpgClusterMetricsAsync(ClusterId, name);
+                await PrometheusService.GetCnpgClusterMetricsAsync(cnpg.TenantId, ClusterId, name);
 
             if (result.IsSuccess && result.Data is not null)
                 results.Add(result.Data);
@@ -227,7 +229,8 @@ else
         try
         {
             KubernetesOperationResult<CnpgScrapeDiagnosis> result =
-                await PrometheusService.DiagnoseCnpgScrapeAsync(ClusterId, cnpgName, target.Namespace);
+                await PrometheusService.DiagnoseCnpgScrapeAsync(
+                    target.TenantId, ClusterId, cnpgName, target.Namespace);
 
             if (result.IsSuccess && result.Data is not null)
                 diagnoses[cnpgName] = result.Data;

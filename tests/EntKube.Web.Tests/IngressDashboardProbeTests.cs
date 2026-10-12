@@ -59,6 +59,8 @@ public class IngressDashboardProbeTests : IDisposable
             new PrometheusService(
                 testDb.Factory,
                 new KubernetesProxyClientPool(NullLogger<KubernetesProxyClientPool>.Instance),
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
                 new PromQueryCache(),
                 NullLogger<PrometheusService>.Instance),
             NullLogger<IngressDashboardService>.Instance);

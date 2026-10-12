@@ -136,7 +136,18 @@ public class ClusterCredentialCustodyTests
     /// <para>That is what the 197 were waiting for. They were never a refactor; they were this
     /// question.</para>
     ///
-    private const int BaselineOccurrences = 183;
+    /// <para><b>181 — two of <c>PrometheusService</c>'s twenty, and deliberately only two.</b>
+    /// Converting all seventeen of its public methods at once was attempted and abandoned: each
+    /// signature threaded surfaced callers that had not been counted, and the error count rose as
+    /// often as it fell. So the service now has <em>two</em> resolution paths — the old
+    /// <c>ResolvedPrometheusInfo</c> (a kubeconfig string, reached by cluster id alone, still used
+    /// by fifteen methods) and <c>ReachablePrometheus</c> (an <c>IClusterClient</c>, tenant-first)
+    /// — and methods move across one at a time, each step compiling and tested.</para>
+    ///
+    /// <para>When the last caller of the old path goes, it and the <c>clientPool</c> field go with
+    /// it, and this number drops by the remaining eighteen in one step.</para>
+    ///
+    private const int BaselineOccurrences = 181;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
