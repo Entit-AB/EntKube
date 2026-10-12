@@ -170,7 +170,21 @@ public class ClusterCredentialCustodyTests
     /// each step compiling and tested, after one attempt at all seventeen methods at once that never
     /// compiled at all.</para>
     ///
-    private const int BaselineOccurrences = 176;
+    /// <para><b>169 — step 4, the ClusterMonitoring subtree.</b> Seven methods at once, which is
+    /// more than the earlier steps took, because they share exactly one plumbing act: giving
+    /// <c>ClusterMonitoring</c> a <c>TenantId</c> from <c>ClusterDetail</c>, which then reaches
+    /// <c>AlertPanel</c>, <c>AlertRulesPanel</c> and <c>ScrapeTargetsPanel</c>. Splitting them
+    /// would have meant adding a parameter in one commit and using it in another.</para>
+    ///
+    /// <para><c>PrometheusService</c> is at 6 of its original 20 and has <b>two</b> callers of the
+    /// old by-cluster-id resolution left — <c>GetDeploymentMetricsAsync</c> and the
+    /// <c>GetMetricRangeAsync</c>/<c>GetLabelValuesAsync</c> pair behind <c>IMetricsQuery</c>. When
+    /// those go, the old record and the <c>clientPool</c> field go with them.</para>
+    ///
+    /// <para><c>ClusterHealthPanel.razor</c> deleted — 225 lines, rendered by nothing, and one of
+    /// <c>GetClusterHealthAsync</c>'s four callers.</para>
+    ///
+    private const int BaselineOccurrences = 169;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.

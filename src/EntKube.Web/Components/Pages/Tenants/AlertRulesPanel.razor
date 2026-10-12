@@ -123,6 +123,13 @@ else
 }
 
 @code {
+    /// <summary>
+    /// Whose cluster this is. Every metric read goes through PrometheusService, which resolves the
+    /// cluster tenant-first — a panel holding only a cluster id could name any cluster in the
+    /// installation.
+    /// </summary>
+    [Parameter] public required Guid TenantId { get; set; }
+
     [Parameter] public required Guid ClusterId { get; set; }
 
     private List<AlertRule> rules = [];
@@ -142,7 +149,7 @@ else
         errorMessage = null;
         StateHasChanged();
 
-        KubernetesOperationResult<List<AlertRule>> result = await PrometheusService.GetAlertRulesAsync(ClusterId);
+        KubernetesOperationResult<List<AlertRule>> result = await PrometheusService.GetAlertRulesAsync(TenantId, ClusterId);
         if (result.IsSuccess)
         {
             rules = result.Data ?? [];

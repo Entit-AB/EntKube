@@ -182,7 +182,7 @@ public class AlertSyncService(
 
         // Fetch current alerts from Alertmanager
         KubernetesOperationResult<List<AlertInfo>> alertsResult =
-            await prometheusService.GetAlertsAsync(clusterId, ct);
+            await prometheusService.GetAlertsAsync(tenantId, clusterId, ct);
 
         if (!alertsResult.IsSuccess)
         {

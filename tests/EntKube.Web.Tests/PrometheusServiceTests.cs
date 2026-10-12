@@ -59,7 +59,7 @@ public class PrometheusServiceTests : IDisposable
         // Act
 
         KubernetesOperationResult<ClusterHealthSummary> result =
-            await sut.GetClusterHealthAsync(nonExistentId);
+            await sut.GetClusterHealthAsync(Guid.NewGuid(), nonExistentId);
 
         // Assert — should fail gracefully with a clear message.
 
@@ -96,7 +96,7 @@ public class PrometheusServiceTests : IDisposable
         // Act
 
         KubernetesOperationResult<ClusterHealthSummary> result =
-            await sut.GetClusterHealthAsync(cluster.Id);
+            await sut.GetClusterHealthAsync(tenant.Id, cluster.Id);
 
         // Assert — no prometheus component means we can't query metrics.
 
@@ -139,7 +139,7 @@ public class PrometheusServiceTests : IDisposable
         // Act
 
         KubernetesOperationResult<ClusterHealthSummary> result =
-            await sut.GetClusterHealthAsync(cluster.Id);
+            await sut.GetClusterHealthAsync(tenant.Id, cluster.Id);
 
         // Assert — without kubeconfig we can't connect to the cluster.
 

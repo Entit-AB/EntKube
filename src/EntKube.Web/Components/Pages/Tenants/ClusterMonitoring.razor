@@ -192,18 +192,18 @@
         }
 
         @* ── Alerts ── *@
-        <AlertPanel ClusterId="ClusterId" PrometheusService="PrometheusService" />
+        <AlertPanel TenantId="TenantId" ClusterId="ClusterId" PrometheusService="PrometheusService" />
 
         @* ── Scrape Targets ── *@
         <div class="mt-4">
             <h6 class="text-muted mb-2"><span class="bi bi-radar me-1"></span>Scrape Targets</h6>
-            <ScrapeTargetsPanel ClusterId="ClusterId" />
+            <ScrapeTargetsPanel TenantId="TenantId" ClusterId="ClusterId" />
         </div>
 
         @* ── Alert Rules ── *@
         <div class="mt-4">
             <h6 class="text-muted mb-2"><span class="bi bi-list-check me-1"></span>Alerting Rules</h6>
-            <AlertRulesPanel ClusterId="ClusterId" />
+            <AlertRulesPanel TenantId="TenantId" ClusterId="ClusterId" />
         </div>
 
         @* ── RabbitMQ Metrics ── *@
@@ -215,6 +215,13 @@
 </div>
 
 @code {
+    /// <summary>
+    /// Whose cluster this is. Every metric read goes through PrometheusService, which resolves the
+    /// cluster tenant-first — a panel holding only a cluster id could name any cluster in the
+    /// installation.
+    /// </summary>
+    [Parameter] public required Guid TenantId { get; set; }
+
     [Parameter] public Guid ClusterId { get; set; }
 
     private ClusterHealthSummary? health;
@@ -257,7 +264,7 @@
     private async Task LoadHealth()
     {
         KubernetesOperationResult<ClusterHealthSummary> result =
-            await PrometheusService.GetClusterHealthAsync(ClusterId);
+            await PrometheusService.GetClusterHealthAsync(TenantId, ClusterId);
 
         if (result.IsSuccess)
         {
@@ -273,7 +280,7 @@
     {
         KubernetesOperationResult<ClusterMetricsHistory> result =
             await PrometheusService.GetClusterMetricsHistoryAsync(
-                ClusterId, TimeSpan.FromMinutes(timeRange));
+                TenantId, ClusterId, TimeSpan.FromMinutes(timeRange));
 
         if (result.IsSuccess && result.Data is not null)
         {
