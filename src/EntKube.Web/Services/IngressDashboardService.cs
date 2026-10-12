@@ -23,7 +23,7 @@ namespace EntKube.Web.Services;
 /// </summary>
 public partial class IngressDashboardService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    IKubernetesClientFactory k8s,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     PrometheusService prometheus,
     ILogger<IngressDashboardService> logger)
 {
@@ -65,7 +65,8 @@ public partial class IngressDashboardService(
 
         foreach (KubernetesCluster cluster in clusters)
         {
-            if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            EntKube.Web.Services.Clusters.IClusterClient? client = await clusterClients.ForAsync(tenantId, cluster.Id, ct);
+            if (client is null)
             {
                 probes.Add(new ClusterProbe(cluster.Id, cluster.Name, false, "?", "No kubeconfig materialized", 0));
                 continue;
@@ -78,7 +79,7 @@ public partial class IngressDashboardService(
             {
                 (List<IngressRouteView> clusterRoutes, List<MiddlewareInfo> clusterMiddlewares,
                     List<GatewayListenerInfo> clusterListeners) =
-                    await LoadClusterAsync(cluster, envName, gatewayClass, managedHosts, ct);
+                    await LoadClusterAsync(cluster, client, envName, gatewayClass, managedHosts, ct);
                 routes.AddRange(clusterRoutes);
                 middlewares.AddRange(clusterMiddlewares);
                 listeners.AddRange(clusterListeners);
@@ -114,27 +115,26 @@ public partial class IngressDashboardService(
     /// no Gateway API, no Traefik) just yields nothing for that kind.
     /// </summary>
     private async Task<(List<IngressRouteView> Routes, List<MiddlewareInfo> Middlewares, List<GatewayListenerInfo> Listeners)> LoadClusterAsync(
-        KubernetesCluster cluster, string envName, string gatewayClass,
+        KubernetesCluster cluster, EntKube.Web.Services.Clusters.IClusterClient client, string envName, string gatewayClass,
         HashSet<string> managedHosts, CancellationToken ct)
     {
-        string kc = cluster.Kubeconfig!;
 
         // Endpoints (core) → readiness per service, keyed "namespace/serviceName".
-        Dictionary<string, (int Ready, int Total)> endpoints = await LoadEndpointsAsync(kc, ct);
+        Dictionary<string, (int Ready, int Total)> endpoints = await LoadEndpointsAsync(client, ct);
 
         // cert-manager Certificates → TLS state per dnsName.
-        Dictionary<string, CertInfo> certs = await LoadCertificatesAsync(kc, ct);
+        Dictionary<string, CertInfo> certs = await LoadCertificatesAsync(client, ct);
 
         // Provider-native "middleware/filter" catalog: Traefik Middleware CRDs on a Traefik
         // cluster, Gateway API HTTPRoute filters (added below) on a Gateway API cluster.
         List<MiddlewareInfo> middlewareCatalog = string.Equals(gatewayClass, "traefik", StringComparison.OrdinalIgnoreCase)
-            ? await LoadMiddlewaresAsync(cluster.Id, kc, ct)
+            ? await LoadMiddlewaresAsync(cluster.Id, client, ct)
             : [];
 
         // Gateway API Gateways → the real listeners (name/port/protocol/TLS/hostname). These are
         // the provider-agnostic analogue of Traefik "entrypoints", and let HTTPRoutes resolve
         // which listener (and port) they attach to via parentRefs, plus whether TLS terminates there.
-        List<GatewayListenerInfo> listeners = await LoadGatewayListenersAsync(cluster.Id, kc, ct);
+        List<GatewayListenerInfo> listeners = await LoadGatewayListenersAsync(cluster.Id, client, ct);
 
         // TLS host sets derived from the listeners (exact hostnames + wildcard suffixes).
         HashSet<string> tlsHostsExact = [];
@@ -195,7 +195,7 @@ public partial class IngressDashboardService(
         }
 
         // ── Core Ingress (networking.k8s.io) ──
-        foreach (JsonElement item in Items(await SafeGetAsync("ingresses.networking.k8s.io", kc, ct)))
+        foreach (JsonElement item in Items(await SafeGetAsync("ingresses.networking.k8s.io", client, ct)))
         {
             (string ns, string name) = Meta(item);
             if (!item.TryGetProperty("spec", out JsonElement spec)) continue;
@@ -237,7 +237,7 @@ public partial class IngressDashboardService(
         }
 
         // ── Gateway API HTTPRoute ──
-        foreach (JsonElement item in Items(await SafeGetAsync("httproutes.gateway.networking.k8s.io", kc, ct)))
+        foreach (JsonElement item in Items(await SafeGetAsync("httproutes.gateway.networking.k8s.io", client, ct)))
         {
             (string ns, string name) = Meta(item);
             if (!item.TryGetProperty("spec", out JsonElement spec)) continue;
@@ -293,9 +293,9 @@ public partial class IngressDashboardService(
         }
 
         // ── Traefik IngressRoute CRD (traefik.io, with legacy containo.us fallback) ──
-        string traefikJson = await SafeGetAsync("ingressroutes.traefik.io", kc, ct);
+        string traefikJson = await SafeGetAsync("ingressroutes.traefik.io", client, ct);
         if (Items(traefikJson).Count == 0)
-            traefikJson = await SafeGetAsync("ingressroutes.traefik.containo.us", kc, ct);
+            traefikJson = await SafeGetAsync("ingressroutes.traefik.containo.us", client, ct);
         foreach (JsonElement item in Items(traefikJson))
         {
             (string ns, string name) = Meta(item);
@@ -359,10 +359,10 @@ public partial class IngressDashboardService(
     /// "namespace/serviceName". An Endpoints object shares its service's name, which is how
     /// we map a route's backend service to live endpoint readiness.
     /// </summary>
-    private async Task<Dictionary<string, (int Ready, int Total)>> LoadEndpointsAsync(string kc, CancellationToken ct)
+    private async Task<Dictionary<string, (int Ready, int Total)>> LoadEndpointsAsync(EntKube.Web.Services.Clusters.IClusterClient client, CancellationToken ct)
     {
         Dictionary<string, (int, int)> map = [];
-        foreach (JsonElement item in Items(await SafeGetAsync("endpoints", kc, ct)))
+        foreach (JsonElement item in Items(await SafeGetAsync("endpoints", client, ct)))
         {
             (string ns, string name) = Meta(item);
             int ready = 0, notReady = 0;
@@ -385,12 +385,12 @@ public partial class IngressDashboardService(
     /// (e.g. <c>stripPrefix</c>, <c>headers</c>, <c>basicAuth</c>) — exactly what Traefik's own
     /// dashboard shows. Absent Traefik just yields an empty list.
     /// </summary>
-    private async Task<List<MiddlewareInfo>> LoadMiddlewaresAsync(Guid clusterId, string kc, CancellationToken ct)
+    private async Task<List<MiddlewareInfo>> LoadMiddlewaresAsync(Guid clusterId, EntKube.Web.Services.Clusters.IClusterClient client, CancellationToken ct)
     {
         List<MiddlewareInfo> list = [];
-        string json = await SafeGetAsync("middlewares.traefik.io", kc, ct);
+        string json = await SafeGetAsync("middlewares.traefik.io", client, ct);
         if (Items(json).Count == 0)
-            json = await SafeGetAsync("middlewares.traefik.containo.us", kc, ct);
+            json = await SafeGetAsync("middlewares.traefik.containo.us", client, ct);
 
         foreach (JsonElement item in Items(json))
         {
@@ -408,10 +408,10 @@ public partial class IngressDashboardService(
     /// These are the provider-agnostic analogue of Traefik entrypoints and drive the "Gateways"
     /// overview card plus HTTPRoute parentRef resolution. Absent Gateway API yields an empty list.
     /// </summary>
-    private async Task<List<GatewayListenerInfo>> LoadGatewayListenersAsync(Guid clusterId, string kc, CancellationToken ct)
+    private async Task<List<GatewayListenerInfo>> LoadGatewayListenersAsync(Guid clusterId, EntKube.Web.Services.Clusters.IClusterClient client, CancellationToken ct)
     {
         List<GatewayListenerInfo> list = [];
-        foreach (JsonElement item in Items(await SafeGetAsync("gateways.gateway.networking.k8s.io", kc, ct)))
+        foreach (JsonElement item in Items(await SafeGetAsync("gateways.gateway.networking.k8s.io", client, ct)))
         {
             (string ns, string name) = Meta(item);
             if (!item.TryGetProperty("spec", out JsonElement spec)
@@ -491,10 +491,10 @@ public partial class IngressDashboardService(
     /// carrying expiry (status.notAfter) and readiness (Ready condition). Absent cert-manager
     /// just yields an empty map (routes then show as untracked TLS).
     /// </summary>
-    private async Task<Dictionary<string, CertInfo>> LoadCertificatesAsync(string kc, CancellationToken ct)
+    private async Task<Dictionary<string, CertInfo>> LoadCertificatesAsync(EntKube.Web.Services.Clusters.IClusterClient client, CancellationToken ct)
     {
         Dictionary<string, CertInfo> map = [];
-        foreach (JsonElement item in Items(await SafeGetAsync("certificates.cert-manager.io", kc, ct)))
+        foreach (JsonElement item in Items(await SafeGetAsync("certificates.cert-manager.io", client, ct)))
         {
             (string ns, string name) = Meta(item);
             DateTime? notAfter = null;
@@ -559,9 +559,9 @@ public partial class IngressDashboardService(
 
     // ── JSON helpers ──
 
-    private async Task<string> SafeGetAsync(string resource, string kc, CancellationToken ct)
+    private async Task<string> SafeGetAsync(string resource, EntKube.Web.Services.Clusters.IClusterClient client, CancellationToken ct)
     {
-        try { return await k8s.GetJsonAllNamespacesAsync(resource, kc, ct: ct); }
+        try { return await client.GetJsonAllNamespacesAsync(resource, ct: ct); }
         catch (Exception ex)
         {
             // CRD not installed / API group absent / transient — treat as "nothing of this kind".
