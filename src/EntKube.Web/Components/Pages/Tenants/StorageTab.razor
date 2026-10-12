@@ -651,9 +651,9 @@
                             {
                                 <select class="form-select form-select-sm" @bind="formCubeFsComponentId">
                                     <option value="@Guid.Empty">— Select CubeFS instance —</option>
-                                    @foreach (ClusterComponent comp in cubeFsComponents)
+                                    @foreach (EntKube.Contracts.Catalog.InstalledComponent comp in cubeFsComponents)
                                     {
-                                        <option value="@comp.Id">@comp.Cluster.Name / @comp.Namespace</option>
+                                        <option value="@comp.Id">@comp.ClusterName / @comp.Namespace</option>
                                     }
                                 </select>
                             }
@@ -790,7 +790,7 @@
     private List<OpenStackConnection> openStackConnections = [];
 
     // Installed CubeFS components (targets for in-cluster S3 bucket provisioning)
-    private List<ClusterComponent> cubeFsComponents = [];
+    private List<EntKube.Contracts.Catalog.InstalledComponent> cubeFsComponents = [];
     private Guid formCubeFsComponentId;
 
     // Storage link form fields
