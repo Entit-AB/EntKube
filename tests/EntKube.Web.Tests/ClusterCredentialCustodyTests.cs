@@ -110,7 +110,12 @@ public class ClusterCredentialCustodyTests
     /// seam makes the scoping local instead of inherited, which is worth having and is not a
     /// vulnerability fixed.</para>
     ///
-    private const int BaselineOccurrences = 211;
+    /// <para><b>209, after <c>IngressDashboardService</c>.</b> Two occurrences, one reachable
+    /// site, and four private-helper signatures — but only ONE place that ever touched the
+    /// client: a <c>SafeGetAsync</c> funnel that every query goes through. The six signatures
+    /// the triage warned about were six <em>pass-throughs</em>.</para>
+    ///
+    private const int BaselineOccurrences = 209;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -120,7 +125,7 @@ public class ClusterCredentialCustodyTests
     /// <c>OpenLdapService</c> — all four because they already had a tenant, which is the only
     /// thing that decides whether a conversion is possible at all.</para>
     /// </summary>
-    private const int BaselineFiles = 39;
+    private const int BaselineFiles = 38;
 
     private static (int Occurrences, int Files) Measure()
     {
