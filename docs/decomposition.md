@@ -305,6 +305,44 @@ the seam for a client is a dependency cycle. Whatever resolves the credential fo
 sit below both — sharing the `c.Id == clusterId && c.TenantId == tenantId` predicate, not the
 seam that applies it.
 
+#### 4.0.1.2 DECIDED (2026-10-12): a sweep acts as each tenant in turn
+
+The question this section has been blocked on — *who is acting, and on whose behalf* — is
+answered. **A background sweep acts as each tenant in turn.** Its outer loop is over tenants and
+it calls the existing tenant-scoped APIs once per tenant.
+
+Two alternatives were offered and rejected:
+
+- **a system principal** (`ActorContext.System(reason)`) accepted by the contracts and the seam,
+  recorded in the audit log — one query per sweep instead of N;
+- **installation-scoped read-only contract methods** usable only by services declared as sweeps,
+  with a ratchet forbidding their use elsewhere.
+
+Both cost **a second authorization path that has to stay correct forever**, with a ratchet as the
+only thing stopping a page reaching for the wide surface. The per-tenant loop adds no concept at
+all.
+
+**The deciding argument is not the query count.** Iterating tenants makes the tenant an *input*
+to every lookup rather than something read off the row being authorized. That is exactly what the
+19 tautological seam calls (§4.0.1.1) are: `ForAsync(cluster.TenantId, cluster.Id)` exists because
+the method had no tenant to pass. A sweep that iterates tenants has one, so the predicate can
+fail — which is the difference between a check and a decoration.
+
+`CostScanService` already worked this way, so the shape was in the codebase before the decision
+named it: collect tenant ids, loop, per-tenant try/catch, rethrow cancellation.
+
+**First application — the headscale cert sweep, and it is the pattern for the rest.**
+`HeadscaleCertSyncService` selected cluster ids across the whole installation and acted on them;
+it now loops tenants and asks Catalog for each tenant's own headscale installs.
+`HeadscaleService`'s 29 public methods take the tenant their two Razor-page callers always had,
+its `GetComponentAsync` funnel (thirteen internal callers) asks Catalog tenant-first, and the
+credential comes from `IClusterClient`. **Custody 200 → 183, contract 27 → 25** — the single
+largest fall either number has had, from one service.
+
+Order the rest by the same rule the triage taught: `AlertSyncService`,
+`ResourceUsageCollectorService` and `HeadscaleCertSyncService` were in *both* counts, so a sweep
+conversion pays twice.
+
 **It also strengthens the case for §5's agent model.** An agent running *inside* the cluster
 needs no kubeconfig at all — there is nothing to hand out, because the work happens where the
 credentials already are. Credential custody was presented there as a side benefit of

@@ -39,26 +39,57 @@ public class HeadscaleCertSyncService(
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
         var headscaleService = scope.ServiceProvider.GetRequiredService<HeadscaleService>();
 
-        List<Guid> clusterIds;
+        var catalog = scope.ServiceProvider.GetRequiredService<EntKube.Contracts.Catalog.ICatalogApi>();
+
+        // One tenant at a time, which is the decided shape for every sweep: the tenant is an
+        // INPUT to each lookup rather than something read off the cluster the sweep found. This
+        // used to select cluster ids across the whole installation and then act on them, so every
+        // check downstream compared a row against itself. CostScanService is the precedent.
+        List<Guid> tenantIds;
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
-            clusterIds = await db.ClusterComponents
-                .Where(c => (c.HelmChartName == "headscale" || c.Name == "headscale")
-                    && c.ExternalRoutes.Any(r => r.TlsMode == TlsMode.Passthrough))
-                .Select(c => c.ClusterId)
-                .Distinct()
-                .ToListAsync(ct);
+            tenantIds = await db.Tenants.Select(t => t.Id).ToListAsync(ct);
         }
 
-        foreach (Guid clusterId in clusterIds)
+        foreach (Guid tenantId in tenantIds)
         {
-            try
+            List<Guid> clusterIds;
+            using (ApplicationDbContext db = dbFactory.CreateDbContext())
             {
-                await headscaleService.SyncCertIfChangedAsync(clusterId, ct);
+                // The headscale installs this tenant owns, from Catalog; then the ones published
+                // with TLS passthrough, which is the only reason this sweep exists. The alias is
+                // asymmetric (Name or HelmChartName) so that half stays in memory.
+                List<Guid> componentIds =
+                [
+                    .. (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+                        .Where(c => c.HelmChartName == "headscale" || c.Name == "headscale")
+                        .Select(c => c.Id),
+                ];
+
+                clusterIds = await db.ExternalRoutes
+                    .Where(r => componentIds.Contains(r.ComponentId)
+                        && r.TlsMode == TlsMode.Passthrough)
+                    .Select(r => r.Component.ClusterId)
+                    .Distinct()
+                    .ToListAsync(ct);
             }
-            catch (Exception ex)
+
+            foreach (Guid clusterId in clusterIds)
             {
-                logger.LogWarning(ex, "Headscale cert sync failed for cluster {ClusterId}", clusterId);
+                try
+                {
+                    await headscaleService.SyncCertIfChangedAsync(tenantId, clusterId, ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    throw;
+                }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex,
+                        "Headscale cert sync failed for cluster {ClusterId} of tenant {TenantId}",
+                        clusterId, tenantId);
+                }
             }
         }
     }

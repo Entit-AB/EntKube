@@ -47,26 +47,36 @@ public class HeadscaleService(
     VaultService vaultService,
     ExternalRouteService externalRouteService,
     ComponentLifecycleService lifecycleService,
-    IHttpClientFactory httpClientFactory)
+    IHttpClientFactory httpClientFactory,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients)
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
     // ── Component lookup ──────────────────────────────────────────────────────
 
-    public async Task<ClusterComponent?> GetComponentAsync(Guid clusterId, CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        return await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.ClusterId == clusterId
-                && (c.HelmChartName == "headscale" || c.Name == "headscale"), ct);
-    }
+    /// <summary>
+    /// The headscale component on one of a tenant's clusters, or null.
+    ///
+    /// <para>This is the funnel: thirteen methods in this file start here, and every one of them
+    /// used to reach a cluster by id alone — so a crafted id answered about any cluster in the
+    /// installation. The tenant is now a parameter rather than something derived from the row,
+    /// which is what makes the check able to fail at all.</para>
+    ///
+    /// <para>The alias is asymmetric — <c>Name</c> or <c>HelmChartName</c> — so the predicate
+    /// stays here in memory rather than becoming a contract method that would answer about
+    /// installations this has always rejected.</para>
+    /// </summary>
+    public async Task<EntKube.Contracts.Catalog.InstalledComponent?> GetComponentAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+        => (await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct))
+            .FirstOrDefault(c => c.HelmChartName == "headscale" || c.Name == "headscale");
 
     // ── Vault helpers ─────────────────────────────────────────────────────────
 
-    public async Task<string?> GetServerUrlAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<string?> GetServerUrlAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
         if (comp is null) return null;
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster cluster = await db.KubernetesClusters
@@ -74,9 +84,9 @@ public class HeadscaleService(
         return await vaultService.GetComponentSecretValueAsync(cluster.TenantId, comp.Id, "server-url", ct);
     }
 
-    public async Task<string?> GetClusterIssuerAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<string?> GetClusterIssuerAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
         if (comp is null) return null;
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster cluster = await db.KubernetesClusters
@@ -84,9 +94,9 @@ public class HeadscaleService(
         return await vaultService.GetComponentSecretValueAsync(cluster.TenantId, comp.Id, "cluster-issuer", ct);
     }
 
-    public async Task<string?> GetApiKeyAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<string?> GetApiKeyAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
         if (comp is null) return null;
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster cluster = await db.KubernetesClusters
@@ -94,9 +104,9 @@ public class HeadscaleService(
         return await vaultService.GetComponentSecretValueAsync(cluster.TenantId, comp.Id, "api-key", ct);
     }
 
-    public async Task SaveApiKeyAsync(Guid clusterId, string apiKey, CancellationToken ct = default)
+    public async Task SaveApiKeyAsync(Guid tenantId, Guid clusterId, string apiKey, CancellationToken ct = default)
     {
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
         if (comp is null) throw new InvalidOperationException("Headscale component not found.");
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster cluster = await db.KubernetesClusters
@@ -110,17 +120,17 @@ public class HeadscaleService(
     /// Runs `headscale apikeys create` inside the headscale pod and returns the key.
     /// This is necessary because the REST API requires an API key to call — chicken-and-egg.
     /// </summary>
-    public async Task<string> GenerateApiKeyAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<string> GenerateApiKeyAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
-        if (comp?.Cluster?.Kubeconfig is null)
-            throw new InvalidOperationException("Headscale component not found or cluster has no kubeconfig.");
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = comp is null ? null : await clusterClients.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null)
+            throw new InvalidOperationException("Headscale component not found or cluster has no cluster.");
 
-        string podName = await GetHeadscalePodNameAsync(clusterId, comp.Cluster.Kubeconfig, ct);
-        string output = await k8sFactory.RunCommandOnPodAsync(
+        string podName = await GetHeadscalePodNameAsync(tenantId, clusterId, cluster, ct);
+        string output = await cluster.RunCommandOnPodAsync(
             podName, "headscale",
             ["headscale", "apikeys", "create"],
-            comp.Cluster.Kubeconfig,
             ct: ct);
 
         // headscale writes structured log lines to stderr; the API key is the last
@@ -139,10 +149,9 @@ public class HeadscaleService(
         return key;
     }
 
-    private async Task<string> GetHeadscalePodNameAsync(Guid clusterId, string kubeconfig, CancellationToken ct)
+    private async Task<string> GetHeadscalePodNameAsync(Guid tenantId, Guid clusterId, EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
-        string json = await k8sFactory.GetJsonAsync("pods", "headscale", kubeconfig,
-            "app=headscale", ct);
+        string json = await cluster.GetJsonAsync("pods", "headscale", "app=headscale", ct);
         JsonNode? root = JsonNode.Parse(json);
 
         // FirstOrDefault rather than [0]: indexing an empty JsonArray throws
@@ -326,7 +335,7 @@ public class HeadscaleService(
     /// <para><b>This is the one component lookup that cannot be meaningfully scoped.</b> Its only
     /// caller is <c>ComponentInstallOrchestrator</c>, which is Catalog's own code working by
     /// component id by design and holds no tenant. A <c>tenantId</c> parameter here could only be
-    /// filled with <c>comp.Cluster.TenantId</c> — read from the row it would then be used to
+    /// filled with <c>comp.TenantId</c> — read from the row it would then be used to
     /// filter — and a predicate that compares a row against itself can never fail. Adding one
     /// would take <see cref="ComponentTenantScopingTests"/> to zero while changing nothing, so it
     /// is left as it is and the reason is written down. For a tenant check to mean anything the
@@ -357,7 +366,7 @@ public class HeadscaleService(
         // anyway so the route creation has one code path, and the limit is recorded rather than
         // dressed up: see the comment on this method.
         await EnsureExternalRouteAsync(comp.Cluster.TenantId, componentId, url, issuer, ct);
-        await EnsureIstioPermissiveAsync(comp.ClusterId, ct);
+        await EnsureIstioPermissiveAsync(comp.Cluster.TenantId, comp.ClusterId, ct);
     }
 
     /// <summary>
@@ -411,10 +420,11 @@ public class HeadscaleService(
     ///
     /// No-ops for non-Istio gateway classes.
     /// </summary>
-    public async Task EnsureIstioPermissiveAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task EnsureIstioPermissiveAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
-        if (comp?.Cluster?.Kubeconfig is null) return;
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = comp is null ? null : await clusterClients.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null) return;
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         List<ClusterComponent> clusterComponents = await db.ClusterComponents
@@ -425,10 +435,9 @@ public class HeadscaleService(
         if (gatewayClass != "istio") return;
 
         (_, string gwNamespace) = ExternalRouteService.ResolveGateway(clusterComponents);
-        string kubeconfig = comp.Cluster.Kubeconfig;
 
         // Get the headscale hostname so we can scope the ALPN fix to just this SNI.
-        string? serverUrl = await GetServerUrlAsync(clusterId, ct);
+        string? serverUrl = await GetServerUrlAsync(tenantId, clusterId, ct);
         if (string.IsNullOrEmpty(serverUrl) || !Uri.TryCreate(serverUrl, UriKind.Absolute, out Uri? uri))
             return;
         string hostname = uri.Host;
@@ -472,7 +481,7 @@ public class HeadscaleService(
                           alpn_protocols:
                           - http/1.1
             """;
-        await k8sFactory.ApplyManifestAsync(alpnFilter, kubeconfig, ct);
+        await cluster.ApplyManifestAsync(alpnFilter, ct);
 
         // Secondary fix: with HTTP/1.1 in place, Envoy must recognise the ts2021 upgrade type
         // or it will strip the Upgrade header before forwarding.
@@ -513,7 +522,7 @@ public class HeadscaleService(
                       - upgrade_type: websocket
                       - upgrade_type: ts2021
             """;
-        await k8sFactory.ApplyManifestAsync(upgradeFilter, kubeconfig, ct);
+        await cluster.ApplyManifestAsync(upgradeFilter, ct);
 
         // Belt-and-suspenders: allow plain-text and mTLS into headscale namespace.
         string peerAuth = $"""
@@ -526,7 +535,7 @@ public class HeadscaleService(
               mtls:
                 mode: PERMISSIVE
             """;
-        await k8sFactory.ApplyManifestAsync(peerAuth, kubeconfig, ct);
+        await cluster.ApplyManifestAsync(peerAuth, ct);
 
         // Belt-and-suspenders: disable mTLS origination from the gateway toward headscale.
         string destinationRule = $"""
@@ -541,7 +550,7 @@ public class HeadscaleService(
                 tls:
                   mode: DISABLE
             """;
-        await k8sFactory.ApplyManifestAsync(destinationRule, kubeconfig, ct);
+        await cluster.ApplyManifestAsync(destinationRule, ct);
     }
 
     // ── TLS passthrough ───────────────────────────────────────────────────────
@@ -554,15 +563,14 @@ public class HeadscaleService(
     /// The headscale pod will be briefly unavailable while the cert is provisioned
     /// and the Deployment rolls out (~1-2 minutes for Let's Encrypt).
     /// </summary>
-    public async Task SwitchToTlsPassthroughAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task SwitchToTlsPassthroughAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
-        if (comp?.Cluster?.Kubeconfig is null)
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = comp is null ? null : await clusterClients.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null)
             throw new InvalidOperationException("Headscale component not found.");
 
-        string kubeconfig = comp.Cluster.Kubeconfig;
-
-        string? serverUrl = await GetServerUrlAsync(clusterId, ct);
+        string? serverUrl = await GetServerUrlAsync(tenantId, clusterId, ct);
         if (string.IsNullOrEmpty(serverUrl))
             throw new InvalidOperationException("server-url not configured in vault.");
 
@@ -574,27 +582,27 @@ public class HeadscaleService(
         //    The cert in cert-manager namespace was already issued by Let's Encrypt for this
         //    hostname and trusted by browsers. Reusing it avoids a second ACME round-trip and
         //    eliminates cert-trust issues caused by HTTP-01 challenge redirects.
-        await CopyGatewayCertToHeadscaleAsync(hostname, kubeconfig, ct);
+        await CopyGatewayCertToHeadscaleAsync(hostname, cluster, ct);
 
         // 2. Patch headscale-config ConfigMap to add tls_cert_path / tls_key_path.
         //    headscale reads these from the config file (Viper env-var override is unreliable
         //    for keys already set in the file). With these keys present headscale serves HTTPS
         //    on the existing listen_addr (0.0.0.0:8080).
-        await PatchHeadscaleTlsConfigAsync(kubeconfig, ct);
+        await PatchHeadscaleTlsConfigAsync(cluster, ct);
 
         // 3. Apply updated Deployment: mounts headscale-tls secret (optional so the pod starts
         //    immediately); init container blocks until cert-manager writes the cert file.
-        await k8sFactory.ApplyManifestAsync(BuildTlsDeploymentManifest(), kubeconfig, ct);
+        await cluster.ApplyManifestAsync(BuildTlsDeploymentManifest(), ct);
 
         // 3b. Force a rolling restart so headscale always picks up the patched ConfigMap.
         //     ConfigMap subPath mounts are frozen at pod start time — a running pod won't
         //     see the tls_cert_path addition until it restarts. On the first run the
         //     Deployment spec change already triggers a rollout; on subsequent "Reapply"
         //     calls the manifest is unchanged so only this explicit restart does anything.
-        await ForceHeadscaleRolloutAsync(kubeconfig, ct);
+        await ForceHeadscaleRolloutAsync(cluster, ct);
 
         // 4. Apply Service exposing port 443 → pod 8080 (headscale now serves HTTPS there).
-        await k8sFactory.ApplyManifestAsync(BuildTlsServiceManifest(), kubeconfig, ct);
+        await cluster.ApplyManifestAsync(BuildTlsServiceManifest(), ct);
 
         // 5. Switch ExternalRoute to Passthrough so the Gateway gets a TLS listener + TLSRoute.
         //    Delete the old HTTPRoute first to avoid a name conflict (same name, different kind).
@@ -607,7 +615,7 @@ public class HeadscaleService(
             // Remove old HTTPRoute from the cluster before switching kind.
             string oldRouteName = ExternalRouteService.ToListenerName(route.Hostname) + "-route";
             string routeNs = comp.Namespace ?? "default";
-            await k8sFactory.DeleteManifestAsync("httproute", oldRouteName, routeNs, kubeconfig, ct);
+            await cluster.DeleteManifestAsync("httproute", oldRouteName, routeNs, ct);
 
             route.TlsMode = TlsMode.Passthrough;
             route.ServicePort = 443;
@@ -622,10 +630,9 @@ public class HeadscaleService(
     /// if they are not already present. headscale reads these from the file at startup;
     /// env-var overrides via Viper are unreliable when the key already exists in the file.
     /// </summary>
-    private async Task PatchHeadscaleTlsConfigAsync(string kubeconfig, CancellationToken ct)
+    private async Task PatchHeadscaleTlsConfigAsync(EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
-        string cmJson = await k8sFactory.GetJsonAsync(
-            "configmap/headscale-config", "headscale", kubeconfig, ct: ct);
+        string cmJson = await cluster.GetJsonAsync("configmap/headscale-config", "headscale", ct: ct);
 
         using JsonDocument doc = JsonDocument.Parse(cmJson);
         string configYaml = doc.RootElement
@@ -645,8 +652,7 @@ public class HeadscaleService(
         {
             ["data"] = new Dictionary<string, string> { ["config.yaml"] = patched }
         });
-        await k8sFactory.PatchStrategicAsync(
-            "configmap", "headscale-config", "headscale", jsonPatch, kubeconfig, ct);
+        await cluster.PatchStrategicAsync("configmap", "headscale-config", "headscale", jsonPatch, ct);
     }
 
     /// <summary>
@@ -659,41 +665,41 @@ public class HeadscaleService(
     /// and re-syncs + restarts headscale only when cert-manager has renewed the cert.
     /// Called by <see cref="HeadscaleCertSyncService"/> on a background timer.
     /// </summary>
-    public async Task SyncCertIfChangedAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task SyncCertIfChangedAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
-        if (comp?.Cluster?.Kubeconfig is null) return;
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = comp is null ? null : await clusterClients.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null) return;
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         bool isPassthrough = await db.ExternalRoutes
             .AnyAsync(r => r.ComponentId == comp.Id && r.TlsMode == TlsMode.Passthrough, ct);
         if (!isPassthrough) return;
 
-        string? serverUrl = await GetServerUrlAsync(clusterId, ct);
+        string? serverUrl = await GetServerUrlAsync(tenantId, clusterId, ct);
         if (string.IsNullOrEmpty(serverUrl)) return;
         if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out Uri? uri)) return;
 
         string hostname = uri.Host;
-        string kubeconfig = comp.Cluster.Kubeconfig;
 
         string? sourceCrt = await ReadCertCrtAsync(
-            ExternalRouteService.ToCertSecretName(hostname), "cert-manager", kubeconfig, ct);
+            ExternalRouteService.ToCertSecretName(hostname), "cert-manager", cluster, ct);
         if (string.IsNullOrEmpty(sourceCrt)) return;
 
-        string? currentCrt = await ReadCertCrtAsync("headscale-tls", "headscale", kubeconfig, ct);
+        string? currentCrt = await ReadCertCrtAsync("headscale-tls", "headscale", cluster, ct);
 
         if (sourceCrt == currentCrt) return;
 
-        await CopyGatewayCertToHeadscaleAsync(hostname, kubeconfig, ct);
-        await ForceHeadscaleRolloutAsync(kubeconfig, ct);
+        await CopyGatewayCertToHeadscaleAsync(hostname, cluster, ct);
+        await ForceHeadscaleRolloutAsync(cluster, ct);
     }
 
     private async Task<string?> ReadCertCrtAsync(
-        string secretName, string ns, string kubeconfig, CancellationToken ct)
+        string secretName, string ns, EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         try
         {
-            string json = await k8sFactory.GetJsonAsync($"secret/{secretName}", ns, kubeconfig, ct: ct);
+            string json = await cluster.GetJsonAsync($"secret/{secretName}", ns, ct: ct);
             using JsonDocument doc = JsonDocument.Parse(json);
             JsonElement data = doc.RootElement.GetProperty("data");
             return data.TryGetProperty("tls.crt", out JsonElement el) ? el.GetString() : null;
@@ -704,12 +710,11 @@ public class HeadscaleService(
         }
     }
 
-    private async Task CopyGatewayCertToHeadscaleAsync(string hostname, string kubeconfig, CancellationToken ct)
+    private async Task CopyGatewayCertToHeadscaleAsync(string hostname, EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         string certSecretName = ExternalRouteService.ToCertSecretName(hostname);
 
-        string secretJson = await k8sFactory.GetJsonAsync(
-            $"secret/{certSecretName}", "cert-manager", kubeconfig, ct: ct);
+        string secretJson = await cluster.GetJsonAsync($"secret/{certSecretName}", "cert-manager", ct: ct);
 
         using JsonDocument doc = JsonDocument.Parse(secretJson);
         JsonElement data = doc.RootElement.GetProperty("data");
@@ -736,10 +741,10 @@ public class HeadscaleService(
               tls.key: {tlsKey}
             """;
 
-        await k8sFactory.ApplyManifestAsync(manifest, kubeconfig, ct);
+        await cluster.ApplyManifestAsync(manifest, ct);
     }
 
-    private async Task ForceHeadscaleRolloutAsync(string kubeconfig, CancellationToken ct)
+    private async Task ForceHeadscaleRolloutAsync(EntKube.Web.Services.Clusters.IClusterClient cluster, CancellationToken ct)
     {
         string patch = JsonSerializer.Serialize(new Dictionary<string, object>
         {
@@ -757,7 +762,7 @@ public class HeadscaleService(
                 }
             }
         });
-        await k8sFactory.PatchJsonAsync("deployment", "headscale", "headscale", patch, kubeconfig, ct);
+        await cluster.PatchJsonAsync("deployment", "headscale", "headscale", patch, ct);
     }
 
     private static string BuildTlsDeploymentManifest() => """
@@ -867,7 +872,7 @@ public class HeadscaleService(
     /// a Kubernetes Secret so the subnet router pod can mount it.
     /// </summary>
     public async Task<string> SetupInfraAuthKeyAsync(
-        Guid clusterId, string serverUrl, string apiKey, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string serverUrl, string apiKey, CancellationToken ct = default)
     {
         // Ensure infra user exists.
         List<HeadscaleUser> users = await ListUsersAsync(serverUrl, apiKey, ct);
@@ -879,7 +884,7 @@ public class HeadscaleService(
             serverUrl, apiKey, "infra", reusable: true, ephemeral: false, ct: ct);
 
         // Store in vault.
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
         if (comp is not null)
         {
             using ApplicationDbContext db = dbFactory.CreateDbContext();
@@ -890,16 +895,17 @@ public class HeadscaleService(
         }
 
         // Sync to cluster as K8s secret.
-        await SyncInfraAuthKeyToClusterAsync(clusterId, preauth.Key, ct);
+        await SyncInfraAuthKeyToClusterAsync(tenantId, clusterId, preauth.Key, ct);
 
         return preauth.Key;
     }
 
     private async Task SyncInfraAuthKeyToClusterAsync(
-        Guid clusterId, string preAuthKey, CancellationToken ct)
+        Guid tenantId, Guid clusterId, string preAuthKey, CancellationToken ct)
     {
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
-        if (comp?.Cluster?.Kubeconfig is null) return;
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = comp is null ? null : await clusterClients.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null) return;
 
         string manifest = $"""
             apiVersion: v1
@@ -912,7 +918,7 @@ public class HeadscaleService(
               authkey: {preAuthKey}
             """;
 
-        await k8sFactory.ApplyManifestAsync(manifest, comp.Cluster.Kubeconfig, ct);
+        await cluster.ApplyManifestAsync(manifest, ct);
     }
 
     // ── Subnet router ─────────────────────────────────────────────────────────
@@ -923,34 +929,37 @@ public class HeadscaleService(
     /// reach cluster-internal services. Requires the infra pre-auth key secret.
     /// </summary>
     public async Task DeploySubnetRouterAsync(
-        Guid clusterId, string serverUrl, string serviceCidr, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string serverUrl, string serviceCidr, CancellationToken ct = default)
     {
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
-        if (comp?.Cluster?.Kubeconfig is null)
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = comp is null ? null : await clusterClients.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null)
             throw new InvalidOperationException("Headscale component not found.");
 
         string manifest = BuildSubnetRouterManifest(serverUrl, serviceCidr);
-        await k8sFactory.ApplyManifestAsync(manifest, comp.Cluster.Kubeconfig, ct);
+        await cluster.ApplyManifestAsync(manifest, ct);
     }
 
-    public async Task RemoveSubnetRouterAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task RemoveSubnetRouterAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
-        if (comp?.Cluster?.Kubeconfig is null) return;
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = comp is null ? null : await clusterClients.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null) return;
 
-        await k8sFactory.DeleteManifestAsync(
-            "daemonset", "headscale-subnet-router", "headscale", comp.Cluster.Kubeconfig, ct);
+        await cluster.DeleteManifestAsync(
+            "daemonset", "headscale-subnet-router", "headscale", ct);
     }
 
-    public async Task<bool> IsSubnetRouterRunningAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<bool> IsSubnetRouterRunningAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        ClusterComponent? comp = await GetComponentAsync(clusterId, ct);
-        if (comp?.Cluster?.Kubeconfig is null) return false;
+        EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = comp is null ? null : await clusterClients.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null) return false;
 
         try
         {
-            string json = await k8sFactory.GetJsonAsync(
-                "daemonsets", "headscale", comp.Cluster.Kubeconfig, "app=headscale-subnet-router", ct);
+            string json = await cluster.GetJsonAsync(
+                "daemonsets", "headscale", "app=headscale-subnet-router", ct);
             JsonNode? root = JsonNode.Parse(json);
             return root?["items"] is JsonArray arr && arr.Count > 0;
         }

@@ -104,7 +104,13 @@ public class CatalogContractAdoptionTests
     /// before measuring. Only <c>StalwartService.ApplyConfigurationAsync</c>'s list had a tenant
     /// and so actually moved.</para>
     ///
-    private const int BaselineQueries = 27;
+    /// <para><b>25, and for the first time a sweep's own query went.</b>
+    /// <c>HeadscaleCertSyncService</c> 1 → 0 and <c>HeadscaleService</c> 3 → 2: the sweep decision
+    /// means the sweep has a tenant to ask with, so a lookup that selected cluster ids across the
+    /// whole installation became the tenant's own installs from the contract. The 22 "no tenant in
+    /// scope" sites were this, not a missing contract method.</para>
+    ///
+    private const int BaselineQueries = 25;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,
