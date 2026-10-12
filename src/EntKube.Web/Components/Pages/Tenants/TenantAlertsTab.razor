@@ -487,7 +487,7 @@ else
     private async Task<ClusterAlertVm> LoadClusterAlertsAsync(KubernetesCluster cluster)
     {
         KubernetesOperationResult<List<AlertInfo>> result =
-            await PrometheusService.GetAlertsAsync(cluster.Id);
+            await PrometheusService.GetAlertsAsync(TenantId, cluster.Id);
 
         return result.IsSuccess
             ? new ClusterAlertVm(cluster, result.Data ?? [], null)
@@ -606,7 +606,7 @@ else
         foreach (AlertRow row in selected)
         {
             KubernetesOperationResult result = await PrometheusService.CreateSilenceAsync(
-                row.ClusterId,
+                TenantId, row.ClusterId,
                 bulkSilenceForm.Comment,
                 currentUser ?? "entkube-user",
                 TimeSpan.FromHours(bulkSilenceForm.Hours),
@@ -656,7 +656,7 @@ else
         StateHasChanged();
 
         KubernetesOperationResult result = await PrometheusService.CreateSilenceAsync(
-            silenceTarget.ClusterId,
+            TenantId, silenceTarget.ClusterId,
             silenceForm.Comment,
             currentUser ?? "entkube-user",
             TimeSpan.FromHours(silenceForm.Hours),

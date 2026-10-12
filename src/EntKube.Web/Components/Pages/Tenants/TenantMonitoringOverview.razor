@@ -388,7 +388,7 @@
             return new ClusterSummaryVm(cluster, null, null, activeAlerts);
 
         KubernetesOperationResult<ClusterHealthSummary> result =
-            await PrometheusService.GetClusterHealthAsync(cluster.Id);
+            await PrometheusService.GetClusterHealthAsync(TenantId, cluster.Id);
 
         return new ClusterSummaryVm(
             cluster,

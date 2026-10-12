@@ -463,13 +463,13 @@ public class PrometheusService(
     /// while the user is still waiting for the first.</para>
     /// </summary>
     public async Task<KubernetesOperationResult<ClusterHealthSummary>> GetClusterHealthAsync(
-        Guid clusterId, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         return await queryCache.GetOrFetchAsync(
             EntKube.Web.Services.Telemetry.PromQueryCache.Key(clusterId, "health", "cluster-health", 0),
             async () =>
             {
-                var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+                var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
                 if (info is null) return KubernetesOperationResult<ClusterHealthSummary>.Failure(error!);
 
                 using CancellationTokenSource timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
@@ -479,7 +479,7 @@ public class PrometheusService(
 
                 KubernetesOperationResult<ClusterHealthSummary> result =
                     await WithServiceAsync<ClusterHealthSummary>(
-                        info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+                        info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
                         (http, baseUrl, token) => QueryClusterHealthAsync(http, baseUrl, clusterId, token),
                         $"cluster health for {clusterId}", timeout.Token, probeHealthEndpoint: false);
 
@@ -673,13 +673,13 @@ public class PrometheusService(
     /// Retrieves active alerts from Alertmanager.
     /// </summary>
     public async Task<KubernetesOperationResult<List<AlertInfo>>> GetAlertsAsync(
-        Guid clusterId, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<AlertInfo>>.Failure(error!);
 
         return await WithServiceAsync<List<AlertInfo>>(
-            info.Kubeconfig, info.Config.Namespace, info.Config.AlertmanagerServiceName, info.Config.AlertmanagerServicePort,
+            info.Cluster, info.Config.Namespace, info.Config.AlertmanagerServiceName, info.Config.AlertmanagerServicePort,
             async (http, baseUrl, token) =>
             {
                 string json = await http.GetStringAsync($"{baseUrl}/api/v2/alerts", token);
@@ -692,13 +692,13 @@ public class PrometheusService(
     /// Retrieves silences from Alertmanager.
     /// </summary>
     public async Task<KubernetesOperationResult<List<SilenceInfo>>> GetSilencesAsync(
-        Guid clusterId, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<SilenceInfo>>.Failure(error!);
 
         return await WithServiceAsync<List<SilenceInfo>>(
-            info.Kubeconfig, info.Config.Namespace, info.Config.AlertmanagerServiceName, info.Config.AlertmanagerServicePort,
+            info.Cluster, info.Config.Namespace, info.Config.AlertmanagerServiceName, info.Config.AlertmanagerServicePort,
             async (http, baseUrl, token) =>
             {
                 string json = await http.GetStringAsync($"{baseUrl}/api/v2/silences", token);
@@ -711,10 +711,10 @@ public class PrometheusService(
     /// Creates a new silence in Alertmanager.
     /// </summary>
     public async Task<KubernetesOperationResult> CreateSilenceAsync(
-        Guid clusterId, string comment, string createdBy, TimeSpan duration,
+        Guid tenantId, Guid clusterId, string comment, string createdBy, TimeSpan duration,
         List<SilenceMatcher> matchers, CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult.Failure(error!);
 
         string body = JsonSerializer.Serialize(new
@@ -727,7 +727,7 @@ public class PrometheusService(
         });
 
         var result = await WithServiceAsync<bool>(
-            info.Kubeconfig, info.Config.Namespace, info.Config.AlertmanagerServiceName, info.Config.AlertmanagerServicePort,
+            info.Cluster, info.Config.Namespace, info.Config.AlertmanagerServiceName, info.Config.AlertmanagerServicePort,
             async (http, baseUrl, token) =>
             {
                 using StringContent content = new(body, Encoding.UTF8, "application/json");
@@ -823,9 +823,9 @@ public class PrometheusService(
     /// kubelet/cAdvisor metrics when they are not scraped by this Prometheus instance.
     /// </summary>
     public async Task<KubernetesOperationResult<ClusterMetricsHistory>> GetClusterMetricsHistoryAsync(
-        Guid clusterId, TimeSpan duration, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, TimeSpan duration, CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<ClusterMetricsHistory>.Failure(error!);
 
         long end   = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
@@ -833,7 +833,7 @@ public class PrometheusService(
         int  step  = Math.Max(15, (int)(duration.TotalSeconds / 100));
 
         return await WithServiceAsync<ClusterMetricsHistory>(
-            info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+            info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             async (http, baseUrl, token) =>
             {
                 static async Task<double> Scalar(HttpClient h, string url, CancellationToken t) =>
@@ -1189,13 +1189,13 @@ public class PrometheusService(
     /// Retrieves all active scrape targets from Prometheus with their health (up/down).
     /// </summary>
     public async Task<KubernetesOperationResult<List<ScrapeTarget>>> GetScrapeTargetsAsync(
-        Guid clusterId, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<ScrapeTarget>>.Failure(error!);
 
         return await WithServiceAsync<List<ScrapeTarget>>(
-            info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+            info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             async (http, baseUrl, token) =>
             {
                 string json = await http.GetStringAsync($"{baseUrl}/api/v1/targets?state=active", token);
@@ -1208,13 +1208,13 @@ public class PrometheusService(
     /// Retrieves all alerting rules from Prometheus with their current evaluation state.
     /// </summary>
     public async Task<KubernetesOperationResult<List<AlertRule>>> GetAlertRulesAsync(
-        Guid clusterId, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<AlertRule>>.Failure(error!);
 
         return await WithServiceAsync<List<AlertRule>>(
-            info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+            info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             async (http, baseUrl, token) =>
             {
                 string json = await http.GetStringAsync($"{baseUrl}/api/v1/rules?type=alert", token);

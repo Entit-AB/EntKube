@@ -168,6 +168,13 @@
 </div>
 
 @code {
+    /// <summary>
+    /// Whose cluster this is. Every metric read goes through PrometheusService, which resolves the
+    /// cluster tenant-first — a panel holding only a cluster id could name any cluster in the
+    /// installation.
+    /// </summary>
+    [Parameter] public required Guid TenantId { get; set; }
+
     [Parameter] public Guid ClusterId { get; set; }
     [Parameter] public PrometheusService PrometheusService { get; set; } = null!;
 
@@ -206,7 +213,7 @@
     private async Task FetchAlertsAsync()
     {
         KubernetesOperationResult<List<AlertInfo>> result =
-            await PrometheusService.GetAlertsAsync(ClusterId);
+            await PrometheusService.GetAlertsAsync(TenantId, ClusterId);
 
         if (result.IsSuccess)
         {
@@ -229,7 +236,7 @@
         StateHasChanged();
 
         KubernetesOperationResult<List<SilenceInfo>> result =
-            await PrometheusService.GetSilencesAsync(ClusterId);
+            await PrometheusService.GetSilencesAsync(TenantId, ClusterId);
 
         if (result.IsSuccess)
         {
@@ -278,7 +285,7 @@
         ];
 
         KubernetesOperationResult result = await PrometheusService.CreateSilenceAsync(
-            ClusterId,
+            TenantId, ClusterId,
             silenceComment,
             "entkube-user",
             TimeSpan.FromHours(silenceDurationHours),
