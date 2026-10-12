@@ -130,7 +130,24 @@ public class CatalogContractAdoptionTests
     /// "minio-operator" are two — the same asymmetry that left the other seven
     /// "is this operator installed" callers alone.</para>
     ///
-    private const int BaselineQueries = 23;
+    /// <para><b>21.</b> <c>HeadscaleCertSyncService</c> 1 → 0 and <c>HeadscaleService</c> 3 → 2,
+    /// because the sweep decision (§4.0.1.2) gives a sweep a tenant to ask with — a lookup that
+    /// selected cluster ids across the whole installation became the tenant's own installs from
+    /// the contract.</para>
+    ///
+    /// <para><b>⚠️ This constant has now been wrong on main TWICE, from the same cause.</b> Two
+    /// open PRs each lowered it, their conflict was resolved by taking one side, and the result
+    /// claimed a number the tree did not have — 202 the first time (#171), 23 the second. Both
+    /// times the slack half of this ratchet was the only thing that noticed, and both times the
+    /// measured combination had been written in the PR body beforehand.</para>
+    ///
+    /// <para>So the remedy is not better prose on the PR. <b>Do not leave two branches open that
+    /// both lower the same baseline.</b> A ratchet constant is a claim about the whole tree, so
+    /// two independent decrements have no correct merge — they have to be re-measured, which is
+    /// work someone has to notice is needed. Serialise instead: land one, rebase the other. The
+    /// author controls that; the merger cannot be expected to.</para>
+    ///
+    private const int BaselineQueries = 21;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,
