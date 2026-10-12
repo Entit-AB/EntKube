@@ -104,7 +104,33 @@ public class CatalogContractAdoptionTests
     /// before measuring. Only <c>StalwartService.ApplyConfigurationAsync</c>'s list had a tenant
     /// and so actually moved.</para>
     ///
-    private const int BaselineQueries = 27;
+    /// <para><b>23, and this is where the contract work stops being mechanical.</b>
+    /// <c>StorageService</c> 6→2 took the last four sites that had a tenant in scope. Of the 23
+    /// left, <b>exactly one</b> has a tenant — <c>TailscaleService.GetOperatorsAsync</c>, blocked
+    /// for a different reason (see above: its DTO hands the entity to a page that reads
+    /// <c>Component.Cluster.Kubeconfig</c> off it). The other 22 have no tenant in scope, so
+    /// <c>ICatalogApi</c> cannot serve them whatever is added to it.</para>
+    ///
+    /// <para>87 → 23 is as far as this ratchet goes without answering who a background sweep acts
+    /// as. That is the same wall <see cref="CustodyTriageTests"/> reached at three, and it is one
+    /// question, not two: <c>AlertSyncService</c>, <c>ResourceUsageCollectorService</c> and
+    /// <c>HeadscaleCertSyncService</c> appear in both counts because a sweep that reaches every
+    /// cluster in the installation needs a tenant for the contract <em>and</em> for the
+    /// credential.</para>
+    ///
+    /// <para><c>RegisterMinioTenantAsync</c> matched <c>c.ClusterId == clusterId</c> with no
+    /// tenant predicate, and its one caller is a page offering the tenant's own clusters — so,
+    /// like <c>StalwartDnsService</c> before it, this was scoping that lived in the caller rather
+    /// than a reachable hole. The method itself had no guarantee, since <c>tenantId</c> and
+    /// <c>clusterId</c> are independent parameters of a public method; it has one now. Worth
+    /// having, not a vulnerability fixed.</para>
+    ///
+    /// <para><c>IsMinioAvailableAsync</c> and <c>GetCubeFSComponentsAsync</c> keep their predicates
+    /// in memory, because the contract's find-by-key takes <em>one</em> key and "minio" and
+    /// "minio-operator" are two — the same asymmetry that left the other seven
+    /// "is this operator installed" callers alone.</para>
+    ///
+    private const int BaselineQueries = 23;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

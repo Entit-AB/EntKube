@@ -62,7 +62,7 @@ public class StorageBindingSyncTests : IDisposable
 
         sut = new StorageService(
             testDb.Factory, vault, s3, keystone, relay, tunnel, agents, k8s.Object,
-            new ClusterClientFactory(testDb.Factory, k8s.Object), clients);
+            new ClusterClientFactory(testDb.Factory, k8s.Object), new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), clients);
     }
 
     public void Dispose()
