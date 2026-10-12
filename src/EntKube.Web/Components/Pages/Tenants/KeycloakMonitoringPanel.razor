@@ -208,6 +208,13 @@ else
 
 @code {
     /// <summary>The Kubernetes cluster whose Prometheus is queried.</summary>
+    /// <summary>
+    /// Whose cluster this is. PrometheusService resolves the cluster tenant-first, so without
+    /// this the panel could only name a cluster by id — which answered about any cluster in the
+    /// installation.
+    /// </summary>
+    [Parameter] public required Guid TenantId { get; set; }
+
     [Parameter] public required Guid ClusterId { get; set; }
 
     /// <summary>Namespace the Keycloak release runs in — the only thing that scopes its series.</summary>
@@ -249,7 +256,7 @@ else
         try
         {
             KubernetesOperationResult<KeycloakMetricsSummary> result =
-                await PrometheusService.GetKeycloakMetricsAsync(ClusterId, InstanceName, Namespace);
+                await PrometheusService.GetKeycloakMetricsAsync(TenantId, ClusterId, InstanceName, Namespace);
 
             if (result.IsSuccess) metrics = result.Data;
             else error = result.Error;
@@ -306,7 +313,7 @@ else
         {
             KubernetesOperationResult<ScrapeDiagnosis> result =
                 await PrometheusService.DiagnoseServiceMonitorScrapeAsync(
-                    ClusterId, Namespace, "keycloak",
+                    TenantId, ClusterId, Namespace, "keycloak",
                     "Set serviceMonitor.enabled to true in the component's values "
                     + "(Cluster → Components → keycloak → Values), then Save & Apply.");
 

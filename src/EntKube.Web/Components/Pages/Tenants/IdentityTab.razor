@@ -1948,7 +1948,7 @@ else if (selectedKeycloak is not null)
             {
                 @* Namespace is nullable on the component; installs made through the catalog use
                    the entry's default, which is what the metrics selector needs. *@
-                <KeycloakMonitoringPanel ClusterId="monitored.ClusterId"
+                <KeycloakMonitoringPanel TenantId="TenantId" ClusterId="monitored.ClusterId"
                                          Namespace="@(string.IsNullOrWhiteSpace(monitored.Namespace) ? "keycloak" : monitored.Namespace)"
                                          InstanceName="@selectedKeycloak.DisplayName" />
             }

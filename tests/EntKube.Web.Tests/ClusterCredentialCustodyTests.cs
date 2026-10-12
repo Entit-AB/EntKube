@@ -161,7 +161,16 @@ public class ClusterCredentialCustodyTests
     /// <para><c>PrometheusService</c> is at 16 of its original 20. Thirteen methods remain on the
     /// old by-cluster-id path; each moves with its callers, one step at a time.</para>
     ///
-    private const int BaselineOccurrences = 179;
+    /// <para><b>176 — step 3, the two monitoring panels.</b>
+    /// <c>GetRabbitMQMetricsAsync</c>, <c>GetKeycloakMetricsAsync</c> and the
+    /// <c>DiagnoseServiceMonitorScrapeAsync</c> they share. <c>PrometheusService</c> is at 13 of
+    /// its original 20, with nine callers of the old by-cluster-id resolution left.</para>
+    ///
+    /// <para>Three steps in, the rate is steady and so is the method: 183 → 181 → 179 → 176,
+    /// each step compiling and tested, after one attempt at all seventeen methods at once that never
+    /// compiled at all.</para>
+    ///
+    private const int BaselineOccurrences = 176;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.

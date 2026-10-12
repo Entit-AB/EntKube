@@ -1227,13 +1227,13 @@ public class PrometheusService(
     /// Retrieves RabbitMQ metrics from Prometheus (via RabbitMQ Prometheus plugin).
     /// </summary>
     public async Task<KubernetesOperationResult<RabbitMQMetricsSummary>> GetRabbitMQMetricsAsync(
-        Guid clusterId, string rabbitMQName, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string rabbitMQName, CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<RabbitMQMetricsSummary>.Failure(error!);
 
         return await WithServiceAsync<RabbitMQMetricsSummary>(
-            info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+            info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             async (http, baseUrl, token) =>
             {
                 Dictionary<string, List<PrometheusMetricResult>> r =
@@ -1532,13 +1532,14 @@ public class PrometheusService(
     /// identity label — they are scoped by the namespace the release was installed into.
     /// </summary>
     public async Task<KubernetesOperationResult<KeycloakMetricsSummary>> GetKeycloakMetricsAsync(
-        Guid clusterId, string instanceName, string keycloakNamespace, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string instanceName, string keycloakNamespace,
+        CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<KeycloakMetricsSummary>.Failure(error!);
 
         return await WithServiceAsync<KeycloakMetricsSummary>(
-            info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+            info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             (http, baseUrl, token) => QueryKeycloakMetricsAsync(http, baseUrl, instanceName, keycloakNamespace, token),
             $"Keycloak metrics for {instanceName}", ct);
     }
@@ -1556,15 +1557,15 @@ public class PrometheusService(
     /// <param name="monitorNameHint">Substring identifying the workload's own ServiceMonitor.</param>
     /// <param name="absentRemedy">What to tell the operator when no monitor exists at all.</param>
     public async Task<KubernetesOperationResult<ScrapeDiagnosis>> DiagnoseServiceMonitorScrapeAsync(
-        Guid clusterId, string workloadNamespace, string monitorNameHint, string absentRemedy,
-        CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string workloadNamespace, string monitorNameHint,
+        string absentRemedy, CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<ScrapeDiagnosis>.Failure(error!);
 
         try
         {
-            Kubernetes k8s = CreateK8sClient(info.Kubeconfig);
+            Kubernetes k8s = info.Cluster.GetPooledSdkClient();
 
             JsonArray monitors = await ListCustomObjectsAsync(
                 k8s, "monitoring.coreos.com", "v1", workloadNamespace, "servicemonitors", ct);
