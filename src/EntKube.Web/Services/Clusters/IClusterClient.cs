@@ -130,6 +130,22 @@ public interface IClusterClient
     /// ordinary way of working.</para>
     /// </summary>
     k8s.Kubernetes CreateSdkClient();
+
+    /// <summary>
+    /// A <b>pooled</b> SDK client for this cluster — the same object across calls, rebuilt
+    /// periodically so a rotated credential is picked up.
+    ///
+    /// <para><b>Why this exists beside <see cref="CreateSdkClient"/>.</b> That one builds a fresh
+    /// client, and a fresh client means a fresh <c>HttpClient</c> and a fresh TLS handshake.
+    /// <c>PrometheusService</c> reads metrics through the apiserver's pod proxy once per dashboard
+    /// tile, and its own comment records that a single extra round-trip there was "a fixed WAN
+    /// latency added to every tile" — so converting it to the unpooled client would have been a
+    /// regression that every test passes.</para>
+    ///
+    /// <para>The pool itself is not new: <c>KubernetesProxyClientPool</c> already existed, keyed
+    /// on the credential. What is new is that reaching it no longer requires holding one.</para>
+    /// </summary>
+    k8s.Kubernetes GetPooledSdkClient();
 }
 
 /// <summary>

@@ -12,7 +12,8 @@ namespace EntKube.Web.Services.Clusters;
 /// changes is who has to be holding the kubeconfig to ask.</para>
 /// </summary>
 public sealed class ClusterClient(
-    IKubernetesClientFactory inner, Guid clusterId, string clusterName, string kubeconfig)
+    IKubernetesClientFactory inner, Guid clusterId, string clusterName, string kubeconfig,
+    EntKube.Web.Services.KubernetesProxyClientPool? pool = null)
     : IClusterClient
 {
     public Guid ClusterId => clusterId;
@@ -112,6 +113,18 @@ public sealed class ClusterClient(
     /// The same four lines that were copied into ten services, in one place. The kubeconfig is
     /// read from here rather than passed in, which is the whole point.
     /// </summary>
+    /// <summary>
+    /// The pooled client, from the pool that already existed for exactly this.
+    ///
+    /// <para><b>Falls back to an unpooled client when no pool was supplied.</b> The application
+    /// always supplies one — <c>KubernetesProxyClientPool</c> is a registered singleton — so the
+    /// fallback exists for the forty-seven test fixtures that construct this factory directly and
+    /// do not care about pooling. Stated rather than silent, because "pooled" that quietly is not
+    /// would hide exactly the per-tile latency this op was added to protect.</para>
+    /// </summary>
+    public k8s.Kubernetes GetPooledSdkClient()
+        => pool is null ? CreateSdkClient() : pool.Get(kubeconfig);
+
     public k8s.Kubernetes CreateSdkClient()
     {
         using MemoryStream stream = new(System.Text.Encoding.UTF8.GetBytes(kubeconfig));
@@ -131,7 +144,8 @@ public sealed class ClusterClient(
 /// </summary>
 public sealed class ClusterClientFactory(
     IDbContextFactory<FleetDbContext> dbFactory,
-    IKubernetesClientFactory inner) : IClusterClientFactory
+    IKubernetesClientFactory inner,
+    EntKube.Web.Services.KubernetesProxyClientPool? pool = null) : IClusterClientFactory
 {
     public async Task<IClusterClient?> ForAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
@@ -147,6 +161,6 @@ public sealed class ClusterClientFactory(
         // further in, with a message naming neither.
         return cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig)
             ? null
-            : new ClusterClient(inner, cluster.Id, cluster.Name, cluster.Kubeconfig);
+            : new ClusterClient(inner, cluster.Id, cluster.Name, cluster.Kubeconfig, pool);
     }
 }

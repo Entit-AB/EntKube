@@ -427,6 +427,8 @@ public class CnpgDatabaseSize
 public class PrometheusService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     KubernetesProxyClientPool clientPool,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     EntKube.Web.Services.Telemetry.PromQueryCache queryCache,
     ILogger<PrometheusService> logger)
 {
@@ -951,13 +953,13 @@ public class PrometheusService(
     /// backend count, active queries, and per-database sizes.
     /// </summary>
     public async Task<KubernetesOperationResult<CnpgMetricsSummary>> GetCnpgClusterMetricsAsync(
-        Guid clusterId, string cnpgClusterName, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string cnpgClusterName, CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<CnpgMetricsSummary>.Failure(error!);
 
         return await WithServiceAsync<CnpgMetricsSummary>(
-            info.Kubeconfig, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+            info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
             async (http, baseUrl, token) =>
             {
                 string lagJson = await http.GetStringAsync(
@@ -1030,14 +1032,15 @@ public class PrometheusService(
     /// what the configuration implies.
     /// </summary>
     public async Task<KubernetesOperationResult<CnpgScrapeDiagnosis>> DiagnoseCnpgScrapeAsync(
-        Guid clusterId, string cnpgClusterName, string cnpgNamespace, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string cnpgClusterName, string cnpgNamespace,
+        CancellationToken ct = default)
     {
-        var (info, error) = await ResolvePrometheusInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<CnpgScrapeDiagnosis>.Failure(error!);
 
         try
         {
-            Kubernetes k8s = CreateK8sClient(info.Kubeconfig);
+            Kubernetes k8s = info.Cluster.GetPooledSdkClient();
 
             JsonNode? podMonitor = await FindCnpgPodMonitorAsync(k8s, cnpgNamespace, cnpgClusterName, ct);
             JsonNode? prometheus = await FindPrometheusResourceAsync(k8s, ct);
@@ -1978,11 +1981,22 @@ public class PrometheusService(
     ///
     /// An explicit Configuration JSON always wins over the derived defaults.
     /// </summary>
+    /// <summary>The same derivation for a component that arrived through <c>ICatalogApi</c>.</summary>
+    public static PrometheusConfig GetPrometheusConfig(
+        EntKube.Contracts.Catalog.InstalledComponent component)
+        => GetPrometheusConfig(
+            component.Name, component.ReleaseName, component.Namespace, component.Configuration);
+
     public static PrometheusConfig GetPrometheusConfig(ClusterComponent component)
+        => GetPrometheusConfig(
+            component.Name, component.ReleaseName, component.Namespace, component.Configuration);
+
+    private static PrometheusConfig GetPrometheusConfig(
+        string componentName, string? componentRelease, string? componentNamespace, string? configuration)
     {
         // Derive defaults from component metadata so they work regardless of release name.
-        string releaseName = component.ReleaseName ?? component.Name;
-        string ns          = component.Namespace ?? "monitoring";
+        string releaseName = componentRelease ?? componentName;
+        string ns          = componentNamespace ?? "monitoring";
 
         PrometheusConfig derived = new()
         {
@@ -1991,13 +2005,13 @@ public class PrometheusService(
             AlertmanagerServiceName = $"{releaseName}-alertmanager",
         };
 
-        if (string.IsNullOrWhiteSpace(component.Configuration))
+        if (string.IsNullOrWhiteSpace(configuration))
             return derived;
 
         try
         {
             PrometheusConfig? explicit_ = JsonSerializer.Deserialize<PrometheusConfig>(
-                component.Configuration,
+                configuration,
                 new JsonSerializerOptions { PropertyNameCaseInsensitive = true });
 
             if (explicit_ is null) return derived;
@@ -2084,6 +2098,41 @@ public class PrometheusService(
 
     private sealed record ResolvedPrometheusInfo(string Kubeconfig, PrometheusConfig Config);
 
+    /// <summary>
+    /// A prometheus this tenant may reach: the cluster as a seam client, and where on it to look.
+    ///
+    /// <para><b>Why there are two of these.</b> <see cref="ResolvedPrometheusInfo"/> carries a
+    /// <c>string Kubeconfig</c> and is reached by cluster id alone — seventeen public methods
+    /// still use it. Converting all seventeen at once is what I tried and abandoned: every
+    /// signature threaded surfaces callers that were not counted, and the error count went up as
+    /// often as down. So this exists beside it and methods move across one at a time, each one
+    /// compiling and tested. When the last caller of the old one goes, both it and the
+    /// <c>clientPool</c> field go with it.</para>
+    /// </summary>
+    private sealed record ReachablePrometheus(EntKube.Web.Services.Clusters.IClusterClient Cluster, PrometheusConfig Config);
+
+    /// <summary>
+    /// The tenant-scoped resolution. The old one is <c>c.Id == clusterId</c> with no tenant
+    /// predicate, which is why a cluster id alone answered about any cluster in the installation.
+    /// </summary>
+    private async Task<(ReachablePrometheus? Info, string? Error)> ResolveReachableAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct)
+    {
+        EntKube.Web.Services.Clusters.IClusterClient? cluster = await clusterClients.ForAsync(tenantId, clusterId, ct);
+
+        if (cluster is null)
+            return (null, "Cluster not found for this tenant, or it has no kubeconfig configured.");
+
+        EntKube.Contracts.Catalog.InstalledComponent? prometheusComponent =
+            (await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct))
+            .FirstOrDefault(c => c.Name.Contains("prometheus", StringComparison.OrdinalIgnoreCase));
+
+        if (prometheusComponent is null)
+            return (null, "No prometheus component found on this cluster.");
+
+        return (new ReachablePrometheus(cluster, GetPrometheusConfig(prometheusComponent)), null);
+    }
+
     private async Task<(ResolvedPrometheusInfo? Info, string? Error)> ResolvePrometheusInfoAsync(
         Guid clusterId, CancellationToken ct)
     {
@@ -2121,6 +2170,24 @@ public class PrometheusService(
     /// Requires get permission on pods/proxy in the pod's namespace, which is present
     /// in any standard cluster-admin or operator kubeconfig.
     /// </summary>
+    /// <summary>
+    /// The same proxy round-trip for a cluster reached through the seam. The <c>string
+    /// kubeconfig</c> overload below still serves the fifteen methods not yet converted; it goes
+    /// when its last caller does.
+    /// </summary>
+    private async Task<KubernetesOperationResult<T>> WithServiceAsync<T>(
+        EntKube.Web.Services.Clusters.IClusterClient cluster,
+        string ns,
+        string svcName,
+        int svcPort,
+        Func<HttpClient, string, CancellationToken, Task<T>> action,
+        string logContext,
+        CancellationToken ct,
+        bool probeHealthEndpoint = true)
+        => await WithServiceCoreAsync(
+            cluster.GetPooledSdkClient(), ns, svcName, svcPort, action, logContext, ct,
+            probeHealthEndpoint);
+
     private async Task<KubernetesOperationResult<T>> WithServiceAsync<T>(
         string kubeconfig,
         string ns,
@@ -2130,11 +2197,22 @@ public class PrometheusService(
         string logContext,
         CancellationToken ct,
         bool probeHealthEndpoint = true)
+        => await WithServiceCoreAsync(
+            CreateK8sClient(kubeconfig), ns, svcName, svcPort, action, logContext, ct,
+            probeHealthEndpoint);
+
+    private async Task<KubernetesOperationResult<T>> WithServiceCoreAsync<T>(
+        Kubernetes k8s,
+        string ns,
+        string svcName,
+        int svcPort,
+        Func<HttpClient, string, CancellationToken, Task<T>> action,
+        string logContext,
+        CancellationToken ct,
+        bool probeHealthEndpoint)
     {
         try
         {
-            Kubernetes k8s = CreateK8sClient(kubeconfig);
-
             V1EndpointAddress? addr = await FindEndpointAddressAsync(k8s, ns, svcName, svcPort, ct);
             if (addr?.TargetRef is null)
                 throw new InvalidOperationException(

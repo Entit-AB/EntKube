@@ -7,6 +7,7 @@ using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 
 namespace EntKube.Web.Tests;
 
@@ -58,6 +59,8 @@ public class CustomerTabRenderTests : BunitContext, IDisposable
         Services.AddSingleton(new PrometheusService(
             testDb.Factory,
             new KubernetesProxyClientPool(NullLogger<KubernetesProxyClientPool>.Instance),
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, new Mock<IKubernetesClientFactory>().Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             new PromQueryCache(),
             NullLogger<PrometheusService>.Instance));
     }

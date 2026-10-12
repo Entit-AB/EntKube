@@ -5,6 +5,7 @@ using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Moq;
 
 namespace EntKube.Web.Tests;
 
@@ -34,6 +35,8 @@ public class PrometheusServiceTests : IDisposable
         sut = new PrometheusService(
             testDb.Factory,
             new KubernetesProxyClientPool(NullLogger<KubernetesProxyClientPool>.Instance),
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, new Mock<IKubernetesClientFactory>().Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             new PromQueryCache(),
             NullLogger<PrometheusService>.Instance);
     }
@@ -805,5 +808,73 @@ public class PrometheusServiceTests : IDisposable
         // "heap used" tile silently includes metaspace and code cache.
         PrometheusService.BuildKeycloakQueries("sso")["heapUsed"].Should().Contain("area=\"heap\"");
         PrometheusService.BuildKeycloakQueries("sso")["heapComm"].Should().Contain("area=\"heap\"");
+    }
+
+    // ──────── The refusal the tenant-aware path buys ────────
+
+    /// <summary>
+    /// A tenant asking about a cluster that is not theirs is refused.
+    ///
+    /// <para><b>This could not be asserted before.</b> Every method on this service took a cluster
+    /// id and no tenant, and the single resolution point was <c>c.Id == clusterId</c> — so there
+    /// was nothing to compare the cluster against and a crafted id answered about any cluster in
+    /// the installation. <c>GetCnpgClusterMetricsAsync</c> is the first method moved onto the
+    /// tenant-scoped path; fifteen still take the old one, which is why this is one test and not
+    /// seventeen.</para>
+    ///
+    /// <para>The sibling assertion below is what stops this passing for the wrong reason: the same
+    /// cluster, asked by its own tenant, gets past the resolution and fails later — on the missing
+    /// prometheus component rather than on the tenant.</para>
+    /// </summary>
+    [Fact]
+    public async Task GetCnpgClusterMetricsAsync_AnotherTenantsCluster_IsRefused()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedReachableClusterAsync();
+        Guid stranger = Guid.NewGuid();
+        db.Set<Tenant>().Add(new Tenant { Id = stranger, Name = "Stranger", Slug = $"s-{stranger:N}" });
+        await db.SaveChangesAsync();
+
+        KubernetesOperationResult<CnpgMetricsSummary> result =
+            await sut.GetCnpgClusterMetricsAsync(stranger, clusterId, "db-1");
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("not found for this tenant",
+            "the seam refuses before anything is asked of the cluster");
+    }
+
+    [Fact]
+    public async Task GetCnpgClusterMetricsAsync_OwnCluster_GetsPastTheTenantCheck()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedReachableClusterAsync();
+
+        KubernetesOperationResult<CnpgMetricsSummary> result =
+            await sut.GetCnpgClusterMetricsAsync(tenantId, clusterId, "db-1");
+
+        result.IsSuccess.Should().BeFalse("there is no prometheus component on this cluster");
+        result.Error.Should().Contain("No prometheus component",
+            "which is a different refusal from the tenant one — if both said the same thing, the "
+            + "test above would prove nothing");
+    }
+
+    /// <summary>A tenant with one cluster whose kubeconfig is in the vault.</summary>
+    private async Task<(Guid TenantId, Guid ClusterId)> SeedReachableClusterAsync()
+    {
+        Tenant tenant = new() { Id = Guid.NewGuid(), Name = "Owner", Slug = $"owner-{Guid.NewGuid():N}" };
+        Data.Environment env = new() { Id = Guid.NewGuid(), TenantId = tenant.Id, Name = "prod" };
+        KubernetesCluster cluster = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenant.Id, EnvironmentId = env.Id,
+            Name = "prod-cluster", ApiServerUrl = "https://k8s.example.com",
+        };
+
+        db.Set<Tenant>().Add(tenant);
+        db.Set<Data.Environment>().Add(env);
+        db.KubernetesClusters.Add(cluster);
+        await db.SaveChangesAsync();
+
+        await vaultService.InitializeVaultAsync(tenant.Id);
+        await testDb.SeedKubeconfigAsync(vaultService, tenant.Id, cluster.Id, TestKubeconfig.Valid);
+
+        return (tenant.Id, cluster.Id);
     }
 }
