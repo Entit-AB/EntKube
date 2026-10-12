@@ -37,7 +37,7 @@ public class MinioBucketInfo
 /// External providers are registered manually — the service stores metadata
 /// in StorageLink entities and credentials in the VaultSecret table.
 /// </summary>
-public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, OpenStackKeystoneClient keystone, ClusterEgressRelay egressRelay, ClusterEgressTunnel egressTunnel, AgentRegistry agentRegistry, IKubernetesClientFactory k8sFactory, EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients, StorageLinkClientFactory storageClientFactory, IConfiguration? configuration = null)
+public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, OpenStackKeystoneClient keystone, ClusterEgressRelay egressRelay, ClusterEgressTunnel egressTunnel, AgentRegistry agentRegistry, IKubernetesClientFactory k8sFactory, EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients, EntKube.Contracts.Catalog.ICatalogApi catalog, StorageLinkClientFactory storageClientFactory, IConfiguration? configuration = null)
 {
     // CubeFS service coordinates for in-cluster access, overridable per deployment via config
     // (the CubeFS Helm chart's service names/ports can differ). Defaults match the chart's
@@ -56,27 +56,25 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        return await db.ClusterComponents
-            .AnyAsync(c => c.Cluster.TenantId == tenantId
-                && (c.Name == "minio" || c.Name == "minio-operator")
-                && c.Status == ComponentStatus.Installed, ct);
+        // Two catalog keys mean two names, and the contract's find-by-key takes one — so the
+        // predicate stays here, in memory, over the tenant's own components. Which is the shape
+        // the other seven "is this operator installed" callers already use.
+        return (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+            .Any(c => (c.Name == "minio" || c.Name == "minio-operator")
+                && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed);
     }
 
     /// <summary>
     /// Lists installed CubeFS components across the tenant's clusters, so the UI can offer
     /// them as the target for provisioning an S3 bucket on the CubeFS object gateway.
     /// </summary>
-    public async Task<List<ClusterComponent>> GetCubeFSComponentsAsync(Guid tenantId, CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        return await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .Where(c => c.Cluster.TenantId == tenantId
-                && c.Name == "cubefs"
-                && c.Status == ComponentStatus.Installed)
-            .OrderBy(c => c.Cluster.Name)
-            .ToListAsync(ct);
-    }
+    public async Task<List<EntKube.Contracts.Catalog.InstalledComponent>> GetCubeFSComponentsAsync(Guid tenantId, CancellationToken ct = default)
+        =>
+        [
+            .. (await catalog.FindComponentsAsync(tenantId, "cubefs", ct))
+                .Where(c => c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed)
+                .OrderBy(c => c.ClusterName, StringComparer.OrdinalIgnoreCase),
+        ];
 
     // ──────── MinIO Discovery ────────
 
@@ -389,9 +387,11 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         // IsMinioRegistered can distinguish tenants on different clusters by cluster identity.
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent? component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.ClusterId == clusterId
-                && (c.Name == "minio-operator" || c.Name == "minio"), ct);
+        // Was `c.ClusterId == clusterId` with no tenant predicate, so any cluster's MinIO
+        // component could be attached to this tenant's link. The contract resolves the cluster
+        // tenant-first; the two-name predicate stays in memory as above.
+        EntKube.Contracts.Catalog.InstalledComponent? component = (await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct))
+            .FirstOrDefault(c => c.Name is "minio-operator" or "minio");
 
         if (component is not null)
         {
@@ -616,14 +616,8 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         Guid tenantId, Guid environmentId, Guid cubefsComponentId, string bucketName,
         string? displayName = null, string? notes = null, CancellationToken ct = default)
     {
-        ClusterComponent component;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
-        {
-            component = await db.ClusterComponents
-                .Include(c => c.Cluster)
-                .FirstOrDefaultAsync(c => c.Id == cubefsComponentId && c.Cluster.TenantId == tenantId, ct)
-                ?? throw new InvalidOperationException("CubeFS component not found.");
-        }
+        EntKube.Contracts.Catalog.InstalledComponent component = await catalog.GetComponentAsync(tenantId, cubefsComponentId, ct)
+            ?? throw new InvalidOperationException("CubeFS component not found.");
 
         EntKube.Web.Services.Clusters.IClusterClient clusterAccess =
             await clusterClients.ForAsync(tenantId, component.ClusterId, ct)

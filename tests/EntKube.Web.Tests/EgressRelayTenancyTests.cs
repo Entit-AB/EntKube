@@ -65,6 +65,7 @@ public class EgressRelayTenancyTests : IDisposable
             testDb.Factory, vaultService, new OpenStackS3Service(vaultService, httpFactory, keystone),
             keystone, relay, tunnel, agents, k8s.Object,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             new StorageLinkClientFactory(vaultService, testDb.Factory, httpFactory, keystone));
     }
 
