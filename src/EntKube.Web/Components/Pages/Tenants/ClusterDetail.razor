@@ -2089,7 +2089,7 @@ else if (section == "components")
             return;
         }
 
-        gatewayApiCrdsPresent = await ScanService.CheckGatewayApiCrdsAsync(Cluster);
+        gatewayApiCrdsPresent = await ScanService.CheckGatewayApiCrdsAsync(TenantId, Cluster.Id);
     }
 
     private Task CheckCertManagerGatewayApiIfNeededAsync()
@@ -2124,8 +2124,8 @@ else if (section == "components")
 
         try
         {
-            discoveredReleases = await ScanService.ScanHelmReleasesAsync(Cluster);
-            discoveredManifests = await ScanService.ScanManifestComponentsAsync(Cluster);
+            discoveredReleases = await ScanService.ScanHelmReleasesAsync(TenantId, Cluster.Id);
+            discoveredManifests = await ScanService.ScanManifestComponentsAsync(TenantId, Cluster.Id);
         }
         catch (Exception ex)
         {
@@ -2211,7 +2211,7 @@ else if (section == "components")
     {
         try
         {
-            await ScanService.ImportReleaseAsync(Cluster, release);
+            await ScanService.ImportReleaseAsync(TenantId, Cluster, release);
             release.AlreadyTracked = true;
             await LoadComponents();
         }
@@ -2230,7 +2230,7 @@ else if (section == "components")
 
         try
         {
-            await ScanService.ImportAllNewReleasesAsync(Cluster, discoveredReleases);
+            await ScanService.ImportAllNewReleasesAsync(TenantId, Cluster, discoveredReleases);
             await LoadComponents();
         }
         catch (Exception ex)

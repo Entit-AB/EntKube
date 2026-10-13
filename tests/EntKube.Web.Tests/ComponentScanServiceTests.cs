@@ -54,7 +54,9 @@ public class ComponentScanServiceTests : IDisposable
             dbFactory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory),
             vaultService, new EntKube.Web.Modules.Api.CatalogApi(dbFactory));
-        sut = new ComponentScanService(dbFactory, vaultService, kyvernoService, rabbitMQService);
+        sut = new ComponentScanService(
+            dbFactory, vaultService, kyvernoService, rabbitMQService,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory));
 
         // Seed tenant, environment, and cluster.
 
@@ -198,7 +200,7 @@ public class ComponentScanServiceTests : IDisposable
 
         // Act
 
-        ClusterComponent result = await sut.ImportReleaseAsync(testCluster, release);
+        ClusterComponent result = await sut.ImportReleaseAsync(tenantId, testCluster, release);
 
         // Assert
 
@@ -247,7 +249,7 @@ public class ComponentScanServiceTests : IDisposable
 
         // Act
 
-        ClusterComponent result = await sut.ImportReleaseAsync(testCluster, release);
+        ClusterComponent result = await sut.ImportReleaseAsync(tenantId, testCluster, release);
 
         // Assert — should update existing, not create new.
 
@@ -275,7 +277,7 @@ public class ComponentScanServiceTests : IDisposable
 
         // Act
 
-        int imported = await sut.ImportAllNewReleasesAsync(testCluster, releases);
+        int imported = await sut.ImportAllNewReleasesAsync(tenantId, testCluster, releases);
 
         // Assert — only non-tracked releases should be imported.
 
@@ -404,4 +406,28 @@ public class ComponentScanServiceTests : IDisposable
         [System.Text.Json.Serialization.JsonPropertyName("last_deployed")]
         public string? LastDeployed { get; set; }
     }
+
+    // ──────── The refusal the tenant parameter buys ────────
+
+    /// <summary>
+    /// A stranger scanning this cluster finds nothing, rather than its inventory.
+    ///
+    /// <para>These scans are reads, but they are the most revealing reads in the product: every
+    /// helm release in every namespace, every CRD, every route. They took a
+    /// <c>KubernetesCluster</c> row and used the kubeconfig on it, so whoever could name a
+    /// cluster could enumerate it.</para>
+    ///
+    /// <para>Empty rather than an error, deliberately: that is what these methods already did for
+    /// a cluster with no stored credential, and the callers render it as "nothing discovered".</para>
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_cluster_discovers_nothing()
+    {
+        Guid stranger = Guid.NewGuid();
+
+        (await sut.ScanHelmReleasesAsync(stranger, testCluster.Id)).Should().BeEmpty();
+        (await sut.ScanManifestComponentsAsync(stranger, testCluster.Id)).Should().BeEmpty();
+        (await sut.CheckGatewayApiCrdsAsync(stranger, testCluster.Id)).Should().BeFalse();
+    }
+
 }
