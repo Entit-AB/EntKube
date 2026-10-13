@@ -35,7 +35,7 @@
 }
 else
 {
-    <TraceExplorer ClusterId="@(Guid.Parse(selectedClusterId))" PresetTraceId="@PresetTraceId" />
+    <TraceExplorer TenantId="TenantId" ClusterId="@(Guid.Parse(selectedClusterId))" PresetTraceId="@PresetTraceId" />
 }
 
 @code {

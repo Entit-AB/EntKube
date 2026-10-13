@@ -487,9 +487,9 @@ shape the work turned out to have. Where it stands, against the figures this sec
 
 | measure | at the start | now |
 |---|---|---|
-| credential sites | 508 in 57 files | **92 in 27** |
+| credential sites | 508 in 57 files | **82 in 26** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
-| foreign reads of `ClusterComponents` | 87 | **14** |
+| foreign reads of `ClusterComponents` | 87 | **13** |
 | foreign *writes* to it | 22 | **0** |
 | own-process kubectl/helm outside the gate (§5.4) | 49 | **6** |
 | component lookups escaping their tenant | 14 | **0** |
@@ -497,9 +497,9 @@ shape the work turned out to have. Where it stands, against the figures this sec
 Those are six ratchets, each with a banked baseline and a second test that fails when the
 baseline carries slack, so none of them can drift back quietly.
 
-*Two columns count work that is open rather than merged: credential sites are 105 in 28 files on
-`main` and 92 in 27 with #195, and the tautological figure is 1 on `main` and 0 with #194 — which
-also takes the foreign reads from 15 to 14. Every other number is on `main` today.*
+*Two columns count work that is open rather than merged: credential sites are 82 in 26 files on
+`main` and **72 in 26** with #198, and the foreign reads are 14 on `main` and 13 with the routing
+change below. Every other number is on `main` today.*
 
 **The seam was the constraint far more often than the callers were.** §4.0.1 said the opposite —
 "the seam is not the constraint any more" — and that was wrong in a specific and repeatable way.
@@ -555,10 +555,13 @@ the object *could* be read, it described deleting a node that a drain leaves in 
 found by a test that drives the real factory with a cancelling sink, which is the only kind that
 can see this: a mocked factory asserts that a method was called, not that the gate agreed.
 
-**Sweeps.** §4.0.1.2's decision has been applied eight times (headscale certs, alert sync,
-resource usage, deployment sync, git sync, L4 route health, certificate distribution, and the
-rollout watcher). Two hazards recurred and are worth naming, because both produce a *silent*
-wrong answer:
+**Sweeps.** §4.0.1.2's decision has been applied nine times (headscale certs, alert sync,
+resource usage, deployment sync, git sync, L4 route health, certificate distribution, the rollout
+watcher, and the telemetry alert evaluator). The last of those is the clearest statement of what
+the decision is *for*: its rules carry a `TenantId` and it read that off the row it had just
+loaded, which is a tenant to label an incident with and not a tenant to ask as — every query
+beneath it was answered for whatever rows happened to be there. Two hazards recurred and are worth
+naming, because both produce a *silent* wrong answer:
 
 - **Flattening the pair.** A sweep that loops tenants to find work and then reduces it to a list
   of cluster or deployment ids has thrown away the thing it just established. The tenant has to
@@ -570,11 +573,25 @@ wrong answer:
   installed, a gateway address read as absent. Test it by asking stranger-then-owner; the other
   order passes against the bug.
 
-**What the remaining 92 are made of.** No decision blocks them any more. They are concentrated in
-`KubernetesOperationsService` (11, all in methods whose callers are pages that already have a
-tenant), `ComponentScanService` (10), `AppGovernanceService` (8), `KyvernoPolicyService` (6) and
-`TailscaleVpnTab.razor` (6 — a page reading a credential off a DTO, which needs the DTO changed
-first), then a tail of ones and twos. The six ungated CLI invocations are in five files and are
+**⚠️ An interface that is part of a shipped artifact cannot take an authorization parameter.**
+The telemetry routing layer was the last contract query's blocker, and it was not shaped the way it
+looked. It hands the viewers an `ILogBackend`/`ITraceQueryService`, so the move was apparently a
+`tenantId` on those methods — but both interfaces live in `EntKube.Telemetry` and are implemented
+**inside the in-cluster node**, where a tenant means nothing: a node serves one cluster and
+authenticates with a token. Every implementation but the management plane's would have ignored the
+parameter, and a management-plane authorization change would have become a change to the node's
+wire surface — which reaches no cluster until the chart's `appVersion` and both catalog pins are
+bumped and a new image ships. The tenant goes on a factory in front of the interface instead
+(`ITelemetryBackends.LogsFor(tenantId)`, the same shape as `IClusterClientFactory.ForAsync`). Worth
+checking, before the next cascade that ends at an interface, whether anything outside this process
+implements it.
+
+**What the remaining 82 are made of.** No decision blocks them any more. Re-measured
+rather than carried forward — the previous version of this list still named `ComponentScanService`
+with ten after it had reached zero: `KubernetesOperationsService` (11 on `main`, 1 with #198),
+`AppGovernanceService` (8), `TailscaleVpnTab.razor` (6 — a page reading a credential off a DTO,
+which needs the DTO changed first), `KyvernoPolicyService` (6), `KubernetesJitProvisioner` (6),
+`TelemetryNodeClient` (5), `ConnectivityGraphService` (4), then a tail of threes and below. The six ungated CLI invocations are in five files and are
 the same kind of problem: `ClusterEgressTunnel`, `DockerRegistryService`, `DriftDetectionService`,
 `ReleaseVolumeGuard` (2) and `VpnService`.
 

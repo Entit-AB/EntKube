@@ -44,11 +44,9 @@ public sealed class TelemetryAlertEvaluator(
         using ApplicationDbContext db = scope.ServiceProvider
             .GetRequiredService<IDbContextFactory<ApplicationDbContext>>().CreateDbContext();
 
-        List<TelemetryAlertRule> rules = await db.TelemetryAlertRules.Where(r => r.IsEnabled).ToListAsync(ct);
-        if (rules.Count == 0) return;
+        if (!await db.TelemetryAlertRules.AnyAsync(r => r.IsEnabled, ct)) return;
 
-        ITraceQueryService trace = scope.ServiceProvider.GetRequiredService<ITraceQueryService>();
-        ILogBackend log = scope.ServiceProvider.GetRequiredService<ILogBackend>();
+        ITelemetryBackends backends = scope.ServiceProvider.GetRequiredService<ITelemetryBackends>();
         IRumQueryService rum = scope.ServiceProvider.GetRequiredService<IRumQueryService>();
         IncidentDispatcher dispatcher = scope.ServiceProvider.GetRequiredService<IncidentDispatcher>();
 
@@ -65,50 +63,68 @@ public sealed class TelemetryAlertEvaluator(
         // Accumulate firing/resolved incidents per (tenant, cluster) to dispatch after the single save.
         Dictionary<(Guid Tenant, Guid Cluster), (List<AlertIncident> Firing, List<AlertIncident> Resolved)> byCluster = [];
 
-        foreach (TelemetryAlertRule rule in rules)
+        // One tenant at a time, outermost. The rules carry a TenantId and this used to read it off the
+        // row it had just loaded — which is a tenant to label an incident with, but not a tenant to ASK
+        // as: every query below it (the tenant's clusters, and now the telemetry backend's routing
+        // decision) would be answered for whatever rows happened to be there. Iterating tenants makes
+        // the tenant an input to the cycle, so a rule can only ever reach its own tenant's clusters and
+        // its own tenant's telemetry. Same shape as AlertSyncService and the seven other sweeps.
+        List<Guid> tenants = await db.Tenants.Select(x => x.Id).ToListAsync(ct);
+
+        foreach (Guid tenantId in tenants)
         {
-            List<Guid> clusters = await ResolveClustersAsync(db, rule, trace, log, ct);
+            List<TelemetryAlertRule> rules = await db.TelemetryAlertRules
+                .Where(r => r.IsEnabled && r.TenantId == tenantId).ToListAsync(ct);
+            if (rules.Count == 0) continue;
 
-            foreach (Guid clusterId in clusters)
+            ITraceQueryService trace = backends.TracesFor(tenantId);
+            ILogBackend log = backends.LogsFor(tenantId);
+
+            foreach (TelemetryAlertRule rule in rules)
             {
-                if (InMaintenance(rule.TenantId, clusterId)) continue;   // hold state during maintenance
+                List<Guid> clusters = await ResolveClustersAsync(db, tenantId, rule, trace, log, ct);
 
-                Evaluation ev = await EvaluateRuleAsync(rule, clusterId, now, trace, log, rum, ct);
-                if (ev.Status == EvalStatus.Indeterminate) continue;     // transient failure / no data — hold state
-
-                string fingerprint = $"telemetry:{rule.Id:N}:{clusterId:N}";
-                AlertIncident? inc = await db.AlertIncidents
-                    .FirstOrDefaultAsync(i => i.ClusterId == clusterId && i.Fingerprint == fingerprint, ct);
-
-                (List<AlertIncident> firing, List<AlertIncident> resolved) = Bucket(byCluster, rule.TenantId, clusterId);
-
-                if (ev.Status == EvalStatus.Firing)
+                foreach (Guid clusterId in clusters)
                 {
-                    if (inc is null)
+                    if (InMaintenance(tenantId, clusterId)) continue;        // hold state during maintenance
+
+                    Evaluation ev = await EvaluateRuleAsync(rule, clusterId, now, trace, log, rum, ct);
+                    if (ev.Status == EvalStatus.Indeterminate) continue;     // transient failure / no data — hold state
+
+                    string fingerprint = $"telemetry:{rule.Id:N}:{clusterId:N}";
+                    AlertIncident? inc = await db.AlertIncidents
+                        .FirstOrDefaultAsync(i => i.ClusterId == clusterId && i.Fingerprint == fingerprint, ct);
+
+                    (List<AlertIncident> firing, List<AlertIncident> resolved) = Bucket(byCluster, tenantId, clusterId);
+
+                    if (ev.Status == EvalStatus.Firing)
                     {
-                        inc = NewIncident(rule, clusterId, fingerprint, ev, now);
-                        db.AlertIncidents.Add(inc);
-                        firing.Add(inc);
+                        if (inc is null)
+                        {
+                            inc = NewIncident(rule, clusterId, fingerprint, ev, now);
+                            db.AlertIncidents.Add(inc);
+                            firing.Add(inc);
+                        }
+                        else if (inc.Status == IncidentStatus.Resolved)
+                        {
+                            Reactivate(inc, rule, ev, now);
+                            firing.Add(inc);
+                        }
+                        else
+                        {
+                            // still firing — refresh fields, do not re-notify
+                            inc.Summary = Truncate(ev.Summary, 500); inc.Description = Truncate(ev.Description, 2000);
+                            inc.Severity = Truncate(rule.Severity, 20); inc.UpdatedAt = now;
+                        }
                     }
-                    else if (inc.Status == IncidentStatus.Resolved)
+                    else if (inc is not null && inc.Status != IncidentStatus.Resolved)
                     {
-                        Reactivate(inc, rule, ev, now);
-                        firing.Add(inc);
+                        inc.Status = IncidentStatus.Resolved;
+                        inc.EndsAt ??= now;
+                        inc.ResolvedAt = now;
+                        inc.UpdatedAt = now;
+                        resolved.Add(inc);
                     }
-                    else
-                    {
-                        // still firing — refresh fields, do not re-notify
-                        inc.Summary = Truncate(ev.Summary, 500); inc.Description = Truncate(ev.Description, 2000);
-                        inc.Severity = Truncate(rule.Severity, 20); inc.UpdatedAt = now;
-                    }
-                }
-                else if (inc is not null && inc.Status != IncidentStatus.Resolved)
-                {
-                    inc.Status = IncidentStatus.Resolved;
-                    inc.EndsAt ??= now;
-                    inc.ResolvedAt = now;
-                    inc.UpdatedAt = now;
-                    resolved.Add(inc);
                 }
             }
         }
@@ -134,7 +150,8 @@ public sealed class TelemetryAlertEvaluator(
     /// only the clusters that actually carry telemetry for this signal — idle clusters are skipped so
     /// they don't cost an aggregate scan every cycle.</summary>
     private static async Task<List<Guid>> ResolveClustersAsync(
-        ApplicationDbContext db, TelemetryAlertRule rule, ITraceQueryService trace, ILogBackend log, CancellationToken ct)
+        ApplicationDbContext db, Guid tenantId, TelemetryAlertRule rule, ITraceQueryService trace,
+        ILogBackend log, CancellationToken ct)
     {
         if (rule.ClusterId is Guid cid) return [cid];
 
@@ -143,7 +160,7 @@ public sealed class TelemetryAlertEvaluator(
         if (rule.Kind is TelemetryAlertKind.RumErrorRate or TelemetryAlertKind.RumLcpP75) return [];
 
         List<Guid> all = await db.KubernetesClusters
-            .Where(c => c.TenantId == rule.TenantId).Select(c => c.Id).ToListAsync(ct);
+            .Where(c => c.TenantId == tenantId).Select(c => c.Id).ToListAsync(ct);
         List<Guid> withData = [];
         foreach (Guid c in all)
             if (await HasSignalAsync(rule.Kind, c, trace, log, ct)) withData.Add(c);

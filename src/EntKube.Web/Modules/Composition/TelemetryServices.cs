@@ -45,8 +45,7 @@ internal static class TelemetryServices
         services.AddScoped<SegmentTraceService>();
         services.AddScoped<NodeLogBackend>();
         services.AddScoped<NodeTraceService>();
-        services.AddScoped<ILogBackend, ClusterRoutedLogBackend>();
-        services.AddScoped<ITraceQueryService, ClusterRoutedTraceService>();
+        services.AddScoped<ITelemetryBackends, TelemetryBackendRouter>();
         services.AddScoped<IRumQueryService, SegmentRumService>();
         services.AddScoped<IMetricsQuery, PromMetricsService>();
         services.AddSingleton<IngestTokenService>();

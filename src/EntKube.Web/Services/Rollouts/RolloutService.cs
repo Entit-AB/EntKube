@@ -41,7 +41,7 @@ public sealed class NoOpRolloutStarter : IRolloutStarter
 public class RolloutService(
     IDbContextFactory<DeliveryDbContext> dbFactory,
     PrometheusService prometheus,
-    ITraceQueryService traces,
+    EntKube.Web.Services.Telemetry.ITelemetryBackends telemetry,
     ErrorBudgetService errorBudgets,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     ILogger<RolloutService> logger) : IRolloutStarter
@@ -154,9 +154,12 @@ public class RolloutService(
         {
             try
             {
-                KubernetesOperationResult<List<RedBucket>> red = await traces.GetServiceRedAsync(
-                    deployment.ClusterId, policy.TelemetryServiceName, windowStart, now,
-                    buckets: 12, ct);
+                // The analysis reads the deployment's own telemetry as the tenant whose rollout this
+                // is — the same tenant already supplied for the metrics above and the cluster client below.
+                KubernetesOperationResult<List<RedBucket>> red = await telemetry.TracesFor(tenantId)
+                    .GetServiceRedAsync(
+                        deployment.ClusterId, policy.TelemetryServiceName, windowStart, now,
+                        buckets: 12, ct);
 
                 if (red.IsSuccess && red.Data is { Count: > 0 })
                 {

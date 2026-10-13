@@ -36,7 +36,7 @@ public class TelemetryCutoverTests
         // has not moved. Routing on the node's existence alone empties every telemetry view.
         Fixture f = Fixture.Build(collectorEndpoint: PublicEndpoint);
 
-        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.ClusterId)).Should().BeTrue();
+        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.TenantId, f.ClusterId)).Should().BeTrue();
     }
 
     [Fact]
@@ -44,7 +44,7 @@ public class TelemetryCutoverTests
     {
         Fixture f = Fixture.Build(collectorEndpoint: InClusterEndpoint);
 
-        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.ClusterId)).Should().BeFalse();
+        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.TenantId, f.ClusterId)).Should().BeFalse();
     }
 
     [Fact]
@@ -54,7 +54,7 @@ public class TelemetryCutoverTests
         // it is not this management plane's store, so reading from that store would find nothing.
         Fixture f = Fixture.Build(collectorEndpoint: "http://otel-hub.observability:4318/v1/logs");
 
-        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.ClusterId)).Should().BeFalse();
+        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.TenantId, f.ClusterId)).Should().BeFalse();
     }
 
     [Fact]
@@ -64,7 +64,7 @@ public class TelemetryCutoverTests
         // honest one, and the install-time heal is what fixes the placeholder.
         Fixture f = Fixture.Build(collectorEndpoint: TelemetryIngestDefaults.EndpointPlaceholder);
 
-        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.ClusterId)).Should().BeTrue();
+        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.TenantId, f.ClusterId)).Should().BeTrue();
     }
 
     [Fact]
@@ -74,7 +74,23 @@ public class TelemetryCutoverTests
         // rather than inheriting a guess dressed up as an answer.
         Fixture f = Fixture.Build(collectorEndpoint: null, withCollector: false);
 
-        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.ClusterId)).Should().BeNull();
+        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.TenantId, f.ClusterId)).Should().BeNull();
+    }
+
+    [Fact]
+    public async Task A_stranger_draws_no_conclusion_either()
+    {
+        // Same cluster, same collector, asked by a tenant it does not belong to. Catalog answers a
+        // tenant about its own clusters, so there is no collector to find and the answer is the same
+        // null as "no collector installed" — deliberately, because the only thing this question is
+        // used for is picking a store to read from, and a stranger reads nothing out of either.
+        Fixture f = Fixture.Build(collectorEndpoint: PublicEndpoint);
+
+        (await f.Telemetry.ManagementPlaneStillReceivesAsync(Guid.NewGuid(), f.ClusterId))
+            .Should().BeNull("the cluster is not this tenant's");
+
+        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.TenantId, f.ClusterId))
+            .Should().BeTrue("and the owner's own answer is unaffected");
     }
 
     [Fact]
@@ -89,7 +105,7 @@ public class TelemetryCutoverTests
         // Written back to the component, not merely rendered into one helm invocation: the read path
         // decides which store holds the data by reading exactly this value.
         f.CollectorValues().Should().Contain(InClusterEndpoint);
-        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.ClusterId)).Should().BeFalse();
+        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.TenantId, f.ClusterId)).Should().BeFalse();
     }
 
     [Fact]

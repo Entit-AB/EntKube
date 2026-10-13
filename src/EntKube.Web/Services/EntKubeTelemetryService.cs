@@ -317,23 +317,24 @@ public class EntKubeTelemetryService(
     ///
     /// <para>Returns null when the cluster has no installed collector at all. Then there is nothing to
     /// conclude — something else may be exporting straight to the node — and the caller keeps its
-    /// default.</para>
+    /// default. <b>A tenant who cannot see the cluster gets that same null</b>, which routes to the
+    /// node: no answer, so the caller's default. It is the one case where "I am not allowed to know"
+    /// and "there is nothing to know" are deliberately the same answer, because this question is only
+    /// ever asked to pick a store to read from — and a tenant who may not see the cluster reads
+    /// nothing out of either one.</para>
     /// </summary>
-    public async Task<bool?> ManagementPlaneStillReceivesAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<bool?> ManagementPlaneStillReceivesAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        // Asked of Catalog rather than read out of its table. The status filter stays here rather than
+        // becoming a contract parameter: the contract answers "this cluster's collector", and whether
+        // an installing or failed one counts is this caller's business, not Catalog's.
+        InstalledComponent? collector = await catalog.FindComponentAsync(
+            tenantId, clusterId, TelemetryIngestDefaults.CollectorKey, ct);
 
-        // Projected into an anonymous type, not straight to the string: HelmValues is nullable, so a
-        // bare Select cannot tell "no collector on this cluster" from "a collector with no values".
-        // Same as above: no tenant to scope by until this method's signature gains one.
-        var collector = await db.ClusterComponents
-            .Where(c => c.ClusterId == clusterId
-                        && c.Name == TelemetryIngestDefaults.CollectorKey
-                        && c.Status == ComponentStatus.Installed)
-            .Select(c => new { c.HelmValues })
-            .FirstOrDefaultAsync(ct);
-
-        if (collector is null) return null;
+        if (collector is null
+            || collector.Status != EntKube.Contracts.Catalog.ComponentStatus.Installed)
+            return null;
 
         string? endpoint = YamlFormMerger.ExtractValue(
             collector.HelmValues ?? "", TelemetryIngestDefaults.EndpointYamlPath);
