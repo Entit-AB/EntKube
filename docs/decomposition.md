@@ -351,6 +351,39 @@ Order the rest by the same rule the triage taught: `AlertSyncService`,
 `ResourceUsageCollectorService` and `HeadscaleCertSyncService` were in *both* counts, so a sweep
 conversion pays twice.
 
+**A derived tenant is not a label.** Three more sweeps now ask per tenant, and all three had
+written the derivation off as bookkeeping:
+
+- `AlertEscalationService` selected every unacknowledged incident in the installation and read
+  `i.Cluster.TenantId` off each row — and that is the tenant the escalation is **re-notified as**.
+  An incident whose `ClusterId` pointed at another tenant's cluster would have reached that
+  tenant's channels about an alert from somewhere else.
+- `KeycloakBackupSchedulerService` carried `r.TenantId` out of each scheduled realm into
+  `CreateBackupAsync` — the call that resolves the realm's cluster credential and its storage link.
+- `BootstrapRunnerService` read the queue across the installation and took each run's tenant off
+  its cluster row, then handed it to the component registrar and the install orchestrator. That is
+  the tenant an entire cluster bootstrap acts as. The `(tenant, run)` pair now travels together
+  from the queue read, rather than being flattened to run ids and re-derived — flattening is the
+  documented way to throw away exactly what the loop establishes.
+
+**What made them assertable.** Each selection is now a named `public static` query
+(`DueFor`, `ScheduledFor`, `QueuedFor`), the same device as the seam's public argument builders.
+The logic lived in a `private` method of a `BackgroundService` behind a startup delay, so there was
+nothing a test could call; and the shape being replaced returned *every* row in the installation,
+which satisfies any test that only counts what came back for one tenant. `SweepTenancyTests` gives
+two tenants a qualifying row each and requires each to see exactly its own — verified by deleting
+the tenant predicate, which fails exactly the three tests that are about it.
+
+⚠️ **A count of "sweeps that loop tenants" is easy to get wrong, twice over.** A regex for
+`.Tenants ... Select(` misses `AdvisorScanService`, which loops `db.Tenants.ToListAsync()`, and
+misses `GitSyncService`, whose loop is upstream of a queue. Separately, four hosted services look
+exempt because they only call a `ReconcileAllAsync` elsewhere — and none of those four owners
+(`RabbitMQService`, `KafkaService`, `ElasticsearchService`, `CertificateDistributionService`)
+loops tenants either: they select installation-wide and read the tenant off the row, which is
+*cross-row* rather than tautological and so invisible to `VacuousTenantCheckTests`. Classify by
+reading, not by matching; a ratchet over this set is worth having, but it needs the whole set
+classified first and must not be introduced while a PR in flight changes the count.
+
 **It also strengthens the case for §5's agent model.** An agent running *inside* the cluster
 needs no kubeconfig at all — there is nothing to hand out, because the work happens where the
 credentials already are. Credential custody was presented there as a side benefit of
