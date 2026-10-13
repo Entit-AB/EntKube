@@ -61,55 +61,57 @@ public class NodeInfo
 public class NodeManagementService(
     IDbContextFactory<FleetDbContext> dbFactory,
     AuditService auditService,
-    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     ILogger<NodeManagementService> logger)
 {
-    private Task RequireNodeAckAsync(
-        EntKube.Web.Services.ClusterChanges.ChangeVerb verb, string kubeconfig,
-        string clusterLabel, string summary, string? patch, CancellationToken ct)
-        => gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+    /// <summary>
+    /// Raises the acknowledgment for a node change this service carries out through the SDK.
+    ///
+    /// <para>No credential: the seam fills it in, along with the cluster's label. That is the
+    /// whole reason this service no longer loads a cluster row — the kubeconfig was read to
+    /// satisfy <c>PlannedClusterChange</c>, not to talk to the cluster.</para>
+    /// </summary>
+    private static Task RequireNodeAckAsync(
+        EntKube.Web.Services.ClusterChanges.ChangeVerb verb,
+        EntKube.Web.Services.Clusters.IClusterClient cluster,
+        string summary, string? patch, CancellationToken ct)
+        => cluster.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedChange
         {
             Verb = verb,
-            Kubeconfig = kubeconfig,
-            ClusterLabel = string.IsNullOrWhiteSpace(clusterLabel) ? "cluster" : clusterLabel,
             Summary = summary,
             Patch = patch,
         }, ct);
 
     // ── Cluster lookup helper ─────────────────────────────────────────────────
 
-    private async Task<(KubernetesCluster? Cluster, KubernetesOperationResult? Error)>
-        LoadClusterAsync(Guid clusterId, CancellationToken ct)
+    /// <summary>
+    /// The cluster as a seam client, or the failure to report. Replaces a pair of helpers that
+    /// loaded the row and checked its kubeconfig column: "may this tenant hold that cluster's
+    /// credential" and "does a credential exist" turn out to be the same question, and the seam
+    /// answers both. No node operation here reads anything else off the row.
+    /// </summary>
+    private async Task<(EntKube.Web.Services.Clusters.IClusterClient? Cluster, KubernetesOperationResult? Error)>
+        LoadClusterAsync(Guid tenantId, Guid clusterId, CancellationToken ct)
     {
-        using FleetDbContext db = dbFactory.CreateDbContext();
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
 
-        if (cluster is null)
-            return (null, KubernetesOperationResult.Failure("Cluster not found."));
-
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return (null, KubernetesOperationResult.Failure(
-                "Cluster has no kubeconfig configured."));
-
-        return (cluster, null);
+        return cluster is null
+            ? (null, KubernetesOperationResult.Failure(
+                "Cluster not found for this tenant, or it has no kubeconfig configured."))
+            : (cluster, null);
     }
 
-    private async Task<(KubernetesCluster? Cluster, KubernetesOperationResult<T>? Error)>
-        LoadClusterAsync<T>(Guid clusterId, CancellationToken ct)
+    private async Task<(EntKube.Web.Services.Clusters.IClusterClient? Cluster, KubernetesOperationResult<T>? Error)>
+        LoadClusterAsync<T>(Guid tenantId, Guid clusterId, CancellationToken ct)
     {
-        using FleetDbContext db = dbFactory.CreateDbContext();
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
 
-        if (cluster is null)
-            return (null, KubernetesOperationResult<T>.Failure("Cluster not found."));
-
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return (null, KubernetesOperationResult<T>.Failure(
-                "Cluster has no kubeconfig configured."));
-
-        return (cluster, null);
+        return cluster is null
+            ? (null, KubernetesOperationResult<T>.Failure(
+                "Cluster not found for this tenant, or it has no kubeconfig configured."))
+            : (cluster, null);
     }
 
     // ── Node listing ──────────────────────────────────────────────────────────
@@ -119,15 +121,16 @@ public class NodeManagementService(
     /// taints, capacity, allocatable resources, and addresses.
     /// </summary>
     public async Task<KubernetesOperationResult<List<NodeInfo>>> GetNodesAsync(
-        Guid clusterId, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        (KubernetesCluster? cluster, KubernetesOperationResult<List<NodeInfo>>? err) =
-            await LoadClusterAsync<List<NodeInfo>>(clusterId, ct);
+        (EntKube.Web.Services.Clusters.IClusterClient? cluster, KubernetesOperationResult<List<NodeInfo>>? err) =
+            await LoadClusterAsync<List<NodeInfo>>(tenantId, clusterId, ct);
         if (err is not null) return err;
 
         try
         {
-            using Kubernetes client = CreateClient(cluster!.Kubeconfig!);
+            // Not disposed: pooled per credential and shared across callers.
+            Kubernetes client = cluster!.GetPooledSdkClient();
             V1NodeList list = await client.CoreV1.ListNodeAsync(cancellationToken: ct);
 
             List<NodeInfo> nodes = list.Items.Select(node =>
@@ -235,15 +238,16 @@ public class NodeManagementService(
     /// Returns all pods currently scheduled on a specific node (across all namespaces).
     /// </summary>
     public async Task<KubernetesOperationResult<List<PodInfo>>> GetPodsOnNodeAsync(
-        Guid clusterId, string nodeName, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string nodeName, CancellationToken ct = default)
     {
-        (KubernetesCluster? cluster, KubernetesOperationResult<List<PodInfo>>? err) =
-            await LoadClusterAsync<List<PodInfo>>(clusterId, ct);
+        (EntKube.Web.Services.Clusters.IClusterClient? cluster, KubernetesOperationResult<List<PodInfo>>? err) =
+            await LoadClusterAsync<List<PodInfo>>(tenantId, clusterId, ct);
         if (err is not null) return err;
 
         try
         {
-            using Kubernetes client = CreateClient(cluster!.Kubeconfig!);
+            // Not disposed: pooled per credential and shared across callers.
+            Kubernetes client = cluster!.GetPooledSdkClient();
 
             V1PodList podList = await client.CoreV1.ListPodForAllNamespacesAsync(
                 fieldSelector: $"spec.nodeName={nodeName}",
@@ -288,15 +292,16 @@ public class NodeManagementService(
     /// "kubectl describe node" events section).
     /// </summary>
     public async Task<KubernetesOperationResult<List<NodeEventInfo>>> GetNodeEventsAsync(
-        Guid clusterId, string nodeName, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string nodeName, CancellationToken ct = default)
     {
-        (KubernetesCluster? cluster, KubernetesOperationResult<List<NodeEventInfo>>? err) =
-            await LoadClusterAsync<List<NodeEventInfo>>(clusterId, ct);
+        (EntKube.Web.Services.Clusters.IClusterClient? cluster, KubernetesOperationResult<List<NodeEventInfo>>? err) =
+            await LoadClusterAsync<List<NodeEventInfo>>(tenantId, clusterId, ct);
         if (err is not null) return err;
 
         try
         {
-            using Kubernetes client = CreateClient(cluster!.Kubeconfig!);
+            // Not disposed: pooled per credential and shared across callers.
+            Kubernetes client = cluster!.GetPooledSdkClient();
 
             var events = await client.CoreV1.ListEventForAllNamespacesAsync(
                 fieldSelector: $"involvedObject.name={nodeName},involvedObject.kind=Node",
@@ -332,25 +337,25 @@ public class NodeManagementService(
     /// Equivalent to "kubectl cordon &lt;node&gt;".
     /// </summary>
     public async Task<KubernetesOperationResult> CordonNodeAsync(
-        Guid clusterId, string nodeName,
+        Guid tenantId, Guid clusterId, string nodeName,
         string? performedBy = null, CancellationToken ct = default)
-        => await SetNodeSchedulableAsync(clusterId, nodeName, schedulable: false, performedBy, ct);
+        => await SetNodeSchedulableAsync(tenantId, clusterId, nodeName, schedulable: false, performedBy, ct);
 
     /// <summary>
     /// Re-enables scheduling on a cordoned node.
     /// Equivalent to "kubectl uncordon &lt;node&gt;".
     /// </summary>
     public async Task<KubernetesOperationResult> UncordonNodeAsync(
-        Guid clusterId, string nodeName,
+        Guid tenantId, Guid clusterId, string nodeName,
         string? performedBy = null, CancellationToken ct = default)
-        => await SetNodeSchedulableAsync(clusterId, nodeName, schedulable: true, performedBy, ct);
+        => await SetNodeSchedulableAsync(tenantId, clusterId, nodeName, schedulable: true, performedBy, ct);
 
     private async Task<KubernetesOperationResult> SetNodeSchedulableAsync(
-        Guid clusterId, string nodeName, bool schedulable,
+        Guid tenantId, Guid clusterId, string nodeName, bool schedulable,
         string? performedBy, CancellationToken ct)
     {
-        (KubernetesCluster? cluster, KubernetesOperationResult? err) =
-            await LoadClusterAsync(clusterId, ct);
+        (EntKube.Web.Services.Clusters.IClusterClient? cluster, KubernetesOperationResult? err) =
+            await LoadClusterAsync(tenantId, clusterId, ct);
         if (err is not null) return err;
 
         try
@@ -359,11 +364,12 @@ public class NodeManagementService(
             string value = schedulable ? "null" : "true";
 
             await RequireNodeAckAsync(EntKube.Web.Services.ClusterChanges.ChangeVerb.Patch,
-                cluster!.Kubeconfig!, cluster.Name,
+                cluster!,
                 $"{(schedulable ? "Uncordon" : "Cordon")} Node/{nodeName}",
                 $"spec.unschedulable = {value}", ct);
 
-            using Kubernetes client = CreateClient(cluster!.Kubeconfig!);
+            // Not disposed: pooled per credential and shared across callers.
+            Kubernetes client = cluster!.GetPooledSdkClient();
 
             V1Patch patch = new(
                 $"{{\"spec\":{{\"unschedulable\":{value}}}}}",
@@ -391,54 +397,36 @@ public class NodeManagementService(
     /// ignores DaemonSet pods, and deletes local storage pods if requested).
     /// </summary>
     public async Task<KubernetesOperationResult<string>> DrainNodeAsync(
-        Guid clusterId, string nodeName,
+        Guid tenantId, Guid clusterId, string nodeName,
         int gracePeriodSeconds = 30,
         bool ignoreDaemonSets = true,
         bool deleteEmptyDirData = false,
         string? performedBy = null,
         CancellationToken ct = default)
     {
-        (KubernetesCluster? cluster, KubernetesOperationResult<string>? err) =
-            await LoadClusterAsync<string>(clusterId, ct);
+        (EntKube.Web.Services.Clusters.IClusterClient? cluster, KubernetesOperationResult<string>? err) =
+            await LoadClusterAsync<string>(tenantId, clusterId, ct);
         if (err is not null) return err;
 
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-        try
+        // Through the seam, which raises the acknowledgment and supplies the credential. A drain
+        // is its own verb there: it is neither a patch nor a delete of one object, and the
+        // PodDisruptionBudget handling lives in kubectl rather than in the API.
+        HelmExecutionResult result = await cluster!.DrainNodeAsync(
+            nodeName, gracePeriodSeconds, ignoreDaemonSets, deleteEmptyDirData,
+            $"Drain Node/{nodeName} (cordon + evict all evictable pods)", ct);
+
+        if (result.Success)
         {
-            await RequireNodeAckAsync(EntKube.Web.Services.ClusterChanges.ChangeVerb.Delete,
-                cluster!.Kubeconfig!, cluster.Name,
-                $"Drain Node/{nodeName} (cordon + evict all evictable pods)", null, ct);
-
-            await SecretFile.WriteAsync(tempKubeconfig, cluster!.Kubeconfig, ct);
-
-            List<string> args = ["drain", nodeName,
-                $"--grace-period={gracePeriodSeconds}",
-                "--timeout=5m"];
-
-            if (ignoreDaemonSets) args.Add("--ignore-daemonsets");
-            if (deleteEmptyDirData) args.Add("--delete-emptydir-data");
-            args.Add($"--kubeconfig={tempKubeconfig}");
-
-            HelmExecutionResult result = await RunCliAsync(
-                "kubectl", string.Join(" ", args), ct);
-
-            if (result.Success)
-            {
-                logger.LogInformation("Node {Node} drained by {User}", nodeName, performedBy ?? "system");
-            }
-            else
-            {
-                logger.LogWarning("Drain failed for node {Node}: {Output}", nodeName, result.Output);
-            }
-
-            return result.Success
-                ? KubernetesOperationResult<string>.Success(result.Output)
-                : KubernetesOperationResult<string>.Failure(result.Output);
+            logger.LogInformation("Node {Node} drained by {User}", nodeName, performedBy ?? "system");
         }
-        finally
+        else
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+            logger.LogWarning("Drain failed for node {Node}: {Output}", nodeName, result.Output);
         }
+
+        return result.Success
+            ? KubernetesOperationResult<string>.Success(result.Output)
+            : KubernetesOperationResult<string>.Failure(result.Output);
     }
 
     // ── Label management ──────────────────────────────────────────────────────
@@ -447,11 +435,11 @@ public class NodeManagementService(
     /// Sets a label on a node. If value is null, the label is removed.
     /// </summary>
     public async Task<KubernetesOperationResult> SetNodeLabelAsync(
-        Guid clusterId, string nodeName, string key, string? value,
+        Guid tenantId, Guid clusterId, string nodeName, string key, string? value,
         string? performedBy = null, CancellationToken ct = default)
     {
-        (KubernetesCluster? cluster, KubernetesOperationResult? err) =
-            await LoadClusterAsync(clusterId, ct);
+        (EntKube.Web.Services.Clusters.IClusterClient? cluster, KubernetesOperationResult? err) =
+            await LoadClusterAsync(tenantId, clusterId, ct);
         if (err is not null) return err;
 
         try
@@ -460,11 +448,12 @@ public class NodeManagementService(
             string labelValue = value is null ? "null" : $"\"{JsonEscape(value)}\"";
 
             await RequireNodeAckAsync(EntKube.Web.Services.ClusterChanges.ChangeVerb.Patch,
-                cluster!.Kubeconfig!, cluster.Name,
+                cluster!,
                 value is null ? $"Remove label {key} from Node/{nodeName}" : $"Set label {key}={value} on Node/{nodeName}",
                 $"metadata.labels.{key} = {(value is null ? "(removed)" : value)}", ct);
 
-            using Kubernetes client = CreateClient(cluster!.Kubeconfig!);
+            // Not disposed: pooled per credential and shared across callers.
+            Kubernetes client = cluster!.GetPooledSdkClient();
 
             V1Patch patch = new(
                 $"{{\"metadata\":{{\"labels\":{{\"{JsonEscape(key)}\":{labelValue}}}}}}}",
@@ -490,11 +479,11 @@ public class NodeManagementService(
     /// Replaces the full taint list on a node with the provided taints.
     /// </summary>
     public async Task<KubernetesOperationResult> SetNodeTaintsAsync(
-        Guid clusterId, string nodeName, List<NodeTaintInfo> taints,
+        Guid tenantId, Guid clusterId, string nodeName, List<NodeTaintInfo> taints,
         string? performedBy = null, CancellationToken ct = default)
     {
-        (KubernetesCluster? cluster, KubernetesOperationResult? err) =
-            await LoadClusterAsync(clusterId, ct);
+        (EntKube.Web.Services.Clusters.IClusterClient? cluster, KubernetesOperationResult? err) =
+            await LoadClusterAsync(tenantId, clusterId, ct);
         if (err is not null) return err;
 
         try
@@ -507,11 +496,12 @@ public class NodeManagementService(
             }));
 
             await RequireNodeAckAsync(EntKube.Web.Services.ClusterChanges.ChangeVerb.Patch,
-                cluster!.Kubeconfig!, cluster.Name,
+                cluster!,
                 $"Replace taints on Node/{nodeName} ({taints.Count} taint(s))",
                 $"spec.taints = {taintsJson}", ct);
 
-            using Kubernetes client = CreateClient(cluster!.Kubeconfig!);
+            // Not disposed: pooled per credential and shared across callers.
+            Kubernetes client = cluster!.GetPooledSdkClient();
 
             V1Patch patch = new(
                 $"{{\"spec\":{{\"taints\":{taintsJson}}}}}",
@@ -592,57 +582,6 @@ public class NodeManagementService(
 
     // ── Internal helpers ──────────────────────────────────────────────────────
 
-    private static Kubernetes CreateClient(string kubeconfig)
-    {
-        using System.IO.MemoryStream stream = new(System.Text.Encoding.UTF8.GetBytes(kubeconfig));
-        KubernetesClientConfiguration config =
-            KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
-        return new Kubernetes(config);
-    }
-
     private static string JsonEscape(string s) =>
         s.Replace("\\", "\\\\").Replace("\"", "\\\"");
-
-    private static async Task<HelmExecutionResult> RunCliAsync(
-        string program, string arguments, CancellationToken ct)
-    {
-        System.Diagnostics.ProcessStartInfo psi = new()
-        {
-            FileName = program,
-            Arguments = arguments,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using System.Diagnostics.Process process = new() { StartInfo = psi };
-        try
-        {
-            process.Start();
-            Task<string> stdout = process.StandardOutput.ReadToEndAsync(ct);
-            Task<string> stderr = process.StandardError.ReadToEndAsync(ct);
-            await process.WaitForExitAsync(ct);
-
-            string combined = (await stdout).Trim();
-            string errStr = (await stderr).Trim();
-            if (!string.IsNullOrEmpty(errStr))
-                combined = string.IsNullOrEmpty(combined) ? errStr : combined + "\n" + errStr;
-
-            return new HelmExecutionResult
-            {
-                Success = process.ExitCode == 0,
-                ExitCode = process.ExitCode,
-                Output = combined
-            };
-        }
-        catch (Exception ex)
-        {
-            return new HelmExecutionResult
-            {
-                Success = false,
-                Output = $"Failed to run {program}: {ex.Message}"
-            };
-        }
-    }
 }

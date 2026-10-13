@@ -489,7 +489,7 @@
                 KubernetesOperationResult<List<NodeInfo>> result;
                 try
                 {
-                    result = await NodeService.GetNodesAsync(cluster.Id);
+                    result = await NodeService.GetNodesAsync(TenantId, cluster.Id);
                 }
                 catch (Exception ex)
                 {

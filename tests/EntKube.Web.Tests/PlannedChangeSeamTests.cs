@@ -220,6 +220,51 @@ public class PlannedChangeSeamTests
         sink.Asked[0].Manifest.Should().BeNull("the cluster fetches the manifest; EntKube never holds it");
     }
 
+    /// <summary>
+    /// The drain verb: the command line it builds, and that it is always acknowledged.
+    ///
+    /// <para><b>This test earned its keep immediately.</b> The drain was first written as
+    /// <c>ChangeVerb.Delete</c>, and the test failed because nothing was thrown — the gate had
+    /// computed a delete preview for the Node object, found it absent, concluded "no change" and
+    /// skipped the dialog. A drain applied without anyone being asked. It also described the
+    /// wrong act when the object <em>was</em> readable: a drain does not delete the node.</para>
+    ///
+    /// <para>So a drain is its own verb, with no dry run — the same reasoning as
+    /// <c>ChangeVerb.Rollback</c>: what it will evict depends on budgets and on what happens to
+    /// be running, so the summary is the honest preview.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_drain_is_always_acknowledged_and_carries_its_flags()
+    {
+        KubernetesClientFactory.BuildDrainArguments("node-3", 30, true, false, "/tmp/kc.yaml")
+            .Should().Be("drain node-3 --grace-period=30 --timeout=5m --ignore-daemonsets "
+                + "--kubeconfig=/tmp/kc.yaml",
+                "the timeout is not optional: a drain blocked by a PodDisruptionBudget would "
+                + "otherwise wait forever inside a request");
+
+        KubernetesClientFactory.BuildDrainArguments("node-3", 0, false, true, "/tmp/kc.yaml")
+            .Should().Be("drain node-3 --grace-period=0 --timeout=5m --delete-emptydir-data "
+                + "--kubeconfig=/tmp/kc.yaml");
+
+        ClusterChangeGate gate = new(
+            new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
+        RecordingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        Func<Task> act = () => new KubernetesClientFactory(gate)
+            .DrainNodeAsync("node-3", TestKubeconfig.Valid);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+
+        sink.Asked.Should().ContainSingle();
+        sink.Asked[0].Verb.Should().Be(ChangeVerb.Drain,
+            "a drain is not a delete: as Delete, an unreadable Node made the gate report no "
+            + "change and apply the drain unasked");
+        sink.Asked[0].Kind.Should().Be("Node");
+        sink.Asked[0].Name.Should().Be("node-3");
+        sink.Asked[0].Summary.Should().Contain("evict");
+    }
+
     private sealed class RecordingSink : IClusterChangeAckSink
     {
         public List<PlannedClusterChange> Asked { get; } = [];

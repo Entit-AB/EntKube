@@ -80,6 +80,14 @@ public interface IClusterClient
         EntKube.Web.Services.ClusterChanges.PlannedChange change, CancellationToken ct = default);
 
     /// <summary>
+    /// Drains this node: cordons it, then evicts every evictable pod. See
+    /// <see cref="IKubernetesClientFactory.DrainNodeAsync"/> for why this is its own verb.
+    /// </summary>
+    Task<HelmExecutionResult> DrainNodeAsync(
+        string nodeName, int gracePeriodSeconds = 30, bool ignoreDaemonSets = true,
+        bool deleteEmptyDirData = false, string? summary = null, CancellationToken ct = default);
+
+    /// <summary>
     /// Rolls every Deployment in a namespace back to the revision Kubernetes last recorded for it.
     /// See <see cref="IKubernetesClientFactory.UndoDeploymentsAsync"/> for why the namespace is
     /// the unit and why a partial result is returned rather than thrown.

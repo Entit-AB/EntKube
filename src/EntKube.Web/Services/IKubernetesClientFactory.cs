@@ -120,6 +120,23 @@ public interface IKubernetesClientFactory
         string clusterLabel, CancellationToken ct = default);
 
     /// <summary>
+    /// Drains a node: cordons it, then evicts every evictable pod (<c>kubectl drain</c>).
+    ///
+    /// <para>Not expressible as a patch or a delete. A drain respects PodDisruptionBudgets, waits
+    /// for evictions to complete, and has its own opinions about DaemonSet pods and pods with
+    /// local storage — all of which live in kubectl rather than in the API. The alternative to
+    /// this verb is a caller holding a kubeconfig, which is what <c>NodeManagementService</c>
+    /// did.</para>
+    ///
+    /// <para>The result is returned rather than thrown: a drain that evicted most of a node and
+    /// then hit a budget is the outcome an operator needs to read.</para>
+    /// </summary>
+    Task<HelmExecutionResult> DrainNodeAsync(
+        string nodeName, string kubeconfig, int gracePeriodSeconds = 30,
+        bool ignoreDaemonSets = true, bool deleteEmptyDirData = false,
+        string? summary = null, CancellationToken ct = default);
+
+    /// <summary>
     /// Rolls every Deployment in a namespace back to the revision Kubernetes last recorded for
     /// it (<c>kubectl rollout undo</c>), as one acknowledged change.
     ///

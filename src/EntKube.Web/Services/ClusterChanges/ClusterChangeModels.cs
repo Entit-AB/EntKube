@@ -20,6 +20,19 @@ public enum ChangeVerb
     /// moved to, because the cluster — not EntKube — is the one that remembers it.
     /// </summary>
     Rollback,
+
+    /// <summary>
+    /// Cordoning a node and evicting everything evictable on it (<c>kubectl drain</c>).
+    ///
+    /// <para>⚠️ Deliberately <b>not</b> <see cref="Delete"/>, which it was first written as. A
+    /// drain does not delete the Node object — so the gate's delete preview described the wrong
+    /// thing entirely ("about to delete this node"), and when the object could not be read it
+    /// concluded <em>no change</em> and applied the drain <b>without asking anyone</b>. A drain
+    /// has no dry run: what it is about to evict depends on budgets and on what is running at
+    /// that moment, so the honest preview is its summary, which is what the fall-through in
+    /// <c>ClusterChangeGate.ComputeDiffAsync</c> gives it.</para>
+    /// </summary>
+    Drain,
 }
 
 /// <summary>
@@ -122,6 +135,7 @@ public sealed class PlannedClusterChange
                 => $"{Verb} {Resource}/{Name} in {Namespace}",
             ChangeVerb.EnsureNamespace => $"Ensure namespace {Namespace ?? Name}",
             ChangeVerb.Rollback => $"Roll back {Resource ?? "workloads"} in {Namespace}",
+            ChangeVerb.Drain => $"Drain {Kind ?? "Node"}/{Name}",
             _ => $"{Verb} manifest",
         };
     }
