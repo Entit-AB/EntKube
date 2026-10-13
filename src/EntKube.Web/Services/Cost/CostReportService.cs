@@ -1,4 +1,6 @@
+using EntKube.Contracts.Delivery;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Cost;
@@ -221,7 +223,8 @@ public sealed record CostReport
 /// their own waste onto their neighbours.
 /// </summary>
 public class CostReportService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<CostDbContext> dbFactory,
+    EntKube.Contracts.Delivery.IDeliveryApi delivery,
     PrometheusService prometheus,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     ILogger<CostReportService> logger)
@@ -258,7 +261,7 @@ public class CostReportService(
     {
         List<string> warnings = [];
 
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         var clusters = await db.KubernetesClusters
             .AsNoTracking()
@@ -274,20 +277,28 @@ public class CostReportService(
 
         // Namespace ownership comes from EntKube's own deployment records: the same
         // (cluster, namespace) pair that the platform deploys into is the one being billed.
-        var ownership = await db.AppDeployments
-            .AsNoTracking()
-            .Where(d => d.App.Customer.TenantId == tenantId)
+        //
+        // Asked of Delivery rather than read out of its tables. Cost owns rates and ledger rows; who
+        // deployed what, where, belongs to Delivery, and reading it directly is what kept this service
+        // on the all-seeing context — the only thing that did. The customer identity comes from the
+        // app rather than the deployment, which is also where the entity carried it: tenancy reaches
+        // an app through its customer, so this is one lookup rather than a join the caller invents.
+        IReadOnlyList<DeploymentSummary> deployments = await delivery.GetDeploymentsForTenantAsync(tenantId, ct);
+        Dictionary<Guid, AppSummary> appsById =
+            (await delivery.GetAppsAsync(tenantId, ct)).ToDictionary(a => a.Id);
+
+        var ownership = deployments
             .Select(d => new
             {
                 d.ClusterId,
                 d.Namespace,
                 d.AppId,
-                CustomerId = (Guid?)d.App.CustomerId,
-                CustomerName = d.App.Customer.Name,
-                AppName = d.App.Name,
-                EnvironmentName = d.Environment.Name,
+                CustomerId = appsById.TryGetValue(d.AppId, out AppSummary? app) ? (Guid?)app.CustomerId : null,
+                CustomerName = appsById.TryGetValue(d.AppId, out AppSummary? named) ? named.CustomerName : "",
+                AppName = d.AppName,
+                EnvironmentName = (string?)d.EnvironmentName,
             })
-            .ToListAsync(ct);
+            .ToList();
 
         // Several deployments can target one namespace. The customer is taken from the
         // first — any of them identifies it, and billing needs only that — but every

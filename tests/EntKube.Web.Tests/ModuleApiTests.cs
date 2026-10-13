@@ -207,8 +207,14 @@ public class ModuleApiTests : IDisposable
             "tenancy reaches a deployment through its app's customer — the long way round is "
             + "exactly where a hand-written filter goes wrong");
 
-        (await Delivery.GetDeploymentsForTenantAsync(ourTenant)).Should().ContainSingle()
-            .Which.AppName.Should().Be("ours-app");
+        DeploymentSummary ours = (await Delivery.GetDeploymentsForTenantAsync(ourTenant)).Should()
+            .ContainSingle().Subject;
+        ours.AppName.Should().Be("ours-app");
+
+        // The inline environment name is why CostReportService can group a report by environment
+        // without reaching for Delivery's Environments table. A contract field nothing asserts is a
+        // contract field that silently stops being projected.
+        ours.EnvironmentName.Should().Be("ours-env");
         (await Delivery.GetDeploymentsForClusterAsync(ourTenant, theirCluster)).Should().BeEmpty();
     }
 
