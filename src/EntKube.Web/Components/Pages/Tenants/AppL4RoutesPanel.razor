@@ -346,7 +346,7 @@
         if (d is null) return;
         loadingServices = true;
         availableServices = [];
-        try { availableServices = await K8sOps.GetServicesInNamespaceAsync(d.Cluster.Id, d.Namespace); }
+        try { availableServices = await K8sOps.GetServicesInNamespaceAsync(TenantId, d.Cluster.Id, d.Namespace); }
         catch { availableServices = []; }
         finally { loadingServices = false; }
     }

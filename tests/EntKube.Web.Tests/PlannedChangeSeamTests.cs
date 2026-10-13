@@ -265,6 +265,40 @@ public class PlannedChangeSeamTests
         sink.Asked[0].Summary.Should().Contain("evict");
     }
 
+    /// <summary>
+    /// The two reads-and-writes added for the install and routing paths: running a CronJob now,
+    /// and fetching one named resource as JSON.
+    /// </summary>
+    [Fact]
+    public async Task Running_a_cronjob_now_is_acknowledged_without_a_manifest()
+    {
+        KubernetesClientFactory
+            .BuildCreateJobFromCronJobArguments("nightly-manual-1", "nightly", "billing-ns", "/tmp/kc.yaml")
+            .Should().Be("create job nightly-manual-1 --from=cronjob/nightly -n billing-ns "
+                + "--kubeconfig=/tmp/kc.yaml");
+
+        KubernetesClientFactory
+            .BuildResourceJsonArguments("deployment", "api", "billing-ns", "/tmp/kc.yaml")
+            .Should().Be("get deployment api -n billing-ns --kubeconfig=/tmp/kc.yaml -o json");
+
+        ClusterChangeGate gate = new(
+            new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
+        RecordingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        Func<Task> act = () => new KubernetesClientFactory(gate)
+            .CreateJobFromCronJobAsync("nightly-manual-1", "nightly", "billing-ns", TestKubeconfig.Valid);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+
+        sink.Asked.Should().ContainSingle();
+        sink.Asked[0].Verb.Should().Be(ChangeVerb.Apply);
+        sink.Asked[0].Name.Should().Be("nightly-manual-1");
+        sink.Asked[0].Manifest.Should().BeNull(
+            "the Job is copied from a template on the cluster, so there is no manifest text to "
+            + "preview — the summary is the honest one, as with an apply from a URL");
+    }
+
     private sealed class RecordingSink : IClusterChangeAckSink
     {
         public List<PlannedClusterChange> Asked { get; } = [];

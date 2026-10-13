@@ -966,7 +966,7 @@
         if (deployment?.Cluster is null) return;
 
         loadingServices = true;
-        availableServices = await K8sOps.GetServicesInNamespaceAsync(deployment.Cluster.Id, deployment.Namespace);
+        availableServices = await K8sOps.GetServicesInNamespaceAsync(TenantId, deployment.Cluster.Id, deployment.Namespace);
         loadingServices = false;
 
         // Auto-select if there's only one service.
@@ -996,7 +996,7 @@
         availablePorts = svc?.Ports ?? [];
         if (availablePorts.Count > 0) newDrPort = availablePorts[0].Port;
 
-        endpointSummary = await K8sOps.GetEndpointsForServiceAsync(clusterId, ns, serviceName);
+        endpointSummary = await K8sOps.GetEndpointsForServiceAsync(TenantId, clusterId, ns, serviceName);
     }
 
     private async Task AddDeploymentRoute(Guid routeId)

@@ -377,6 +377,51 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         => _gate.AcknowledgeAsync(change.WithCredential(kubeconfig, clusterLabel), ct);
 
     /// <summary>
+    /// Runs a CronJob now, by copying its template into a new Job. See
+    /// <see cref="IKubernetesClientFactory.CreateJobFromCronJobAsync"/>.
+    /// </summary>
+    public async Task<HelmExecutionResult> CreateJobFromCronJobAsync(
+        string jobName, string cronJobName, string ns, string kubeconfig,
+        string? summary = null, CancellationToken ct = default)
+    {
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            // Apply, and no manifest: what is being created is a copy of a template this process
+            // never sees, so the summary is the only honest preview — the same shape as an apply
+            // from a URL.
+            Verb = ChangeVerb.Apply,
+            Kind = "Job",
+            Name = jobName,
+            Namespace = ns,
+            Kubeconfig = kubeconfig,
+            Summary = summary ?? $"Create Job/{jobName} from CronJob/{cronJobName} in {ns}",
+        }, ct);
+
+        string kubeconfigPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+
+            (int code, string stdout, string stderr) = await RunKubectlRawAsync(
+                BuildCreateJobFromCronJobArguments(jobName, cronJobName, ns, kubeconfigPath), ct);
+
+            string output = string.IsNullOrWhiteSpace(stdout) ? stderr : stdout;
+            return new HelmExecutionResult { Success = code == 0, Output = output.TrimEnd() };
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+        }
+    }
+
+    /// <summary>The command line for running a CronJob now.</summary>
+    public static string BuildCreateJobFromCronJobArguments(
+        string jobName, string cronJobName, string ns, string kubeconfigPath)
+        => $"create job {jobName} --from=cronjob/{cronJobName} -n {ns}"
+           + $" --kubeconfig={kubeconfigPath}";
+
+    /// <summary>
     /// Drains a node. See <see cref="IKubernetesClientFactory.DrainNodeAsync"/>.
     /// </summary>
     public async Task<HelmExecutionResult> DrainNodeAsync(
@@ -838,6 +883,41 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     public static string BuildDeleteArguments(string kind, string name, string ns, string kubeconfigPath)
         => $"delete {kind} {name}{(string.IsNullOrEmpty(ns) ? "" : $" -n {ns}")}"
            + $" --kubeconfig={kubeconfigPath} --ignore-not-found";
+
+    /// <summary>
+    /// One named resource as JSON. Returns the result rather than throwing: its caller refreshes
+    /// a set of manifests and counts the ones the cluster no longer has, so "not found" is an
+    /// answer rather than a failure.
+    /// </summary>
+    public async Task<HelmExecutionResult> GetResourceJsonAsync(
+        string resource, string name, string ns, string kubeconfig, CancellationToken ct = default)
+    {
+        string kubeconfigPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+
+            (int code, string stdout, string stderr) = await RunKubectlRawAsync(
+                BuildResourceJsonArguments(resource, name, ns, kubeconfigPath), ct);
+
+            return new HelmExecutionResult
+            {
+                Success = code == 0,
+                Output = code == 0 ? stdout : (string.IsNullOrWhiteSpace(stderr) ? stdout : stderr).TrimEnd(),
+            };
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+        }
+    }
+
+    /// <summary>The command line for one named resource as JSON.</summary>
+    public static string BuildResourceJsonArguments(
+        string resource, string name, string ns, string kubeconfigPath)
+        => $"get {resource} {name}{(string.IsNullOrEmpty(ns) ? "" : $" -n {ns}")}"
+           + $" --kubeconfig={kubeconfigPath} -o json";
 
     /// <summary>
     /// The command line for one resource's YAML. Public and static so it can be asserted without

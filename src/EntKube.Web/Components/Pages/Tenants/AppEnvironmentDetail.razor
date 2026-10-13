@@ -2994,7 +2994,7 @@
         {
             bool enabling = !selectedDeployment.IsManaged;
             KubernetesOperationResult<string> result =
-                await K8sOps.SetDeploymentManagementAsync(selectedDeployment.Id, enabling);
+                await K8sOps.SetDeploymentManagementAsync(TenantId, selectedDeployment.Id, enabling);
             yamlApplySuccess = result.IsSuccess;
             yamlApplyOutput = result.IsSuccess ? result.Data : result.Error;
 

@@ -473,7 +473,7 @@ else
         if (d.Cluster is null) return;
         newDrDeploymentId = d.Id;
         addLoadingServices = true;
-        addAvailableServices = await K8sOps.GetServicesInNamespaceAsync(d.Cluster.Id, d.Namespace);
+        addAvailableServices = await K8sOps.GetServicesInNamespaceAsync(TenantId, d.Cluster.Id, d.Namespace);
         addLoadingServices = false;
         if (addAvailableServices.Count == 1)
             await SelectAddService(addAvailableServices[0].Name, d);
@@ -497,7 +497,7 @@ else
         addAvailablePorts = svc?.Ports ?? [];
         if (addAvailablePorts.Count > 0) newDrPort = addAvailablePorts[0].Port;
         if (d.Cluster is not null)
-            addEndpointSummary = await K8sOps.GetEndpointsForServiceAsync(d.Cluster.Id, d.Namespace, name);
+            addEndpointSummary = await K8sOps.GetEndpointsForServiceAsync(TenantId, d.Cluster.Id, d.Namespace, name);
     }
 
     private async Task AddPath(Guid routeId)
@@ -545,13 +545,13 @@ else
         if (editingDeployment?.Cluster is not null)
         {
             editLoadingServices = true;
-            editAvailableServices = await K8sOps.GetServicesInNamespaceAsync(
+            editAvailableServices = await K8sOps.GetServicesInNamespaceAsync(TenantId, 
                 editingDeployment.Cluster.Id, editingDeployment.Namespace);
             editLoadingServices = false;
 
             KubeServiceInfo? svc = editAvailableServices.FirstOrDefault(s => s.Name == editService);
             editAvailablePorts = svc?.Ports ?? [];
-            editEndpointSummary = await K8sOps.GetEndpointsForServiceAsync(
+            editEndpointSummary = await K8sOps.GetEndpointsForServiceAsync(TenantId, 
                 editingDeployment.Cluster.Id, editingDeployment.Namespace, editService);
         }
     }
@@ -577,7 +577,7 @@ else
         KubeServiceInfo? svc = editAvailableServices.FirstOrDefault(s => s.Name == name);
         editAvailablePorts = svc?.Ports ?? [];
         if (editAvailablePorts.Count > 0) editPort = editAvailablePorts[0].Port;
-        editEndpointSummary = await K8sOps.GetEndpointsForServiceAsync(
+        editEndpointSummary = await K8sOps.GetEndpointsForServiceAsync(TenantId, 
             editingDeployment.Cluster.Id, editingDeployment.Namespace, name);
     }
 

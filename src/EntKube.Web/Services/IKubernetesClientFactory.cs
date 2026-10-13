@@ -120,6 +120,20 @@ public interface IKubernetesClientFactory
         string clusterLabel, CancellationToken ct = default);
 
     /// <summary>
+    /// Creates a Job from an existing CronJob's template — "run it now"
+    /// (<c>kubectl create job --from=cronjob/…</c>).
+    ///
+    /// <para>Not an apply: EntKube does not have the manifest. The template lives on the cluster,
+    /// and kubectl copies it, which is the whole point — reconstructing it here would be a guess
+    /// at what the CronJob actually says, and a wrong guess runs the wrong thing.</para>
+    ///
+    /// <para>The caller names the Job, because it also has to record which name it used.</para>
+    /// </summary>
+    Task<HelmExecutionResult> CreateJobFromCronJobAsync(
+        string jobName, string cronJobName, string ns, string kubeconfig,
+        string? summary = null, CancellationToken ct = default);
+
+    /// <summary>
     /// Drains a node: cordons it, then evicts every evictable pod (<c>kubectl drain</c>).
     ///
     /// <para>Not expressible as a patch or a delete. A drain respects PodDisruptionBudgets, waits
@@ -176,6 +190,14 @@ public interface IKubernetesClientFactory
     /// cannot express.</para>
     /// </summary>
     Task<string> GetResourceYamlAsync(
+        string resource, string name, string ns, string kubeconfig, CancellationToken ct = default);
+
+    /// <summary>
+    /// One named resource as JSON — the sibling of <see cref="GetResourceYamlAsync"/>, for callers
+    /// that parse rather than display. <c>GetJsonAsync</c> lists a kind; this fetches one object,
+    /// which is what a manifest refresh needs (it re-reads each stored manifest by kind and name).
+    /// </summary>
+    Task<HelmExecutionResult> GetResourceJsonAsync(
         string resource, string name, string ns, string kubeconfig, CancellationToken ct = default);
 
     /// <summary>
