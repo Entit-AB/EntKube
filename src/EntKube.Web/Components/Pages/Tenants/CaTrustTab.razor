@@ -357,7 +357,7 @@ else
         busy = true;
         try
         {
-            (bool ok, string output) = await TrustService.ApplyBundleAsync(bundleId);
+            (bool ok, string output) = await TrustService.ApplyBundleAsync(TenantId, bundleId);
             if (ok) Toasts.Success("Trust bundle applied to the cluster.");
             else Toasts.Error(string.IsNullOrWhiteSpace(output) ? "Apply failed." : output);
             await LoadAsync();
@@ -372,7 +372,7 @@ else
         busy = true;
         try
         {
-            await TrustService.DeleteBundleAsync(bundleId);
+            await TrustService.DeleteBundleAsync(TenantId, bundleId);
             Toasts.Success("Trust bundle removed.");
             await LoadAsync();
         }

@@ -122,6 +122,29 @@ public class PlannedChangeSeamTests
             .Should().Be("get deployment billing-api -n billing-ns --kubeconfig=/tmp/kc.yaml -o yaml");
     }
 
+    /// <summary>
+    /// A cluster-scoped delete omits the namespace flag rather than sending it empty.
+    ///
+    /// <para><c>kubectl delete x y -n</c> is rejected outright, so a caller holding a
+    /// cluster-scoped CR — a trust-manager <c>Bundle</c>, for instance — could not use the seam
+    /// at all and kept its own kubectl with its own copy of the credential.
+    /// <c>ResourceExistsAsync</c> had read an empty <c>ns</c> this way all along; delete had not,
+    /// and the inconsistency was invisible until something needed it.</para>
+    /// </summary>
+    [Fact]
+    public void A_delete_omits_the_namespace_flag_for_a_cluster_scoped_resource()
+    {
+        KubernetesClientFactory
+            .BuildDeleteArguments("bundles.trust.cert-manager.io", "ca-bundle", "", "/tmp/kc.yaml")
+            .Should().Be("delete bundles.trust.cert-manager.io ca-bundle "
+                + "--kubeconfig=/tmp/kc.yaml --ignore-not-found");
+
+        KubernetesClientFactory
+            .BuildDeleteArguments("secret", "tls", "billing-ns", "/tmp/kc.yaml")
+            .Should().Be("delete secret tls -n billing-ns "
+                + "--kubeconfig=/tmp/kc.yaml --ignore-not-found");
+    }
+
     private sealed class RecordingSink : IClusterChangeAckSink
     {
         public List<PlannedClusterChange> Asked { get; } = [];

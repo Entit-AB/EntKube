@@ -331,7 +331,7 @@ public class KedaScalerService(
     /// Returns one result per target, keyed by "{cluster}/{namespace}".
     /// </summary>
     public async Task<List<(string Target, bool Success, string Output)>> ApplyToEnvironmentAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -339,17 +339,17 @@ public class KedaScalerService(
         if (scalers.Count == 0)
             return [("(no scalers)", false, "No autoscalers configured — nothing to apply.")];
 
-        List<(KubernetesCluster Cluster, string Namespace)> targets =
+        List<(Guid ClusterId, string ClusterName, string Namespace)> targets =
             await ResolveTargetsAsync(db, appId, environmentId, ct);
 
         if (targets.Count == 0)
             return [("(no deployments)", false, "No deployments found for this app in this environment. Create a deployment first.")];
 
         var results = new List<(string Target, bool Success, string Output)>();
-        foreach (var (cluster, ns) in targets)
+        foreach ((Guid clusterId, string clusterName, string ns) in targets)
         {
-            (bool ok, string output) = await ApplyToNamespaceAsync(scalers, cluster, ns, ct);
-            results.Add(($"{cluster.Name}/{ns}", ok, output));
+            (bool ok, string output) = await ApplyToNamespaceAsync(tenantId, scalers, clusterId, ns, ct);
+            results.Add(($"{clusterName}/{ns}", ok, output));
         }
         return results;
     }
@@ -359,34 +359,48 @@ public class KedaScalerService(
     /// deduplicated. The governance namespace lock wins over the deployment's own namespace, which
     /// is what apply writes to, so scanning and applying always look at the same places.
     /// </summary>
-    private static async Task<List<(KubernetesCluster Cluster, string Namespace)>> ResolveTargetsAsync(
+    /// <summary>
+    /// Where this app's autoscalers belong: a cluster id, its name for messages, and a namespace.
+    ///
+    /// <para>Deliberately not the <c>KubernetesCluster</c> row it used to return. Including that
+    /// row materialized its kubeconfig through the vault interceptor for every target — on a scan
+    /// that only ever needed a name — and then every caller had a credential within reach. The id
+    /// is what the seam wants.</para>
+    /// </summary>
+    private static async Task<List<(Guid ClusterId, string ClusterName, string Namespace)>> ResolveTargetsAsync(
         ApplicationDbContext db, Guid appId, Guid environmentId, CancellationToken ct)
     {
         string? lockedNs = (await db.AppEnvironments
             .FirstOrDefaultAsync(ae => ae.AppId == appId && ae.EnvironmentId == environmentId, ct))?.Namespace;
 
-        List<AppDeployment> deployments = await db.AppDeployments
-            .Include(d => d.Cluster)
+        var deployments = await db.AppDeployments
+            .AsNoTracking()
             .Where(d => d.AppId == appId && d.EnvironmentId == environmentId)
+            .Select(d => new { d.ClusterId, ClusterName = d.Cluster.Name, d.Namespace })
             .ToListAsync(ct);
 
         return deployments
-            .Where(d => d.Cluster is not null)
-            .Select(d => (Cluster: d.Cluster!, Namespace: string.IsNullOrWhiteSpace(lockedNs) ? d.Namespace : lockedNs))
+            .Select(d => (
+                d.ClusterId,
+                d.ClusterName,
+                Namespace: string.IsNullOrWhiteSpace(lockedNs) ? d.Namespace : lockedNs))
             .Where(t => !string.IsNullOrWhiteSpace(t.Namespace))
-            .DistinctBy(t => (t.Cluster.Id, t.Namespace))
+            .DistinctBy(t => (t.ClusterId, t.Namespace))
             .ToList();
     }
 
     /// <summary>Applies all autoscaler manifests to a single namespace via kubectl.</summary>
     public async Task<(bool Success, string Output)> ApplyToNamespaceAsync(
-        List<KedaScaler> scalers, KubernetesCluster cluster, string ns, CancellationToken ct = default)
+        Guid tenantId, List<KedaScaler> scalers, Guid clusterId, string ns,
+        CancellationToken ct = default)
     {
+        // The tenant is the caller's. It used to be cluster.TenantId, read off the row whose id
+        // was then handed to the same call — a predicate that compares a row against itself.
         EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
-            await clusterClients.ForAsync(cluster.TenantId, cluster.Id, ct);
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
 
         if (clusterAccess is null)
-            return (false, "Cluster has no kubeconfig configured.");
+            return (false, "The cluster is not this tenant's, or has no kubeconfig configured.");
 
         string yaml = BuildManifest(scalers, ns);
         if (string.IsNullOrWhiteSpace(yaml))
@@ -402,7 +416,8 @@ public class KedaScalerService(
             string output = await clusterAccess.ApplyManifestInNamespaceAsync(
                 yaml, ns, $"Apply autoscalers to {ns}", ct);
 
-            logger.LogInformation("Autoscalers applied to {Cluster}/{Namespace}", cluster.Name, ns);
+            logger.LogInformation(
+                "Autoscalers applied to {Cluster}/{Namespace}", clusterAccess.ClusterName, ns);
 
             return (true, output.TrimEnd());
         }
@@ -416,7 +431,8 @@ public class KedaScalerService(
         {
             // The caller reads the tuple rather than catching, and an autoscaler that would not
             // apply is something an operator reads on the page.
-            logger.LogWarning(ex, "Autoscaler apply failed for {Cluster}/{Namespace}", cluster.Name, ns);
+            logger.LogWarning(ex,
+                "Autoscaler apply failed for {Cluster}/{Namespace}", clusterAccess.ClusterName, ns);
 
             return (false, ex.Message);
         }
@@ -437,11 +453,11 @@ public class KedaScalerService(
     /// Read-only: nothing is created, changed, or deleted.
     /// </summary>
     public async Task<AutoscalerScanResult> ScanEnvironmentAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
         List<KedaScaler> configured = await GetScalersAsync(appId, environmentId, ct);
 
-        List<(KubernetesCluster Cluster, string Namespace)> targets;
+        List<(Guid ClusterId, string ClusterName, string Namespace)> targets;
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
             targets = await ResolveTargetsAsync(db, appId, environmentId, ct);
@@ -449,50 +465,52 @@ public class KedaScalerService(
 
         AutoscalerScanResult result = new();
 
-        foreach ((KubernetesCluster cluster, string ns) in targets)
+        foreach ((Guid clusterId, string clusterName, string ns) in targets)
         {
-            result.ScannedTargets.Add($"{cluster.Name}/{ns}");
+            result.ScannedTargets.Add($"{clusterName}/{ns}");
 
-            if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
+                await clusterClients.ForAsync(tenantId, clusterId, ct);
+
+            if (clusterAccess is null)
             {
-                result.Errors.Add($"{cluster.Name}: no kubeconfig configured.");
+                result.Errors.Add($"{clusterName}: not this tenant's cluster, or no kubeconfig configured.");
                 continue;
             }
 
             Kubernetes client;
             try
             {
-                using var stream = new MemoryStream(Encoding.UTF8.GetBytes(cluster.Kubeconfig));
-                client = new Kubernetes(KubernetesClientConfiguration.BuildConfigFromConfigFile(stream));
+                client = clusterAccess.GetPooledSdkClient();
             }
             catch (Exception ex)
             {
-                result.Errors.Add($"{cluster.Name}/{ns}: {DescribeApiError(ex)}");
+                result.Errors.Add($"{clusterName}/{ns}: {DescribeApiError(ex)}");
                 continue;
             }
 
             // The two resource families are read independently: one of them failing (an
             // apiserver still warming up its storage, a missing permission) must not blank out
             // what the other found.
-            using (client)
+            // No `using` on the client any more: GetPooledSdkClient hands back one shared per
+            // credential, so disposing it here would tear down connections other callers are
+            // mid-request on. It was correct to dispose the privately-built client it replaces.
+            try
             {
-                try
-                {
-                    result.Live.AddRange(await ScanHpasAsync(client, cluster.Name, ns, ct));
-                }
-                catch (Exception ex)
-                {
-                    result.Errors.Add($"{cluster.Name}/{ns}: HorizontalPodAutoscalers — {DescribeApiError(ex)}");
-                }
+                result.Live.AddRange(await ScanHpasAsync(client, clusterName, ns, ct));
+            }
+            catch (Exception ex)
+            {
+                result.Errors.Add($"{clusterName}/{ns}: HorizontalPodAutoscalers — {DescribeApiError(ex)}");
+            }
 
-                try
-                {
-                    result.Live.AddRange(await ScanKedaAsync(client, cluster.Name, ns, ct));
-                }
-                catch (Exception ex)
-                {
-                    result.Errors.Add($"{cluster.Name}/{ns}: KEDA scalers — {DescribeApiError(ex)}");
-                }
+            try
+            {
+                result.Live.AddRange(await ScanKedaAsync(client, clusterName, ns, ct));
+            }
+            catch (Exception ex)
+            {
+                result.Errors.Add($"{clusterName}/{ns}: KEDA scalers — {DescribeApiError(ex)}");
             }
         }
 

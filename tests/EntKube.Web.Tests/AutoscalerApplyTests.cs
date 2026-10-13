@@ -54,9 +54,12 @@ public class AutoscalerApplyTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
+    /// <summary>The tenant the seeded cluster belongs to, and the one every apply acts as.</summary>
+    private Guid tenantId;
+
     private async Task<KubernetesCluster> SeedClusterAsync(bool withKubeconfig = true)
     {
-        Guid tenantId = Guid.NewGuid();
+        tenantId = Guid.NewGuid();
         Guid clusterId = Guid.NewGuid();
         Guid envId = Guid.NewGuid();
 
@@ -98,7 +101,7 @@ public class AutoscalerApplyTests : IDisposable
     {
         KubernetesCluster cluster = await SeedClusterAsync();
 
-        (bool success, string output) = await sut.ApplyToNamespaceAsync(OneHpa(), cluster, "billing-prod");
+        (bool success, string output) = await sut.ApplyToNamespaceAsync(tenantId, OneHpa(), cluster.Id, "billing-prod");
 
         success.Should().BeTrue(output);
         output.Should().Be("scaledobject.keda.sh/billing-api configured");
@@ -118,7 +121,7 @@ public class AutoscalerApplyTests : IDisposable
     {
         KubernetesCluster cluster = await SeedClusterAsync(withKubeconfig: false);
 
-        (bool success, string output) = await sut.ApplyToNamespaceAsync(OneHpa(), cluster, "billing-prod");
+        (bool success, string output) = await sut.ApplyToNamespaceAsync(tenantId, OneHpa(), cluster.Id, "billing-prod");
 
         success.Should().BeFalse();
         output.Should().Contain("no kubeconfig");
@@ -134,7 +137,7 @@ public class AutoscalerApplyTests : IDisposable
                 It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("kubectl failed (exit 1): no matches for kind \"ScaledObject\""));
 
-        (bool success, string output) = await sut.ApplyToNamespaceAsync(OneHpa(), cluster, "billing-prod");
+        (bool success, string output) = await sut.ApplyToNamespaceAsync(tenantId, OneHpa(), cluster.Id, "billing-prod");
 
         success.Should().BeFalse();
         output.Should().Contain("no matches for kind");
@@ -153,7 +156,7 @@ public class AutoscalerApplyTests : IDisposable
                 It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new OperationCanceledException("Cluster change cancelled by operator"));
 
-        Func<Task> act = () => sut.ApplyToNamespaceAsync(OneHpa(), cluster, "billing-prod");
+        Func<Task> act = () => sut.ApplyToNamespaceAsync(tenantId, OneHpa(), cluster.Id, "billing-prod");
 
         await act.Should().ThrowAsync<OperationCanceledException>();
     }
