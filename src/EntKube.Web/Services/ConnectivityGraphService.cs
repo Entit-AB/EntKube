@@ -26,6 +26,7 @@ namespace EntKube.Web.Services;
 public class ConnectivityGraphService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     IKubernetesClientFactory k8sFactory,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<ConnectivityGraphService> logger)
 {
     private static readonly IDeserializer YamlDeserializer =
@@ -807,7 +808,7 @@ public class ConnectivityGraphService(
     /// not silently dropped. Pure generation — nothing is applied.
     /// </summary>
     public async Task<List<ConnectivityPolicyPlan>> GenerateNetworkPoliciesAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
         ConnectivityGraph graph = await BuildGraphAsync(appId, environmentId, ct);
 
@@ -917,11 +918,17 @@ public class ConnectivityGraphService(
             .FirstOrDefault(s => s is { Count: > 0 });
 
         // Per-cluster capability: does the mesh exist? (drives ServiceEntry egress + AuthorizationPolicy).
+        //
+        // Asked of Catalog per cluster, as the tenant. The clusters came from this app's own
+        // deployments, so a tenant that does not own one of them gets nothing back for it and the
+        // plan treats that cluster as mesh-less — which is the same answer as Istio not being
+        // installed, and not a new failure mode.
         List<Guid> targetClusterIds = targets.Select(t => t.Cluster.Id).Distinct().ToList();
-        List<ClusterComponent> comps = await db.ClusterComponents
-            .AsNoTracking()
-            .Where(c => targetClusterIds.Contains(c.ClusterId))
-            .ToListAsync(ct);
+        List<EntKube.Contracts.Catalog.InstalledComponent> comps = [];
+        foreach (Guid targetClusterId in targetClusterIds)
+        {
+            comps.AddRange(await catalog.GetComponentsForClusterAsync(tenantId, targetClusterId, ct));
+        }
 
         // Other apps' deployments in the same clusters — used to warn that the
         // namespace-wide default-deny will also govern co-located apps.
@@ -934,9 +941,11 @@ public class ConnectivityGraphService(
         List<ConnectivityPolicyPlan> plans = [];
         foreach ((KubernetesCluster cluster, string ns) in targets)
         {
+            // The predicate is unchanged and deliberately asymmetric: either the catalog name or
+            // the upstream chart name may carry "istio", and both spellings are in use.
             bool hasIstio = comps.Any(c => c.ClusterId == cluster.Id
-                && c.Status == ComponentStatus.Installed
-                && ((c.Name?.Contains("istio", StringComparison.OrdinalIgnoreCase) ?? false)
+                && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed
+                && (c.Name.Contains("istio", StringComparison.OrdinalIgnoreCase)
                     || (c.HelmChartName?.Contains("istio", StringComparison.OrdinalIgnoreCase) ?? false)));
 
             ConnectivityPolicyPlan plan = new()
@@ -1053,7 +1062,24 @@ public class ConnectivityGraphService(
     public async Task<List<(string Target, bool Success, string Output)>> ApplyNetworkPoliciesAsync(
         Guid appId, Guid environmentId, CancellationToken ct = default)
     {
-        List<ConnectivityPolicyPlan> plans = await GenerateNetworkPoliciesAsync(appId, environmentId, ct);
+        // The tenant is DERIVED here, not taken as a parameter, and that is a deliberate
+        // half-measure: this method reads kubeconfigs off cluster rows further down, and giving it
+        // a tenant parameter makes those reads reachable in CustodyTriageTests's sense — they have
+        // to move onto the seam in the same change, which belongs with the custody work rather
+        // than with this one. So the app's own tenant is used to scope the Catalog lookup inside
+        // the generate step: a cross-row check (an app pointing at another tenant's cluster is
+        // caught) rather than an authorization one, and weaker than what the page above gets.
+        Guid tenantId;
+        using (ApplicationDbContext appDb = dbFactory.CreateDbContext())
+        {
+            tenantId = await appDb.Apps
+                .Where(a => a.Id == appId)
+                .Select(a => a.Customer.TenantId)
+                .FirstOrDefaultAsync(ct);
+        }
+
+        List<ConnectivityPolicyPlan> plans =
+            await GenerateNetworkPoliciesAsync(tenantId, appId, environmentId, ct);
         if (plans.Count == 0)
         {
             return [("(no targets)", false, "No deployments found for this app in this environment.")];

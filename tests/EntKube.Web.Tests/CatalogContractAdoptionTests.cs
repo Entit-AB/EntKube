@@ -194,7 +194,28 @@ public class CatalogContractAdoptionTests
     /// conversion rather than here. The comment above that query, which already said it could not
     /// be the contract's, now says which caller is the reason.</para>
     ///
-    private const int BaselineQueries = 17;
+    /// <para><b>15.</b> The install orchestrator's post-install hook and the connectivity policy
+    /// generator — both picked because the methods holding them read no credential, so neither
+    /// could spill into the custody count while that work was in flight elsewhere.</para>
+    ///
+    /// <para><c>HeadscaleService.EnsureExternalRouteAfterInstallAsync</c> is the better story. It
+    /// took a component id and nothing else, read the component <em>with its cluster attached</em>,
+    /// and used <c>comp.Cluster.TenantId</c> for the vault lookups and both downstream calls — and
+    /// its own comment explained that the resulting check was tautological "because this runs from
+    /// the install orchestrator, which addresses components by id and has no caller to speak for".
+    /// That was wrong: <c>ComponentInstallOrchestrator.ApplyAsync</c> takes a tenantId and always
+    /// had one. The limitation was in the signature, not in the caller — worth remembering the
+    /// next time a comment explains why something cannot be fixed.</para>
+    ///
+    /// <para><c>ConnectivityGraphService.GenerateNetworkPoliciesAsync</c> asks Catalog per target
+    /// cluster now. Its <c>ApplyNetworkPoliciesAsync</c> caller <b>derives</b> the app's tenant
+    /// rather than taking one, which is deliberate and stated at the call: that method reads
+    /// kubeconfigs further down, so a tenant parameter there makes those reads reachable in
+    /// <see cref="CustodyTriageTests"/>'s sense and they have to move in the same change. A
+    /// cross-row derivation is weaker than what the page above supplies, and saying so beats
+    /// quietly implying the whole path is authorized.</para>
+    ///
+    private const int BaselineQueries = 15;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

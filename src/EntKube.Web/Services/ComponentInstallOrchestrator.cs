@@ -168,7 +168,7 @@ public class ComponentInstallOrchestrator(
 
             // For components that self-expose (e.g. headscale): ensure the external route
             // record exists before applying so it's included in the Gateway manifest.
-            await headscaleService.EnsureExternalRouteAfterInstallAsync(componentId);
+            await headscaleService.EnsureExternalRouteAfterInstallAsync(tenantId, componentId);
 
             // Apply HTTPRoute + Certificate manifests for any configured external routes.
             HelmExecutionResult routeResult = await lifecycleService.ApplyExternalRoutesAsync(componentId);

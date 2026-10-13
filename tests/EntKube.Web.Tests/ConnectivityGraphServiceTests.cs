@@ -26,6 +26,7 @@ public class ConnectivityGraphServiceTests : IDisposable
     private readonly Mock<IKubernetesClientFactory> k8s = new();
     private readonly ConnectivityGraphService sut;
 
+    private readonly Guid tenantId = Guid.NewGuid();
     private readonly Guid appId = Guid.NewGuid();
     private readonly Guid envId = Guid.NewGuid();
     private readonly Guid clusterId = Guid.NewGuid();
@@ -42,7 +43,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         // By default the cluster answers "no Services" — tests that need one say so.
         SetLiveServices(NoLiveServices);
 
-        Tenant tenant = new() { Id = Guid.NewGuid(), Name = "ConnCo", Slug = "connco" };
+        Tenant tenant = new() { Id = tenantId, Name = "ConnCo", Slug = "connco" };
         db.Tenants.Add(tenant);
         db.Environments.Add(new Data.Environment { Id = envId, TenantId = tenant.Id, Name = "production" });
         db.KubernetesClusters.Add(new KubernetesCluster
@@ -61,7 +62,9 @@ public class ConnectivityGraphServiceTests : IDisposable
         vault.InitializeVaultAsync(tenant.Id).GetAwaiter().GetResult();
         testDb.SeedKubeconfigAsync(vault, tenant.Id, clusterId, TestKubeconfig.Valid).GetAwaiter().GetResult();
 
-        sut = new ConnectivityGraphService(dbFactory, k8s.Object, NullLogger<ConnectivityGraphService>.Instance);
+        sut = new ConnectivityGraphService(
+            dbFactory, k8s.Object, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+            NullLogger<ConnectivityGraphService>.Instance);
     }
 
     /// <summary>Makes `kubectl get services` return <paramref name="json"/> for any namespace.</summary>
@@ -268,7 +271,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         });
         db.SaveChanges();
 
-        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(appId, envId);
+        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(tenantId, appId, envId);
 
         plans.Should().ContainSingle();
         ConnectivityPolicyPlan plan = plans[0];
@@ -305,7 +308,7 @@ public class ConnectivityGraphServiceTests : IDisposable
             Tls = true
         });
 
-        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(appId, envId);
+        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(tenantId, appId, envId);
 
         plans.Should().ContainSingle();
         plans[0].Warnings.Should().Contain(w => w.Contains("api.stripe.com"));
@@ -333,7 +336,7 @@ public class ConnectivityGraphServiceTests : IDisposable
             Tls = true
         });
 
-        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(appId, envId);
+        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(tenantId, appId, envId);
 
         ConnectivityPolicyPlan plan = plans.Single();
         plan.HasIstio.Should().BeTrue();
@@ -370,7 +373,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         });
         db.SaveChanges();
 
-        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(appId, envId);
+        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(tenantId, appId, envId);
 
         ConnectivityPolicyPlan plan = plans.Single();
         GeneratedPolicy authz = plan.Policies.Single(p => p.Kind == "AuthorizationPolicy");
@@ -402,7 +405,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         });
         db.SaveChanges();
 
-        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(appId, envId);
+        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(tenantId, appId, envId);
 
         plans.Single().Policies.Should().NotContain(p => p.Kind == "AuthorizationPolicy");
     }
@@ -422,7 +425,7 @@ public class ConnectivityGraphServiceTests : IDisposable
             Protocol = L4Protocol.Tcp
         });
 
-        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(appId, envId);
+        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(tenantId, appId, envId);
 
         string egressYaml = plans[0].Policies.Single(p => p.Name.EndsWith("allow-egress")).Yaml;
         egressYaml.Should().Contain("ipBlock:").And.Contain("cidr: 10.20.0.0/16");
@@ -617,7 +620,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         });
         db.SaveChanges();
 
-        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(appId, envId);
+        List<ConnectivityPolicyPlan> plans = await sut.GenerateNetworkPoliciesAsync(tenantId, appId, envId);
 
         ConnectivityPolicyPlan plan = plans.Single();
         plan.Policies.Should().NotContain(p => p.Kind == "AuthorizationPolicy");
