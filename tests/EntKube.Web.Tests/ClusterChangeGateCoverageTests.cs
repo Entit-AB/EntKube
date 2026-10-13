@@ -97,6 +97,15 @@ public class ClusterChangeGateCoverageTests
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the
     /// failure message says which ones and a new entrant cannot hide inside a total.
+    ///
+    /// <para>⚠️ <b><c>KubernetesOperationsService</c> is absent for a reason that will expire.</b>
+    /// It runs <c>kubectl</c> six times and is excluded only because it <em>acknowledges</em>
+    /// elsewhere in the file, which this metric takes as evidence that its CLI calls are gated.
+    /// Five of those acknowledgments are its own <c>RequireAckAsync</c>; the rest have moved to
+    /// <c>IClusterClient.AcknowledgeAsync</c>. When the last <c>RequireAckAsync</c> goes, the
+    /// file stops matching and arrives here with six invocations at once. That is the metric
+    /// being coarse, not a regression — the fix at that point is to teach
+    /// <see cref="Measure"/> about the seam's acknowledgment, not to bank six.</para>
     /// </summary>
     private static readonly string[] Baseline =
     [

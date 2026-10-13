@@ -23,6 +23,59 @@ public enum ChangeVerb
 }
 
 /// <summary>
+/// A planned change as a <em>caller</em> can describe it: everything about the operation and
+/// nothing about the credential.
+///
+/// <para><b>Why this exists.</b> <see cref="PlannedClusterChange.Kubeconfig"/> is
+/// <c>required</c>, which is what guarantees the gate can always compute a dry-run preview — and
+/// it also meant that every caller raising an acknowledgment had to be holding a kubeconfig.
+/// Callers that mutate through the k8s SDK rather than kubectl cannot get the gate raised for
+/// them from inside the factory, so for them that requirement was the whole reason they still
+/// read the credential off a cluster row.</para>
+///
+/// <para>So a caller fills this in and hands it to <c>IClusterClient.AcknowledgeAsync</c>; the
+/// seam supplies the credential and the cluster's label. The gate's invariant is untouched —
+/// <see cref="PlannedClusterChange"/> is still only ever constructed with one.</para>
+/// </summary>
+public sealed class PlannedChange
+{
+    public required ChangeVerb Verb { get; init; }
+
+    /// <summary>Short human summary, e.g. "Scale Deployment/api to 3".</summary>
+    public string? Summary { get; init; }
+
+    public string? Manifest { get; init; }
+
+    public string? Kind { get; init; }
+    public string? Name { get; init; }
+    public string? Namespace { get; init; }
+
+    public string? Resource { get; init; }
+    public string? Patch { get; init; }
+    public bool StrategicPatch { get; init; }
+
+    /// <summary>
+    /// Completes this into what the gate takes. Called by the seam, which is the only thing that
+    /// has both halves; a caller cannot reach a credential through it because it has to supply
+    /// one to get anything back.
+    /// </summary>
+    public PlannedClusterChange WithCredential(string kubeconfig, string clusterLabel) => new()
+    {
+        Verb = Verb,
+        Kubeconfig = kubeconfig,
+        ClusterLabel = string.IsNullOrWhiteSpace(clusterLabel) ? "cluster" : clusterLabel,
+        Summary = Summary,
+        Manifest = Manifest,
+        Kind = Kind,
+        Name = Name,
+        Namespace = Namespace,
+        Resource = Resource,
+        Patch = Patch,
+        StrategicPatch = StrategicPatch,
+    };
+}
+
+/// <summary>
 /// A single mutating operation that is about to be carried out against a Kubernetes
 /// cluster. Constructed at the mutation choke-point and handed to
 /// <see cref="IClusterChangeGate.AcknowledgeAsync"/> BEFORE the write happens.

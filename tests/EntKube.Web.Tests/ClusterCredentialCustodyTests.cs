@@ -228,7 +228,30 @@ public class ClusterCredentialCustodyTests
     /// new seam verb, <c>UndoDeploymentsAsync</c>, and <c>RolloutWatcherService</c> left the
     /// file list.</para>
     ///
-    private const int BaselineOccurrences = 160;
+    /// <para><b>140 — the resource tree, and the gate stops needing a credential.</b>
+    /// <c>KubernetesOperationsService</c> 46 → 26. Nine actions on <c>ResourceTreePanel</c> —
+    /// scale, restart, delete, logs, containers, events, YAML, cronjob suspend — each took a
+    /// deployment id and nothing else, loaded that deployment's cluster and read the kubeconfig
+    /// off it. One <c>TenantId</c> on that panel reached all of them, the way
+    /// <c>ClusterMonitoring</c>'s did in #182.</para>
+    ///
+    /// <para><b>What unblocked the mutating half.</b> These mutate through the k8s SDK, not
+    /// through the seam, so the gate cannot be raised for them from inside the factory — they
+    /// have to ask. And asking meant holding a kubeconfig, because
+    /// <c>PlannedClusterChange.Kubeconfig</c> is <c>required</c>. So <c>PlannedChange</c> was
+    /// added: everything about the operation and nothing about the credential, completed by the
+    /// seam in <c>IClusterClient.AcknowledgeAsync</c>. The gate's invariant is untouched — a
+    /// <c>PlannedClusterChange</c> still cannot exist without a credential — but a caller no
+    /// longer needs one to ask for an acknowledgment. That requirement was the whole reason a
+    /// dozen methods here read a cluster row at all.</para>
+    ///
+    /// <para><c>GetResourceYamlAsync</c> needed a new seam read instead (<c>kubectl get -o
+    /// yaml</c>): <c>GetJsonAsync</c> lists a kind and returns JSON, and re-serialising JSON for
+    /// a human to read reorders and requotes it. <c>TriggerCronJobAsync</c> is the one action
+    /// left on the old prologue — <c>kubectl create job --from=cronjob/x</c> is a verb the seam
+    /// does not have, the same situation <c>ChangeVerb.Rollback</c> was in.</para>
+    ///
+    private const int BaselineOccurrences = 140;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.

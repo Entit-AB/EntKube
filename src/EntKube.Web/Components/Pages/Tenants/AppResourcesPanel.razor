@@ -159,6 +159,7 @@ else
                        Error="@treeError"
                        Resources="@tree"
                        Namespace="@selectedDeployment.Namespace"
+                       TenantId="TenantId"
                        DeploymentId="@selectedDeployment.Id"
                        AccessRole="@null"
                        OnRefresh="RefreshSelected"
@@ -167,6 +168,9 @@ else
 
 @code {
     [Parameter, EditorRequired] public Guid AppId { get; set; }
+
+    /// <summary>Passed through to the resource tree, whose actions are authorized as this tenant.</summary>
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
     [Parameter] public Guid? EnvironmentId { get; set; }
 
     private List<AppDeployment>? deployments;

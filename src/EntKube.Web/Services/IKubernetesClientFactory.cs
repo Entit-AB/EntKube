@@ -107,6 +107,19 @@ public interface IKubernetesClientFactory
         CancellationToken ct = default);
 
     /// <summary>
+    /// Raises the acknowledgment for a change this factory is not the one carrying out.
+    ///
+    /// <para>Every other method here mutates and acknowledges in one act. A caller that mutates
+    /// through the k8s SDK — scaling a Deployment, patching a CronJob — cannot, so it has to ask
+    /// for the acknowledgment itself. Before this, that meant holding a kubeconfig purely to
+    /// satisfy <c>PlannedClusterChange</c>'s required credential, which is why a dozen methods
+    /// that otherwise needed nothing from a cluster row still read one.</para>
+    /// </summary>
+    Task AcknowledgeAsync(
+        EntKube.Web.Services.ClusterChanges.PlannedChange change, string kubeconfig,
+        string clusterLabel, CancellationToken ct = default);
+
+    /// <summary>
     /// Rolls every Deployment in a namespace back to the revision Kubernetes last recorded for
     /// it (<c>kubectl rollout undo</c>), as one acknowledged change.
     ///
@@ -136,6 +149,17 @@ public interface IKubernetesClientFactory
     Task<bool> ResourceExistsAsync(string resource, string name, string ns, string kubeconfig, CancellationToken ct = default);
 
     Task<string> GetJsonAsync(string resource, string ns, string kubeconfig, string labelSelector = "", CancellationToken ct = default);
+
+    /// <summary>
+    /// One named resource as YAML (<c>kubectl get … -o yaml</c>).
+    ///
+    /// <para>Distinct from <see cref="GetJsonAsync"/>, which lists a kind and returns JSON. A
+    /// caller showing a resource to a human wants the YAML kubectl would print — re-serialising
+    /// JSON would reorder and requote it — and it wants one object by name, which that method
+    /// cannot express.</para>
+    /// </summary>
+    Task<string> GetResourceYamlAsync(
+        string resource, string name, string ns, string kubeconfig, CancellationToken ct = default);
 
     /// <summary>
     /// Reads the tail of a workload's logs (kubectl logs {target}). The target can be a pod name or

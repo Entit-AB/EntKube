@@ -203,15 +203,91 @@ public class KubernetesOperationsServiceTests : IDisposable
     public async Task GetPodLogsAsync_WithoutKubeconfig_ReturnsError()
     {
         // Arrange
-        (AppDeployment deployment, _) = CreateDeploymentWithCluster();
+        (AppDeployment deployment, KubernetesCluster cluster) = CreateDeploymentWithCluster();
 
         // Act
         KubernetesOperationResult<string> result = await sut.GetPodLogsAsync(
-            deployment.Id, "billing-api-abc123");
+            cluster.TenantId, deployment.Id, "billing-api-abc123");
 
         // Assert
         result.IsSuccess.Should().BeFalse();
         result.Error.Should().Contain("kubeconfig");
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  The refusal the tenant parameter buys
+    // ════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Every action on the resource tree — scale, restart, delete, logs, events, containers,
+    /// YAML, cronjob suspend — used to take a deployment id and nothing else, look up that
+    /// deployment's cluster, and read the kubeconfig off it. The id was the authorization.
+    ///
+    /// <para>These assert the pairing is now checked. They are written against a cluster with no
+    /// kubeconfig, so a converted method cannot reach a cluster either way — what they pin is
+    /// that a <em>stranger</em> is refused at the seam, before the deployment's own namespace or
+    /// cluster is ever consulted, and that the owner gets a different answer.</para>
+    /// </summary>
+    [Fact]
+    public async Task ScaleWorkloadAsync_AnotherTenantsDeployment_IsRefused()
+    {
+        (AppDeployment deployment, KubernetesCluster cluster) = CreateDeploymentWithCluster();
+        Guid stranger = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = stranger, Name = "Stranger", Slug = $"s-{stranger:N}" });
+        db.SaveChanges();
+
+        KubernetesOperationResult refused = await sut.ScaleWorkloadAsync(
+            stranger, deployment.Id, "Deployment", "billing-api", 3);
+
+        refused.IsSuccess.Should().BeFalse();
+        refused.Error.Should().Contain("not this tenant's");
+
+        // The owner reaches further: past the seam, and into the missing credential.
+        KubernetesOperationResult owner = await sut.ScaleWorkloadAsync(
+            cluster.TenantId, deployment.Id, "Deployment", "billing-api", 3);
+
+        owner.IsSuccess.Should().BeFalse();
+        owner.Error.Should().Contain("kubeconfig",
+            "a different refusal from the tenant one — if both said the same thing, the "
+            + "assertion above would prove nothing");
+    }
+
+    [Fact]
+    public async Task DeleteResourceAsync_AnotherTenantsDeployment_IsRefused()
+    {
+        (AppDeployment deployment, _) = CreateDeploymentWithCluster();
+
+        KubernetesOperationResult result = await sut.DeleteResourceAsync(
+            Guid.NewGuid(), deployment.Id, "Pod", "billing-api-abc123");
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("not this tenant's");
+    }
+
+    [Fact]
+    public async Task GetResourceEventsAsync_AnotherTenantsDeployment_IsRefused()
+    {
+        (AppDeployment deployment, _) = CreateDeploymentWithCluster();
+
+        KubernetesOperationResult<List<string>> result = await sut.GetResourceEventsAsync(
+            Guid.NewGuid(), deployment.Id, "Pod", "billing-api-abc123");
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("not this tenant's");
+    }
+
+    /// <summary>
+    /// A deployment that does not exist is told so, rather than being refused as though it
+    /// belonged to someone else — the two are different facts and the message should say which.
+    /// </summary>
+    [Fact]
+    public async Task RestartWorkloadAsync_UnknownDeployment_SaysSo()
+    {
+        KubernetesOperationResult result = await sut.RestartWorkloadAsync(
+            Guid.NewGuid(), Guid.NewGuid(), "Deployment", "billing-api");
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("Deployment not found");
     }
 
     // ════════════════════════════════════════════════════════════════
