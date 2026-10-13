@@ -322,27 +322,24 @@ public class KubernetesOperationsService(
     /// been discovered in the telemetry / Loki backend for the cluster.
     /// </summary>
     public async Task<KubernetesOperationResult<List<string>>> ListNamespacesAsync(
-        Guid clusterId, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        KubernetesCluster? cluster;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
-        {
-            cluster = await db.KubernetesClusters.FirstOrDefaultAsync(c => c.Id == clusterId, ct);
-        }
+        // No cluster row read at all now: the seam answers "may this tenant hold that cluster's
+        // credential", which is the same question this method used to answer by loading the row
+        // and looking at a column.
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
 
         if (cluster is null)
         {
-            return KubernetesOperationResult<List<string>>.Failure("Cluster not found.");
-        }
-        if (string.IsNullOrEmpty(cluster.Kubeconfig))
-        {
             return KubernetesOperationResult<List<string>>.Failure(
-                "Cluster has no kubeconfig configured.");
+                "Cluster not found for this tenant, or it has no kubeconfig configured.");
         }
 
         try
         {
-            using Kubernetes client = CreateClient(cluster.Kubeconfig);
+            // Not disposed: pooled per credential and shared. See ResolveTargetAsync.
+            Kubernetes client = cluster.GetPooledSdkClient();
             V1NamespaceList list = await client.CoreV1.ListNamespaceAsync(cancellationToken: ct);
             List<string> names = list.Items
                 .Select(n => n.Metadata?.Name)
@@ -418,67 +415,6 @@ public class KubernetesOperationsService(
     }
 
     /// <summary>
-    /// Lists all pods in the deployment's namespace, filtered by the deployment
-    /// name. Gives the portal a real-time view of what's actually running.
-    /// </summary>
-    public async Task<KubernetesOperationResult<List<PodInfo>>> GetPodsAsync(
-        Guid deploymentId, CancellationToken ct = default)
-    {
-        // First, load the deployment and its cluster so we know where to connect.
-        AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
-
-        if (deployment is null)
-        {
-            return KubernetesOperationResult<List<PodInfo>>.Failure("Deployment not found.");
-        }
-
-        // The cluster needs a kubeconfig to connect.
-        if (string.IsNullOrEmpty(deployment.Cluster.Kubeconfig))
-        {
-            return KubernetesOperationResult<List<PodInfo>>.Failure(
-                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
-        }
-
-        try
-        {
-            // Build a Kubernetes client from the stored kubeconfig.
-            using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
-
-            // List pods in the deployment's namespace.
-            V1PodList podList = await client.CoreV1.ListNamespacedPodAsync(
-                deployment.Namespace, cancellationToken: ct);
-
-            List<PodInfo> pods = podList.Items.Select(pod => new PodInfo
-            {
-                Name = pod.Metadata.Name,
-                Namespace = pod.Metadata.NamespaceProperty ?? deployment.Namespace,
-                Status = pod.Status?.Phase ?? "Unknown",
-                ReadyContainers = pod.Status?.ContainerStatuses?.Count(cs => cs.Ready) ?? 0,
-                TotalContainers = pod.Spec?.Containers?.Count ?? 0,
-                Restarts = pod.Status?.ContainerStatuses?.Sum(cs => cs.RestartCount) ?? 0,
-                StartTime = pod.Status?.StartTime,
-                Containers = (pod.Status?.ContainerStatuses ?? []).Select(cs => new ContainerInfo
-                {
-                    Name = cs.Name,
-                    Image = cs.Image,
-                    Ready = cs.Ready,
-                    RestartCount = cs.RestartCount,
-                    State = cs.State?.Running is not null ? "Running"
-                        : cs.State?.Waiting is not null ? $"Waiting: {cs.State.Waiting.Reason}"
-                        : cs.State?.Terminated is not null ? $"Terminated: {cs.State.Terminated.Reason}"
-                        : "Unknown"
-                }).ToList()
-            }).ToList();
-
-            return KubernetesOperationResult<List<PodInfo>>.Success(pods);
-        }
-        catch (Exception ex)
-        {
-            return KubernetesOperationResult<List<PodInfo>>.Failure($"Failed to list pods: {ex.Message}");
-        }
-    }
-
-    /// <summary>
     /// Retrieves log output from a specific pod. Optionally targets a
     /// specific container in multi-container pods. Returns the last
     /// tailLines lines to keep output manageable.
@@ -528,30 +464,29 @@ public class KubernetesOperationsService(
     /// creates new pods and terminates old ones gradually.
     /// </summary>
     public async Task<KubernetesOperationResult> RestartDeploymentAsync(
+        Guid tenantId,
         Guid deploymentId,
         string k8sDeploymentName,
         string? performedBy = null,
         CancellationToken ct = default)
     {
-        AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
+        var (target, error) = await ResolveTargetAsync(tenantId, deploymentId, ct);
+        if (target is null) return KubernetesOperationResult.Failure(error!);
 
-        if (deployment is null)
-        {
-            return KubernetesOperationResult.Failure("Deployment not found.");
-        }
-
-        if (string.IsNullOrEmpty(deployment.Cluster.Kubeconfig))
-        {
-            return KubernetesOperationResult.Failure(
-                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
-        }
+        AppDeployment deployment = target.Deployment;
 
         try
         {
-            await RequireAckAsync(ChangeVerb.Restart, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
-                deployment.Namespace, $"Restart Deployment/{k8sDeploymentName}", ct: ct);
+            await target.Cluster.AcknowledgeAsync(new PlannedChange
+            {
+                Verb = ChangeVerb.Restart,
+                Resource = "deployment",
+                Name = k8sDeploymentName,
+                Namespace = deployment.Namespace,
+                Summary = $"Restart Deployment/{k8sDeploymentName}",
+            }, ct);
 
-            using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
+            Kubernetes client = target.Cluster.GetPooledSdkClient();
 
             // Patching the pod template annotation forces a rollout restart,
             // identical to "kubectl rollout restart deployment/<name>".
@@ -579,113 +514,6 @@ public class KubernetesOperationsService(
                 "Failed to restart deployment {K8sName} in {Namespace}",
                 k8sDeploymentName, deployment.Namespace);
             return KubernetesOperationResult.Failure($"Failed to restart deployment: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Deletes a specific pod, which triggers Kubernetes to create a replacement
-    /// (assuming the pod is managed by a Deployment/ReplicaSet). This is the
-    /// equivalent of "kubectl delete pod <name>".
-    /// </summary>
-    public async Task<KubernetesOperationResult> DeletePodAsync(
-        Guid deploymentId,
-        string podName,
-        string? performedBy = null,
-        CancellationToken ct = default)
-    {
-        AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
-
-        if (deployment is null)
-        {
-            return KubernetesOperationResult.Failure("Deployment not found.");
-        }
-
-        if (string.IsNullOrEmpty(deployment.Cluster.Kubeconfig))
-        {
-            return KubernetesOperationResult.Failure(
-                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
-        }
-
-        try
-        {
-            await RequireAckAsync(ChangeVerb.Delete, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
-                deployment.Namespace, $"Delete Pod/{podName}", ct: ct);
-
-            using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
-
-            await client.CoreV1.DeleteNamespacedPodAsync(
-                podName, deployment.Namespace, cancellationToken: ct);
-
-            logger.LogInformation(
-                "Pod {PodName} in {Namespace} deleted by {User}",
-                podName, deployment.Namespace, performedBy ?? "system");
-
-            await auditService.RecordAsync(deploymentId, "DeletePod", "Pod",
-                podName, performedBy: performedBy, ct: ct);
-
-            return KubernetesOperationResult.Success();
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to delete pod {PodName} in {Namespace}",
-                podName, deployment.Namespace);
-            return KubernetesOperationResult.Failure($"Failed to delete pod: {ex.Message}");
-        }
-    }
-
-    /// <summary>
-    /// Scales a Kubernetes Deployment to the specified number of replicas.
-    /// Useful for scaling up during traffic spikes or scaling down to save resources.
-    /// </summary>
-    public async Task<KubernetesOperationResult> ScaleDeploymentAsync(
-        Guid deploymentId,
-        string k8sDeploymentName,
-        int replicas,
-        string? performedBy = null,
-        CancellationToken ct = default)
-    {
-        AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
-
-        if (deployment is null)
-        {
-            return KubernetesOperationResult.Failure("Deployment not found.");
-        }
-
-        if (string.IsNullOrEmpty(deployment.Cluster.Kubeconfig))
-        {
-            return KubernetesOperationResult.Failure(
-                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
-        }
-
-        try
-        {
-            await RequireAckAsync(ChangeVerb.Scale, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
-                deployment.Namespace, $"Scale Deployment/{k8sDeploymentName} to {replicas} replica(s)",
-                patch: $"spec.replicas = {replicas}", ct: ct);
-
-            using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
-
-            V1Patch patch = new(
-                $"{{\"spec\":{{\"replicas\":{replicas}}}}}",
-                V1Patch.PatchType.MergePatch);
-
-            await client.AppsV1.PatchNamespacedDeploymentAsync(
-                patch, k8sDeploymentName, deployment.Namespace, cancellationToken: ct);
-
-            logger.LogInformation(
-                "Deployment {K8sName} in {Namespace} scaled to {Replicas} by {User}",
-                k8sDeploymentName, deployment.Namespace, replicas, performedBy ?? "system");
-
-            await auditService.RecordAsync(deploymentId, "ScaleDeployment", "Deployment",
-                k8sDeploymentName, $"replicas={replicas}", performedBy, ct);
-
-            return KubernetesOperationResult.Success();
-        }
-        catch (Exception ex)
-        {
-            logger.LogWarning(ex, "Failed to scale deployment {K8sName} in {Namespace}",
-                k8sDeploymentName, deployment.Namespace);
-            return KubernetesOperationResult.Failure($"Failed to scale deployment: {ex.Message}");
         }
     }
 
@@ -2528,17 +2356,13 @@ public class KubernetesOperationsService(
     /// (e.g. no Ingress controller) doesn't block the others.
     /// </summary>
     public async Task<KubernetesOperationResult<List<DeploymentResource>>> GetLiveResourcesAsync(
-        Guid deploymentId, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentId, CancellationToken ct = default)
     {
-        AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
+        var (target, error) = await ResolveTargetAsync(tenantId, deploymentId, ct);
+        if (target is null)
+            return KubernetesOperationResult<List<DeploymentResource>>.Failure(error!);
 
-        if (deployment is null)
-            return KubernetesOperationResult<List<DeploymentResource>>.Failure("Deployment not found.");
-
-        if (string.IsNullOrEmpty(deployment.Cluster?.Kubeconfig))
-            return KubernetesOperationResult<List<DeploymentResource>>.Failure(
-                "Cluster has no kubeconfig configured.");
-
+        AppDeployment deployment = target.Deployment;
         string ns = deployment.Namespace;
 
         // k8s UID → our resource node (for O(1) parent lookup during tree wiring)
@@ -2581,7 +2405,7 @@ public class KubernetesOperationsService(
 
         try
         {
-            using Kubernetes client = CreateClient(deployment.Cluster.Kubeconfig);
+            Kubernetes client = target.Cluster.GetPooledSdkClient();
 
             // ── Deployments ───────────────────────────────────────────────
             await TryFetch(async () =>

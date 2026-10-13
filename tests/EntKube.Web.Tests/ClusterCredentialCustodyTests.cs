@@ -251,7 +251,36 @@ public class ClusterCredentialCustodyTests
     /// left on the old prologue — <c>kubectl create job --from=cronjob/x</c> is a verb the seam
     /// does not have, the same situation <c>ChangeVerb.Rollback</c> was in.</para>
     ///
-    private const int BaselineOccurrences = 140;
+    /// <para><b>125 — the rest of the deployment-level reads, and three dead ends.</b>
+    /// <c>KubernetesOperationsService</c> 26 → 11.</para>
+    ///
+    /// <para><b>Eight of the fifteen came from deleting code.</b> <c>DeletePodAsync</c>,
+    /// <c>ScaleDeploymentAsync</c> and <c>GetPodsAsync</c> had no caller but a test each. The
+    /// first two were superseded by the generic <c>DeleteResourceAsync</c> and
+    /// <c>ScaleWorkloadAsync</c> that <c>ResourceTreePanel</c> actually calls — converted in #185
+    /// — and the pod list by the telemetry backends. Their <c>PodInfo</c>/<c>ContainerInfo</c>
+    /// DTOs stay: <c>StorageService</c>, <c>NodeManagementService</c> and <c>ClusterNodes</c> use
+    /// them. Deleting a credential site beats converting one, and this is the third time the
+    /// cheapest conversion in a file turned out to be a deletion.</para>
+    ///
+    /// <para>Converted: <c>GetLiveResourcesAsync</c> (the resource tree's own inventory, and the
+    /// widest-reaching of the four), <c>RestartDeploymentAsync</c>, <c>ListNamespacesAsync</c>.
+    /// The restart is the public API's endpoint — it already checked that the <em>app</em> belongs
+    /// to the token's tenant, and the seam now checks the <em>cluster</em>'s, which is a different
+    /// row, so a deployment pointing at someone else's cluster is refused rather than restarted.
+    /// <c>ListNamespacesAsync</c> reads no cluster row at all now: the seam answers the same
+    /// question the row lookup used to.</para>
+    ///
+    /// <para><c>DeploymentSyncService</c> is the fifth sweep turned into a tenant loop — it
+    /// selected every deployment in the installation whose cluster had a kubeconfig, then read
+    /// each one's live resources by id.</para>
+    ///
+    /// <para>What is left in the file is <b>11</b>: <c>TriggerCronJobAsync</c> (3, needs a seam
+    /// verb for <c>kubectl create job --from=cronjob/x</c>), the two cluster-scoped route helpers
+    /// <c>GetServicesInNamespaceAsync</c>/<c>GetEndpointsForServiceAsync</c> (4), and four
+    /// one-site private helpers on the apply path.</para>
+    ///
+    private const int BaselineOccurrences = 125;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.

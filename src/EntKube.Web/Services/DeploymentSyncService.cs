@@ -39,32 +39,43 @@ public class DeploymentSyncService(
         using IDisposable unattended = scope.DeclareUnattended("deployment-sync");
 
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
+        var appDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
         var opsService = scope.ServiceProvider.GetRequiredService<KubernetesOperationsService>();
         var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
 
-        List<Guid> deploymentIds;
+        // One tenant at a time, which is the decided shape for every sweep (docs/decomposition.md
+        // §4.0.1.2): the tenant is an INPUT to the query that finds the work, so each live read is
+        // authorized as that tenant. This used to select every deployment in the installation whose
+        // cluster had a kubeconfig and then read each one's resources by id alone.
+        List<(Guid TenantId, Guid DeploymentId)> targets = [];
 
+        using (ApplicationDbContext appDb = appDbFactory.CreateDbContext())
         using (DeliveryDbContext db = dbFactory.CreateDbContext())
         {
-            deploymentIds = await db.AppDeployments
-                .Include(d => d.Cluster)
-                .Where(d => d.Cluster.KubeconfigSecretId != null)
-                .Select(d => d.Id)
-                .ToListAsync(ct);
+            foreach (Guid tenantId in await appDb.Tenants.Select(t => t.Id).ToListAsync(ct))
+            {
+                List<Guid> ids = await db.AppDeployments
+                    .Where(d => d.Cluster.KubeconfigSecretId != null
+                        && d.App.Customer.TenantId == tenantId)
+                    .Select(d => d.Id)
+                    .ToListAsync(ct);
+
+                targets.AddRange(ids.Select(id => (tenantId, id)));
+            }
         }
 
-        logger.LogDebug("DeploymentSyncService: syncing {Count} deployments", deploymentIds.Count);
+        logger.LogDebug("DeploymentSyncService: syncing {Count} deployments", targets.Count);
 
         int synced = 0, failed = 0;
 
-        foreach (Guid id in deploymentIds)
+        foreach ((Guid tenantId, Guid id) in targets)
         {
             if (ct.IsCancellationRequested) break;
 
             try
             {
                 KubernetesOperationResult<List<DeploymentResource>> result =
-                    await opsService.GetLiveResourcesAsync(id, ct);
+                    await opsService.GetLiveResourcesAsync(tenantId, id, ct);
 
                 if (result.IsSuccess && result.Data is not null)
                 {
