@@ -229,7 +229,8 @@
         busy = true;
         try
         {
-            KubernetesOperationResult<string> result = await K8sOps.ApplyOutboundMtlsAsync(credential.Id);
+            KubernetesOperationResult<string> result =
+                await K8sOps.ApplyOutboundMtlsAsync(TenantId, credential.Id);
 
             if (result.IsSuccess) Toasts.Success(result.Data ?? "Applied.");
             else Toasts.Error(result.Error ?? "Apply failed.");

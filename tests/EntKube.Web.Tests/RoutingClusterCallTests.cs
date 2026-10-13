@@ -188,7 +188,7 @@ public class RoutingClusterCallTests : IDisposable
         await SeedAsync();
         AppL4Route route = await SeedL4RouteAsync();
 
-        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(route.Id);
+        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(tenantId, route.Id);
 
         result.IsSuccess.Should().BeTrue(result.Error);
 
@@ -208,7 +208,7 @@ public class RoutingClusterCallTests : IDisposable
         await SeedAsync();
         AppL4Route route = await SeedL4RouteAsync(L4Protocol.Tcp);
 
-        await sut.ApplyL4RouteAsync(route.Id);
+        await sut.ApplyL4RouteAsync(tenantId, route.Id);
 
         // The ingress gateway would otherwise force mTLS to a sidecar-less pod. Both halves are
         // needed: PERMISSIVE on what the pod accepts, DISABLE on what the gateway sends.
@@ -227,7 +227,7 @@ public class RoutingClusterCallTests : IDisposable
         await SeedAsync();
         AppL4Route route = await SeedL4RouteAsync(L4Protocol.Udp, externalPort: 53);
 
-        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(route.Id);
+        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(tenantId, route.Id);
 
         result.IsSuccess.Should().BeTrue(result.Error);
 
@@ -249,7 +249,7 @@ public class RoutingClusterCallTests : IDisposable
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(false);
 
-        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(route.Id);
+        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(tenantId, route.Id);
 
         result.IsSuccess.Should().BeFalse();
         result.Error.Should().Contain("tcproutes.gateway.networking.k8s.io")
@@ -270,7 +270,7 @@ public class RoutingClusterCallTests : IDisposable
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("kubectl failed (exit 1): connection refused"));
 
-        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(route.Id);
+        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(tenantId, route.Id);
 
         // As it did when this ran kubectl directly: a read that fails is not evidence the CRD is
         // there, so the apply is refused rather than attempted.
@@ -285,7 +285,7 @@ public class RoutingClusterCallTests : IDisposable
         AppL4Route route = await SeedL4RouteAsync();
         GatewayReportsAddress("203.0.113.40");
 
-        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(route.Id);
+        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(tenantId, route.Id);
 
         result.IsSuccess.Should().BeTrue(result.Error);
         result.Data.Should().Contain("203.0.113.40:5432/TCP");
@@ -301,7 +301,7 @@ public class RoutingClusterCallTests : IDisposable
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync("{\"status\":{\"addresses\":[]}}");
 
-        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(route.Id);
+        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(tenantId, route.Id);
 
         result.IsSuccess.Should().BeTrue(result.Error);
         result.Data.Should().Contain("pending");
@@ -313,7 +313,7 @@ public class RoutingClusterCallTests : IDisposable
         await SeedAsync();
         AppL4Route route = await SeedL4RouteAsync(managed: false);
 
-        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(route.Id);
+        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(tenantId, route.Id);
 
         result.IsSuccess.Should().BeFalse();
         applied.Should().BeEmpty();
@@ -325,7 +325,7 @@ public class RoutingClusterCallTests : IDisposable
         await SeedAsync(withKubeconfig: false);
         AppL4Route route = await SeedL4RouteAsync();
 
-        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(route.Id);
+        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(tenantId, route.Id);
 
         result.IsSuccess.Should().BeFalse();
         result.Error.Should().Contain("kubeconfig");
@@ -342,7 +342,7 @@ public class RoutingClusterCallTests : IDisposable
         await SeedAsync();
         AppL4Route route = await SeedL4RouteAsync();
 
-        await sut.DeleteL4RouteFromClusterAsync(route.Id);
+        await sut.DeleteL4RouteFromClusterAsync(tenantId, route.Id);
 
         // The fully-qualified resource type matters: "tcproute" alone is ambiguous with any other
         // group that has registered one.
@@ -356,7 +356,7 @@ public class RoutingClusterCallTests : IDisposable
         await SeedAsync();
         AppL4Route route = await SeedL4RouteAsync();
 
-        await sut.DeleteL4RouteFromClusterAsync(route.Id);
+        await sut.DeleteL4RouteFromClusterAsync(tenantId, route.Id);
 
         // No L4 ports left, so the dedicated Gateway goes with it — that is what releases its
         // auto-provisioned LoadBalancer. Regenerating it instead would keep billing for nothing.
@@ -372,7 +372,7 @@ public class RoutingClusterCallTests : IDisposable
         AppL4Route going = await SeedL4RouteAsync(externalPort: 5432);
         await SeedL4RouteAsync(externalPort: 6379);
 
-        await sut.DeleteL4RouteFromClusterAsync(going.Id);
+        await sut.DeleteL4RouteFromClusterAsync(tenantId, going.Id);
 
         // The surviving route keeps its listener; the Gateway is re-applied, not deleted.
         applied.Should().ContainSingle(m => m.Contains(Document("Gateway")))
@@ -391,7 +391,7 @@ public class RoutingClusterCallTests : IDisposable
         await SeedAsync();
         GatewayReportsAddress("198.51.100.7");
 
-        string? address = await sut.GetL4EndpointAddressAsync(clusterId);
+        string? address = await sut.GetL4EndpointAddressAsync(tenantId, clusterId);
 
         address.Should().Be("198.51.100.7");
     }
@@ -404,7 +404,7 @@ public class RoutingClusterCallTests : IDisposable
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("kubectl failed (exit 1): NotFound"));
 
-        string? address = await sut.GetL4EndpointAddressAsync(clusterId);
+        string? address = await sut.GetL4EndpointAddressAsync(tenantId, clusterId);
 
         address.Should().BeNull();
     }
@@ -415,7 +415,7 @@ public class RoutingClusterCallTests : IDisposable
         await SeedAsync();
         GatewayReportsAddress("198.51.100.7");
 
-        string? address = await sut.GetL4EndpointAddressAsync(Guid.NewGuid());
+        string? address = await sut.GetL4EndpointAddressAsync(tenantId, Guid.NewGuid());
 
         address.Should().BeNull();
     }
@@ -434,7 +434,7 @@ public class RoutingClusterCallTests : IDisposable
         await SeedAsync();
         GatewayReportsAddress("198.51.100.7");
 
-        string? address = await sut.GetL4EndpointAddressAsync(clusterId);
+        string? address = await sut.GetL4EndpointAddressAsync(tenantId, clusterId);
 
         // Reached with no tenant in hand at all, and it answers.
         address.Should().Be("198.51.100.7");
@@ -449,7 +449,7 @@ public class RoutingClusterCallTests : IDisposable
     {
         await SeedAsync();
 
-        KubernetesOperationResult<string> result = await sut.ApplyMeshMtlsAsync(clusterId, "billing-ns");
+        KubernetesOperationResult<string> result = await sut.ApplyMeshMtlsAsync(tenantId, clusterId, "billing-ns");
 
         result.IsSuccess.Should().BeTrue(result.Error);
         applied.Should().ContainSingle(m => m.Contains(Document("PeerAuthentication")))
@@ -461,10 +461,56 @@ public class RoutingClusterCallTests : IDisposable
     {
         await SeedAsync(withKubeconfig: false);
 
-        KubernetesOperationResult<string> result = await sut.ApplyMeshMtlsAsync(clusterId, "billing-ns");
+        KubernetesOperationResult<string> result = await sut.ApplyMeshMtlsAsync(tenantId, clusterId, "billing-ns");
 
         result.IsSuccess.Should().BeFalse();
         result.Error.Should().Contain("kubeconfig");
         applied.Should().BeEmpty();
     }
+
+    // ──────── The refusal the tenant parameter buys ────────
+
+    /// <summary>
+    /// Every one of these took an id and read the tenant off the row it then compared — an L4
+    /// route's own deployment's cluster, or the cluster being applied to. The predicate could not
+    /// fail, so a crafted id reached any cluster in the installation.
+    ///
+    /// <para>Asserted on what reached the cluster, not only on the returned flag: an apply that
+    /// got there and then reported failure would still have changed someone else's gateway.</para>
+    /// </summary>
+    [Fact]
+    public async Task Another_tenant_cannot_apply_or_delete_an_l4_route()
+    {
+        await SeedAsync();
+        AppL4Route route = await SeedL4RouteAsync();
+        Guid stranger = Guid.NewGuid();
+
+        KubernetesOperationResult<string> applyResult = await sut.ApplyL4RouteAsync(stranger, route.Id);
+        KubernetesOperationResult<string> deleteResult =
+            await sut.DeleteL4RouteFromClusterAsync(stranger, route.Id);
+
+        applyResult.IsSuccess.Should().BeFalse();
+        applyResult.Error.Should().Contain("not this tenant's");
+        deleteResult.IsSuccess.Should().BeFalse();
+
+        applied.Should().BeEmpty("nothing may reach a cluster this tenant does not own");
+        deleted.Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task Another_tenant_cannot_apply_mesh_mtls_or_read_the_l4_address()
+    {
+        await SeedAsync();
+        Guid stranger = Guid.NewGuid();
+
+        KubernetesOperationResult<string> mtls = await sut.ApplyMeshMtlsAsync(stranger, clusterId, "billing-ns");
+
+        mtls.IsSuccess.Should().BeFalse();
+        mtls.Error.Should().Contain("not found for this tenant");
+        applied.Should().BeEmpty();
+
+        (await sut.GetL4EndpointAddressAsync(stranger, clusterId)).Should().BeNull(
+            "the gateway's address is read from the cluster, so it is not a stranger's to ask for");
+    }
+
 }

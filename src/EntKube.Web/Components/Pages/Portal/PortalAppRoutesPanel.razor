@@ -341,11 +341,14 @@ else
     </div>
 
     @* Read-only view of any raw TCP/UDP ports exposed for this app. *@
-    <AppL4RoutesPanel App="App" IsPortalView="true" />
+    <AppL4RoutesPanel App="App" TenantId="TenantId" IsPortalView="true" />
 }
 
 @code {
     [Parameter] public required Data.App App { get; set; }
+
+    /// <summary>The tenant the portal resolved this customer under, as its siblings take it.</summary>
+    [Parameter] public required Guid TenantId { get; set; }
     [Parameter] public CustomerAccessRole AccessRole { get; set; }
 
     private List<AppRoute>? routes;

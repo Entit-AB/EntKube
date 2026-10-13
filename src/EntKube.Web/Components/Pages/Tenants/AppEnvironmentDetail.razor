@@ -1188,7 +1188,7 @@
 @if (section == "external-access")
 {
     <AppExternalAccessPanel App="App" TenantId="TenantId" EnvironmentId="Environment.Id" IsPortalView="IsPortalView" />
-    <AppL4RoutesPanel App="App" EnvironmentId="Environment.Id" IsPortalView="IsPortalView" />
+    <AppL4RoutesPanel App="App" TenantId="TenantId" EnvironmentId="Environment.Id" IsPortalView="IsPortalView" />
 }
 
 @* ══════════════════════════════════════════════════════
@@ -2793,7 +2793,8 @@
         {
             string name = selectedDeployment.Name;
             KubernetesOperationResult<string> result =
-                await K8sOps.DeleteDeploymentFromClusterAsync(selectedDeployment.Id, performedBy: null);
+                await K8sOps.DeleteDeploymentFromClusterAsync(
+                    TenantId, selectedDeployment.Id, performedBy: null);
 
             if (!result.IsSuccess)
             {
@@ -2908,7 +2909,8 @@
         syncingGit = true; gitSyncResult = null; StateHasChanged();
         try
         {
-            GitSyncResult result = await GitSyncService.SyncDeploymentAsync(selectedDeployment.Id);
+            GitSyncResult result =
+                await GitSyncService.SyncDeploymentAsync(TenantId, selectedDeployment.Id);
             gitSyncSuccess = result.IsSuccess;
             gitSyncResult = result.AlreadyCurrent
                 ? "Already up to date."
@@ -2972,7 +2974,8 @@
         applyingYaml = true; yamlApplyOutput = null; yamlApplySuccess = null;
         try
         {
-            KubernetesOperationResult<string> result = await K8sOps.ApplyYamlDeploymentAsync(selectedDeployment.Id);
+            KubernetesOperationResult<string> result =
+                await K8sOps.ApplyYamlDeploymentAsync(TenantId, selectedDeployment.Id);
             yamlApplySuccess = result.IsSuccess;
             yamlApplyOutput = result.IsSuccess ? result.Data : result.Error;
         }
@@ -3009,7 +3012,8 @@
         installingHelm = true; helmInstallOutput = null; helmInstallSuccess = null;
         try
         {
-            KubernetesOperationResult<string> result = await K8sOps.HelmInstallOrUpgradeAsync(selectedDeployment.Id);
+            KubernetesOperationResult<string> result =
+                await K8sOps.HelmInstallOrUpgradeAsync(TenantId, selectedDeployment.Id);
             helmInstallSuccess = result.IsSuccess;
             helmInstallOutput = result.IsSuccess ? result.Data : result.Error;
         }

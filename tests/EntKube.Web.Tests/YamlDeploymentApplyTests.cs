@@ -66,9 +66,12 @@ public class YamlDeploymentApplyTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
+    /// <summary>The tenant the seeded deployment belongs to, and the one every apply acts as.</summary>
+    private Guid tenantId;
+
     private async Task<AppDeployment> SeedDeploymentAsync(params string[] manifests)
     {
-        Guid tenantId = Guid.NewGuid();
+        tenantId = Guid.NewGuid();
         Guid clusterId = Guid.NewGuid();
         Guid envId = Guid.NewGuid();
         Guid customerId = Guid.NewGuid();
@@ -143,7 +146,7 @@ public class YamlDeploymentApplyTests : IDisposable
     {
         AppDeployment deployment = await SeedDeploymentAsync(ConfigMapYaml, ServiceYaml);
 
-        KubernetesOperationResult<string> result = await sut.ApplyYamlDeploymentAsync(deployment.Id);
+        KubernetesOperationResult<string> result = await sut.ApplyYamlDeploymentAsync(tenantId, deployment.Id);
 
         result.IsSuccess.Should().BeTrue(result.Error);
 
@@ -165,7 +168,7 @@ public class YamlDeploymentApplyTests : IDisposable
     {
         AppDeployment deployment = await SeedDeploymentAsync(ConfigMapYaml, ServiceYaml);
 
-        await sut.ApplyYamlDeploymentAsync(deployment.Id);
+        await sut.ApplyYamlDeploymentAsync(tenantId, deployment.Id);
 
         // Three manifests: the two above plus the Namespace document the composer prepends.
         applied[0].Summary.Should().Be("Apply 'billing-deploy' (2 manifest(s)) to billing-ns");
@@ -184,7 +187,7 @@ public class YamlDeploymentApplyTests : IDisposable
     {
         AppDeployment deployment = await SeedDeploymentAsync(ConfigMapYaml);
 
-        await sut.ApplyYamlDeploymentAsync(deployment.Id);
+        await sut.ApplyYamlDeploymentAsync(tenantId, deployment.Id);
 
         applied.Should().ContainSingle();
         gate.Verify(
@@ -203,7 +206,7 @@ public class YamlDeploymentApplyTests : IDisposable
                 It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("kubectl failed (exit 1): admission webhook denied"));
 
-        KubernetesOperationResult<string> result = await sut.ApplyYamlDeploymentAsync(deployment.Id);
+        KubernetesOperationResult<string> result = await sut.ApplyYamlDeploymentAsync(tenantId, deployment.Id);
 
         result.IsSuccess.Should().BeFalse();
         result.Error.Should().Contain("admission webhook denied");
@@ -223,7 +226,7 @@ public class YamlDeploymentApplyTests : IDisposable
                 It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new OperationCanceledException("Cluster change cancelled by operator"));
 
-        Func<Task> act = () => sut.ApplyYamlDeploymentAsync(deployment.Id);
+        Func<Task> act = () => sut.ApplyYamlDeploymentAsync(tenantId, deployment.Id);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
     }

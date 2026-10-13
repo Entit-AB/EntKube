@@ -872,7 +872,8 @@
         applyRouteError = null;
         try
         {
-            KubernetesOperationResult<string> result = await K8sOps.SetRouteManagementAsync(route.Id, enabling);
+            KubernetesOperationResult<string> result =
+                await K8sOps.SetRouteManagementAsync(TenantId, route.Id, enabling);
             if (!result.IsSuccess)
             {
                 applyRouteError = result.Error;
@@ -1029,7 +1030,7 @@
     {
         try
         {
-            await K8sOps.DeleteDeploymentRouteFromClusterAsync(drId);
+            await K8sOps.DeleteDeploymentRouteFromClusterAsync(TenantId, drId);
             await AppRouteService.DeleteDeploymentRouteAsync(drId);
             await LoadAsync();
             Toasts.Success("Deployment route removed.");
@@ -1194,7 +1195,8 @@
         applyRouteError = null;
         try
         {
-            KubernetesOperationResult<string> result = await K8sOps.ApplyDeploymentRouteAsync(drId);
+            KubernetesOperationResult<string> result =
+                await K8sOps.ApplyDeploymentRouteAsync(TenantId, drId);
             if (!result.IsSuccess)
                 applyRouteError = result.Error;
             await LoadAsync();

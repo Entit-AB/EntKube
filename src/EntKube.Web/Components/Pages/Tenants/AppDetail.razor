@@ -393,7 +393,8 @@
         deleting = true;
         try
         {
-            List<string> errors = await K8sOps.DeleteAppFromClusterAsync(App.Id, performedBy: null);
+            List<string> errors = await K8sOps.DeleteAppFromClusterAsync(
+                TenantId, App.Id, performedBy: null);
             if (errors.Count > 0)
             {
                 // Cluster cleanup hit problems — surface them and keep the app registered so

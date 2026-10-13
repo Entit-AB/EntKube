@@ -235,6 +235,12 @@
 
 @code {
     [Parameter] public required Data.App App { get; set; }
+
+    /// <summary>
+    /// The tenant whose app this is. Applying an L4 route opens a port on a shared gateway, so
+    /// the cluster it reaches is authorized as this tenant rather than by the route's own id.
+    /// </summary>
+    [Parameter] public required Guid TenantId { get; set; }
     [Parameter] public Guid? EnvironmentId { get; set; }
     [Parameter] public bool IsPortalView { get; set; }
 
@@ -305,7 +311,7 @@
         foreach (Guid clusterId in routes.Select(r => r.AppDeployment.ClusterId).Distinct())
         {
             if (!clusterAddresses.ContainsKey(clusterId))
-                clusterAddresses[clusterId] = await K8sOps.GetL4EndpointAddressAsync(clusterId);
+                clusterAddresses[clusterId] = await K8sOps.GetL4EndpointAddressAsync(TenantId, clusterId);
         }
     }
 
@@ -379,7 +385,7 @@
         applyingId = id;
         try
         {
-            KubernetesOperationResult<string> result = await K8sOps.ApplyL4RouteAsync(id);
+            KubernetesOperationResult<string> result = await K8sOps.ApplyL4RouteAsync(TenantId, id);
             if (result.IsSuccess) Toasts.Success(result.Data ?? "Route applied.");
             else Toasts.Error(result.Error ?? "Failed to apply route.");
             await LoadAsync();
@@ -392,7 +398,7 @@
     {
         try
         {
-            await K8sOps.DeleteL4RouteFromClusterAsync(id);
+            await K8sOps.DeleteL4RouteFromClusterAsync(TenantId, id);
             await L4RouteService.DeleteRouteAsync(id);
             await LoadAsync();
             Toasts.Success("Port deleted.");

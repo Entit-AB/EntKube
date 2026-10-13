@@ -58,7 +58,8 @@ public class VacuousTenantCheckTests
     ///
     /// <para>None of the 19 can be fixed here. They need a tenant threaded down from their
     /// callers, which is the authorization question in docs/decomposition.md §4.0.1 — and the
-    /// concentration is the useful part of the figure: eleven of them are one service's.</para>
+    /// concentration is the useful part of the figure: eleven of them are one service's.
+    /// <em>(Those eleven are done; the concentration was indeed the useful part.)</em></para>
     ///
     /// <para>This number may not grow. A new tenant-less method reaching a cluster is a new place
     /// where any cluster in the installation is reachable by id, and going through the seam does
@@ -78,7 +79,25 @@ public class VacuousTenantCheckTests
     /// tautologies all sit in files that still hold credentials, where threading a tenant in makes
     /// those reads newly inexcusable in the same step (the trap #185 walked into deliberately).</para>
     /// </summary>
-    private const int BaselineTautological = 18;
+    /// <para><b>7 — <c>KubernetesOperationsService</c>'s eleven, which were the concentration
+    /// this figure was pointing at.</b> They are the apply path: install, upgrade, delete,
+    /// the HTTP and L4 route applies and deletes, mesh and outbound mTLS, and the L4 gateway
+    /// address. Each took an id, loaded the row, and handed the row's own tenant back to the seam
+    /// — so the most consequential writes in the product were reachable by id alone.</para>
+    ///
+    /// <para>Every caller had a tenant to give: five pages that already held one, the public API's
+    /// token principal, and two sweeps (<c>GitSyncService</c>, <c>AppL4RouteHealthService</c>)
+    /// that became tenant loops. <c>GitSyncService</c>'s on-demand queue now carries the tenant
+    /// with each entry rather than recovering it when the queue drains — the webhook that fills it
+    /// had already resolved one in order to find the deployment at all.</para>
+    ///
+    /// <para>What remains is <b>7</b>: four in <c>ComponentLifecycleService</c> and one each in
+    /// <c>CertificateDistributionService</c>, <c>TrustBundleService</c> and
+    /// <c>KedaScalerService</c>. All four files still hold credential sites, so threading a tenant
+    /// in makes those reads newly inexcusable in the same step — which is why they belong with
+    /// the custody work rather than beside it.</para>
+    /// </summary>
+    private const int BaselineTautological = 7;
 
     [Fact]
     public void A_tenant_read_off_the_cluster_row_checks_nothing_and_may_not_spread()

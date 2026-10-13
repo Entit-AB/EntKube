@@ -80,16 +80,21 @@ public class PostDeployRouteRefreshTests : IDisposable
         /// <summary>Every deployment route id the refresh asked us to apply, in order.</summary>
         public List<Guid> AppliedRouteIds { get; } = [];
 
+        /// <summary>Every tenant the refresh applied as, so the threading is asserted too.</summary>
+        public List<Guid> AppliedAsTenants { get; } = [];
+
         public override Task<KubernetesOperationResult<string>> ApplyDeploymentRouteAsync(
-            Guid deploymentRouteId, CancellationToken ct = default)
+            Guid tenantId, Guid deploymentRouteId, CancellationToken ct = default)
         {
+            AppliedAsTenants.Add(tenantId);
             AppliedRouteIds.Add(deploymentRouteId);
             return Task.FromResult(applyBehaviour(deploymentRouteId));
         }
 
         /// <summary>Exposes the post-deploy step, which is protected on the real service.</summary>
-        public Task<string?> RefreshForTestAsync(AppDeployment deployment, CancellationToken ct = default)
-            => RefreshDeploymentRoutesAsync(deployment, ct);
+        public Task<string?> RefreshForTestAsync(
+            Guid tenantId, AppDeployment deployment, CancellationToken ct = default)
+            => RefreshDeploymentRoutesAsync(tenantId, deployment, ct);
     }
 
     /// <summary>Builds the service under test with a chosen apply behaviour. Default: every apply succeeds.</summary>
@@ -102,10 +107,13 @@ public class PostDeployRouteRefreshTests : IDisposable
             applyBehaviour ?? (_ => KubernetesOperationResult<string>.Success("applied")));
     }
 
+    /// <summary>The tenant everything below belongs to, and the one the refresh must act as.</summary>
+    private readonly Guid tenantId = Guid.NewGuid();
+
     /// <summary>Seeds a tenant, environment, cluster, customer, app and one deployment to hang routes off.</summary>
     private (AppDeployment deployment, App app) SeedDeployment()
     {
-        Tenant tenant = new() { Id = Guid.NewGuid(), Name = "TestCo", Slug = "testco" };
+        Tenant tenant = new() { Id = tenantId, Name = "TestCo", Slug = "testco" };
         db.Tenants.Add(tenant);
 
         Data.Environment env = new() { Id = Guid.NewGuid(), TenantId = tenant.Id, Name = "production" };
@@ -192,10 +200,15 @@ public class PostDeployRouteRefreshTests : IDisposable
 
         RecordingOpsService sut = BuildService();
 
-        string? note = await sut.RefreshForTestAsync(deployment);
+        string? note = await sut.RefreshForTestAsync(tenantId, deployment);
 
         sut.AppliedRouteIds.Should().HaveCount(1);
         note.Should().Contain("flow.sto2.entit.eu");
+
+        // The refresh applies as the tenant it was given, not as one recovered from the route. It
+        // runs inside the apply path, so a route re-applied under the wrong tenant would be a
+        // write to a cluster nobody authorized.
+        sut.AppliedAsTenants.Should().AllBeEquivalentTo(tenantId);
     }
 
     [Fact]
@@ -209,7 +222,7 @@ public class PostDeployRouteRefreshTests : IDisposable
 
         RecordingOpsService sut = BuildService();
 
-        await sut.RefreshForTestAsync(deployment);
+        await sut.RefreshForTestAsync(tenantId, deployment);
 
         sut.AppliedRouteIds.Should().HaveCount(2);
     }
@@ -229,7 +242,7 @@ public class PostDeployRouteRefreshTests : IDisposable
 
         RecordingOpsService sut = BuildService();
 
-        string? note = await sut.RefreshForTestAsync(deployment);
+        string? note = await sut.RefreshForTestAsync(tenantId, deployment);
 
         sut.AppliedRouteIds.Should().BeEmpty();
         note.Should().BeNull();
@@ -245,7 +258,7 @@ public class PostDeployRouteRefreshTests : IDisposable
 
         RecordingOpsService sut = BuildService();
 
-        await sut.RefreshForTestAsync(deployment);
+        await sut.RefreshForTestAsync(tenantId, deployment);
 
         sut.AppliedRouteIds.Should().BeEmpty();
     }
@@ -275,7 +288,7 @@ public class PostDeployRouteRefreshTests : IDisposable
 
         RecordingOpsService sut = BuildService();
 
-        await sut.RefreshForTestAsync(deployment);
+        await sut.RefreshForTestAsync(tenantId, deployment);
 
         sut.AppliedRouteIds.Should().HaveCount(1);
     }
@@ -293,7 +306,7 @@ public class PostDeployRouteRefreshTests : IDisposable
 
         RecordingOpsService sut = BuildService();
 
-        string? note = await sut.RefreshForTestAsync(deployment);
+        string? note = await sut.RefreshForTestAsync(tenantId, deployment);
 
         note.Should().BeNull();
         sut.AppliedRouteIds.Should().BeEmpty();
@@ -311,7 +324,7 @@ public class PostDeployRouteRefreshTests : IDisposable
         RecordingOpsService sut = BuildService(
             _ => KubernetesOperationResult<string>.Failure("connection refused"));
 
-        string? note = await sut.RefreshForTestAsync(deployment);
+        string? note = await sut.RefreshForTestAsync(tenantId, deployment);
 
         sut.AppliedRouteIds.Should().HaveCount(1);
         note.Should().Contain("failed");
@@ -330,7 +343,7 @@ public class PostDeployRouteRefreshTests : IDisposable
         RecordingOpsService sut = BuildService(
             _ => throw new InvalidOperationException("cluster unreachable"));
 
-        string? note = await sut.RefreshForTestAsync(deployment);
+        string? note = await sut.RefreshForTestAsync(tenantId, deployment);
 
         note.Should().BeNull();
         logger.Entries.Should().Contain(e => e.Level == MsLogLevel.Warning);
@@ -349,7 +362,7 @@ public class PostDeployRouteRefreshTests : IDisposable
             ? KubernetesOperationResult<string>.Success("applied")
             : KubernetesOperationResult<string>.Failure("connection refused"));
 
-        string? note = await sut.RefreshForTestAsync(deployment);
+        string? note = await sut.RefreshForTestAsync(tenantId, deployment);
 
         sut.AppliedRouteIds.Should().HaveCount(2);
         note.Should().Contain("flow.sto2.entit.eu").And.Contain("failed");
