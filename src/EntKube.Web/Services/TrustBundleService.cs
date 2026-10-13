@@ -21,7 +21,6 @@ public sealed record TrustSourceView(CaTrustBundleSource Source, CertificateInfo
 public class TrustBundleService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
-    IClusterChangeGate gate,
     ILogger<TrustBundleService> logger)
 {
     /// <summary>The trust-manager API group/version and label we stamp on managed Bundles.</summary>

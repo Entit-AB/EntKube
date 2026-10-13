@@ -674,9 +674,8 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         {
             await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
 
-            string selector = string.IsNullOrEmpty(labelSelector) ? "" : $" -l {labelSelector}";
             return await RunKubectlAsync(
-                $"get {resource} -n {ns} --kubeconfig={kubeconfigPath}{selector} -o json", ct);
+                BuildGetJsonArguments(resource, ns, labelSelector, kubeconfigPath), ct);
         }
         finally
         {
@@ -702,6 +701,22 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             File.Delete(kubeconfigPath);
         }
     }
+
+    /// <summary>
+    /// The command line for listing a resource as JSON, optionally by label.
+    ///
+    /// <para>An empty namespace means a <b>cluster-scoped</b> resource and the flag is omitted —
+    /// the same convention <see cref="ResourceExistsAsync"/> and
+    /// <see cref="BuildDeleteArguments"/> use. Without it, a caller listing Namespaces or CRDs had
+    /// to keep its own kubectl, which is how <c>CertificateDistributionService</c> ended up with
+    /// one.</para>
+    /// </summary>
+    public static string BuildGetJsonArguments(
+        string resource, string ns, string labelSelector, string kubeconfigPath)
+        => $"get {resource}{(string.IsNullOrEmpty(ns) ? "" : $" -n {ns}")}"
+           + $" --kubeconfig={kubeconfigPath}"
+           + (string.IsNullOrEmpty(labelSelector) ? "" : $" -l {labelSelector}")
+           + " -o json";
 
     /// <summary>
     /// The command line for deleting one named resource.

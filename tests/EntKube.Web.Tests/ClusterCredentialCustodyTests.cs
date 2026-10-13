@@ -303,7 +303,24 @@ public class ClusterCredentialCustodyTests
     /// went 12 → 13. The fix was not to widen the regex — the private kubectl runner had become
     /// <b>dead code</b>, 39 lines of it, so deleting it took the file out of the list honestly.</para>
     ///
-    private const int BaselineOccurrences = 118;
+    /// <para><b>111 — the certificate distributor, and the last of the four.</b> It writes a
+    /// certificate and often its private key into namespaces across a tenant's clusters, and it
+    /// did so by resolving targets into <c>KubernetesCluster</c> rows: a decrypted kubeconfig per
+    /// target, passed on to the namespace listing, the acknowledgment and the apply, with the
+    /// tenant each was checked against read off the row itself.</para>
+    ///
+    /// <para>It needed the same seam gap closed one method further along: listing Namespaces by
+    /// label through <c>GetJsonAsync</c> needed an empty namespace to mean <em>cluster-scoped</em>,
+    /// as <c>ResourceExistsAsync</c> and (since #191) the delete already do. Three methods now
+    /// share one convention, and the names come out of JSON instead of <c>-o name</c> lines.</para>
+    ///
+    /// <para>Both this service and <c>TrustBundleService</c> also stopped taking
+    /// <c>IClusterChangeGate</c> at all. They reach it through <c>IClusterClient</c>, which is the
+    /// point of <c>PlannedChange</c>: a caller that mutates through kubectl can still raise the
+    /// acknowledgment without ever holding a credential. Their private kubectl runners — 37 and
+    /// 39 lines — were dead afterwards.</para>
+    ///
+    private const int BaselineOccurrences = 111;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -325,8 +342,10 @@ public class ClusterCredentialCustodyTests
     /// count — and <c>CostReportService</c> with it.</para>
     ///
     /// <para>30. <c>KedaScalerService</c> and <c>TrustBundleService</c>.</para>
+    ///
+    /// <para>29. <c>CertificateDistributionService</c>.</para>
     /// </summary>
-    private const int BaselineFiles = 30;
+    private const int BaselineFiles = 29;
 
     private static (int Occurrences, int Files) Measure()
     {
