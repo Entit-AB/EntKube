@@ -320,7 +320,7 @@ public class VpnService(
 
         string manifest = BuildSyncManifest(config, secretsB64);
 
-        return await lifecycleService.ApplyRawManifestAsync(ep.Cluster, manifest, delete: false, ct);
+        return await lifecycleService.ApplyRawManifestAsync(tenantId, ep.Cluster, manifest, delete: false, ct);
     }
 
     // ── CIDR auto-detection ──────────────────────────────────────────────────────

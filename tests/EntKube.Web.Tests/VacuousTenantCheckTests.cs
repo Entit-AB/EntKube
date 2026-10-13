@@ -103,10 +103,15 @@ public class VacuousTenantCheckTests
     ///
     /// <para><b>4.</b> <c>CertificateDistributionService</c> followed, the same way: its target
     /// resolution returns seam clients rather than cluster rows, so there is no row left to read a
-    /// tenant off. What remains is <c>ComponentLifecycleService</c> alone — the last
-    /// concentration, and the only file still holding both kinds of debt.</para>
+    /// tenant off.</para>
+    ///
+    /// <para><b>1.</b> <c>ComponentLifecycleService</c>'s three went with its credential sites —
+    /// the install path now takes the tenant from <c>ComponentInstallOrchestrator</c> (which had
+    /// one all along) and from <c>ClusterDetail</c>. <b>One site is left in the whole codebase</b>,
+    /// and the classifier resolves it through a local alias rather than the obvious spelling,
+    /// which is why the figure and a hand grep disagree — trust the classifier.</para>
     /// </summary>
-    private const int BaselineTautological = 4;
+    private const int BaselineTautological = 1;
 
     [Fact]
     public void A_tenant_read_off_the_cluster_row_checks_nothing_and_may_not_spread()

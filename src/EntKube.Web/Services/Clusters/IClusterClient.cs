@@ -103,9 +103,17 @@ public interface IClusterClient
     Task<string> GetResourceYamlAsync(
         string resource, string name, string ns, CancellationToken ct = default);
 
+    /// <summary>
+    /// Server-side applies a manifest this cluster fetches itself, by URL. See
+    /// <see cref="IKubernetesClientFactory.ApplyManifestFromUrlAsync"/>.
+    /// </summary>
+    Task<HelmExecutionResult> ApplyManifestFromUrlAsync(
+        string manifestUrl, string? summary = null, CancellationToken ct = default);
+
     Task<string> GetJsonAllNamespacesAsync(string resource, string labelSelector = "", CancellationToken ct = default);
 
-    Task<string> GetPodLogsAsync(string target, string ns, int tailLines = 200,
+    /// <param name="container">One container of a multi-container pod.</param>
+    Task<string> GetPodLogsAsync(string target, string ns, int tailLines = 200, string? container = null,
         CancellationToken ct = default);
 
     Task<string?> GetSecretValueAsync(string secretName, string key, string ns, CancellationToken ct = default);

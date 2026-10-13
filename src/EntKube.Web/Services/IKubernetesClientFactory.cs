@@ -166,8 +166,31 @@ public interface IKubernetesClientFactory
     /// any selector kubectl accepts — "job/foo" and "deployment/bar" both work, which is what makes
     /// this usable for a one-shot Job whose pod name is generated.
     /// </summary>
+    /// <param name="container">
+    /// One container of a multi-container pod. Without this a caller quoting the tail of a
+    /// specific container's log had to run its own kubectl — which is what
+    /// <c>ComponentLifecycleService</c>'s stalled-install diagnostics did, and the reason it kept
+    /// a kubeconfig on disk through the whole helm run.
+    /// </param>
     Task<string> GetPodLogsAsync(string target, string ns, string kubeconfig, int tailLines = 200,
-        CancellationToken ct = default);
+        CancellationToken ct = default, string? container = null);
+
+    /// <summary>
+    /// Server-side applies a manifest the cluster fetches itself, by URL.
+    ///
+    /// <para>Distinct from <see cref="ApplyManifestAsync"/>, which pipes manifest text: an
+    /// operator install (CRD bundles especially) is published as a URL, and downloading it here to
+    /// pipe it would make EntKube the thing that has to reach the internet rather than the
+    /// cluster. The acknowledgment therefore carries the URL as its summary — there is no manifest
+    /// text to preview, which is the honest description of what is about to happen.</para>
+    ///
+    /// <para><c>--server-side --force-conflicts</c> on purpose: a client-side apply writes its
+    /// whole manifest into an annotation and large CRD bundles exceed the 256 KB ceiling, and the
+    /// first server-side apply over a client-side-managed resource is otherwise rejected as a
+    /// field-manager conflict — which is the state every existing install is in.</para>
+    /// </summary>
+    Task<HelmExecutionResult> ApplyManifestFromUrlAsync(
+        string manifestUrl, string kubeconfig, string? summary = null, CancellationToken ct = default);
 
     /// <summary>
     /// Lists a resource type across all namespaces (kubectl get {resource} -A -o json).

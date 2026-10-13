@@ -320,7 +320,25 @@ public class ClusterCredentialCustodyTests
     /// acknowledgment without ever holding a credential. Their private kubectl runners — 37 and
     /// 39 lines — were dead afterwards.</para>
     ///
-    private const int BaselineOccurrences = 111;
+    /// <para><b>105 — <c>ComponentLifecycleService</c> at zero, and it took the "cannot" with
+    /// it.</b> This file held the install path: six credential sites and three tautological seam
+    /// calls, and a kubeconfig written to disk for the whole duration of every helm run.</para>
+    ///
+    /// <para>Two of its reads were only ever guards — the subchart loops read the credential to
+    /// check it existed, which is a question the seam answers for the right tenant. Two became
+    /// seam calls that already existed: the image-pull Secret through <c>ReplaceSecretAsync</c>
+    /// (not an apply — these Secrets carry no last-applied annotation, so an apply MERGES and a
+    /// revoked registry credential would survive), and the load-balancer address through
+    /// <c>GetJsonAsync</c>.</para>
+    ///
+    /// <para>The last two needed <b>new seam verbs</b>, and that is the finding: the file's own
+    /// comment said the kubeconfig had to stay for "kubectl helpers the seam cannot express", and
+    /// the gate-coverage baseline listed them among four that "genuinely cannot move". They were
+    /// an apply from a URL and a log tail for one container of a multi-container pod — a missing
+    /// parameter and a missing operation, not an impossibility. Third time this programme has
+    /// found a "cannot" that was a gap (see also #191's cluster-scoped delete and #192's list).</para>
+    ///
+    private const int BaselineOccurrences = 105;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -344,8 +362,11 @@ public class ClusterCredentialCustodyTests
     /// <para>30. <c>KedaScalerService</c> and <c>TrustBundleService</c>.</para>
     ///
     /// <para>29. <c>CertificateDistributionService</c>.</para>
+    ///
+    /// <para>28. <c>ComponentLifecycleService</c> — the install path, and the last file in this
+    /// count that also carried tautological seam calls.</para>
     /// </summary>
-    private const int BaselineFiles = 29;
+    private const int BaselineFiles = 28;
 
     private static (int Occurrences, int Files) Measure()
     {

@@ -105,7 +105,7 @@ public class ManifestComponentKubectlTests : IDisposable
     {
         await SeedAsync();
 
-        HelmExecutionResult result = await sut.ExecuteHelmAsync(componentId, Command("kubectl-apply"));
+        HelmExecutionResult result = await sut.ExecuteHelmAsync(tenantId, componentId, Command("kubectl-apply"));
 
         result.Success.Should().BeTrue(result.Output);
         result.Output.Should().Contain("configured");
@@ -129,7 +129,7 @@ public class ManifestComponentKubectlTests : IDisposable
     {
         await SeedAsync();
 
-        HelmExecutionResult result = await sut.ExecuteHelmAsync(componentId, Command("kubectl-delete"));
+        HelmExecutionResult result = await sut.ExecuteHelmAsync(tenantId, componentId, Command("kubectl-delete"));
 
         result.Success.Should().BeTrue(result.Output);
 
@@ -147,7 +147,7 @@ public class ManifestComponentKubectlTests : IDisposable
         await SeedAsync();
 
         HelmExecutionResult result = await sut.ExecuteHelmAsync(
-            componentId, Command("kubectl-apply", yaml: null));
+            tenantId, componentId, Command("kubectl-apply", yaml: null));
 
         result.Success.Should().BeFalse();
         applied.Should().BeEmpty();
@@ -163,7 +163,7 @@ public class ManifestComponentKubectlTests : IDisposable
                 It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("kubectl failed (exit 1): no matches for kind"));
 
-        HelmExecutionResult result = await sut.ExecuteHelmAsync(componentId, Command("kubectl-apply"));
+        HelmExecutionResult result = await sut.ExecuteHelmAsync(tenantId, componentId, Command("kubectl-apply"));
 
         result.Success.Should().BeFalse();
         result.Output.Should().Contain("no matches for kind");

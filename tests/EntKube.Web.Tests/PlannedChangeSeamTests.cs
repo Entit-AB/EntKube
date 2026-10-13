@@ -166,6 +166,60 @@ public class PlannedChangeSeamTests
             .Should().Be("get secrets -n billing-ns --kubeconfig=/tmp/kc.yaml -o json");
     }
 
+    /// <summary>
+    /// The two verbs that retired a "cannot": an apply the cluster fetches by URL, and a log tail
+    /// for one container of several.
+    ///
+    /// <para>Both were listed in <see cref="ClusterChangeGateCoverageTests"/> as things the seam
+    /// could not express, which kept a kubeconfig on disk for the whole of every helm run. One was
+    /// a missing operation; the other was a missing <em>parameter</em>.</para>
+    /// </summary>
+    [Fact]
+    public void The_two_additions_that_retired_a_cannot_build_the_commands_they_replaced()
+    {
+        KubernetesClientFactory
+            .BuildApplyFromUrlArguments("https://example.test/operator.yaml", "/tmp/kc.yaml")
+            .Should().Be("apply --server-side --force-conflicts "
+                + "-f https://example.test/operator.yaml --kubeconfig=/tmp/kc.yaml",
+                "server-side because a client-side apply writes the whole manifest into an "
+                + "annotation, and CRD bundles exceed its 256 KB ceiling");
+
+        KubernetesClientFactory
+            .BuildPodLogsArguments("api-0", "billing-ns", 12, "sidecar", "/tmp/kc.yaml")
+            .Should().Be("logs api-0 -c sidecar -n billing-ns --kubeconfig=/tmp/kc.yaml --tail=12");
+
+        // And without a container, unchanged — the parameter is additive.
+        KubernetesClientFactory
+            .BuildPodLogsArguments("api-0", "billing-ns", 200, null, "/tmp/kc.yaml")
+            .Should().Be("logs api-0 -n billing-ns --kubeconfig=/tmp/kc.yaml --tail=200");
+    }
+
+    /// <summary>
+    /// An apply from a URL is a mutation, so it is acknowledged — and the acknowledgment carries
+    /// the URL rather than a manifest, because there is no manifest text to preview. Against the
+    /// real factory and a cancelling sink, so the throw itself proves the gate was raised.
+    /// </summary>
+    [Fact]
+    public async Task An_apply_from_a_url_is_acknowledged_with_the_url()
+    {
+        ClusterChangeGate gate = new(
+            new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
+        RecordingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        KubernetesClientFactory factory = new(gate);
+
+        Func<Task> act = () => factory.ApplyManifestFromUrlAsync(
+            "https://example.test/operator.yaml", TestKubeconfig.Valid);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+
+        sink.Asked.Should().ContainSingle();
+        sink.Asked[0].Verb.Should().Be(ChangeVerb.Apply);
+        sink.Asked[0].Summary.Should().Contain("https://example.test/operator.yaml");
+        sink.Asked[0].Manifest.Should().BeNull("the cluster fetches the manifest; EntKube never holds it");
+    }
+
     private sealed class RecordingSink : IClusterChangeAckSink
     {
         public List<PlannedClusterChange> Asked { get; } = [];

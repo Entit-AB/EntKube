@@ -91,8 +91,21 @@ public class ClusterChangeGateCoverageTests
     /// seam can express none of the last four: it has no apply-from-URL, no describe, and
     /// <c>GetPodLogsAsync</c> takes no container. Only the image-pull pair is work rather than a
     /// missing operation.</para>
+    ///
+    /// <para><b>6 — and the paragraph above was wrong about "cannot".</b> All six of
+    /// <c>ComponentLifecycleService</c>'s went. The image-pull pair moved onto
+    /// <c>ReplaceSecretAsync</c>, as predicted. The other four did not need the seam to express
+    /// something impossible — they needed <b>two small additions</b>:
+    /// <c>ApplyManifestFromUrlAsync</c> (the cluster fetches the URL; downloading it here would
+    /// make EntKube the thing that must reach the internet) and a <c>container</c> parameter on
+    /// <c>GetPodLogsAsync</c>. The describe had already become two JSON reads.</para>
+    ///
+    /// <para>The lesson is the same one <see cref="ComponentTenantScopingTests"/> recorded for its
+    /// own exemption: "cannot" written next to a number is a claim, and this one survived three
+    /// re-readings of this comment because it sounded like an architectural limit. It was a
+    /// missing parameter.</para>
     /// </summary>
-    private const int BaselineUngatedInvocations = 12;
+    private const int BaselineUngatedInvocations = 6;
 
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the
@@ -110,11 +123,11 @@ public class ClusterChangeGateCoverageTests
     private static readonly string[] Baseline =
     [
         "ClusterEgressTunnel",
-        "ComponentLifecycleService",
         "DockerRegistryService",
         "DriftDetectionService",
         "ReleaseVolumeGuard",
         "VpnService",
+        // ComponentLifecycleService left this list entirely — see the baseline's note.
     ];
 
     /// <summary>
