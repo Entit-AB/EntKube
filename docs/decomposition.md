@@ -216,10 +216,17 @@ is that coverage, asserting on what reaches the cluster and verified by mutation
 
 **What actually gates the rest, measured rather than assumed.** Site count has been the wrong
 way to choose the next conversion, repeatedly. Of the 246 credential sites left, **40 are in a
-method that already has a tenant in scope and 206 are not** (`CustodyTriageTests`). The seam is
+method that already has a tenant in scope and 206 are not** (`CustodyTriageTests`). *(Those
+figures are from 2026-10-11; §4.0.1.4 has the current ledger.)* The seam is
 not the constraint any more — it can run kubectl, build a typed client, pooled or not, run helm and
 apply or delete a whole manifest set. The constraint is that `ForAsync(tenantId, clusterId)` needs
 a tenant, and most of the code reaches clusters by id alone.
+
+> ⚠️ **"The seam is not the constraint any more" was wrong**, and reading it as settled fact cost
+> several conversions their simplest route. Six times afterwards, a caller that could not stop
+> holding a credential turned out to be a caller the seam could not express — a missing verb, a
+> missing parameter, or a convention applied in one method and not its sibling. §4.0.1.4 lists
+> them. The sentence is left standing because the correction is the useful part.
 
 `PrometheusService` is the clearest case and the reason this matters. Twenty sites, which reads as
 the obvious next job — and **all twenty are unreachable**, because not one of its fifteen public
@@ -472,6 +479,104 @@ Everything still runs under one `docker compose up`. The compose file grows from
 one app service to six; that is the whole operational delta for a small install.
 
 ---
+
+#### 4.0.1.4 Ledger and what the seam learned (2026-10-13)
+
+The conversion is far enough along that the useful thing to record is not the next step but the
+shape the work turned out to have. Where it stands, against the figures this section opened with:
+
+| measure | at the start | now |
+|---|---|---|
+| credential sites | 508 in 57 files | **92 in 27** |
+| tautological seam calls (§4.0.1.1) | 19 | **0** |
+| foreign reads of `ClusterComponents` | 87 | **14** |
+| foreign *writes* to it | 22 | **0** |
+| own-process kubectl/helm outside the gate (§5.4) | 49 | **6** |
+| component lookups escaping their tenant | 14 | **0** |
+
+Those are six ratchets, each with a banked baseline and a second test that fails when the
+baseline carries slack, so none of them can drift back quietly.
+
+*Two columns count work that is open rather than merged: credential sites are 105 in 28 files on
+`main` and 92 in 27 with #195, and the tautological figure is 1 on `main` and 0 with #194 — which
+also takes the foreign reads from 15 to 14. Every other number is on `main` today.*
+
+**The seam was the constraint far more often than the callers were.** §4.0.1 said the opposite —
+"the seam is not the constraint any more" — and that was wrong in a specific and repeatable way.
+Six times, a caller that *had* to hold a kubeconfig turned out to be a caller the seam could not
+express:
+
+- **`PlannedChange`** — the largest one. `PlannedClusterChange.Kubeconfig` is `required`, which
+  guarantees the gate can always compute a preview. For callers that mutate through the k8s SDK
+  rather than through a seam operation, that requirement *was* the reason they read a credential:
+  they needed one to ask the gate. `IClusterClient.AcknowledgeAsync` takes the operation and the
+  seam fills in the credential, so the invariant holds and the caller is free of it. This alone
+  unblocked about twenty sites in the file that held the most.
+- **`UndoDeploymentsAsync` + `ChangeVerb.Rollback`** — `kubectl rollout undo` is none of
+  apply/delete/patch/scale/restart/helm, because nothing in a rollback names the state being
+  moved to: the cluster remembers the revision, not EntKube.
+- **`DrainNodeAsync` + `ChangeVerb.Drain`** — same reasoning, and see the warning below.
+- **`ApplyManifestFromUrlAsync`** — an operator install published as a URL. Downloading it to
+  pipe the text would make EntKube the thing that must reach the internet rather than the cluster.
+- **`GetResourceYamlAsync`**, and a **`container` parameter on `GetPodLogsAsync`**. The second is
+  a single optional argument, and its absence is why a kubeconfig sat on disk for the duration of
+  every helm run.
+- **An empty namespace meaning "cluster-scoped"**, in `DeleteManifestAsync` and `GetJsonAsync`.
+  `ResourceExistsAsync` had read it that way from the beginning and documented the convention; the
+  other two sent `-n ` and were rejected by kubectl, which is why two services kept their own
+  kubectl for a trust Bundle and a Namespace list.
+
+The useful generalisation: **when a caller cannot stop holding a credential, check the seam's
+vocabulary before accepting it.** Three of the six were recorded in this repository as
+impossibilities — see below — and all three were a missing verb, parameter or convention.
+
+**⚠️ Three "cannot"s that were wrong, and what they had in common.**
+
+1. `ComponentTenantScopingTests` exempted one component lookup because its caller "addresses
+   components by id by design and holds no tenant of its own". The caller took a `tenantId` and
+   used it on the next line.
+2. `ClusterChangeGateCoverageTests` listed four invocations as ones "the seam can express none
+   of". Two were the missing verb and parameter above; one had already been solved.
+3. A service's own comment explained that its tenant check "is vacuous here" because the method
+   "is reached by component id by design". All five callers had a tenant.
+
+Each claim was *about a caller*, written without opening it; each then propagated into a code
+comment where the next reader found it as settled fact; and each survived several readings
+because it was phrased as an architectural limit rather than as a missing argument. The
+discipline that follows: an exemption is a claim that something is impossible, so open the caller
+before writing one, and when one is retired keep the entry with the correction rather than
+deleting it.
+
+**⚠️ A verb whose gate behaviour was wrong in the safe-looking direction.** The node drain was
+first written as `ChangeVerb.Delete` with `Kind = Node`. The gate computes a dry-run preview per
+verb and skips the dialog when the preview reports no change — so for a node whose object could
+not be read, it concluded "no change" and **applied the drain without asking anyone**; and when
+the object *could* be read, it described deleting a node that a drain leaves in place. Both were
+found by a test that drives the real factory with a cancelling sink, which is the only kind that
+can see this: a mocked factory asserts that a method was called, not that the gate agreed.
+
+**Sweeps.** §4.0.1.2's decision has been applied eight times (headscale certs, alert sync,
+resource usage, deployment sync, git sync, L4 route health, certificate distribution, and the
+rollout watcher). Two hazards recurred and are worth naming, because both produce a *silent*
+wrong answer:
+
+- **Flattening the pair.** A sweep that loops tenants to find work and then reduces it to a list
+  of cluster or deployment ids has thrown away the thing it just established. The tenant has to
+  travel with each unit of work — including across a queue boundary, which is where
+  `GitSyncService`'s on-demand path was dropping it after a webhook had already resolved one.
+- **A memo keyed on the old question.** When a cached lookup gains a tenant, the cache key must
+  gain it too. A tenant who may not see a cluster gets an empty answer cheaply, and under a
+  cluster-only key that answer is then served to the owner — logs routed to a Loki that is not
+  installed, a gateway address read as absent. Test it by asking stranger-then-owner; the other
+  order passes against the bug.
+
+**What the remaining 92 are made of.** No decision blocks them any more. They are concentrated in
+`KubernetesOperationsService` (11, all in methods whose callers are pages that already have a
+tenant), `ComponentScanService` (10), `AppGovernanceService` (8), `KyvernoPolicyService` (6) and
+`TailscaleVpnTab.razor` (6 — a page reading a credential off a DTO, which needs the DTO changed
+first), then a tail of ones and twos. The six ungated CLI invocations are in five files and are
+the same kind of problem: `ClusterEgressTunnel`, `DockerRegistryService`, `DriftDetectionService`,
+`ReleaseVolumeGuard` (2) and `VpnService`.
 
 ## 5. The agent model
 
