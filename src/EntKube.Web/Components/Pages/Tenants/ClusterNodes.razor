@@ -596,6 +596,12 @@ else
 }
 
 @code {
+    /// <summary>
+    /// The tenant whose cluster this is. Cordoning, draining, labelling and tainting a node are
+    /// authorized as them — every one of these used to go by cluster id alone.
+    /// </summary>
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
     [Parameter, EditorRequired] public Guid ClusterId { get; set; }
 
     private List<ClusterServer> UnlinkedServers => servers
@@ -694,7 +700,7 @@ else
 
     private async Task FetchAsync()
     {
-        Task<KubernetesOperationResult<List<NodeInfo>>> nodeTask = NodeService.GetNodesAsync(ClusterId);
+        Task<KubernetesOperationResult<List<NodeInfo>>> nodeTask = NodeService.GetNodesAsync(TenantId, ClusterId);
         Task<List<ClusterServer>> serverTask = NodeService.GetServersAsync(ClusterId);
         await Task.WhenAll(nodeTask, serverTask);
         KubernetesOperationResult<List<NodeInfo>> nodeResult = nodeTask.Result;
@@ -751,7 +757,7 @@ else
         StateHasChanged();
 
         KubernetesOperationResult<List<PodInfo>> result =
-            await NodeService.GetPodsOnNodeAsync(ClusterId, nodeName);
+            await NodeService.GetPodsOnNodeAsync(TenantId, ClusterId, nodeName);
 
         if (result.IsSuccess) nodePods = result.Data!;
         loadingPods = false;
@@ -764,7 +770,7 @@ else
         StateHasChanged();
 
         KubernetesOperationResult<List<NodeManagementService.NodeEventInfo>> result =
-            await NodeService.GetNodeEventsAsync(ClusterId, nodeName);
+            await NodeService.GetNodeEventsAsync(TenantId, ClusterId, nodeName);
 
         if (result.IsSuccess) nodeEvents = result.Data!;
         loadingEvents = false;
@@ -779,7 +785,7 @@ else
         await RunNodeActionAsync(nodeName, "Cordoning…", async () =>
         {
             string? user = await GetCurrentUserAsync();
-            return await NodeService.CordonNodeAsync(ClusterId, nodeName, user);
+            return await NodeService.CordonNodeAsync(TenantId, ClusterId, nodeName, user);
         }, "Cordoned", "Cordon failed");
     }
 
@@ -788,7 +794,7 @@ else
         await RunNodeActionAsync(nodeName, "Uncordoning…", async () =>
         {
             string? user = await GetCurrentUserAsync();
-            return await NodeService.UncordonNodeAsync(ClusterId, nodeName, user);
+            return await NodeService.UncordonNodeAsync(TenantId, ClusterId, nodeName, user);
         }, "Uncordoned", "Uncordon failed");
     }
 
@@ -798,7 +804,7 @@ else
         {
             string? user = await GetCurrentUserAsync();
             KubernetesOperationResult<string> r = await NodeService.DrainNodeAsync(
-                ClusterId, nodeName, performedBy: user);
+                TenantId, ClusterId, nodeName, performedBy: user);
             return r.IsSuccess
                 ? KubernetesOperationResult.Success()
                 : KubernetesOperationResult.Failure(r.Error ?? "Drain failed");
@@ -843,7 +849,7 @@ else
         string? value = string.IsNullOrWhiteSpace(newLabelValue) ? null : newLabelValue.Trim();
 
         KubernetesOperationResult result = await NodeService.SetNodeLabelAsync(
-            ClusterId, nodeName, newLabelKey.Trim(), value, user);
+            TenantId, ClusterId, nodeName, newLabelKey.Trim(), value, user);
 
         actionResults[nodeName] = result.IsSuccess
             ? (true, value is null ? "Label removed" : "Label set")
@@ -872,7 +878,7 @@ else
         }];
 
         KubernetesOperationResult result = await NodeService.SetNodeTaintsAsync(
-            ClusterId, nodeName, updated, user);
+            TenantId, ClusterId, nodeName, updated, user);
 
         actionResults[nodeName] = result.IsSuccess
             ? (true, "Taint added") : (false, result.Error ?? "Failed");
@@ -894,7 +900,7 @@ else
             .ToList();
 
         KubernetesOperationResult result = await NodeService.SetNodeTaintsAsync(
-            ClusterId, nodeName, updated, user);
+            TenantId, ClusterId, nodeName, updated, user);
 
         actionResults[nodeName] = result.IsSuccess
             ? (true, "Taint removed") : (false, result.Error ?? "Failed");

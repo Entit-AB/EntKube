@@ -377,6 +377,66 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         => _gate.AcknowledgeAsync(change.WithCredential(kubeconfig, clusterLabel), ct);
 
     /// <summary>
+    /// Drains a node. See <see cref="IKubernetesClientFactory.DrainNodeAsync"/>.
+    /// </summary>
+    public async Task<HelmExecutionResult> DrainNodeAsync(
+        string nodeName, string kubeconfig, int gracePeriodSeconds = 30,
+        bool ignoreDaemonSets = true, bool deleteEmptyDirData = false,
+        string? summary = null, CancellationToken ct = default)
+    {
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            // Its own verb, not Delete: a drain leaves the Node object in place, so a delete
+            // preview both describes the wrong act and — when the object cannot be read — reports
+            // "no change" and lets the drain through unasked. See ChangeVerb.Drain.
+            Verb = ChangeVerb.Drain,
+            Kind = "Node",
+            Name = nodeName,
+            Kubeconfig = kubeconfig,
+            Summary = summary ?? $"Drain Node/{nodeName} (cordon + evict all evictable pods)",
+        }, ct);
+
+        string kubeconfigPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+
+            (int code, string stdout, string stderr) = await RunKubectlRawAsync(
+                BuildDrainArguments(nodeName, gracePeriodSeconds, ignoreDaemonSets,
+                    deleteEmptyDirData, kubeconfigPath),
+                ct);
+
+            string output = string.IsNullOrWhiteSpace(stdout) ? stderr : stdout;
+            return new HelmExecutionResult { Success = code == 0, Output = output.TrimEnd() };
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+        }
+    }
+
+    /// <summary>
+    /// The command line for a node drain. <c>--timeout=5m</c> is not optional: without it a drain
+    /// blocked by a PodDisruptionBudget waits forever, and this runs inside a request.
+    /// </summary>
+    public static string BuildDrainArguments(
+        string nodeName, int gracePeriodSeconds, bool ignoreDaemonSets,
+        bool deleteEmptyDirData, string kubeconfigPath)
+    {
+        List<string> args =
+        [
+            "drain", nodeName, $"--grace-period={gracePeriodSeconds}", "--timeout=5m",
+        ];
+
+        if (ignoreDaemonSets) args.Add("--ignore-daemonsets");
+        if (deleteEmptyDirData) args.Add("--delete-emptydir-data");
+        args.Add($"--kubeconfig={kubeconfigPath}");
+
+        return string.Join(" ", args);
+    }
+
+    /// <summary>
     /// Rolls every Deployment in a namespace back to its previous recorded revision. See
     /// <see cref="IKubernetesClientFactory.UndoDeploymentsAsync"/>.
     ///

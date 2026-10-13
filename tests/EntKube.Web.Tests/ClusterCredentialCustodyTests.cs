@@ -338,7 +338,25 @@ public class ClusterCredentialCustodyTests
     /// parameter and a missing operation, not an impossibility. Third time this programme has
     /// found a "cannot" that was a gap (see also #191's cluster-scoped delete and #192's list).</para>
     ///
-    private const int BaselineOccurrences = 105;
+    /// <para><b>92 — node management, the largest single file left.</b> Thirteen sites, and
+    /// twelve of them existed for one reason: a pair of <c>LoadClusterAsync</c> helpers that
+    /// loaded the cluster row and checked its <c>Kubeconfig</c> column. "May this tenant hold
+    /// that cluster's credential" and "does a credential exist" are the same question, and the
+    /// seam answers both — no node operation here read anything else off the row.</para>
+    ///
+    /// <para>The thirteenth was <c>kubectl drain</c>, which needed the fourth new seam verb of
+    /// this run. A drain is neither a patch nor a delete of one object: it respects
+    /// PodDisruptionBudgets, waits for evictions, and has its own handling for DaemonSet pods and
+    /// local storage — all of it in kubectl rather than the API. <c>--timeout=5m</c> is carried
+    /// across deliberately, because a drain blocked by a budget otherwise waits forever inside a
+    /// request.</para>
+    ///
+    /// <para>The acknowledgment it used to raise took the kubeconfig purely to satisfy
+    /// <c>PlannedClusterChange</c>; it is a <c>PlannedChange</c> through the seam now, which is
+    /// what let the row go entirely. Cordon, uncordon, drain, label and taint are all authorized
+    /// as the asking tenant, from one <c>TenantId</c> on <c>ClusterNodes</c>.</para>
+    ///
+    private const int BaselineOccurrences = 92;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -365,8 +383,10 @@ public class ClusterCredentialCustodyTests
     ///
     /// <para>28. <c>ComponentLifecycleService</c> — the install path, and the last file in this
     /// count that also carried tautological seam calls.</para>
+    ///
+    /// <para>27. <c>NodeManagementService</c>.</para>
     /// </summary>
-    private const int BaselineFiles = 28;
+    private const int BaselineFiles = 27;
 
     private static (int Occurrences, int Files) Measure()
     {

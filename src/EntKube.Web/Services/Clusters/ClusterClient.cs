@@ -69,6 +69,12 @@ public sealed class ClusterClient(
         EntKube.Web.Services.ClusterChanges.PlannedChange change, CancellationToken ct = default)
         => inner.AcknowledgeAsync(change, kubeconfig, clusterName, ct);
 
+    public Task<HelmExecutionResult> DrainNodeAsync(
+        string nodeName, int gracePeriodSeconds = 30, bool ignoreDaemonSets = true,
+        bool deleteEmptyDirData = false, string? summary = null, CancellationToken ct = default)
+        => inner.DrainNodeAsync(nodeName, kubeconfig, gracePeriodSeconds, ignoreDaemonSets,
+            deleteEmptyDirData, summary, ct);
+
     public Task<WorkloadUndoResult> UndoDeploymentsAsync(
         string ns, string? summary = null, CancellationToken ct = default)
         => inner.UndoDeploymentsAsync(ns, kubeconfig, summary, ct);
