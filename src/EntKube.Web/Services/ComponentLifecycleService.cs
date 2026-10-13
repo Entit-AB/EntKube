@@ -693,7 +693,8 @@ public class ComponentLifecycleService(
             // Resolved BEFORE the placeholders are filled, because it is now the only address they can be
             // filled with. With no indexer on the cluster, FillPlaceholders throws and names the component
             // to install, rather than quietly addressing the management plane.
-            string? inClusterIngest = await entKubeTelemetry.GetInClusterIngestUrlAsync(component.ClusterId, ct);
+            string? inClusterIngest =
+                await entKubeTelemetry.GetInClusterIngestUrlAsync(tenantId, component.ClusterId, ct);
 
             (string? healed, string? mintedToken) = TelemetryIngestDefaults.FillPlaceholders(
                 valuesYaml, component.ClusterId, component.Cluster.TenantId, ingestTokens, configuration,
@@ -759,7 +760,7 @@ public class ComponentLifecycleService(
             // every query fails on both tiers with a DNS error while both pods look perfectly healthy.
             // Corrected here so re-applying the component fixes it.
             (string? repointedQuerier, string? indexerUrl) =
-                await entKubeTelemetry.FixQuerierIndexerUrlAsync(component, valuesYaml, ct);
+                await entKubeTelemetry.FixQuerierIndexerUrlAsync(tenantId, component, valuesYaml, ct);
             valuesYaml = repointedQuerier;
 
             if (indexerUrl is not null)
@@ -1246,7 +1247,7 @@ public class ComponentLifecycleService(
     public async Task<HelmExecutionResult?> EnsureCollectorShipsInClusterAsync(
         Guid tenantId, Guid indexerComponentId, CancellationToken ct = default)
     {
-        if (await RepointCollectorToInClusterAsync(indexerComponentId, ct) is not Guid collectorId)
+        if (await RepointCollectorToInClusterAsync(tenantId, indexerComponentId, ct) is not Guid collectorId)
             return null;
 
         HelmCommand command = await GetInstallCommandAsync(tenantId, collectorId, ct);
@@ -1260,7 +1261,7 @@ public class ComponentLifecycleService(
     /// with the rules in it — can be tested, and driven, without a helm invocation.
     /// </summary>
     public async Task<Guid?> RepointCollectorToInClusterAsync(
-        Guid indexerComponentId, CancellationToken ct = default)
+        Guid tenantId, Guid indexerComponentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -1275,7 +1276,8 @@ public class ComponentLifecycleService(
                                       && c.Status == ComponentStatus.Installed, ct);
         if (collector is null) return null;
 
-        string? inClusterIngest = await entKubeTelemetry.GetInClusterIngestUrlAsync(indexer.ClusterId, ct);
+        string? inClusterIngest =
+            await entKubeTelemetry.GetInClusterIngestUrlAsync(tenantId, indexer.ClusterId, ct);
         (string? repointed, bool didRepoint) = TelemetryIngestDefaults.RepointToInCluster(
             collector.HelmValues, inClusterIngest, configuration);
 
@@ -1402,7 +1404,7 @@ public class ComponentLifecycleService(
     /// from the UI to re-sync after secret changes.
     /// </summary>
     public async Task<HelmExecutionResult> SyncComponentSecretsAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -1413,13 +1415,12 @@ public class ComponentLifecycleService(
             .FirstOrDefaultAsync(c => c.Id == componentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
-        // The tenant comes from the component's own cluster row, so the tenant check inside
-        // ForAsync is vacuous here — this is Catalog's own service resolving a credential for a
-        // component Catalog owns, and it is reached by component id by design. What the seam
-        // changes is not the authorization but the custody: the kubeconfig stops being lifted out
-        // of the row and written to a file here.
-        Guid tenantId = component.Cluster.TenantId;
-
+        // The tenant is the caller's. This method used to read it off the component's own cluster
+        // row and explain, in a comment here, that the resulting check was vacuous because the
+        // method "is reached by component id by design". All five callers had a tenant — the two
+        // pages, the install orchestrator and StalwartService's apply — so the design was in the
+        // signature. The local alias was also what hid the site from a grep: it read
+        // ForAsync(tenantId, ...) while tenantId came from the row being checked.
         EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
             await clusterClients.ForAsync(tenantId, component.ClusterId, ct);
 

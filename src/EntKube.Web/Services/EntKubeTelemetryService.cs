@@ -226,22 +226,21 @@ public class EntKubeTelemetryService(
     /// called while REGISTERING a component — potentially before the indexer's Service exists, and
     /// certainly before anything has been applied.
     /// </summary>
-    public async Task<string?> GetInClusterIndexerUrlAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<string?> GetInClusterIndexerUrlAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-
         // Matched on the catalog key, NOT on the chart name: the query component installs the SAME chart
         // with indexer.enabled=false, so a chart-name match can return the querier's row and derive an
         // indexer address inside a release that renders no indexer at all.
-        // Not the contract: this takes only a clusterId, and the contract's lookups are
-        // tenant-scoped by design. Both of this method's own callers have a tenant to give — but
-        // it is also reached through GetInClusterIngestUrlAsync and FixQuerierIndexerUrlAsync,
-        // whose callers in ComponentLifecycleService take a component id and nothing else. That
-        // cascade is where this change has to start, so it belongs with that file's conversion.
-        var indexer = await db.ClusterComponents
-            .Where(c => c.ClusterId == clusterId && c.Name == IndexerKey)
-            .Select(c => new { c.ReleaseName, c.Name, c.Namespace })
-            .FirstOrDefaultAsync(ct);
+        //
+        // This read said it could not be the contract's because the cascade above it —
+        // GetInClusterIngestUrlAsync and FixQuerierIndexerUrlAsync, reached from
+        // ComponentLifecycleService — took a component id and nothing else. That file's install
+        // path carries a tenant now, so the cascade does too.
+        EntKube.Contracts.Catalog.InstalledComponent? indexer =
+            (await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct))
+            .FirstOrDefault(c => c.Name == IndexerKey);
+
         if (indexer is null) return null;
 
         return IndexerServiceUrl(indexer.ReleaseName ?? indexer.Name, indexer.Namespace);
@@ -251,9 +250,10 @@ public class EntKubeTelemetryService(
     /// The in-cluster OTLP endpoint for this cluster, or null when no telemetry indexer is installed on it.
     /// Used to point the OpenTelemetry Collector at the indexer beside it instead of across the WAN.
     /// </summary>
-    public async Task<string?> GetInClusterIngestUrlAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<string?> GetInClusterIngestUrlAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        return await GetInClusterIndexerUrlAsync(clusterId, ct) is string url
+        return await GetInClusterIndexerUrlAsync(tenantId, clusterId, ct) is string url
             ? url + "/ingest/otlp"
             : null;
     }
@@ -285,11 +285,11 @@ public class EntKubeTelemetryService(
     /// so in the install log rather than leaving a silent edit.</para>
     /// </summary>
     public async Task<(string? Yaml, string? Corrected)> FixQuerierIndexerUrlAsync(
-        ClusterComponent component, string? valuesYaml, CancellationToken ct = default)
+        Guid tenantId, ClusterComponent component, string? valuesYaml, CancellationToken ct = default)
     {
         if (component.Name != QuerierKey) return (valuesYaml, null);
 
-        if (await GetInClusterIndexerUrlAsync(component.ClusterId, ct) is not string derived)
+        if (await GetInClusterIndexerUrlAsync(tenantId, component.ClusterId, ct) is not string derived)
             return (valuesYaml, null);
 
         string? current = YamlFormMerger.ExtractValue(valuesYaml ?? "", IndexerUrlYamlPath);

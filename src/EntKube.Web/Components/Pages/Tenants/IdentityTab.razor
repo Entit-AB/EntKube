@@ -3312,7 +3312,7 @@ else
                 registeredPostgresDatabaseId: regPgDbId);
 
             // Sync the credentials to the K8s secret immediately so the pod can start.
-            await LifecycleService.SyncComponentSecretsAsync(selectedKeycloak.Component!.Id);
+            await LifecycleService.SyncComponentSecretsAsync(TenantId, selectedKeycloak.Component!.Id);
 
             // Import any realms that already exist in this Keycloak instance.
             await KeycloakService.SyncRealmsFromKeycloakAsync(TenantId, config.Id);

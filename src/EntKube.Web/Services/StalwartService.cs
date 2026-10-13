@@ -2059,7 +2059,7 @@ public class StalwartService(
             // through to LDAP with the wrong password: a 401 that took a day to read. Mirror first,
             // then prove the two halves agree, before anything restarts.
             output.Add("--- Syncing credentials to the cluster ---");
-            HelmExecutionResult sync = await lifecycleService.SyncComponentSecretsAsync(clusterComponentId, ct);
+            HelmExecutionResult sync = await lifecycleService.SyncComponentSecretsAsync(tenantId, clusterComponentId, ct);
             if (!string.IsNullOrWhiteSpace(sync.Output))
             {
                 output.Add(sync.Output.Trim());

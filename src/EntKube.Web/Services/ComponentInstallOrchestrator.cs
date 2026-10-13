@@ -119,7 +119,7 @@ public class ComponentInstallOrchestrator(
         // Pre-sync component secrets so they exist in K8s before the pod starts.
         // Components like Keycloak reference secrets via extraEnvFrom at pod startup,
         // which happens during Helm's --wait phase, so the secret must exist first.
-        HelmExecutionResult preSyncResult = await lifecycleService.SyncComponentSecretsAsync(componentId);
+        HelmExecutionResult preSyncResult = await lifecycleService.SyncComponentSecretsAsync(tenantId, componentId);
 
         HelmExecutionResult result = await lifecycleService.ExecuteHelmAsync(tenantId, componentId, command, ct);
 
@@ -155,7 +155,7 @@ public class ComponentInstallOrchestrator(
 
         if (result.Success)
         {
-            HelmExecutionResult syncResult = await lifecycleService.SyncComponentSecretsAsync(componentId);
+            HelmExecutionResult syncResult = await lifecycleService.SyncComponentSecretsAsync(tenantId, componentId);
 
             if (!string.IsNullOrWhiteSpace(syncResult.Output))
             {

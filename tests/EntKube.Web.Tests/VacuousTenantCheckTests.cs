@@ -21,9 +21,10 @@ namespace EntKube.Web.Tests;
 ///
 /// <para><b>It is not carelessness.</b> Every one of them is in a method with no tenant in its
 /// signature, so the cluster row was the only tenant in scope — the author had nothing else to
-/// pass. One says so out loud: <c>ComponentLifecycleService</c> line 1405 carries the comment
-/// "the tenant check inside ForAsync is vacuous here". That makes this a measurement of the
-/// authorization debt
+/// pass. One said so out loud: <c>ComponentLifecycleService</c>'s secret sync carried the comment
+/// "the tenant check inside ForAsync is vacuous here" — and that site was the <b>last</b> one,
+/// closed by giving the method the tenant its five callers all had. That makes this a measurement
+/// of the authorization debt
 /// <see cref="CustodyTriageTests"/> describes, taken at the one place it is visible in a single
 /// expression instead of a call graph.</para>
 ///
@@ -107,11 +108,25 @@ public class VacuousTenantCheckTests
     ///
     /// <para><b>1.</b> <c>ComponentLifecycleService</c>'s three went with its credential sites —
     /// the install path now takes the tenant from <c>ComponentInstallOrchestrator</c> (which had
-    /// one all along) and from <c>ClusterDetail</c>. <b>One site is left in the whole codebase</b>,
-    /// and the classifier resolves it through a local alias rather than the obvious spelling,
-    /// which is why the figure and a hand grep disagree — trust the classifier.</para>
+    /// one all along) and from <c>ClusterDetail</c>.</para>
+    ///
+    /// <para><b>0 — and the last one was hidden by an alias.</b> <c>SyncComponentSecretsAsync</c>
+    /// read <c>Guid tenantId = component.Cluster.TenantId;</c> and then called
+    /// <c>ForAsync(tenantId, component.ClusterId)</c>, so it <em>read</em> like every converted
+    /// site while being the opposite. Resolving method-scoped aliases is the only reason this test
+    /// could see it, which is worth remembering about every grep-shaped measurement: the spelling
+    /// that hides a thing is usually the spelling everyone else uses.</para>
+    ///
+    /// <para>Its comment explained that the check had to be vacuous because the method "is
+    /// reached by component id by design". All five callers — two pages, the install
+    /// orchestrator twice, and <c>StalwartService</c>'s apply — had a tenant. The design was in
+    /// the signature. That is the third such claim this programme has opened and found wrong,
+    /// after #189's exemption list and #193's "cannot move".</para>
+    ///
+    /// <para><b>This number may now only ever be zero.</b> The two halves of the ratchet say the
+    /// same thing from here: a new tautological site is both a regression and un-banked slack.</para>
     /// </summary>
-    private const int BaselineTautological = 1;
+    private const int BaselineTautological = 0;
 
     [Fact]
     public void A_tenant_read_off_the_cluster_row_checks_nothing_and_may_not_spread()
