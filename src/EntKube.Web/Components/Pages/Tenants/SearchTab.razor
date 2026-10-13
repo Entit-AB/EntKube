@@ -2078,7 +2078,8 @@
             ElasticsearchCluster? existing = editingId is Guid id
                 ? clusters.FirstOrDefault(c => c.Id == id)
                 : null;
-            capacity = await Search.CheckCapacityAsync(form.K8sClusterId, form.ToEntity(), existing);
+            capacity = await Search.CheckCapacityAsync(
+                TenantId, form.K8sClusterId, form.ToEntity(), existing);
         }
         catch (Exception ex)
         {
