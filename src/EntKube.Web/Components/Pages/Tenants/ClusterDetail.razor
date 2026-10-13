@@ -2332,7 +2332,7 @@ else if (section == "components")
         // placeholders in the collector config, which installs and runs fine while dropping every batch.
         // When the cluster already runs its own telemetry indexer, point the collector at that instead of
         // back across the WAN — keeping the logs in the cluster is the whole reason it is there.
-        string? indexerUrl = await EntKubeTelemetry.GetInClusterIndexerUrlAsync(Cluster.Id);
+        string? indexerUrl = await EntKubeTelemetry.GetInClusterIndexerUrlAsync(TenantId, Cluster.Id);
         string? inClusterIngest = indexerUrl is null ? null : indexerUrl + "/ingest/otlp";
         EntKube.Web.Services.Telemetry.TelemetryIngestDefaults.ApplyTo(
             entry, regFormFieldValues, Cluster.Id, TenantId, IngestTokens, Config, inClusterIngest);
@@ -3089,7 +3089,7 @@ else if (section == "components")
 
         try
         {
-            HelmExecutionResult result = await LifecycleService.SyncComponentSecretsAsync(componentId);
+            HelmExecutionResult result = await LifecycleService.SyncComponentSecretsAsync(TenantId, componentId);
             secretSyncOutput = result.Success ? "Synced successfully" : result.Output;
         }
         catch (Exception ex)

@@ -124,7 +124,7 @@ public class ComponentSecretSyncTests : IDisposable
         await SeedAsync();
         await GivenAComponentSecretAsync("WG_HOST", "vpn.example.com");
 
-        HelmExecutionResult result = await sut.SyncComponentSecretsAsync(componentId);
+        HelmExecutionResult result = await sut.SyncComponentSecretsAsync(tenantId, componentId);
 
         result.Success.Should().BeTrue(result.Output);
 
@@ -150,7 +150,7 @@ public class ComponentSecretSyncTests : IDisposable
         await SeedAsync();
         await GivenAComponentSecretAsync("PASSWORD_HASH", "hunter2");
 
-        await sut.SyncComponentSecretsAsync(componentId);
+        await sut.SyncComponentSecretsAsync(tenantId, componentId);
 
         string manifest = replaced.Should().ContainSingle().Subject.Manifest;
 
@@ -176,7 +176,7 @@ public class ComponentSecretSyncTests : IDisposable
         await SeedAsync();
         await GivenAComponentSecretAsync("PASSWORD_HASH", "hunter2");
 
-        await sut.SyncComponentSecretsAsync(componentId);
+        await sut.SyncComponentSecretsAsync(tenantId, componentId);
 
         string? stored = await vault.GetComponentSecretValueAsync(tenantId, componentId, "PASSWORD_HASH");
 
@@ -189,7 +189,7 @@ public class ComponentSecretSyncTests : IDisposable
         await SeedAsync();
         await GivenAComponentSecretAsync("WG_HOST", "vpn.example.com");
 
-        await sut.SyncComponentSecretsAsync(componentId);
+        await sut.SyncComponentSecretsAsync(tenantId, componentId);
 
         string manifest = replaced.Single().Manifest;
 
@@ -205,7 +205,7 @@ public class ComponentSecretSyncTests : IDisposable
         await GivenAComponentSecretAsync("WG_HOST", "vpn.example.com");
         await GivenAComponentSecretAsync("WG_PORT", "51820");
 
-        await sut.SyncComponentSecretsAsync(componentId);
+        await sut.SyncComponentSecretsAsync(tenantId, componentId);
 
         string manifest = replaced.Should().ContainSingle(
             "both keys target the same K8s Secret, so there is one replace").Subject.Manifest;
@@ -219,7 +219,7 @@ public class ComponentSecretSyncTests : IDisposable
         await SeedAsync(withKubeconfig: false);
         await GivenAComponentSecretAsync("WG_HOST", "vpn.example.com");
 
-        HelmExecutionResult result = await sut.SyncComponentSecretsAsync(componentId);
+        HelmExecutionResult result = await sut.SyncComponentSecretsAsync(tenantId, componentId);
 
         result.Success.Should().BeFalse();
         result.Output.Should().Contain("No kubeconfig");
@@ -232,10 +232,37 @@ public class ComponentSecretSyncTests : IDisposable
     {
         await SeedAsync();
 
-        HelmExecutionResult result = await sut.SyncComponentSecretsAsync(componentId);
+        HelmExecutionResult result = await sut.SyncComponentSecretsAsync(tenantId, componentId);
 
         result.Success.Should().BeTrue();
         result.Output.Should().Contain("No secrets marked");
         replaced.Should().BeEmpty();
     }
+
+    // ──────── The refusal the tenant parameter buys ────────
+
+    /// <summary>
+    /// A stranger cannot sync this component's secrets into its cluster.
+    ///
+    /// <para>This was the last tautological seam call in the codebase, and it hid behind a local
+    /// alias: the method read <c>Guid tenantId = component.Cluster.TenantId</c> and then called
+    /// <c>ForAsync(tenantId, component.ClusterId)</c>, which reads exactly like every converted
+    /// site. The comment above it explained that the check had to be vacuous because the method
+    /// is "reached by component id by design" — all five callers had a tenant.</para>
+    ///
+    /// <para>Asserted on what reached the cluster: these are Secrets, so a refusal that still
+    /// wrote them would be the whole of the problem.</para>
+    /// </summary>
+    [Fact]
+    public async Task Another_tenant_cannot_sync_this_components_secrets()
+    {
+        await SeedAsync();
+        await GivenAComponentSecretAsync("ADMIN_PASSWORD", "s3cret");
+
+        HelmExecutionResult result = await sut.SyncComponentSecretsAsync(Guid.NewGuid(), componentId);
+
+        result.Success.Should().BeFalse();
+        replaced.Should().BeEmpty("no Secret may be written to a cluster this tenant does not own");
+    }
+
 }

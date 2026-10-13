@@ -76,7 +76,7 @@ public class CatalogComponentRegistrar(
         Dictionary<string, string> values = new(formValues);
         // Prefer the cluster's own indexer when it has one — a collector installed after the telemetry
         // components should ship to them, not back across the WAN.
-        string? indexerUrl = await entKubeTelemetryService.GetInClusterIndexerUrlAsync(clusterId);
+        string? indexerUrl = await entKubeTelemetryService.GetInClusterIndexerUrlAsync(tenantId, clusterId);
         string? inClusterIngest = indexerUrl is null ? null : indexerUrl + "/ingest/otlp";
         TelemetryIngestDefaults.ApplyTo(entry, values, clusterId, tenantId, ingestTokens, configuration, inClusterIngest);
 

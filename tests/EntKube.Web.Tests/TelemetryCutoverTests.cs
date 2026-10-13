@@ -82,7 +82,7 @@ public class TelemetryCutoverTests
     {
         Fixture f = Fixture.Build(collectorEndpoint: PublicEndpoint);
 
-        Guid? toReapply = await f.Lifecycle.RepointCollectorToInClusterAsync(f.IndexerId);
+        Guid? toReapply = await f.Lifecycle.RepointCollectorToInClusterAsync(f.TenantId, f.IndexerId);
 
         toReapply.Should().Be(f.CollectorId, "the collector is what has to be re-applied to move ingest");
 
@@ -97,7 +97,7 @@ public class TelemetryCutoverTests
     {
         Fixture f = Fixture.Build(collectorEndpoint: "http://otel-hub.observability:4318/v1/logs");
 
-        (await f.Lifecycle.RepointCollectorToInClusterAsync(f.IndexerId))
+        (await f.Lifecycle.RepointCollectorToInClusterAsync(f.TenantId, f.IndexerId))
             .Should().BeNull("re-applying their collector to overwrite their destination would be worse "
                              + "than the bug this fixes");
 
@@ -109,7 +109,7 @@ public class TelemetryCutoverTests
     {
         Fixture f = Fixture.Build(collectorEndpoint: PublicEndpoint);
 
-        (await f.Lifecycle.RepointCollectorToInClusterAsync(f.QuerierId)).Should().BeNull();
+        (await f.Lifecycle.RepointCollectorToInClusterAsync(f.TenantId, f.QuerierId)).Should().BeNull();
         f.CollectorValues().Should().Contain(PublicEndpoint);
     }
 
@@ -121,7 +121,8 @@ public class TelemetryCutoverTests
         Guid ClusterId,
         Guid IndexerId,
         Guid QuerierId,
-        Guid CollectorId)
+        Guid CollectorId,
+        Guid TenantId)
     {
         public string CollectorValues()
         {
@@ -196,7 +197,7 @@ public class TelemetryCutoverTests
 
             return new Fixture(
                 telemetry, TestServices.BuildLifecycle(factory, vault, PublicIngest),
-                factory, clusterId, indexerId, querierId, collectorId);
+                factory, clusterId, indexerId, querierId, collectorId, tenantId);
         }
     }
 }

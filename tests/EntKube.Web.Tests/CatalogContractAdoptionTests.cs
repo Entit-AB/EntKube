@@ -215,7 +215,18 @@ public class CatalogContractAdoptionTests
     /// cross-row derivation is weaker than what the page above supplies, and saying so beats
     /// quietly implying the whole path is authorized.</para>
     ///
-    private const int BaselineQueries = 15;
+    /// <para><b>14.</b> <c>EntKubeTelemetryService.GetInClusterIndexerUrlAsync</c> — the read
+    /// #186 attempted and reverted. It was blocked by its own cascade:
+    /// <c>GetInClusterIngestUrlAsync</c> and <c>FixQuerierIndexerUrlAsync</c> are reached from
+    /// <c>ComponentLifecycleService</c>'s install path, which took a component id and nothing
+    /// else. #193 gave that path a tenant, so the cascade has one now and this read is the
+    /// contract's.</para>
+    ///
+    /// <para>Its sibling <c>ManagementPlaneStillReceivesAsync</c> stays: it is reached from
+    /// <c>ClusterRoutedBackends</c>, the telemetry routing layer, which addresses clusters by id
+    /// and has no tenant of its own — a different cascade, and the next one.</para>
+    ///
+    private const int BaselineQueries = 14;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

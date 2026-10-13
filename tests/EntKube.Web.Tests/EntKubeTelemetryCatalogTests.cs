@@ -435,9 +435,9 @@ public class EntKubeTelemetryCatalogTests
         EntKubeTelemetryService sut = new(factory, vault, new IngestTokenService(config),
                 new EntKube.Web.Modules.Api.CatalogApi(factory), config);
 
-        (await sut.GetInClusterIndexerUrlAsync(clusterId))
+        (await sut.GetInClusterIndexerUrlAsync(tenantId, clusterId))
             .Should().Be("http://entkube-telemetry-indexer.monitoring:8080");
-        (await sut.GetInClusterIngestUrlAsync(clusterId))
+        (await sut.GetInClusterIngestUrlAsync(tenantId, clusterId))
             .Should().Be("http://entkube-telemetry-indexer.monitoring:8080/ingest/otlp");
     }
 
@@ -448,11 +448,11 @@ public class EntKubeTelemetryCatalogTests
     {
         // The indexer is NOT on the default release name, so the catalog's default address is wrong for
         // this cluster — which is the whole reason the field cannot be a literal.
-        (EntKubeTelemetryService sut, ClusterComponent querier) =
+        (EntKubeTelemetryService sut, ClusterComponent querier, Guid tenantId) =
             QuerierOnClusterWithIndexer(indexerRelease: "telemetry-prod");
 
         string? values = stored is null ? null : $"querier:\n  indexerUrl: {stored}\n";
-        (string? healed, string? corrected) = await sut.FixQuerierIndexerUrlAsync(querier, values);
+        (string? healed, string? corrected) = await sut.FixQuerierIndexerUrlAsync(tenantId, querier, values);
 
         // The stored copy is the querier's own; a catalog fix never reaches it, so re-applying the
         // component has to be what repairs it.
@@ -464,10 +464,10 @@ public class EntKubeTelemetryCatalogTests
     [Fact]
     public async Task A_querier_that_is_already_right_is_not_rewritten_on_every_apply()
     {
-        (EntKubeTelemetryService sut, ClusterComponent querier) = QuerierOnClusterWithIndexer();
+        (EntKubeTelemetryService sut, ClusterComponent querier, Guid tenantId) = QuerierOnClusterWithIndexer();
 
         const string values = "querier:\n  indexerUrl: " + EntKubeTelemetryService.DefaultIndexerUrl + "\n";
-        (string? healed, string? corrected) = await sut.FixQuerierIndexerUrlAsync(querier, values);
+        (string? healed, string? corrected) = await sut.FixQuerierIndexerUrlAsync(tenantId, querier, values);
 
         // Under the default release name the catalog's address IS the derived one. Reporting a correction
         // here would put a repoint line in the install log of every apply that changed nothing.
@@ -478,13 +478,13 @@ public class EntKubeTelemetryCatalogTests
     [Fact]
     public async Task An_indexer_address_the_operator_chose_is_left_alone()
     {
-        (EntKubeTelemetryService sut, ClusterComponent querier) = QuerierOnClusterWithIndexer();
+        (EntKubeTelemetryService sut, ClusterComponent querier, Guid tenantId) = QuerierOnClusterWithIndexer();
 
         // Federating with an indexer EntKube did not install is a legitimate choice, and silently
         // redirecting a querier onto different data would be worse than the bug this heal exists for.
         const string chosen = "http://telemetry.shared.svc.cluster.local:8080";
         (string? healed, string? corrected) =
-            await sut.FixQuerierIndexerUrlAsync(querier, $"querier:\n  indexerUrl: {chosen}\n");
+            await sut.FixQuerierIndexerUrlAsync(tenantId, querier, $"querier:\n  indexerUrl: {chosen}\n");
 
         corrected.Should().BeNull();
         YamlFormMerger.ExtractValue(healed!, EntKubeTelemetryService.IndexerUrlYamlPath).Should().Be(chosen);
@@ -493,17 +493,17 @@ public class EntKubeTelemetryCatalogTests
     [Fact]
     public async Task The_indexer_itself_is_never_repointed()
     {
-        (EntKubeTelemetryService sut, ClusterComponent querier) = QuerierOnClusterWithIndexer();
+        (EntKubeTelemetryService sut, ClusterComponent querier, Guid tenantId) = QuerierOnClusterWithIndexer();
         querier.Name = EntKubeTelemetryService.IndexerKey;
 
         // An indexer serves its own hot tier; giving it an indexer address would be meaningless.
-        (_, string? corrected) = await sut.FixQuerierIndexerUrlAsync(querier, valuesYaml: null);
+        (_, string? corrected) = await sut.FixQuerierIndexerUrlAsync(tenantId, querier, valuesYaml: null);
         corrected.Should().BeNull();
     }
 
     /// <summary>A cluster carrying an indexer under its default release name, plus the querier row that
     /// reads from it. The connection is intentionally left open for the lifetime of the returned service.</summary>
-    private static (EntKubeTelemetryService Sut, ClusterComponent Querier) QuerierOnClusterWithIndexer(
+    private static (EntKubeTelemetryService Sut, ClusterComponent Querier, Guid TenantId) QuerierOnClusterWithIndexer(
         string indexerRelease = "entkube-telemetry")
     {
         SqliteConnection connection = new("DataSource=:memory:");
@@ -543,7 +543,7 @@ public class EntKubeTelemetryCatalogTests
         querier.Cluster = db.KubernetesClusters.First(c => c.Id == clusterId);
 
         return (new EntKubeTelemetryService(factory, vault, new IngestTokenService(config),
-                new EntKube.Web.Modules.Api.CatalogApi(factory), config), querier);
+                new EntKube.Web.Modules.Api.CatalogApi(factory), config), querier, tenantId);
     }
 
     [Fact]
