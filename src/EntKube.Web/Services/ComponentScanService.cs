@@ -81,7 +81,8 @@ public class ComponentScanService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
     KyvernoPolicyService kyvernoPolicyService,
-    RabbitMQService rabbitMQService)
+    RabbitMQService rabbitMQService,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients)
 {
     /// <summary>
     /// Scans the cluster for all installed Helm releases. Connects using the
@@ -93,16 +94,21 @@ public class ComponentScanService(
     /// indicating which ones are already registered as ClusterComponents.
     /// </summary>
     public async Task<List<DiscoveredHelmRelease>> ScanHelmReleasesAsync(
-        KubernetesCluster cluster, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        // The cluster row is not needed at all: it was read for its kubeconfig and its id, and
+        // the seam carries both — "may this tenant reach that cluster" and "is there a credential
+        // to reach it with" being one question.
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
+
+        if (cluster is null)
         {
             return [];
         }
 
-        // Connect to the cluster using its stored kubeconfig.
-
-        Kubernetes client = CreateClient(cluster.Kubeconfig);
+        // Not disposed: the pooled client is shared per credential.
+        Kubernetes client = cluster.GetPooledSdkClient();
 
         // Query all namespaces for secrets labeled as Helm releases.
         // Helm 3 creates secrets with label "owner=helm" for each revision.
@@ -148,7 +154,7 @@ public class ComponentScanService(
 
         // Get existing components on this cluster to mark already-tracked ones.
 
-        List<ClusterComponent> existingComponents = await vaultService.GetComponentsAsync(cluster.Id, ct);
+        List<ClusterComponent> existingComponents = await vaultService.GetComponentsAsync(clusterId, ct);
 
         // Include both Name and ReleaseName so that components registered via the
         // catalog (where Name = catalog key, e.g. "cloudnative-pg") are still
@@ -198,7 +204,8 @@ public class ComponentScanService(
     /// resources and creates ExternalRoute entries.
     /// </summary>
     public async Task<ClusterComponent> ImportReleaseAsync(
-        KubernetesCluster cluster, DiscoveredHelmRelease release, CancellationToken ct = default)
+        Guid tenantId, KubernetesCluster cluster, DiscoveredHelmRelease release,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -231,21 +238,21 @@ public class ComponentScanService(
 
             // Extract secrets to vault if they don't already exist.
 
-            await ExtractSecretsToVaultAsync(cluster.TenantId, existing, ct);
+            await ExtractSecretsToVaultAsync(tenantId, existing, ct);
 
             // Discover exposed routes for existing component too.
             // Route discovery is best-effort — failure shouldn't block import.
 
             try
             {
-                await DiscoverRoutesAsync(cluster, existing, ct);
+                await DiscoverRoutesAsync(tenantId, cluster.Id, existing, ct);
             }
             catch
             {
                 // Route discovery failed (cluster unreachable, CRD missing, etc.)
             }
 
-            await TryAdoptManagedResourcesAsync(cluster, existing, ct);
+            await TryAdoptManagedResourcesAsync(tenantId, cluster, existing, ct);
 
             return existing;
         }
@@ -277,21 +284,21 @@ public class ComponentScanService(
         // If this component matches a catalog entry with secret fields,
         // extract those secrets from the Helm values and store them in the vault.
 
-        await ExtractSecretsToVaultAsync(cluster.TenantId, component, ct);
+        await ExtractSecretsToVaultAsync(tenantId, component, ct);
 
         // Discover exposed routes (Ingress, HTTPRoute, LoadBalancer) for the component.
         // Route discovery is best-effort — failure shouldn't block import.
 
         try
         {
-            await DiscoverRoutesAsync(cluster, component, ct);
+            await DiscoverRoutesAsync(tenantId, cluster.Id, component, ct);
         }
         catch
         {
             // Route discovery failed (cluster unreachable, CRD missing, etc.)
         }
 
-        await TryAdoptManagedResourcesAsync(cluster, component, ct);
+        await TryAdoptManagedResourcesAsync(tenantId, cluster, component, ct);
 
         return component;
     }
@@ -304,7 +311,7 @@ public class ComponentScanService(
     /// here never blocks the component import.
     /// </summary>
     private async Task TryAdoptManagedResourcesAsync(
-        KubernetesCluster cluster, ClusterComponent component, CancellationToken ct)
+        Guid tenantId, KubernetesCluster cluster, ClusterComponent component, CancellationToken ct)
     {
         try
         {
@@ -312,10 +319,10 @@ public class ComponentScanService(
             bool isRabbitOperator = Matches(component, "rabbitmq-cluster-operator");
 
             if (isKyverno)
-                await kyvernoPolicyService.DiscoverPoliciesAsync(cluster.TenantId, cluster.EnvironmentId, ct);
+                await kyvernoPolicyService.DiscoverPoliciesAsync(tenantId, cluster.EnvironmentId, ct);
 
             if (isRabbitOperator)
-                await rabbitMQService.DiscoverClustersAsync(cluster.TenantId, ct);
+                await rabbitMQService.DiscoverClustersAsync(tenantId, ct);
         }
         catch
         {
@@ -335,7 +342,8 @@ public class ComponentScanService(
     /// all releases, so one bad release doesn't block the rest.
     /// </summary>
     public async Task<int> ImportAllNewReleasesAsync(
-        KubernetesCluster cluster, List<DiscoveredHelmRelease> releases, CancellationToken ct = default)
+        Guid tenantId, KubernetesCluster cluster, List<DiscoveredHelmRelease> releases,
+        CancellationToken ct = default)
     {
         int imported = 0;
         List<string> errors = [];
@@ -344,7 +352,7 @@ public class ComponentScanService(
         {
             try
             {
-                await ImportReleaseAsync(cluster, release, ct);
+                await ImportReleaseAsync(tenantId, cluster, release, ct);
                 release.AlreadyTracked = true;
                 imported++;
             }
@@ -375,16 +383,24 @@ public class ComponentScanService(
     /// EntKube originally created them.
     /// </summary>
     public async Task<List<ExternalRoute>> DiscoverRoutesAsync(
-        KubernetesCluster cluster, ClusterComponent component, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, ClusterComponent component, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig) || string.IsNullOrWhiteSpace(component.Namespace))
+        if (string.IsNullOrWhiteSpace(component.Namespace))
         {
             return [];
         }
 
-        Kubernetes client = CreateClient(cluster.Kubeconfig);
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
+
+        if (cluster is null)
+        {
+            return [];
+        }
+
+        Kubernetes client = cluster.GetPooledSdkClient();
         List<ExternalRoute> discovered = [];
 
         // Get existing routes for this component so we don't duplicate.
@@ -1003,9 +1019,12 @@ public class ComponentScanService(
     /// the Helm scan.
     /// </summary>
     public async Task<List<DiscoveredManifestComponent>> ScanManifestComponentsAsync(
-        KubernetesCluster cluster, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
+
+        if (cluster is null)
         {
             return [];
         }
@@ -1014,7 +1033,7 @@ public class ComponentScanService(
 
         try
         {
-            client = CreateClient(cluster.Kubeconfig);
+            client = cluster.GetPooledSdkClient();
         }
         catch
         {
@@ -1024,7 +1043,7 @@ public class ComponentScanService(
         // Existing tracked names, so we can flag components already registered.
         // Mirror the Helm scan: match on both Name (catalog key) and ReleaseName.
 
-        List<ClusterComponent> existingComponents = await vaultService.GetComponentsAsync(cluster.Id, ct);
+        List<ClusterComponent> existingComponents = await vaultService.GetComponentsAsync(clusterId, ct);
 
         HashSet<string> trackedNames = new(StringComparer.OrdinalIgnoreCase);
         foreach (ClusterComponent c in existingComponents)
@@ -1222,16 +1241,19 @@ public class ComponentScanService(
     /// installed on the cluster. Returns false if unreachable or CRDs are absent.
     /// </summary>
     public async Task<bool> CheckGatewayApiCrdsAsync(
-        KubernetesCluster cluster, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
+
+        if (cluster is null)
         {
             return false;
         }
 
         try
         {
-            Kubernetes client = CreateClient(cluster.Kubeconfig);
+            Kubernetes client = cluster.GetPooledSdkClient();
             await client.ApiextensionsV1.ReadCustomResourceDefinitionAsync(
                 "httproutes.gateway.networking.k8s.io", cancellationToken: ct);
             return true;
@@ -1240,41 +1262,4 @@ public class ComponentScanService(
         {
             return false;
         }
-    }
-
-    /// <summary>
-    /// Checks whether cert-manager has been started with Gateway API support enabled.
-    /// Returns false if cert-manager is not installed or does not have the feature gate.
-    /// </summary>
-    public async Task<bool> CheckCertManagerGatewayApiAsync(
-        KubernetesCluster cluster, CancellationToken ct = default)
-    {
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-        {
-            return false;
-        }
-
-        try
-        {
-            Kubernetes client = CreateClient(cluster.Kubeconfig);
-            k8s.Models.V1Deployment deployment = await client.AppsV1.ReadNamespacedDeploymentAsync(
-                "cert-manager", "cert-manager", cancellationToken: ct);
-
-            return deployment.Spec?.Template?.Spec?.Containers?.Any(c =>
-                c.Args?.Any(a =>
-                    a.Contains("GatewayAPI=true", StringComparison.OrdinalIgnoreCase) ||
-                    a.Contains("ExperimentalGatewayAPISupport=true", StringComparison.OrdinalIgnoreCase)) == true) == true;
-        }
-        catch
-        {
-            return false;
-        }
-    }
-
-    private static Kubernetes CreateClient(string kubeconfig)
-    {
-        using MemoryStream stream = new(Encoding.UTF8.GetBytes(kubeconfig));
-        KubernetesClientConfiguration config = KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
-        return new Kubernetes(config);
-    }
-}
+    }}

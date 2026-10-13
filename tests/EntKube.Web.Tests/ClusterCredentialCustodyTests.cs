@@ -356,7 +356,24 @@ public class ClusterCredentialCustodyTests
     /// what let the row go entirely. Cordon, uncordon, drain, label and taint are all authorized
     /// as the asking tenant, from one <c>TenantId</c> on <c>ClusterNodes</c>.</para>
     ///
-    private const int BaselineOccurrences = 92;
+    /// <para><b>82 — the discovery scans.</b> <c>ComponentScanService</c> is what reads a
+    /// cluster to find out what is installed on it: helm release secrets across every namespace,
+    /// manifest-installed components by CRD presence, Gateway API CRDs, and the routes a
+    /// component already exposes. Five methods, each taking a <c>KubernetesCluster</c> row and
+    /// reading its kubeconfig; they take <c>(tenantId, clusterId)</c> now and the row is not
+    /// needed at all, because the only other thing they read off it was its id.</para>
+    ///
+    /// <para>Two of the ten sites went with a method that had <b>no caller anywhere</b> —
+    /// <c>CheckCertManagerGatewayApiAsync</c>, which checked for a cert-manager feature gate. The
+    /// fourth dead method this programme has deleted rather than converted.</para>
+    ///
+    /// <para><c>ImportReleaseAsync</c> and its adoption path also stopped reading
+    /// <c>cluster.TenantId</c> for the four tenant-scoped calls they make — Kyverno discovery,
+    /// RabbitMQ discovery and two vault extractions. Those were not counted here, because a
+    /// tenant read off a row is the <em>other</em> ratchet, but they are the same mistake and
+    /// they went in the same change.</para>
+    ///
+    private const int BaselineOccurrences = 82;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -385,8 +402,10 @@ public class ClusterCredentialCustodyTests
     /// count that also carried tautological seam calls.</para>
     ///
     /// <para>27. <c>NodeManagementService</c>.</para>
+    ///
+    /// <para>26. <c>ComponentScanService</c>.</para>
     /// </summary>
-    private const int BaselineFiles = 27;
+    private const int BaselineFiles = 26;
 
     private static (int Occurrences, int Files) Measure()
     {
