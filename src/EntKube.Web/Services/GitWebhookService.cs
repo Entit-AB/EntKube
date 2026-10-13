@@ -79,7 +79,7 @@ public class GitWebhookService(
 
         foreach (AppDeployment deployment in matched)
         {
-            syncService.EnqueueSync(deployment.Id);
+            syncService.EnqueueSync(tenantId.Value, deployment.Id);
             queued++;
         }
 

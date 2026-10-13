@@ -29,9 +29,15 @@ public class GitSyncService(
     private static readonly TimeSpan InterDeploymentDelay = TimeSpan.FromMilliseconds(300);
 
     // Deployments can be queued for immediate sync (e.g. webhook or UI button).
-    private readonly System.Collections.Concurrent.ConcurrentQueue<Guid> _syncQueue = new();
+    /// <summary>
+    /// Queued on-demand syncs, each carrying the tenant that asked for it. The tenant travels
+    /// with the work rather than being recovered from the deployment when the queue drains: a git
+    /// sync applies to a cluster, and who may reach that cluster is the queuer's authority, not a
+    /// property of the row.
+    /// </summary>
+    private readonly System.Collections.Concurrent.ConcurrentQueue<(Guid TenantId, Guid DeploymentId)> _syncQueue = new();
 
-    public void EnqueueSync(Guid deploymentId) => _syncQueue.Enqueue(deploymentId);
+    public void EnqueueSync(Guid tenantId, Guid deploymentId) => _syncQueue.Enqueue((tenantId, deploymentId));
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -40,10 +46,13 @@ public class GitSyncService(
         while (!stoppingToken.IsCancellationRequested)
         {
             // Drain the immediate queue first.
-            while (_syncQueue.TryDequeue(out Guid queued))
+            while (_syncQueue.TryDequeue(out (Guid TenantId, Guid DeploymentId) queued))
             {
-                try { await SyncDeploymentAsync(queued, stoppingToken); }
-                catch (Exception ex) { logger.LogWarning(ex, "GitSyncService: queue sync failed for {Id}", queued); }
+                try { await SyncDeploymentAsync(queued.TenantId, queued.DeploymentId, stoppingToken); }
+                catch (Exception ex)
+                {
+                    logger.LogWarning(ex, "GitSyncService: queue sync failed for {Id}", queued.DeploymentId);
+                }
             }
 
             await SyncAllAutoSyncDeploymentsAsync(stoppingToken);
@@ -57,8 +66,14 @@ public class GitSyncService(
         using IDisposable unattended = scope.DeclareUnattended("git-sync");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
 
-        List<Guid> deploymentIds;
+        var appDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
 
+        // One tenant at a time (docs/decomposition.md §4.0.1.2). A git sync APPLIES to a cluster,
+        // so the tenant it acts as decides which cluster it may reach — this used to select every
+        // auto-syncing deployment in the installation and apply each one by id.
+        List<(Guid TenantId, Guid DeploymentId)> targets = [];
+
+        using (ApplicationDbContext appDb = appDbFactory.CreateDbContext())
         using (DeliveryDbContext db = dbFactory.CreateDbContext())
         {
             DeploymentType[] gitTypes =
@@ -68,23 +83,29 @@ public class GitSyncService(
                 DeploymentType.GitAppOfApps
             ];
 
-            deploymentIds = await db.AppDeployments
-                .Where(d => (d.GitUrl != null || d.GitRepositoryId != null)
-                    && d.GitAutoSync
-                    && gitTypes.Contains(d.Type))
-                .Select(d => d.Id)
-                .ToListAsync(ct);
+            foreach (Guid tenantId in await appDb.Tenants.Select(t => t.Id).ToListAsync(ct))
+            {
+                List<Guid> ids = await db.AppDeployments
+                    .Where(d => (d.GitUrl != null || d.GitRepositoryId != null)
+                        && d.GitAutoSync
+                        && gitTypes.Contains(d.Type)
+                        && d.App.Customer.TenantId == tenantId)
+                    .Select(d => d.Id)
+                    .ToListAsync(ct);
+
+                targets.AddRange(ids.Select(id => (tenantId, id)));
+            }
         }
 
-        logger.LogDebug("GitSyncService: checking {Count} git-backed deployments", deploymentIds.Count);
+        logger.LogDebug("GitSyncService: checking {Count} git-backed deployments", targets.Count);
 
-        foreach (Guid id in deploymentIds)
+        foreach ((Guid tenantId, Guid id) in targets)
         {
             if (ct.IsCancellationRequested) break;
 
             try
             {
-                await SyncDeploymentAsync(id, ct);
+                await SyncDeploymentAsync(tenantId, id, ct);
             }
             catch (Exception ex)
             {
@@ -100,7 +121,7 @@ public class GitSyncService(
     /// the UI or webhook handler for on-demand sync.
     /// </summary>
     public async Task<GitSyncResult> SyncDeploymentAsync(
-        Guid deploymentId, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentId, CancellationToken ct = default)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
         using IDisposable unattended = scope.DeclareUnattended("git-sync");
@@ -245,7 +266,7 @@ public class GitSyncService(
                 case DeploymentType.GitYaml:
                 {
                     KubernetesOperationResult<string> applyResult =
-                        await k8sOps.ApplyYamlDeploymentAsync(deploymentId, "git-sync", ct);
+                        await k8sOps.ApplyYamlDeploymentAsync(tenantId, deploymentId, "git-sync", ct);
                     applySuccess = applyResult.IsSuccess;
                     applyOutput = applyResult.IsSuccess ? applyResult.Data : applyResult.Error;
                     if (!applyResult.IsSuccess)
@@ -256,7 +277,7 @@ public class GitSyncService(
                 case DeploymentType.GitHelm:
                 {
                     KubernetesOperationResult<string> helmResult =
-                        await k8sOps.HelmInstallOrUpgradeAsync(deploymentId, ct: ct);
+                        await k8sOps.HelmInstallOrUpgradeAsync(tenantId, deploymentId, ct: ct);
                     applySuccess = helmResult.IsSuccess;
                     applyOutput = helmResult.IsSuccess ? helmResult.Data : helmResult.Error;
                     if (!helmResult.IsSuccess)

@@ -171,7 +171,7 @@
         try
         {
             KubernetesOperationResult<MeshReadiness> result =
-                await K8sOps.GetMeshReadinessAsync(target.ClusterId, target.Namespace);
+                await K8sOps.GetMeshReadinessAsync(TenantId, target.ClusterId, target.Namespace);
 
             if (result.IsSuccess && result.Data is { } r) readiness[target.Key] = r;
             else Toasts.Error(result.Error ?? "Could not read the namespace.");
@@ -190,7 +190,8 @@
             // Applying does the readiness check itself and refuses STRICT if the namespace isn't
             // ready — the stored posture is then ahead of the cluster, which the applied-at stamp
             // shows. Surface the refusal instead of reporting a change that did not land.
-            KubernetesOperationResult<string> result = await K8sOps.ApplyMeshMtlsAsync(target.ClusterId, target.Namespace);
+            KubernetesOperationResult<string> result =
+                await K8sOps.ApplyMeshMtlsAsync(TenantId, target.ClusterId, target.Namespace);
 
             if (result.IsSuccess) Toasts.Success(result.Data ?? "Applied.");
             else Toasts.Error(result.Error ?? "Apply failed.");

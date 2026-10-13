@@ -477,7 +477,7 @@
             AuthenticationState auth = await AuthState.GetAuthenticationStateAsync();
 
             KubernetesOperationResult<string> result = await K8sOps.ApplyYamlDeploymentAsync(
-                row.DeploymentId, performedBy: auth.User.Identity?.Name);
+                TenantId, row.DeploymentId, performedBy: auth.User.Identity?.Name);
 
             actionOk = result.IsSuccess;
             actionMessage = result.IsSuccess

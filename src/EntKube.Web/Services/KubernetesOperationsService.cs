@@ -177,7 +177,8 @@ public class KubernetesOperationsService(
     ///
     /// Returns a short note for the operator-facing output, or null if there was nothing to do.
     /// </summary>
-    protected virtual async Task<string?> RefreshDeploymentRoutesAsync(AppDeployment deployment, CancellationToken ct)
+    protected virtual async Task<string?> RefreshDeploymentRoutesAsync(
+        Guid tenantId, AppDeployment deployment, CancellationToken ct)
     {
         try
         {
@@ -221,7 +222,8 @@ public class KubernetesOperationsService(
 
             foreach ((Guid routeId, string hostname) in perHostname)
             {
-                KubernetesOperationResult<string> routeResult = await ApplyDeploymentRouteAsync(routeId, ct);
+                KubernetesOperationResult<string> routeResult =
+                await ApplyDeploymentRouteAsync(tenantId, routeId, ct);
 
                 if (routeResult.IsSuccess)
                 {
@@ -784,20 +786,21 @@ public class KubernetesOperationsService(
     /// an unregister-only flow).
     /// </summary>
     public async Task<KubernetesOperationResult<string>> DeleteDeploymentFromClusterAsync(
-        Guid deploymentId, string? performedBy = null, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentId, string? performedBy = null, CancellationToken ct = default)
     {
         AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
 
         if (deployment is null)
             return KubernetesOperationResult<string>.Failure("Deployment not found.");
 
-        IClusterClient? clusterAccess = deployment.Cluster is null
-            ? null
-            : await clusterClients.ForAsync(deployment.Cluster.TenantId, deployment.ClusterId, ct);
+        // The tenant is the caller's, not one read off the row being authorized. The old form —
+        // ForAsync(deployment.Cluster.TenantId, deployment.ClusterId) — compared a row against
+        // itself, so the predicate could not fail; see VacuousTenantCheckTests.
+        IClusterClient? clusterAccess = await clusterClients.ForAsync(tenantId, deployment.ClusterId, ct);
 
         if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
-                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
+                "The deployment's cluster is not this tenant's, or has no kubeconfig configured.");
 
         try
         {
@@ -890,7 +893,7 @@ public class KubernetesOperationsService(
     /// separately after this completes.
     /// </summary>
     public async Task<List<string>> DeleteAppFromClusterAsync(
-        Guid appId, string? performedBy = null, CancellationToken ct = default)
+        Guid tenantId, Guid appId, string? performedBy = null, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -904,7 +907,7 @@ public class KubernetesOperationsService(
         foreach (Guid deploymentId in deploymentIds)
         {
             KubernetesOperationResult<string> result =
-                await DeleteDeploymentFromClusterAsync(deploymentId, performedBy, ct);
+                await DeleteDeploymentFromClusterAsync(tenantId, deploymentId, performedBy, ct);
 
             if (!result.IsSuccess && result.Error is not null)
                 errors.Add(result.Error);
@@ -927,7 +930,7 @@ public class KubernetesOperationsService(
     /// (PVCs, ConfigMaps) land before workloads (Deployments, Services).
     /// </summary>
     public async Task<KubernetesOperationResult<string>> ApplyYamlDeploymentAsync(
-        Guid deploymentId, string? performedBy = null, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentId, string? performedBy = null, CancellationToken ct = default)
     {
         AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
 
@@ -938,13 +941,14 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Failure(
                 "This deployment is observed only (imported / managed by ArgoCD or Flux). Enable management to let EntKube apply it.");
 
-        IClusterClient? clusterAccess = deployment.Cluster is null
-            ? null
-            : await clusterClients.ForAsync(deployment.Cluster.TenantId, deployment.ClusterId, ct);
+        // The tenant is the caller's, not one read off the row being authorized. The old form —
+        // ForAsync(deployment.Cluster.TenantId, deployment.ClusterId) — compared a row against
+        // itself, so the predicate could not fail; see VacuousTenantCheckTests.
+        IClusterClient? clusterAccess = await clusterClients.ForAsync(tenantId, deployment.ClusterId, ct);
 
         if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
-                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
+                "The deployment's cluster is not this tenant's, or has no kubeconfig configured.");
 
         // Check namespace governance before touching the cluster.
         string? lockedNs = await GetGovernanceNamespaceAsync(deployment, ct);
@@ -1071,7 +1075,7 @@ public class KubernetesOperationsService(
     /// to its cluster using "kubectl apply". Idempotent.
     /// </summary>
     public virtual async Task<KubernetesOperationResult<string>> ApplyDeploymentRouteAsync(
-        Guid deploymentRouteId, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentRouteId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -1095,13 +1099,16 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Failure(
                 "This route is observed only (imported / managed by ArgoCD or Flux). Enable management to let EntKube apply it.");
 
-        IClusterClient? clusterAccess = dr.AppDeployment?.Cluster is null
+        // The tenant comes from the caller, not from dr.AppDeployment.Cluster.TenantId as it used
+        // to: read off the row it was then compared against, that predicate could never fail. A
+        // route whose deployment sits on another tenant's cluster is refused here now.
+        IClusterClient? clusterAccess = dr.AppDeployment is null
             ? null
-            : await clusterClients.ForAsync(dr.AppDeployment.Cluster.TenantId, dr.AppDeployment.ClusterId, ct);
+            : await clusterClients.ForAsync(tenantId, dr.AppDeployment.ClusterId, ct);
 
         if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
-                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
+                "The route's cluster is not this tenant's, or has no kubeconfig configured.");
 
         Guid clusterId = dr.AppDeployment!.ClusterId;
 
@@ -1224,7 +1231,7 @@ public class KubernetesOperationsService(
     /// the External Access panel's management switch (imported routes start unmanaged).
     /// </summary>
     public async Task<KubernetesOperationResult<string>> SetRouteManagementAsync(
-        Guid appRouteId, bool managed, CancellationToken ct = default)
+        Guid tenantId, Guid appRouteId, bool managed, CancellationToken ct = default)
     {
         Guid? applyRouteId;
         bool wasApplied;
@@ -1258,11 +1265,11 @@ public class KubernetesOperationsService(
 
         // Enabling → reconcile now (IsManaged is already true so the apply queries include it).
         if (managed)
-            return await ApplyDeploymentRouteAsync(applyRouteId.Value, ct);
+            return await ApplyDeploymentRouteAsync(tenantId, applyRouteId.Value, ct);
 
         // Disabling → only remove the HTTPRoute if EntKube had actually applied one.
         if (wasApplied)
-            return await DeleteDeploymentRouteFromClusterAsync(applyRouteId.Value, ct);
+            return await DeleteDeploymentRouteFromClusterAsync(tenantId, applyRouteId.Value, ct);
 
         return KubernetesOperationResult<string>.Success("Management disabled.");
     }
@@ -1273,7 +1280,7 @@ public class KubernetesOperationsService(
     /// Uses --ignore-not-found so it is safe to call even if the resource was never applied.
     /// </summary>
     public async Task<KubernetesOperationResult<string>> DeleteDeploymentRouteFromClusterAsync(
-        Guid deploymentRouteId, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentRouteId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -1293,13 +1300,13 @@ public class KubernetesOperationsService(
         if (dr is null)
             return KubernetesOperationResult<string>.Failure("Deployment route not found.");
 
-        IClusterClient? clusterAccess = dr.AppDeployment?.Cluster is null
+        IClusterClient? clusterAccess = dr.AppDeployment is null
             ? null
-            : await clusterClients.ForAsync(dr.AppDeployment.Cluster.TenantId, dr.AppDeployment.ClusterId, ct);
+            : await clusterClients.ForAsync(tenantId, dr.AppDeployment.ClusterId, ct);
 
         if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
-                "Cluster has no kubeconfig configured.");
+                "The route's cluster is not this tenant's, or has no kubeconfig configured.");
 
         string ns = dr.AppDeployment!.Namespace;
         Guid clusterId = dr.AppDeployment.ClusterId;
@@ -1498,7 +1505,7 @@ public class KubernetesOperationsService(
     /// somewhere central would never be found.
     /// </summary>
     public async Task<KubernetesOperationResult<string>> ApplyOutboundMtlsAsync(
-        Guid credentialId, CancellationToken ct = default)
+        Guid tenantId, Guid credentialId, CancellationToken ct = default)
     {
         if (vault is null)
             return KubernetesOperationResult<string>.Failure("Vault is unavailable in this context.");
@@ -1537,13 +1544,12 @@ public class KubernetesOperationsService(
         {
             AppDeployment first = group.First();
 
-            IClusterClient? clusterAccess = first.Cluster is null
-                ? null
-                : await clusterClients.ForAsync(first.Cluster.TenantId, first.ClusterId, ct);
+            IClusterClient? clusterAccess = await clusterClients.ForAsync(tenantId, first.ClusterId, ct);
 
             if (clusterAccess is null)
             {
-                notes.Add($"{first.Cluster?.Name ?? "cluster"}: no kubeconfig configured, skipped.");
+                notes.Add($"{first.Cluster?.Name ?? "cluster"}: not this tenant's cluster, or no "
+                    + "kubeconfig configured — skipped.");
                 continue;
             }
 
@@ -1634,20 +1640,14 @@ public class KubernetesOperationsService(
     /// UI included) never have to handle it.
     /// </summary>
     public async Task<KubernetesOperationResult<MeshReadiness>> GetMeshReadinessAsync(
-        Guid clusterId, string ns, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string ns, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
-
-        if (cluster is null)
-            return KubernetesOperationResult<MeshReadiness>.Failure("Cluster not found.");
-
-        IClusterClient? clusterAccess = await clusterClients.ForAsync(cluster.TenantId, clusterId, ct);
+        // No cluster row read at all: it was loaded only to take a tenant off it and hand that
+        // back to the seam, which is the shape this whole exercise exists to remove.
+        IClusterClient? clusterAccess = await clusterClients.ForAsync(tenantId, clusterId, ct);
         if (clusterAccess is null)
             return KubernetesOperationResult<MeshReadiness>.Failure(
-                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
+                "Cluster not found for this tenant, or it has no kubeconfig configured.");
 
         try
         {
@@ -1674,21 +1674,24 @@ public class KubernetesOperationsService(
     /// difference between a policy change and an outage.
     /// </summary>
     public async Task<KubernetesOperationResult<string>> ApplyMeshMtlsAsync(
-        Guid clusterId, string ns, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string ns, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // The cluster row is still read, but for its COMPONENTS — the gateway class decides
+        // whether PeerAuthentication means anything here. It is scoped by the tenant now rather
+        // than supplying one.
         KubernetesCluster? cluster = await db.KubernetesClusters
             .Include(c => c.Components)
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
 
         if (cluster is null)
-            return KubernetesOperationResult<string>.Failure("Cluster not found.");
+            return KubernetesOperationResult<string>.Failure("Cluster not found for this tenant.");
 
-        IClusterClient? clusterAccess = await clusterClients.ForAsync(cluster.TenantId, clusterId, ct);
+        IClusterClient? clusterAccess = await clusterClients.ForAsync(tenantId, clusterId, ct);
         if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
-                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
+                "The cluster has no kubeconfig configured.");
 
         if (ExternalRouteService.ResolveGatewayClass(cluster.Components) != "istio")
             return KubernetesOperationResult<string>.Failure(
@@ -1780,7 +1783,7 @@ public class KubernetesOperationsService(
     /// (LoadBalancer address:port).
     /// </summary>
     public async Task<KubernetesOperationResult<string>> ApplyL4RouteAsync(
-        Guid l4RouteId, CancellationToken ct = default)
+        Guid tenantId, Guid l4RouteId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -1796,13 +1799,13 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Failure(
                 "This route is observed only. Enable management to let EntKube apply it.");
 
-        IClusterClient? clusterAccess = route.AppDeployment?.Cluster is null
+        IClusterClient? clusterAccess = route.AppDeployment is null
             ? null
-            : await clusterClients.ForAsync(route.AppDeployment.Cluster.TenantId, route.AppDeployment.ClusterId, ct);
+            : await clusterClients.ForAsync(tenantId, route.AppDeployment.ClusterId, ct);
 
         if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
-                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
+                "The route's cluster is not this tenant's, or has no kubeconfig configured.");
 
         Guid clusterId = route.AppDeployment!.ClusterId;
         string backendNs = route.AppDeployment.Namespace;
@@ -1883,7 +1886,7 @@ public class KubernetesOperationsService(
     /// LoadBalancer — when no L4 routes remain). Call before removing the route from the database.
     /// </summary>
     public async Task<KubernetesOperationResult<string>> DeleteL4RouteFromClusterAsync(
-        Guid l4RouteId, CancellationToken ct = default)
+        Guid tenantId, Guid l4RouteId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -1895,12 +1898,13 @@ public class KubernetesOperationsService(
         if (route is null)
             return KubernetesOperationResult<string>.Failure("L4 route not found.");
 
-        IClusterClient? clusterAccess = route.AppDeployment?.Cluster is null
+        IClusterClient? clusterAccess = route.AppDeployment is null
             ? null
-            : await clusterClients.ForAsync(route.AppDeployment.Cluster.TenantId, route.AppDeployment.ClusterId, ct);
+            : await clusterClients.ForAsync(tenantId, route.AppDeployment.ClusterId, ct);
 
         if (clusterAccess is null)
-            return KubernetesOperationResult<string>.Failure("Cluster has no kubeconfig configured.");
+            return KubernetesOperationResult<string>.Failure(
+                "The route's cluster is not this tenant's, or has no kubeconfig configured.");
 
         string ns = route.AppDeployment!.Namespace;
         Guid clusterId = route.AppDeployment.ClusterId;
@@ -1948,17 +1952,20 @@ public class KubernetesOperationsService(
     }
 
     /// <summary>Returns the dedicated L4 gateway's external address (LoadBalancer IP/hostname), or null if not yet assigned.</summary>
-    public async Task<string?> GetL4EndpointAddressAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<string?> GetL4EndpointAddressAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // Scoped by the tenant rather than supplying one. The row is still needed for its
+        // components: the L4 gateway's namespace comes from what is installed.
         KubernetesCluster? cluster = await db.KubernetesClusters
             .Include(c => c.Components)
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
 
         if (cluster is null) return null;
 
-        IClusterClient? clusterAccess = await clusterClients.ForAsync(cluster.TenantId, clusterId, ct);
+        IClusterClient? clusterAccess = await clusterClients.ForAsync(tenantId, clusterId, ct);
         if (clusterAccess is null) return null;
 
         (_, string gwNamespace) = ExternalRouteService.ResolveL4Gateway(cluster.Components);
@@ -2207,7 +2214,7 @@ public class KubernetesOperationsService(
     /// can show exactly what Helm reported.
     /// </summary>
     public async Task<KubernetesOperationResult<string>> HelmInstallOrUpgradeAsync(
-        Guid deploymentId, string? performedBy = null, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentId, string? performedBy = null, CancellationToken ct = default)
     {
         AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
 
@@ -2218,13 +2225,14 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Failure(
                 "This deployment is observed only (imported / managed by ArgoCD or Flux). Enable management to let EntKube apply it.");
 
-        IClusterClient? clusterAccess = deployment.Cluster is null
-            ? null
-            : await clusterClients.ForAsync(deployment.Cluster.TenantId, deployment.ClusterId, ct);
+        // The tenant is the caller's, not one read off the row being authorized. The old form —
+        // ForAsync(deployment.Cluster.TenantId, deployment.ClusterId) — compared a row against
+        // itself, so the predicate could not fail; see VacuousTenantCheckTests.
+        IClusterClient? clusterAccess = await clusterClients.ForAsync(tenantId, deployment.ClusterId, ct);
 
         if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
-                "Cluster has no kubeconfig configured. Upload a kubeconfig to enable cluster operations.");
+                "The deployment's cluster is not this tenant's, or has no kubeconfig configured.");
 
         // Check namespace governance before touching the cluster.
         string? lockedNsHelm = await GetGovernanceNamespaceAsync(deployment, ct);
@@ -2327,7 +2335,7 @@ public class KubernetesOperationsService(
                 // The release has just swapped out every workload and Service in the namespace,
                 // which is precisely when the gateway is prone to losing this app's virtual host.
                 // Re-apply the routes EntKube owns so the operator never has to do it by hand.
-                routeNote = await RefreshDeploymentRoutesAsync(deployment, ct);
+                routeNote = await RefreshDeploymentRoutesAsync(tenantId, deployment, ct);
             }
             else
             {

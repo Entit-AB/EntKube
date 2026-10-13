@@ -118,7 +118,7 @@ public class HelmSeamTests : IDisposable
     {
         await SeedAsync();
 
-        KubernetesOperationResult<string> result = await Sut().HelmInstallOrUpgradeAsync(deploymentId);
+        KubernetesOperationResult<string> result = await Sut().HelmInstallOrUpgradeAsync(tenantId, deploymentId);
 
         result.IsSuccess.Should().BeTrue(result.Error);
 
@@ -140,7 +140,7 @@ public class HelmSeamTests : IDisposable
     {
         await SeedAsync();
 
-        await Sut().HelmInstallOrUpgradeAsync(deploymentId);
+        await Sut().HelmInstallOrUpgradeAsync(tenantId, deploymentId);
 
         (HelmInvocation invocation, string kubeconfig) = helm.Should().ContainSingle().Subject;
 
@@ -156,7 +156,7 @@ public class HelmSeamTests : IDisposable
     {
         await SeedAsync(chartVersion: null);
 
-        await Sut().HelmInstallOrUpgradeAsync(deploymentId);
+        await Sut().HelmInstallOrUpgradeAsync(tenantId, deploymentId);
 
         string argv = string.Join(' ', helm.Single().Invocation.Arguments);
         argv.Should().NotContain("--version");
@@ -167,7 +167,7 @@ public class HelmSeamTests : IDisposable
     {
         await SeedAsync(values: "grafana:\n  adminPassword: hunter2\n");
 
-        await Sut().HelmInstallOrUpgradeAsync(deploymentId);
+        await Sut().HelmInstallOrUpgradeAsync(tenantId, deploymentId);
 
         string argv = string.Join(' ', helm.Single().Invocation.Arguments);
 
@@ -183,7 +183,7 @@ public class HelmSeamTests : IDisposable
     {
         await SeedAsync();
 
-        await Sut().HelmInstallOrUpgradeAsync(deploymentId);
+        await Sut().HelmInstallOrUpgradeAsync(tenantId, deploymentId);
 
         // Carried on the invocation rather than left to the gate's fallback, which for a helm
         // change is the bare words "Helm manifest".
@@ -196,7 +196,7 @@ public class HelmSeamTests : IDisposable
     {
         await SeedAsync(withKubeconfig: false);
 
-        KubernetesOperationResult<string> result = await Sut().HelmInstallOrUpgradeAsync(deploymentId);
+        KubernetesOperationResult<string> result = await Sut().HelmInstallOrUpgradeAsync(tenantId, deploymentId);
 
         result.IsSuccess.Should().BeFalse();
         result.Error.Should().Contain("kubeconfig");
@@ -211,7 +211,7 @@ public class HelmSeamTests : IDisposable
         deployment.IsManaged = false;
         await db.SaveChangesAsync();
 
-        KubernetesOperationResult<string> result = await Sut().HelmInstallOrUpgradeAsync(deploymentId);
+        KubernetesOperationResult<string> result = await Sut().HelmInstallOrUpgradeAsync(tenantId, deploymentId);
 
         result.IsSuccess.Should().BeFalse();
         helm.Should().BeEmpty();
@@ -226,7 +226,7 @@ public class HelmSeamTests : IDisposable
     {
         await SeedAsync();
 
-        KubernetesOperationResult<string> result = await Sut().DeleteDeploymentFromClusterAsync(deploymentId);
+        KubernetesOperationResult<string> result = await Sut().DeleteDeploymentFromClusterAsync(tenantId, deploymentId);
 
         result.IsSuccess.Should().BeTrue(result.Error);
 
@@ -332,10 +332,34 @@ public class HelmSeamTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        await Sut().DeleteDeploymentFromClusterAsync(deploymentId);
+        await Sut().DeleteDeploymentFromClusterAsync(tenantId, deploymentId);
 
         // A manifest deployment is removed with `kubectl delete -f`, which the seam has no
         // operation for — so this path still spawns its own kubectl and is not helm's business.
         helm.Should().BeEmpty();
     }
+
+    /// <summary>
+    /// The apply paths took a deployment id and read the tenant off that deployment's cluster, so
+    /// the check compared a row against itself. Asserted on <c>helm</c> — the list of invocations
+    /// that reached a cluster — because a refusal that still ran helm would be no refusal.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenant_cannot_install_upgrade_or_delete_this_deployment()
+    {
+        await SeedAsync();
+        Guid stranger = Guid.NewGuid();
+
+        KubernetesOperationResult<string> upgrade =
+            await Sut().HelmInstallOrUpgradeAsync(stranger, deploymentId);
+        KubernetesOperationResult<string> delete =
+            await Sut().DeleteDeploymentFromClusterAsync(stranger, deploymentId);
+
+        upgrade.IsSuccess.Should().BeFalse();
+        upgrade.Error.Should().Contain("not this tenant's");
+        delete.IsSuccess.Should().BeFalse();
+
+        helm.Should().BeEmpty("no helm invocation may reach a cluster this tenant does not own");
+    }
+
 }

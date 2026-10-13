@@ -190,7 +190,8 @@ public static class PublicApiEndpoints
             // Attributed to the token, not to a user: an audit trail that says "CI pipeline"
             // is more useful than one that says whoever happened to create the token.
             KubernetesOperationResult<string> result = await operations.ApplyYamlDeploymentAsync(
-                deploymentId, performedBy: $"api-token:{principal.TokenName}", ct);
+                principal.TenantId, deploymentId,
+                performedBy: $"api-token:{principal.TokenName}", ct: ct);
 
             return result.IsSuccess
                 ? Results.Ok(new { ok = true, output = result.Data })

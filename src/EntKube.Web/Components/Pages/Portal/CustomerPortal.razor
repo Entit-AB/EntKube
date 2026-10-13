@@ -304,7 +304,7 @@ else
             }
             else if (selectedRoutesApp is not null)
             {
-                <PortalAppRoutesPanel App="selectedRoutesApp" AccessRole="currentAccessRole" />
+                <PortalAppRoutesPanel App="selectedRoutesApp" TenantId="selectedCustomer.TenantId" AccessRole="currentAccessRole" />
             }
             else if (selectedCustomerOp == "hours" && currentAccessRole >= CustomerAccessRole.Operator)
             {
@@ -1087,7 +1087,7 @@ else
         deletingApp = true;
         deleteAppError = null;
 
-        await K8sOps.DeleteAppFromClusterAsync(appId, currentUserId);
+        await K8sOps.DeleteAppFromClusterAsync(selectedCustomer!.TenantId, appId, currentUserId);
         await TenantService.DeleteAppAsync(appId);
 
         Data.App? appToRemove = selectedCustomer!.Apps.FirstOrDefault(a => a.Id == appId);
