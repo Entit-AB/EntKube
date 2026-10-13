@@ -372,7 +372,8 @@ else
                     <span class="bi bi-journal-text fs-4 me-2 text-primary"></span>
                     <h4 class="mb-0">Logs — @selectedCustomer.Name</h4>
                 </div>
-                <CustomerLogBrowser Customer="selectedCustomer" OnNavigateToDeployment="NavigateToDeploymentFromLogs" />
+                <CustomerLogBrowser Customer="selectedCustomer" TenantId="selectedCustomer.TenantId"
+                                    OnNavigateToDeployment="NavigateToDeploymentFromLogs" />
             }
             else if (selectedCustomerOp == "observability" && currentAccessRole >= CustomerAccessRole.Operator)
             {

@@ -234,8 +234,10 @@ public class EntKubeTelemetryService(
         // with indexer.enabled=false, so a chart-name match can return the querier's row and derive an
         // indexer address inside a release that renders no indexer at all.
         // Not the contract: this takes only a clusterId, and the contract's lookups are
-        // tenant-scoped by design. Giving this method a tenant changes its callers, which is a
-        // separate change — and it is also a tenancy gap in its own right.
+        // tenant-scoped by design. Both of this method's own callers have a tenant to give — but
+        // it is also reached through GetInClusterIngestUrlAsync and FixQuerierIndexerUrlAsync,
+        // whose callers in ComponentLifecycleService take a component id and nothing else. That
+        // cascade is where this change has to start, so it belongs with that file's conversion.
         var indexer = await db.ClusterComponents
             .Where(c => c.ClusterId == clusterId && c.Name == IndexerKey)
             .Select(c => new { c.ReleaseName, c.Name, c.Namespace })

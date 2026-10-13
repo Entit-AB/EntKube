@@ -114,11 +114,17 @@ public class ModuleContractTests
     /// <para>The measurement that names the next contracts: of the remaining cross-module
     /// reads, <c>ClusterComponent</c> (Catalog) is read by 36 services and <c>AppDeployment</c>
     /// (Delivery) by 22. Two contracts would unblock most of what is left.</para>
+    ///
+    /// <para><b>Telemetry 11 → 10</b>, and it came for free: <c>LogQueryService</c> held the
+    /// all-seeing context for one read — "is EntKube's collector installed on this cluster" —
+    /// which is a Catalog question. Asking <c>ICatalogApi</c> instead left it with no reason to
+    /// hold a context at all. That is the shape the paragraph above predicts: the Catalog
+    /// contract is what takes services off this list, one read at a time.</para>
     /// </summary>
     private static readonly Dictionary<Module, int> Baseline = new()
     {
         [Module.DataServices] = 12,
-        [Module.Telemetry] = 11,
+        [Module.Telemetry] = 10,
         [Module.Connectivity] = 8,
         [Module.Support] = 7,
         [Module.Catalog] = 6,

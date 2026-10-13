@@ -18,7 +18,7 @@ namespace EntKube.Web.Services;
 public class LogQueryService(
     ILogBackend native,
     LokiService loki,
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<LogQueryService> logger)
 {
     /// <summary>
@@ -42,45 +42,62 @@ public class LogQueryService(
     // histogram together, every deployment's pod and container dropdowns at once — and every one of
     // those routes through here first. A plain Dictionary written from two of them at the same moment
     // is not merely a lost entry: it can corrupt the bucket chain and throw, or spin, on a later read.
-    private readonly ConcurrentDictionary<Guid, (bool UseNative, DateTime At)> _routeCache = new();
-    private readonly ConcurrentDictionary<Guid, (bool Installed, DateTime At)> _installedCache = new();
+    //
+    // Keyed on (tenant, cluster) rather than cluster alone, now that the collector probe is asked
+    // as a tenant. A cluster has one owner, so the pair looks redundant — but a tenant who may
+    // NOT see it gets an empty component list and therefore "no collector", and caching that
+    // under the cluster id alone would answer the owner's next question with the stranger's
+    // result. The two answers are about different questions and must not share a key.
+    private readonly ConcurrentDictionary<(Guid TenantId, Guid ClusterId), (bool UseNative, DateTime At)> _routeCache = new();
+    private readonly ConcurrentDictionary<(Guid TenantId, Guid ClusterId), (bool Installed, DateTime At)> _installedCache = new();
 
-    // True when the EntKube telemetry collector (otel-collector) is installed on the cluster.
-    // This is the signal that EntKube native telemetry OWNS logs/traces for the cluster — so it
-    // takes over even before the first batch lands, and even when Loki is also installed.
-    private async Task<bool> NativeCollectorInstalledAsync(Guid clusterId, CancellationToken ct)
+    /// <summary>
+    /// True when the EntKube telemetry collector (otel-collector) is installed on the cluster.
+    /// This is the signal that EntKube native telemetry OWNS logs/traces for the cluster — so it
+    /// takes over even before the first batch lands, and even when Loki is also installed.
+    ///
+    /// <para>Public because it is the whole of the routing decision that depends on the tenant,
+    /// and therefore the part worth asserting on its own: the rest of this facade cannot be
+    /// exercised without both backends constructed, while this answers from Catalog alone.</para>
+    /// </summary>
+    public async Task<bool> NativeCollectorInstalledAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        if (_installedCache.TryGetValue(clusterId, out (bool Installed, DateTime At) c)
+        if (_installedCache.TryGetValue((tenantId, clusterId), out (bool Installed, DateTime At) c)
             && DateTime.UtcNow - c.At < TimeSpan.FromSeconds(5))
             return c.Installed;
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        bool installed = await db.ClusterComponents.AnyAsync(x =>
-            x.ClusterId == clusterId
-            && x.Status == ComponentStatus.Installed
-            && ((x.HelmChartName != null && x.HelmChartName.Contains("opentelemetry-collector"))
-                || (x.ReleaseName != null && x.ReleaseName.Contains("otel-collector"))
-                || x.Name.Contains("otel-collector")), ct);
-        _installedCache[clusterId] = (installed, DateTime.UtcNow);
+        // Asked of Catalog rather than read out of its table. The predicate is deliberately
+        // asymmetric and is kept exactly as it was: the chart name is the upstream chart, the
+        // release name and the name are EntKube's own, and matching all three uniformly is how
+        // this kind of lookup goes wrong.
+        bool installed = (await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct))
+            .Any(x => x.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed
+                && ((x.HelmChartName != null && x.HelmChartName.Contains("opentelemetry-collector"))
+                    || (x.ReleaseName != null && x.ReleaseName.Contains("otel-collector"))
+                    || x.Name.Contains("otel-collector")));
+
+        _installedCache[(tenantId, clusterId)] = (installed, DateTime.UtcNow);
         return installed;
     }
 
     // Auto = policy default; Native/Loki = the viewer's explicit override (a cluster can have both).
-    private async Task<bool> UseNativeAsync(Guid clusterId, LogBackendKind backend, CancellationToken ct)
+    private async Task<bool> UseNativeAsync(
+        Guid tenantId, Guid clusterId, LogBackendKind backend, CancellationToken ct)
     {
         if (!native.IsEnabled) return false;
         if (backend == LogBackendKind.Native) return true;
         if (backend == LogBackendKind.Loki) return false;
 
-        if (_routeCache.TryGetValue(clusterId, out (bool UseNative, DateTime At) c)
+        if (_routeCache.TryGetValue((tenantId, clusterId), out (bool UseNative, DateTime At) c)
             && DateTime.UtcNow - c.At < TimeSpan.FromSeconds(5))
             return c.UseNative;
 
         // Auto: EntKube takes over when its collector is installed (even before data arrives);
         // otherwise use native only if it already holds data, else fall back to Loki.
-        bool useNative = await NativeCollectorInstalledAsync(clusterId, ct)
+        bool useNative = await NativeCollectorInstalledAsync(tenantId, clusterId, ct)
             || await WithinBudgetAsync(native.HasDataAsync(clusterId, ct), clusterId, "EntKube telemetry");
-        _routeCache[clusterId] = (useNative, DateTime.UtcNow);
+        _routeCache[(tenantId, clusterId)] = (useNative, DateTime.UtcNow);
         return useNative;
     }
 
@@ -95,9 +112,12 @@ public class LogQueryService(
     /// between opening the page and starting the work. Only the native probe touches this service's
     /// caches, so there is nothing to synchronise.
     /// </remarks>
-    public async Task<(bool Native, bool Loki)> ProbeBackendsAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<(bool Native, bool Loki)> ProbeBackendsAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        Task<bool> nativeProbe = native.IsEnabled ? NativeUsableAsync(clusterId, ct) : Task.FromResult(false);
+        Task<bool> nativeProbe = native.IsEnabled
+            ? NativeUsableAsync(tenantId, clusterId, ct)
+            : Task.FromResult(false);
         Task<bool> lokiProbe = loki.IsAvailableAsync(clusterId, ct);
         return (await WithinBudgetAsync(nativeProbe, clusterId, "EntKube telemetry"),
                 await WithinBudgetAsync(lokiProbe, clusterId, "Loki"));
@@ -120,34 +140,36 @@ public class LogQueryService(
         return false;
     }
 
-    private async Task<bool> NativeUsableAsync(Guid clusterId, CancellationToken ct)
-        => await NativeCollectorInstalledAsync(clusterId, ct) || await native.HasDataAsync(clusterId, ct);
+    private async Task<bool> NativeUsableAsync(Guid tenantId, Guid clusterId, CancellationToken ct)
+        => await NativeCollectorInstalledAsync(tenantId, clusterId, ct)
+            || await native.HasDataAsync(clusterId, ct);
 
-    public async Task<bool> IsAvailableAsync(Guid clusterId, CancellationToken ct = default)
-        => await UseNativeAsync(clusterId, LogBackendKind.Auto, ct) || await loki.IsAvailableAsync(clusterId, ct);
+    public async Task<bool> IsAvailableAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
+        => await UseNativeAsync(tenantId, clusterId, LogBackendKind.Auto, ct)
+            || await loki.IsAvailableAsync(clusterId, ct);
 
     public async Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(
-        Guid clusterId, LogBackendKind backend = LogBackendKind.Auto, int windowMinutes = 60, CancellationToken ct = default)
-        => await UseNativeAsync(clusterId, backend, ct)
+        Guid tenantId, Guid clusterId, LogBackendKind backend = LogBackendKind.Auto, int windowMinutes = 60, CancellationToken ct = default)
+        => await UseNativeAsync(tenantId, clusterId, backend, ct)
             ? await native.GetNamespacesAsync(clusterId, windowMinutes, ct)
             : await loki.GetNamespacesAsync(clusterId, ct);
 
     public async Task<KubernetesOperationResult<List<string>>> GetPodsAsync(
-        Guid clusterId, string namespaceName, LogBackendKind backend = LogBackendKind.Auto, int windowMinutes = 60, CancellationToken ct = default)
-        => await UseNativeAsync(clusterId, backend, ct)
+        Guid tenantId, Guid clusterId, string namespaceName, LogBackendKind backend = LogBackendKind.Auto, int windowMinutes = 60, CancellationToken ct = default)
+        => await UseNativeAsync(tenantId, clusterId, backend, ct)
             ? await native.GetPodsAsync(clusterId, namespaceName, windowMinutes, ct)
             : await loki.GetPodsAsync(clusterId, namespaceName, ct);
 
     public async Task<KubernetesOperationResult<List<string>>> GetContainersAsync(
-        Guid clusterId, string namespaceName, LogBackendKind backend = LogBackendKind.Auto, int windowMinutes = 60, CancellationToken ct = default)
-        => await UseNativeAsync(clusterId, backend, ct)
+        Guid tenantId, Guid clusterId, string namespaceName, LogBackendKind backend = LogBackendKind.Auto, int windowMinutes = 60, CancellationToken ct = default)
+        => await UseNativeAsync(tenantId, clusterId, backend, ct)
             ? await native.GetContainersAsync(clusterId, namespaceName, windowMinutes, ct)
             : await loki.GetContainersAsync(clusterId, namespaceName, ct);
 
     public async Task<KubernetesOperationResult<List<LokiLogStream>>> QueryAsync(
-        Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int limit = 200,
+        Guid tenantId, Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int limit = 200,
         LogBackendKind backend = LogBackendKind.Auto, CancellationToken ct = default)
-        => await UseNativeAsync(clusterId, backend, ct)
+        => await UseNativeAsync(tenantId, clusterId, backend, ct)
             ? await native.QueryAsync(clusterId, filter, from, to, limit, ct)
             // Loki path: minLevel is re-applied client-side by the viewer; attribute filters are native-only.
             : await loki.QueryRangeMultiAsync(clusterId, filter.Namespaces, filter.Pod, filter.Container, filter.Text, from, to, limit, ct);
@@ -157,9 +179,9 @@ public class LogQueryService(
     /// (the viewer then simply omits the volume strip). Attribute filters are native-only.
     /// </summary>
     public async Task<KubernetesOperationResult<List<LogHistogramBucket>>> GetHistogramAsync(
-        Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int buckets = 48,
+        Guid tenantId, Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int buckets = 48,
         LogBackendKind backend = LogBackendKind.Auto, CancellationToken ct = default)
-        => await UseNativeAsync(clusterId, backend, ct)
+        => await UseNativeAsync(tenantId, clusterId, backend, ct)
             ? await native.GetHistogramAsync(clusterId, filter, from, to, buckets, ct)
             : await loki.GetHistogramAsync(clusterId, filter, from, to, buckets, ct);
 }

@@ -214,6 +214,9 @@ else
 }
 
 @code {
+    /// <summary>The tenant asking. The backend probe is a Catalog lookup, scoped to them.</summary>
+    [Parameter] public required Guid TenantId { get; set; }
+
     [Parameter] public required Guid ClusterId { get; set; }
     [Parameter] public string? PresetNamespace { get; set; }
     [Parameter] public string? PresetPod { get; set; }
@@ -264,7 +267,7 @@ else
         // failed. Whatever happens, the load ends and anything that went wrong is on screen.
         try
         {
-            (nativeBackend, lokiBackend) = await Logs.ProbeBackendsAsync(ClusterId);
+            (nativeBackend, lokiBackend) = await Logs.ProbeBackendsAsync(TenantId, ClusterId);
             lokiAvailable = nativeBackend || lokiBackend;
 
             // Default source: prefer whichever backend actually has data; the user can switch when
@@ -303,7 +306,7 @@ else
         namespaces = [];
 
         KubernetesOperationResult<List<string>> nsResult =
-            await Logs.GetNamespacesAsync(ClusterId, backend, windowMinutes: timeRangeMinutes);
+            await Logs.GetNamespacesAsync(TenantId, ClusterId, backend, windowMinutes: timeRangeMinutes);
         if (nsResult.IsSuccess)
             namespaces = nsResult.Data ?? [];
         else
@@ -369,7 +372,8 @@ else
         if (string.IsNullOrEmpty(selectedNamespace)) return;
 
         KubernetesOperationResult<List<string>> podResult =
-            await Logs.GetPodsAsync(ClusterId, selectedNamespace, backend, windowMinutes: timeRangeMinutes);
+            await Logs.GetPodsAsync(
+                TenantId, ClusterId, selectedNamespace, backend, windowMinutes: timeRangeMinutes);
         if (podResult.IsSuccess)
         {
             pods = podResult.Data ?? [];
@@ -398,8 +402,10 @@ else
 
         // The log page and the volume histogram are independent queries over the same filters —
         // issue them concurrently so the search waits on the slower, not the sum.
-        Task<KubernetesOperationResult<List<LokiLogStream>>> resultTask = Logs.QueryAsync(ClusterId, filter, from, to, limit, backend);
-        Task<KubernetesOperationResult<List<LogHistogramBucket>>> histTask = Logs.GetHistogramAsync(ClusterId, filter, from, to, backend: backend);
+        Task<KubernetesOperationResult<List<LokiLogStream>>> resultTask =
+            Logs.QueryAsync(TenantId, ClusterId, filter, from, to, limit, backend);
+        Task<KubernetesOperationResult<List<LogHistogramBucket>>> histTask =
+            Logs.GetHistogramAsync(TenantId, ClusterId, filter, from, to, backend: backend);
         await Task.WhenAll(resultTask, histTask);
 
         KubernetesOperationResult<List<LokiLogStream>> result = resultTask.Result;
@@ -462,7 +468,8 @@ else
                 DateTime now = DateTime.UtcNow;
                 // Query just past the cursor; a 1s overlap tolerates clock skew, de-duped by ts.
                 KubernetesOperationResult<List<LokiLogStream>> result =
-                    await Logs.QueryAsync(ClusterId, BuildFilter(), lastTs.AddSeconds(-1), now, limit, backend, ct);
+                    await Logs.QueryAsync(
+                        TenantId, ClusterId, BuildFilter(), lastTs.AddSeconds(-1), now, limit, backend, ct);
                 if (!result.IsSuccess || result.Data is null) continue;
 
                 List<LokiLogEntry> newer = result.Data

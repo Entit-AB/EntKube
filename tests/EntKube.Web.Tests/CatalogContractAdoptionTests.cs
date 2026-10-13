@@ -162,9 +162,39 @@ public class CatalogContractAdoptionTests
     /// tenant bounds which clusters are collected, but <c>PrometheusService.GetMetricRangeAsync</c>
     /// still takes a cluster id and no tenant — as do all fifteen of its public methods, which is
     /// why its 20 credential sites are the largest remaining block. The sweep is fixed; the call
-    /// it makes would still answer about any cluster.</para>
+    /// it makes would still answer about any cluster. <em>(Both halves are done as of #184.)</em></para>
     ///
-    private const int BaselineQueries = 19;
+    /// <para><b>17.</b> The log viewers' backend routing and the headscale Istio fix.</para>
+    ///
+    /// <para><c>HeadscaleService.EnsureIstioPermissiveAsync</c> was the free one: it already took
+    /// a tenant, so its component read was a foreign query with nothing to gain. What made it a
+    /// one-line change is #172 — the gateway resolvers take <c>IComponentNaming</c>, so the
+    /// contract's DTO goes straight into them with no shape conversion at all.</para>
+    ///
+    /// <para><c>LogQueryService</c> cost more and is worth the detail. Its seven public methods
+    /// now take the asking tenant, which reached four pages, because the <em>routing</em> decision
+    /// — native store or Loki — turns on whether EntKube's collector is installed, and that is a
+    /// Catalog question. The predicate is kept exactly as it was, asymmetric on purpose: the chart
+    /// name is upstream's, the release name and the name are EntKube's own, and matching all three
+    /// uniformly is how this kind of lookup goes wrong.</para>
+    ///
+    /// <para>⚠️ <b>The probe is memoized, and the memo had to be re-keyed.</b> It ran before every
+    /// facade call (~5 round-trips per log-panel load), cached on the cluster id — correct while
+    /// the probe took nothing else. Asked as a tenant it is a different question: a tenant who may
+    /// not see the cluster gets an empty component list and therefore "no collector", and under a
+    /// cluster-only key that answer would be handed to the <em>owner</em> next, routing their logs
+    /// to a Loki that is not there. <c>LogRoutingTenancyTests</c> asks the same pair of questions
+    /// in both orders, which is the only way round that is sensitive to it.</para>
+    ///
+    /// <para><c>EntKubeTelemetryService</c>'s two reads were attempted and reverted. Both of
+    /// <c>GetInClusterIndexerUrlAsync</c>'s own callers have a tenant — but it is also reached
+    /// through <c>GetInClusterIngestUrlAsync</c> and <c>FixQuerierIndexerUrlAsync</c>, whose
+    /// callers in <c>ComponentLifecycleService</c> take a component id and nothing else. The
+    /// cascade ends in a file that holds credential sites, so it belongs with that file's
+    /// conversion rather than here. The comment above that query, which already said it could not
+    /// be the contract's, now says which caller is the reason.</para>
+    ///
+    private const int BaselineQueries = 17;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

@@ -251,6 +251,12 @@ else
 @code {
     [Parameter] public Customer? Customer { get; set; }
 
+    /// <summary>
+    /// The tenant the portal resolved this customer under, passed in the way every other child of
+    /// CustomerPortal takes it rather than read off <see cref="Customer"/> here.
+    /// </summary>
+    [Parameter] public required Guid TenantId { get; set; }
+
     /// Raised with the deployment Id when a customer clicks a log row's
     /// "Go to deployment" action. The parent resolves it to the full
     /// AppDeployment and switches to the operations view.
@@ -438,9 +444,9 @@ else
         // page settles. None of them depends on any other, so they go out together and cost the
         // slowest instead.
         List<Task<KubernetesOperationResult<List<string>>>> podTasks =
-            [.. pairs.Select(pair => Logs.GetPodsAsync(pair.ClusterId, pair.Namespace))];
+            [.. pairs.Select(pair => Logs.GetPodsAsync(TenantId, pair.ClusterId, pair.Namespace))];
         List<Task<KubernetesOperationResult<List<string>>>> containerTasks =
-            [.. pairs.Select(pair => Logs.GetContainersAsync(pair.ClusterId, pair.Namespace))];
+            [.. pairs.Select(pair => Logs.GetContainersAsync(TenantId, pair.ClusterId, pair.Namespace))];
         await Task.WhenAll(podTasks.Concat(containerTasks));
 
         SortedSet<string> podSet = [];
@@ -623,6 +629,7 @@ else
         // bounds what they can see; the results are combined below either way.
         List<Task<KubernetesOperationResult<List<LokiLogStream>>>> searches =
             [.. byCluster.Select(c => Logs.QueryAsync(
+                TenantId,
                 c.ClusterId,
                 new LogQueryFilter { Namespaces = c.Namespaces, Pod = pod, Container = container, Text = text },
                 from, to, limit))];
