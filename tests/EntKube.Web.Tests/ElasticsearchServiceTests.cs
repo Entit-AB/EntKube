@@ -383,12 +383,35 @@ public class ElasticsearchServiceTests : IDisposable
         await SeedClusterAsync();
         ArrangeCluster(TwoNodes, NoPods);
 
-        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(k8sClusterId, SampleCluster());
+        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(tenantId, k8sClusterId, SampleCluster());
 
         check.CapacityKnown.Should().BeTrue();
         check.NodeCount.Should().Be(2);
         check.Fits.Should().BeTrue();
         check.AllocatableMemoryBytes.Should().Be(32L * 1024 * 1024 * 1024);
+    }
+
+    /// <summary>
+    /// A capacity check is a live read of someone's nodes and pods, and it used to be reachable by
+    /// cluster id alone: the method loaded the cluster by that id and then handed the tenant it
+    /// found back to the seam, so the predicate compared the row to itself and could not fail.
+    ///
+    /// <para>The warning path is what it falls into now — the same answer as a cluster with no
+    /// kubeconfig, which is the right shape: "capacity unknown", not an error that would tell a
+    /// stranger whether the cluster exists.</para>
+    /// </summary>
+    [Fact]
+    public async Task AnotherTenantsCluster_IsNotRead()
+    {
+        await SeedClusterAsync();
+        ArrangeCluster(TwoNodes, NoPods);
+
+        ElasticsearchCapacityCheck check =
+            await sut.CheckCapacityAsync(Guid.NewGuid(), k8sClusterId, SampleCluster());
+
+        check.CapacityKnown.Should().BeFalse("nothing may be read off a cluster this tenant does not own");
+        check.NodeCount.Should().Be(0);
+        check.Warnings.Should().ContainSingle(w => w.Contains("no kubeconfig"));
     }
 
     [Fact]
@@ -401,7 +424,7 @@ public class ElasticsearchServiceTests : IDisposable
         c.HotCount = 8;
         c.HotMemory = "8Gi";
 
-        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(k8sClusterId, c);
+        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(tenantId, k8sClusterId, c);
 
         check.Fits.Should().BeFalse();
         check.Blocking.Should().ContainSingle(b => b.Contains("more memory than the cluster has unallocated"));
@@ -419,7 +442,7 @@ public class ElasticsearchServiceTests : IDisposable
         c.HotCount = 1;
         c.HotMemory = "24Gi";
 
-        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(k8sClusterId, c);
+        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(tenantId, k8sClusterId, c);
 
         check.Fits.Should().BeFalse();
         check.Blocking.Should().ContainSingle(b => b.Contains("would stay Pending"));
@@ -437,7 +460,7 @@ public class ElasticsearchServiceTests : IDisposable
             ]}
             """);
 
-        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(k8sClusterId, SampleCluster());
+        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(tenantId, k8sClusterId, SampleCluster());
 
         // A finished pod holds nothing, so only the two running ones are charged.
         check.CommittedMemoryBytes.Should().Be(24L * 1024 * 1024 * 1024);
@@ -455,7 +478,7 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchCluster planned = SampleCluster();
         planned.HotCount = 3;   // one more 4Gi node
 
-        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(k8sClusterId, planned, current);
+        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(tenantId, k8sClusterId, planned, current);
 
         check.DeltaMemoryBytes.Should().Be(4L * 1024 * 1024 * 1024);
         check.Fits.Should().BeTrue();
@@ -472,7 +495,7 @@ public class ElasticsearchServiceTests : IDisposable
             ]}
             """, NoPods);
 
-        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(k8sClusterId, SampleCluster());
+        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(tenantId, k8sClusterId, SampleCluster());
 
         check.NodeCount.Should().Be(1);
         check.AllocatableMemoryBytes.Should().Be(16L * 1024 * 1024 * 1024);
@@ -485,7 +508,7 @@ public class ElasticsearchServiceTests : IDisposable
         k8s.Setup(x => x.GetJsonAllNamespacesAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("connection refused"));
 
-        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(k8sClusterId, SampleCluster());
+        ElasticsearchCapacityCheck check = await sut.CheckCapacityAsync(tenantId, k8sClusterId, SampleCluster());
 
         check.Fits.Should().BeTrue();
         check.CapacityKnown.Should().BeFalse();

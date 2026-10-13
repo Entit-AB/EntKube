@@ -63,8 +63,22 @@ public class VacuousTenantCheckTests
     /// <para>This number may not grow. A new tenant-less method reaching a cluster is a new place
     /// where any cluster in the installation is reachable by id, and going through the seam does
     /// not change that.</para>
+    ///
+    /// <para><b>18 — <c>ElasticsearchService.CheckCapacityAsync</c>.</b> It took a cluster id,
+    /// loaded that row, and handed the tenant it found back to the seam. Its page caller had a
+    /// <c>TenantId</c> all along; its two internal callers hold an <c>ElasticsearchCluster</c>,
+    /// whose own <c>TenantId</c> makes those two <em>cross-row</em> — an integrity check that can
+    /// actually fail, because an ES cluster row pointing at another tenant's Kubernetes cluster is
+    /// now refused rather than served. The cluster lookup is scoped as well, so the row cannot be
+    /// read at all without the tenant matching.</para>
+    ///
+    /// <para>Picked because <c>ElasticsearchService</c> holds <b>zero</b> credential sites — it was
+    /// converted in full earlier — so fixing a vacuous check there could not spill into the
+    /// custody count while that work was in flight on another branch. The other eight non-Fleet
+    /// tautologies all sit in files that still hold credentials, where threading a tenant in makes
+    /// those reads newly inexcusable in the same step (the trap #185 walked into deliberately).</para>
     /// </summary>
-    private const int BaselineTautological = 19;
+    private const int BaselineTautological = 18;
 
     [Fact]
     public void A_tenant_read_off_the_cluster_row_checks_nothing_and_may_not_spread()

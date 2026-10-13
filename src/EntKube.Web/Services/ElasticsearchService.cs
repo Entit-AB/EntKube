@@ -301,6 +301,7 @@ public class ElasticsearchService(
     /// cluster being created.
     /// </param>
     public async Task<ElasticsearchCapacityCheck> CheckCapacityAsync(
+        Guid tenantId,
         Guid kubernetesClusterId,
         ElasticsearchCluster planned,
         ElasticsearchCluster? current = null,
@@ -314,13 +315,16 @@ public class ElasticsearchService(
         check.DeltaMemoryBytes = want.MemoryBytesTotal - have.MemoryBytesTotal;
         check.DeltaCpuMilli = want.CpuMilliTotal - have.CpuMilliTotal;
 
+        // Scoped by the asking tenant, not by the id alone. This read used to take the tenant off
+        // the row it had just fetched by id and hand it back to the seam — a predicate comparing a
+        // row to itself, which cannot fail. See VacuousTenantCheckTests.
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster? k8sCluster = await db.KubernetesClusters
-            .FirstOrDefaultAsync(c => c.Id == kubernetesClusterId, ct);
+            .FirstOrDefaultAsync(c => c.Id == kubernetesClusterId && c.TenantId == tenantId, ct);
 
         Clusters.IClusterClient? reachable = k8sCluster is null
             ? null
-            : await clusterAccess.ForAsync(k8sCluster.TenantId, k8sCluster.Id, ct);
+            : await clusterAccess.ForAsync(tenantId, k8sCluster.Id, ct);
 
         if (reachable is null)
         {
@@ -330,8 +334,8 @@ public class ElasticsearchService(
 
         try
         {
-            string nodesJson = await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).GetJsonAllNamespacesAsync("nodes", ct: ct);
-            string podsJson = await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).GetJsonAllNamespacesAsync("pods", ct: ct);
+            string nodesJson = await (await ClusterFor(tenantId, k8sCluster.Id, ct)).GetJsonAllNamespacesAsync("nodes", ct: ct);
+            string podsJson = await (await ClusterFor(tenantId, k8sCluster.Id, ct)).GetJsonAllNamespacesAsync("pods", ct: ct);
 
             Dictionary<string, (long Cpu, long Mem)> allocatable = ParseNodeAllocatable(nodesJson);
             Dictionary<string, (long Cpu, long Mem)> committed = ParsePodRequestsByNode(podsJson);
@@ -431,7 +435,7 @@ public class ElasticsearchService(
         if (!acknowledgeCapacity)
         {
             ElasticsearchCapacityCheck check =
-                await CheckCapacityAsync(cluster.KubernetesClusterId, cluster, null, ct);
+                await CheckCapacityAsync(cluster.TenantId, cluster.KubernetesClusterId, cluster, null, ct);
             if (!check.Fits) throw new InvalidOperationException(CapacityRefusal(check));
         }
 
@@ -489,7 +493,7 @@ public class ElasticsearchService(
         if (!acknowledgeCapacity)
         {
             ElasticsearchCapacityCheck check =
-                await CheckCapacityAsync(cluster.KubernetesClusterId, cluster, before, ct);
+                await CheckCapacityAsync(cluster.TenantId, cluster.KubernetesClusterId, cluster, before, ct);
             if (!check.Fits) throw new InvalidOperationException(CapacityRefusal(check));
         }
 
