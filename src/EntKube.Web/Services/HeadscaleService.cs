@@ -343,30 +343,30 @@ public class HeadscaleService(
     /// any.</para>
     /// </summary>
     public async Task EnsureExternalRouteAfterInstallAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        ClusterComponent? comp = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct);
+        // Asked of Catalog by id, which returns null when the component is not this tenant's —
+        // so the alias check below runs on a row this caller is allowed to see.
+        //
+        // This method used to say its downstream check was tautological "because this runs from
+        // the install orchestrator, which addresses components by id and has no caller to speak
+        // for". That was wrong: the orchestrator's ApplyAsync takes a tenantId and always had
+        // one. The limitation was in this signature, not in the caller.
+        EntKube.Contracts.Catalog.InstalledComponent? comp =
+            await catalog.GetComponentAsync(tenantId, componentId, ct);
 
         if (comp is null) return;
         if (comp.HelmChartName != "headscale" && comp.Name != "headscale") return;
 
         string? url = await vaultService.GetComponentSecretValueAsync(
-            comp.Cluster.TenantId, comp.Id, "server-url", ct);
+            tenantId, comp.Id, "server-url", ct);
         string? issuer = await vaultService.GetComponentSecretValueAsync(
-            comp.Cluster.TenantId, comp.Id, "cluster-issuer", ct);
+            tenantId, comp.Id, "cluster-issuer", ct);
 
         if (string.IsNullOrEmpty(url) || string.IsNullOrEmpty(issuer)) return;
 
-        // The tenant passed on is the component's own, because this runs from the install
-        // orchestrator, which addresses components by id and has no caller to speak for. So the
-        // check downstream is tautological here — it compares the row against itself. It is passed
-        // anyway so the route creation has one code path, and the limit is recorded rather than
-        // dressed up: see the comment on this method.
-        await EnsureExternalRouteAsync(comp.Cluster.TenantId, componentId, url, issuer, ct);
-        await EnsureIstioPermissiveAsync(comp.Cluster.TenantId, comp.ClusterId, ct);
+        await EnsureExternalRouteAsync(tenantId, componentId, url, issuer, ct);
+        await EnsureIstioPermissiveAsync(tenantId, comp.ClusterId, ct);
     }
 
     /// <summary>

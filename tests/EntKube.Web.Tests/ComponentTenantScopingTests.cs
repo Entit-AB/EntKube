@@ -27,9 +27,8 @@ namespace EntKube.Web.Tests;
 /// six of the seven chains reaching <c>ExternalRouteService.AddRouteAsync</c> turned out to have a
 /// genuine tenant to pass.</para>
 ///
-/// <para><b>One remains and it is deliberate.</b> See <see cref="CannotBeScoped"/> — a tenant
-/// check is only worth anything when the tenant comes from the caller's authority, and on that
-/// path there is no caller with any.</para>
+/// <para><b>Now none remain.</b> The last one was exempted on a claim about its caller that was
+/// never checked — see <see cref="CannotBeScoped"/>, which is empty and keeps the correction.</para>
 /// </summary>
 public class ComponentTenantScopingTests
 {
@@ -43,22 +42,22 @@ public class ComponentTenantScopingTests
     private static readonly string[] Baseline = [];
 
     /// <summary>
-    /// The lookup that cannot be meaningfully scoped, with the reason, because the alternative is
-    /// a number that reads zero while nothing changed.
+    /// Lookups that cannot be meaningfully scoped. <b>Empty</b> — and the one entry it held is
+    /// worth keeping as a correction rather than deleting.
     ///
-    /// <para><c>HeadscaleService.EnsureExternalRouteAfterInstallAsync</c> is called only by
-    /// <c>ComponentInstallOrchestrator</c> — Catalog's own code, working by component id by design
-    /// and holding no tenant of its own. The only value a <c>tenantId</c> parameter could be given
-    /// is <c>comp.Cluster.TenantId</c>, read from the very row it would then filter, and a
-    /// predicate comparing a row against itself can never fail.</para>
+    /// <para>⚠️ <c>HeadscaleService.EnsureExternalRouteAfterInstallAsync</c> was exempted here on
+    /// this reasoning: "called only by <c>ComponentInstallOrchestrator</c> — Catalog's own code,
+    /// working by component id by design and holding no tenant of its own. The only value a
+    /// <c>tenantId</c> parameter could be given is <c>comp.Cluster.TenantId</c>, read from the
+    /// very row it would then filter." Every sentence about the caller was wrong:
+    /// <c>ComponentInstallOrchestrator.ApplyAsync</c> takes a <c>Guid tenantId</c> and always
+    /// did. Nobody had looked.</para>
     ///
-    /// <para>So it stays, named here. If an install path ever gains a real caller identity, this
-    /// is the site to revisit — and until then the entry says why it is not simply forgotten.</para>
+    /// <para>The lesson is about exemptions, not about headscale. An entry on this list is a
+    /// claim that something is impossible, and it then sits in the codebase justifying itself —
+    /// the method's own doc comment repeated it. Before adding one, open the caller.</para>
     /// </summary>
-    private static readonly string[] CannotBeScoped =
-    [
-        "HeadscaleService.EnsureExternalRouteAfterInstallAsync",
-    ];
+    private static readonly string[] CannotBeScoped = [];
 
     [Fact]
     public void No_new_component_lookup_escapes_its_tenant()

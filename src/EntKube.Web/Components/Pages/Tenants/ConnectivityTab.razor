@@ -516,7 +516,13 @@ else
 @code {
     [Parameter] public Guid AppId { get; set; }
     [Parameter] public Guid EnvironmentId { get; set; }
-    [Parameter] public Guid? TenantId { get; set; }
+    /// <summary>
+    /// The tenant whose app this is. Was <c>Guid?</c> with a <c>TenantId is { } t</c> guard around
+    /// the mTLS panels — defensive weight rather than a real case: the single page that renders
+    /// this tab always passes its own non-nullable TenantId, and the policy generation now needs
+    /// one to ask Catalog with.
+    /// </summary>
+    [Parameter] public required Guid TenantId { get; set; }
     [Parameter] public string? AppName { get; set; }
 
     /// <summary>Portal (customer) view can preview policies but not apply them to clusters.</summary>
@@ -650,7 +656,8 @@ else
         applyResults = null;
         try
         {
-            policyPlans = await ConnectivityService.GenerateNetworkPoliciesAsync(AppId, EnvironmentId);
+            policyPlans = await ConnectivityService.GenerateNetworkPoliciesAsync(
+                TenantId, AppId, EnvironmentId);
         }
         catch (Exception ex)
         {

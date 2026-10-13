@@ -461,4 +461,62 @@ public class HeadscaleClusterCallTests : IDisposable
         comp!.Id.Should().Be(componentId);
         comp.ClusterId.Should().Be(clusterId);
     }
+
+    // ──────── The post-install route ────────
+
+    /// <summary>
+    /// The install orchestrator's hook. It took a component id and nothing else, read the
+    /// component with its cluster attached, and used <c>comp.Cluster.TenantId</c> for everything
+    /// downstream — and the method said in its own comment that it had "no caller to speak for".
+    /// It did: <c>ComponentInstallOrchestrator.ApplyAsync</c> takes a tenantId and always has.
+    ///
+    /// <para>The owner is asserted through the <em>idempotence</em> branch: with a route already
+    /// present, the method must reach <c>EnsureExternalRouteAsync</c> and return there without
+    /// adding a second one. Reaching that branch at all proves the owner got past Catalog and the
+    /// vault — and it stops before the route-application path this fixture deliberately leaves
+    /// unwired (see <c>lifecycleService: null!</c> above), so the test asserts a real outcome
+    /// rather than tripping over a null.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_owner_reaches_the_route_step_and_does_not_duplicate_it()
+    {
+        await SeedAsync();
+        await GivenHeadscaleSecretsAsync();
+
+        db.ExternalRoutes.Add(new ExternalRoute
+        {
+            Id = Guid.NewGuid(), ComponentId = componentId, Hostname = "vpn.example.com",
+            ServiceName = "headscale", ServicePort = 80, TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt-prod",
+        });
+        await db.SaveChangesAsync();
+
+        await sut.EnsureExternalRouteAfterInstallAsync(tenantId, componentId);
+
+        await using ApplicationDbContext read = testDb.CreateContext();
+        read.ExternalRoutes.Where(r => r.ComponentId == componentId).ToList()
+            .Should().ContainSingle("the route already existed, so the second call is a no-op");
+    }
+
+    [Fact]
+    public async Task The_post_install_route_is_not_created_for_a_stranger()
+    {
+        await SeedAsync();
+        await GivenHeadscaleSecretsAsync();
+
+        await sut.EnsureExternalRouteAfterInstallAsync(Guid.NewGuid(), componentId);
+
+        await using ApplicationDbContext read = testDb.CreateContext();
+        read.ExternalRoutes.Where(r => r.ComponentId == componentId).ToList()
+            .Should().BeEmpty("Catalog returns nothing for a component that is not this tenant's, "
+                + "so the method returns before it reads a secret or writes a route");
+        applied.Should().BeEmpty();
+    }
+
+    /// <summary>The two component secrets the post-install hook needs to do anything at all.</summary>
+    private async Task GivenHeadscaleSecretsAsync()
+    {
+        await vault.SetComponentSecretAsync(tenantId, componentId, "server-url", "https://vpn.example.com");
+        await vault.SetComponentSecretAsync(tenantId, componentId, "cluster-issuer", "letsencrypt-prod");
+    }
 }
