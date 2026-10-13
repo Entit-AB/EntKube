@@ -133,7 +133,7 @@
                         Namespaces = [Panel.Namespace],
                         Text = string.IsNullOrEmpty(Panel.MatchText) ? null : Panel.MatchText
                     };
-                    var r = await Logs.GetHistogramAsync(ClusterId, filter, From, To);
+                    var r = await Logs.GetHistogramAsync(TenantId, ClusterId, filter, From, To);
                     if (r.IsSuccess && r.Data is not null) histogram = r.Data;
                 }
                 break;

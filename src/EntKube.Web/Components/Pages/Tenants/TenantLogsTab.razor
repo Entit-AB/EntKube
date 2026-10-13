@@ -87,7 +87,7 @@ else if (string.IsNullOrEmpty(selectedClusterId))
 }
 else
 {
-    <LogBrowser ClusterId="@(Guid.Parse(selectedClusterId))" />
+    <LogBrowser TenantId="TenantId" ClusterId="@(Guid.Parse(selectedClusterId))" />
 }
 
 @code {

@@ -426,10 +426,11 @@ public class HeadscaleService(
         EntKube.Web.Services.Clusters.IClusterClient? cluster = comp is null ? null : await clusterClients.ForAsync(tenantId, clusterId, ct);
         if (cluster is null) return;
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        List<ClusterComponent> clusterComponents = await db.ClusterComponents
-            .Where(c => c.ClusterId == clusterId)
-            .ToListAsync(ct);
+        // Asked of Catalog, not of its table. The tenant was a parameter here all along, so this
+        // query was a foreign read with nothing to gain from it — and the gateway resolvers take
+        // IComponentNaming since #172, so the contract's DTO goes straight in.
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> clusterComponents =
+            await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct);
 
         string gatewayClass = ExternalRouteService.ResolveGatewayClass(clusterComponents);
         if (gatewayClass != "istio") return;
