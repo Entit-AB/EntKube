@@ -3041,7 +3041,7 @@
         if (selectedDeployment is not null)
         {
             KubernetesOperationResult<List<DeploymentResource>> result =
-                await K8sOps.GetLiveResourcesAsync(selectedDeployment.Id);
+                await K8sOps.GetLiveResourcesAsync(TenantId, selectedDeployment.Id);
             if (result.IsSuccess)
             {
                 resourceTree = result.Data ?? [];

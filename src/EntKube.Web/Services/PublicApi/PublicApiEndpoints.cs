@@ -228,8 +228,12 @@ public static class PublicApiEndpoints
                 return Results.NotFound();
             }
 
+            // The ownership check above is on the APP's tenant; the seam then checks the
+            // CLUSTER's. Two different rows, so a deployment pointing at another tenant's cluster
+            // is refused there rather than restarted here.
             KubernetesOperationResult result = await operations.RestartDeploymentAsync(
-                deploymentId, workload.Trim(), performedBy: $"api-token:{principal.TokenName}", ct);
+                principal.TenantId, deploymentId, workload.Trim(),
+                performedBy: $"api-token:{principal.TokenName}", ct: ct);
 
             return result.IsSuccess
                 ? Results.Ok(new { ok = true })

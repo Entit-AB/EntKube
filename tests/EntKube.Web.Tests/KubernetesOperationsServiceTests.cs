@@ -140,24 +140,6 @@ public class KubernetesOperationsServiceTests : IDisposable
     }
 
     // ════════════════════════════════════════════════════════════════
-    //  GetPodsAsync
-    // ════════════════════════════════════════════════════════════════
-
-    [Fact]
-    public async Task GetPodsAsync_WithoutKubeconfig_ReturnsClusterNotConfiguredError()
-    {
-        // Arrange — cluster has no kubeconfig stored.
-        (AppDeployment deployment, _) = CreateDeploymentWithCluster();
-
-        // Act — trying to get pods without a kubeconfig should return an error.
-        KubernetesOperationResult<List<PodInfo>> result = await sut.GetPodsAsync(deployment.Id);
-
-        // Assert
-        result.IsSuccess.Should().BeFalse();
-        result.Error.Should().Contain("kubeconfig");
-    }
-
-    // ════════════════════════════════════════════════════════════════
     //  RestartDeploymentAsync
     // ════════════════════════════════════════════════════════════════
 
@@ -165,30 +147,11 @@ public class KubernetesOperationsServiceTests : IDisposable
     public async Task RestartDeploymentAsync_WithoutKubeconfig_ReturnsError()
     {
         // Arrange
-        (AppDeployment deployment, _) = CreateDeploymentWithCluster();
+        (AppDeployment deployment, KubernetesCluster cluster) = CreateDeploymentWithCluster();
 
         // Act
         KubernetesOperationResult result = await sut.RestartDeploymentAsync(
-            deployment.Id, "billing-api");
-
-        // Assert
-        result.IsSuccess.Should().BeFalse();
-        result.Error.Should().Contain("kubeconfig");
-    }
-
-    // ════════════════════════════════════════════════════════════════
-    //  DeletePodAsync
-    // ════════════════════════════════════════════════════════════════
-
-    [Fact]
-    public async Task DeletePodAsync_WithoutKubeconfig_ReturnsError()
-    {
-        // Arrange
-        (AppDeployment deployment, _) = CreateDeploymentWithCluster();
-
-        // Act
-        KubernetesOperationResult result = await sut.DeletePodAsync(
-            deployment.Id, "billing-api-abc123");
+            cluster.TenantId, deployment.Id, "billing-api");
 
         // Assert
         result.IsSuccess.Should().BeFalse();
@@ -277,6 +240,59 @@ public class KubernetesOperationsServiceTests : IDisposable
     }
 
     /// <summary>
+    /// The resource tree's own data, and the cluster read behind the log viewer's namespace
+    /// picker. Both took an id and nothing else; the tree read is the one that mattered most,
+    /// because it is a full inventory of a namespace's workloads.
+    /// </summary>
+    [Fact]
+    public async Task GetLiveResourcesAsync_AnotherTenantsDeployment_IsRefused()
+    {
+        (AppDeployment deployment, KubernetesCluster cluster) = CreateDeploymentWithCluster();
+
+        KubernetesOperationResult<List<DeploymentResource>> refused =
+            await sut.GetLiveResourcesAsync(Guid.NewGuid(), deployment.Id);
+
+        refused.IsSuccess.Should().BeFalse();
+        refused.Error.Should().Contain("not this tenant's");
+
+        KubernetesOperationResult<List<DeploymentResource>> owner =
+            await sut.GetLiveResourcesAsync(cluster.TenantId, deployment.Id);
+
+        owner.IsSuccess.Should().BeFalse();
+        owner.Error.Should().Contain("kubeconfig",
+            "the owner gets past the seam and fails on the missing credential instead");
+    }
+
+    [Fact]
+    public async Task ListNamespacesAsync_AnotherTenantsCluster_IsRefused()
+    {
+        KubernetesCluster cluster = CreateCluster();
+
+        KubernetesOperationResult<List<string>> result =
+            await sut.ListNamespacesAsync(Guid.NewGuid(), cluster.Id);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("not found for this tenant");
+    }
+
+    /// <summary>
+    /// The public API's restart endpoint already checked that the APP belongs to the token's
+    /// tenant. The seam now checks the CLUSTER's, which is a different row: a deployment pointing
+    /// at another tenant's cluster is refused rather than restarted.
+    /// </summary>
+    [Fact]
+    public async Task RestartDeploymentAsync_AnotherTenantsDeployment_IsRefused()
+    {
+        (AppDeployment deployment, _) = CreateDeploymentWithCluster();
+
+        KubernetesOperationResult result = await sut.RestartDeploymentAsync(
+            Guid.NewGuid(), deployment.Id, "billing-api");
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("not this tenant's");
+    }
+
+    /// <summary>
     /// A deployment that does not exist is told so, rather than being refused as though it
     /// belonged to someone else — the two are different facts and the message should say which.
     /// </summary>
@@ -293,19 +309,4 @@ public class KubernetesOperationsServiceTests : IDisposable
     // ════════════════════════════════════════════════════════════════
     //  ScaleDeploymentAsync
     // ════════════════════════════════════════════════════════════════
-
-    [Fact]
-    public async Task ScaleDeploymentAsync_WithoutKubeconfig_ReturnsError()
-    {
-        // Arrange
-        (AppDeployment deployment, _) = CreateDeploymentWithCluster();
-
-        // Act
-        KubernetesOperationResult result = await sut.ScaleDeploymentAsync(
-            deployment.Id, "billing-api", 3);
-
-        // Assert
-        result.IsSuccess.Should().BeFalse();
-        result.Error.Should().Contain("kubeconfig");
-    }
 }

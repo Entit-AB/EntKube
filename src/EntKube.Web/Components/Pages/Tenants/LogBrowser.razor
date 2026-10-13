@@ -317,7 +317,8 @@ else
         // search can still run — but leave any backend error above on screen so it's diagnosable.
         if (namespaces.Count == 0)
         {
-            KubernetesOperationResult<List<string>> clusterNs = await K8s.ListNamespacesAsync(ClusterId);
+            KubernetesOperationResult<List<string>> clusterNs =
+                await K8s.ListNamespacesAsync(TenantId, ClusterId);
             if (clusterNs.IsSuccess && clusterNs.Data is { Count: > 0 } clusterNamespaces)
             {
                 namespaces = clusterNamespaces;
