@@ -101,11 +101,12 @@ public class VacuousTenantCheckTests
     /// with their credential sites — which is the only way these four files can move, since a
     /// tenant parameter makes the reads inside them newly inexcusable in the same step.</para>
     ///
-    /// <para>The five that remain are the other two of that group: <c>ComponentLifecycleService</c>
-    /// (4, the last concentration) and <c>CertificateDistributionService</c> (1). Both still hold
-    /// credential sites, so both move the same way — tenant and credential in one step.</para>
+    /// <para><b>4.</b> <c>CertificateDistributionService</c> followed, the same way: its target
+    /// resolution returns seam clients rather than cluster rows, so there is no row left to read a
+    /// tenant off. What remains is <c>ComponentLifecycleService</c> alone — the last
+    /// concentration, and the only file still holding both kinds of debt.</para>
     /// </summary>
-    private const int BaselineTautological = 5;
+    private const int BaselineTautological = 4;
 
     [Fact]
     public void A_tenant_read_off_the_cluster_row_checks_nothing_and_may_not_spread()

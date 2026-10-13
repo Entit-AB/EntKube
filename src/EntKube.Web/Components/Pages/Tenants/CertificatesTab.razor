@@ -379,7 +379,7 @@ else
         {
             // Remove delivery targets first (also clears the mirrored secrets), then the cert.
             foreach (CertificateDistribution t in await DistService.GetDistributionsForCertAsync(TenantId, certId))
-                await DistService.DeleteDistributionAsync(t.Id);
+                await DistService.DeleteDistributionAsync(TenantId, t.Id);
             await VaultService.DeleteTenantCertificateAsync(certId);
             Toasts.Success("Certificate deleted.");
             confirmDeleteCertId = null;
@@ -448,7 +448,7 @@ else
         busy = true;
         try
         {
-            CertificateDistributionResult r = await DistService.ApplyDistributionAsync(targetId);
+            CertificateDistributionResult r = await DistService.ApplyDistributionAsync(TenantId, targetId);
             if (r.Success) Toasts.Success($"Delivered to {r.NamespaceCount} namespace(s).");
             else Toasts.Error(string.IsNullOrWhiteSpace(r.Output) ? "Delivery failed." : r.Output);
             if (expandedCertId is Guid id) await RefreshTargets(id);
@@ -463,7 +463,7 @@ else
         busy = true;
         try
         {
-            await DistService.DeleteDistributionAsync(targetId);
+            await DistService.DeleteDistributionAsync(TenantId, targetId);
             Toasts.Success("Target removed.");
             await RefreshTargets(certId);
         }

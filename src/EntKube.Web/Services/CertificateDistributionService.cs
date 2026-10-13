@@ -29,7 +29,6 @@ public class CertificateDistributionService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vault,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
-    IClusterChangeGate gate,
     ILogger<CertificateDistributionService> logger)
 {
     // Namespaces never targeted by an "all namespaces" distribution.
@@ -91,31 +90,27 @@ public class CertificateDistributionService(
     }
 
     /// <summary>Removes the distribution from the DB and best-effort deletes the mirrored Secrets.</summary>
-    public async Task DeleteDistributionAsync(Guid id, CancellationToken ct = default)
+    public async Task DeleteDistributionAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        CertificateDistribution? dist = await db.CertificateDistributions.FindAsync([id], ct);
+
+        // Scoped: the distribution must be this tenant's before any Secret is removed from a
+        // cluster. It used to be found by id alone.
+        CertificateDistribution? dist = await db.CertificateDistributions
+            .FirstOrDefaultAsync(d => d.Id == id && d.TenantId == tenantId, ct);
         if (dist is null) return;
 
         try
         {
-            foreach ((KubernetesCluster cluster, IReadOnlyList<string> namespaces) in await ResolveTargetsAsync(db, dist, ct))
+            foreach ((Clusters.IClusterClient cluster, IReadOnlyList<string> namespaces) in
+                     await ResolveTargetsAsync(db, tenantId, dist, ct))
             {
                 foreach (string ns in namespaces)
                 {
-                    await gate.AcknowledgeAsync(new PlannedClusterChange
-                    {
-                        Verb = ChangeVerb.Delete,
-                        Kubeconfig = cluster.Kubeconfig!,
-                        ClusterLabel = cluster.Name,
-                        Kind = "secret",
-                        Name = dist.TargetSecretName,
-                        Namespace = ns,
-                        Summary = $"Delete distributed cert secret {dist.TargetSecretName} in {ns}",
-                    }, ct);
-                    await RunKubectlAsync(
-                        $"delete secret {dist.TargetSecretName} -n {ns} --ignore-not-found",
-                        cluster.Kubeconfig!, ct);
+                    // The seam raises the acknowledgment for its own delete, so this no longer
+                    // builds a PlannedClusterChange — which is what it needed a kubeconfig for.
+                    await cluster.DeleteManifestAsync("secret", dist.TargetSecretName, ns, ct);
                 }
             }
         }
@@ -178,12 +173,14 @@ public class CertificateDistributionService(
     // ── Apply / reconcile ───────────────────────────────────────────────────────
 
     /// <summary>Mirrors one distribution to its cluster (gated). Returns per-run output.</summary>
-    public async Task<CertificateDistributionResult> ApplyDistributionAsync(Guid id, CancellationToken ct = default)
+    public async Task<CertificateDistributionResult> ApplyDistributionAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        CertificateDistribution? dist = await db.CertificateDistributions.FindAsync([id], ct);
+        CertificateDistribution? dist = await db.CertificateDistributions
+            .FirstOrDefaultAsync(d => d.Id == id && d.TenantId == tenantId, ct);
         if (dist is null) return new(false, 0, "Certificate distribution not found.");
-        return await ApplyCoreAsync(db, dist, ct);
+        return await ApplyCoreAsync(db, tenantId, dist, ct);
     }
 
     /// <summary>
@@ -193,13 +190,30 @@ public class CertificateDistributionService(
     public async Task ReconcileAllAsync(CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        List<CertificateDistribution> all = await db.CertificateDistributions.ToListAsync(ct);
-        foreach (CertificateDistribution dist in all)
+
+        // One tenant at a time (docs/decomposition.md §4.0.1.2). This writes a Secret — a
+        // certificate and often its private key — into namespaces on a cluster, so which tenant
+        // it acts as is the whole question. It used to select every distribution in the
+        // installation and apply each one by id.
+        List<(Guid TenantId, Guid DistributionId)> targets =
+        [
+            .. (await db.CertificateDistributions
+                    .Select(d => new { d.TenantId, d.Id })
+                    .ToListAsync(ct))
+                .Select(d => (d.TenantId, d.Id)),
+        ];
+
+        foreach ((Guid tenantId, Guid distributionId) in targets)
         {
             if (ct.IsCancellationRequested) break;
+
+            CertificateDistribution? dist = await db.CertificateDistributions
+                .FirstOrDefaultAsync(d => d.Id == distributionId && d.TenantId == tenantId, ct);
+            if (dist is null) continue;
+
             try
             {
-                CertificateDistributionResult r = await ApplyCoreAsync(db, dist, ct);
+                CertificateDistributionResult r = await ApplyCoreAsync(db, tenantId, dist, ct);
                 if (!r.Success)
                     logger.LogWarning("Reconcile of cert distribution {Name} failed: {Output}", dist.Name, r.Output);
             }
@@ -211,7 +225,7 @@ public class CertificateDistributionService(
     }
 
     private async Task<CertificateDistributionResult> ApplyCoreAsync(
-        ApplicationDbContext db, CertificateDistribution dist, CancellationToken ct)
+        ApplicationDbContext db, Guid tenantId, CertificateDistribution dist, CancellationToken ct)
     {
         CertificateBundle? bundle = await vault.GetCertificateBundleByIdAsync(dist.VaultSecretId, ct);
         if (bundle is null || !bundle.HasCertificate)
@@ -220,24 +234,25 @@ public class CertificateDistributionService(
         if (dist.IncludeKey && !bundle.HasPrivateKey)
             return new(false, 0, "This distribution is configured to include the private key, but the selected certificate has no key. Add a key or switch to certificate-only.");
 
-        List<(KubernetesCluster Cluster, IReadOnlyList<string> Namespaces)> groups =
-            await ResolveTargetsAsync(db, dist, ct);
+        List<(Clusters.IClusterClient Cluster, IReadOnlyList<string> Namespaces)> groups =
+            await ResolveTargetsAsync(db, tenantId, dist, ct);
         if (groups.Count == 0)
             return new(false, 0, "No target namespaces resolved for this distribution (no matching apps/namespaces, or clusters have no kubeconfig).");
 
         int total = 0;
         bool allOk = true;
         List<string> outputs = [];
-        foreach ((KubernetesCluster cluster, IReadOnlyList<string> namespaces) in groups)
+        foreach ((Clusters.IClusterClient cluster, IReadOnlyList<string> namespaces) in groups)
         {
             string manifest = BuildSecretManifest(dist, bundle, namespaces);
 
-            await gate.AcknowledgeAsync(new PlannedClusterChange
+            // The seam supplies the credential and the cluster's label; this caller still raises
+            // the acknowledgment itself, because it applies through kubectl and wants one dialog
+            // for the whole namespace set rather than one per Secret.
+            await cluster.AcknowledgeAsync(new PlannedChange
             {
                 Verb = ChangeVerb.Apply,
-                Kubeconfig = cluster.Kubeconfig!,
-                ClusterLabel = cluster.Name,
-                Summary = $"Distribute certificate {dist.TargetSecretName} to {namespaces.Count} namespace(s) on {cluster.Name}",
+                Summary = $"Distribute certificate {dist.TargetSecretName} to {namespaces.Count} namespace(s) on {cluster.ClusterName}",
                 Manifest = manifest,
             }, ct);
 
@@ -245,14 +260,14 @@ public class CertificateDistributionService(
             allOk &= ok;
             total += namespaces.Count;
             if (!string.IsNullOrWhiteSpace(output))
-                outputs.Add($"{cluster.Name}: {output}");
+                outputs.Add($"{cluster.ClusterName}: {output}");
 
             if (ok)
                 logger.LogInformation("Certificate {Secret} distributed to {Count} namespaces on {Cluster}",
-                    dist.TargetSecretName, namespaces.Count, cluster.Name);
+                    dist.TargetSecretName, namespaces.Count, cluster.ClusterName);
             else
                 logger.LogWarning("Certificate distribution {Secret} failed on {Cluster}: {Output}",
-                    dist.TargetSecretName, cluster.Name, output);
+                    dist.TargetSecretName, cluster.ClusterName, output);
         }
 
         if (allOk)
@@ -270,10 +285,13 @@ public class CertificateDistributionService(
     /// deployments; the other scopes span the pinned cluster or, when ClusterId is null, every cluster
     /// the tenant owns (tenant-wide). Clusters without a kubeconfig are skipped.
     /// </summary>
-    private async Task<List<(KubernetesCluster Cluster, IReadOnlyList<string> Namespaces)>> ResolveTargetsAsync(
-        ApplicationDbContext db, CertificateDistribution dist, CancellationToken ct)
+    private async Task<List<(Clusters.IClusterClient Cluster, IReadOnlyList<string> Namespaces)>> ResolveTargetsAsync(
+        ApplicationDbContext db, Guid tenantId, CertificateDistribution dist, CancellationToken ct)
     {
-        List<(KubernetesCluster, IReadOnlyList<string>)> groups = [];
+        // Returns seam clients rather than cluster ROWS. The rows carried a decrypted kubeconfig
+        // into every caller — including the namespace listing, which only needed to talk to the
+        // cluster — and the tenant each was then checked against came off the row itself.
+        List<(Clusters.IClusterClient, IReadOnlyList<string>)> groups = [];
 
         if (dist.Scope == TrustDistributionScope.App)
         {
@@ -294,8 +312,8 @@ public class CertificateDistributionService(
 
             foreach (IGrouping<Guid, AppDeployment> byCluster in deployments.GroupBy(d => d.ClusterId))
             {
-                KubernetesCluster? cluster = await db.KubernetesClusters.FindAsync([byCluster.Key], ct);
-                if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig)) continue;
+                Clusters.IClusterClient? cluster = await clusterAccess.ForAsync(tenantId, byCluster.Key, ct);
+                if (cluster is null) continue;
 
                 List<string> namespaces = byCluster
                     .Select(d => lockedNs.TryGetValue(d.EnvironmentId, out string? locked) && !string.IsNullOrWhiteSpace(locked)
@@ -309,23 +327,26 @@ public class CertificateDistributionService(
         }
 
         // All / Tenant / Labels: a pinned cluster, or every cluster in the tenant when unset.
-        List<KubernetesCluster> clusters = dist.ClusterId is not null
-            ? await db.KubernetesClusters.Where(c => c.Id == dist.ClusterId).ToListAsync(ct)
-            : await db.KubernetesClusters.Where(c => c.TenantId == dist.TenantId).ToListAsync(ct);
+        // Scoped by the ASKING tenant, not by dist.TenantId — a pinned cluster belonging to
+        // someone else is now refused by the seam rather than written to.
+        List<Guid> clusterIds = dist.ClusterId is not null
+            ? [dist.ClusterId.Value]
+            : await db.KubernetesClusters.Where(c => c.TenantId == tenantId).Select(c => c.Id).ToListAsync(ct);
 
-        foreach (KubernetesCluster cluster in clusters)
+        foreach (Guid clusterId in clusterIds)
         {
-            if (string.IsNullOrWhiteSpace(cluster.Kubeconfig)) continue;
+            Clusters.IClusterClient? cluster = await clusterAccess.ForAsync(tenantId, clusterId, ct);
+            if (cluster is null) continue;
 
             IReadOnlyList<string> namespaces = dist.Scope switch
             {
                 TrustDistributionScope.TenantNamespaces =>
-                    await TrustBundleService.ResolveTenantNamespacesAsync(db, dist.TenantId, cluster.Id, ct),
+                    await TrustBundleService.ResolveTenantNamespacesAsync(db, tenantId, clusterId, ct),
                 TrustDistributionScope.AllNamespaces =>
-                    (await ListClusterNamespacesAsync(cluster.Kubeconfig!, selector: null, ct))
+                    (await ListClusterNamespacesAsync(cluster, selector: null, ct))
                         .Where(ns => !SystemNamespaces.Contains(ns)).ToList(),
                 TrustDistributionScope.MatchLabels =>
-                    await ResolveLabelNamespacesAsync(dist, cluster.Kubeconfig!, ct),
+                    await ResolveLabelNamespacesAsync(dist, cluster, ct),
                 _ => [],
             };
             if (namespaces.Count > 0) groups.Add((cluster, namespaces));
@@ -334,25 +355,49 @@ public class CertificateDistributionService(
     }
 
     private static async Task<IReadOnlyList<string>> ResolveLabelNamespacesAsync(
-        CertificateDistribution dist, string kubeconfig, CancellationToken ct)
+        CertificateDistribution dist, Clusters.IClusterClient cluster, CancellationToken ct)
     {
         Dictionary<string, string> labels = TrustBundleService.ParseSelector(dist.NamespaceSelectorJson);
         if (labels.Count == 0) return [];
         string selector = string.Join(",", labels.Select(kv => $"{kv.Key}={kv.Value}"));
-        return await ListClusterNamespacesAsync(kubeconfig, selector, ct);
+        return await ListClusterNamespacesAsync(cluster, selector, ct);
     }
 
+    /// <summary>
+    /// The cluster's namespace names, optionally by label.
+    ///
+    /// <para>Through the seam, which needed an empty namespace to mean "cluster-scoped" before
+    /// this was possible — Namespaces are not in a namespace. The names come out of JSON now
+    /// rather than <c>-o name</c> lines, which is the same list without a prefix to strip.</para>
+    /// </summary>
     private static async Task<IReadOnlyList<string>> ListClusterNamespacesAsync(
-        string kubeconfig, string? selector, CancellationToken ct)
+        Clusters.IClusterClient cluster, string? selector, CancellationToken ct)
     {
-        string args = "get namespaces -o name" + (string.IsNullOrWhiteSpace(selector) ? "" : $" -l {selector}");
-        (bool ok, string output) = await RunKubectlAsync(args, kubeconfig, ct);
-        if (!ok) return [];
-        return output
-            .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
-            .Select(l => l.StartsWith("namespace/", StringComparison.Ordinal) ? l["namespace/".Length..] : l)
-            .Where(l => l.Length > 0)
-            .ToList();
+        try
+        {
+            string json = await cluster.GetJsonAsync("namespaces", ns: "", selector ?? "", ct);
+
+            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("items", out System.Text.Json.JsonElement items)
+                || items.ValueKind != System.Text.Json.JsonValueKind.Array)
+            {
+                return [];
+            }
+
+            return [.. items
+                .EnumerateArray()
+                .Select(i => i.TryGetProperty("metadata", out System.Text.Json.JsonElement md)
+                    && md.TryGetProperty("name", out System.Text.Json.JsonElement n)
+                        ? n.GetString() : null)
+                .Where(n => !string.IsNullOrEmpty(n))
+                .Select(n => n!)];
+        }
+        catch (Exception)
+        {
+            // A cluster that cannot be listed contributes no namespaces, which is what the
+            // kubectl version did by returning (ok: false) and an empty list.
+            return [];
+        }
     }
 
     // ── Secret manifest builder ──────────────────────────────────────────────────
@@ -400,42 +445,6 @@ public class CertificateDistributionService(
 
     // ── kubectl plumbing ─────────────────────────────────────────────────────────
 
-
-    private static async Task<(bool, string)> RunKubectlAsync(
-        string arguments, string kubeconfig, CancellationToken ct, string? extraTemp = null)
-    {
-        string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-certdist-{Guid.NewGuid():N}.kubeconfig");
-        try
-        {
-            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
-
-            System.Diagnostics.ProcessStartInfo psi = new("kubectl", $"{arguments} --kubeconfig {kubeconfigPath}")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            psi.EnvironmentVariables["HOME"] = "/tmp";
-
-            using System.Diagnostics.Process proc = new() { StartInfo = psi };
-            StringBuilder output = new();
-            proc.OutputDataReceived += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-            proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-            proc.Start();
-            proc.BeginOutputReadLine();
-            proc.BeginErrorReadLine();
-            await proc.WaitForExitAsync(ct);
-
-            return (proc.ExitCode == 0, output.ToString().TrimEnd());
-        }
-        finally
-        {
-            if (File.Exists(kubeconfigPath)) File.Delete(kubeconfigPath);
-            if (extraTemp is not null && File.Exists(extraTemp)) File.Delete(extraTemp);
-        }
-    }
-
     /// <summary>
     /// Applies a manifest through the cluster client, keeping the <c>(ok, output)</c> shape this
     /// service reports with.
@@ -447,16 +456,8 @@ public class CertificateDistributionService(
     /// and the credential stops passing through here.</para>
     /// </summary>
     private async Task<(bool Ok, string Output)> ApplyThroughClusterAsync(
-        KubernetesCluster cluster, string manifest, CancellationToken ct)
+        Clusters.IClusterClient target, string manifest, CancellationToken ct)
     {
-        Clusters.IClusterClient? target =
-            await clusterAccess.ForAsync(cluster.TenantId, cluster.Id, ct);
-
-        if (target is null)
-        {
-            return (false, "The cluster has no stored kubeconfig.");
-        }
-
         try
         {
             return (true, await target.ApplyManifestAsync(manifest, ct));

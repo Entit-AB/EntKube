@@ -145,6 +145,27 @@ public class PlannedChangeSeamTests
                 + "--kubeconfig=/tmp/kc.yaml --ignore-not-found");
     }
 
+    /// <summary>
+    /// A cluster-scoped <em>list</em> omits the namespace flag too, and keeps the label selector.
+    ///
+    /// <para>Namespaces are not in a namespace, so a caller listing them could not use
+    /// <c>GetJsonAsync</c> and kept its own kubectl —
+    /// <c>CertificateDistributionService.ListClusterNamespacesAsync</c> was exactly that. Three
+    /// methods now read an empty <c>ns</c> the same way; the convention was always there, just
+    /// not everywhere.</para>
+    /// </summary>
+    [Fact]
+    public void A_json_list_omits_the_namespace_flag_for_a_cluster_scoped_resource()
+    {
+        KubernetesClientFactory
+            .BuildGetJsonArguments("namespaces", "", "team=billing", "/tmp/kc.yaml")
+            .Should().Be("get namespaces --kubeconfig=/tmp/kc.yaml -l team=billing -o json");
+
+        KubernetesClientFactory
+            .BuildGetJsonArguments("secrets", "billing-ns", "", "/tmp/kc.yaml")
+            .Should().Be("get secrets -n billing-ns --kubeconfig=/tmp/kc.yaml -o json");
+    }
+
     private sealed class RecordingSink : IClusterChangeAckSink
     {
         public List<PlannedClusterChange> Asked { get; } = [];

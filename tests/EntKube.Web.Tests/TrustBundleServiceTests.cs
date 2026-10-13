@@ -33,12 +33,12 @@ public sealed class TrustBundleServiceTests : IDisposable
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
             db.Database.EnsureCreated();
 
-        ClusterChangeGate gate = new(new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
+        // No gate here any more: this service reaches it only through IClusterClient.
         sut = new TrustBundleService(
             dbFactory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(
                 dbFactory, new Mock<IKubernetesClientFactory>().Object),
-            gate, NullLogger<TrustBundleService>.Instance);
+            NullLogger<TrustBundleService>.Instance);
     }
 
     // ── Manifest generation ──────────────────────────────────────────────────

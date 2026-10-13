@@ -39,12 +39,14 @@ public sealed class CertificateDistributionServiceTests : IDisposable
 
         VaultEncryptionService encryption = new(TestRootKey);
         VaultService vault = new(dbFactory, encryption, TestServices.NoClusterAccess);
-        ClusterChangeGate gate = new(new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
+
+        // No gate here any more: this service reaches it only through IClusterClient, which
+        // supplies the credential the gate needs. See PlannedChangeSeamTests.
         sut = new CertificateDistributionService(
             dbFactory, vault,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(
                 dbFactory, new Mock<IKubernetesClientFactory>().Object),
-            gate, NullLogger<CertificateDistributionService>.Instance);
+            NullLogger<CertificateDistributionService>.Instance);
     }
 
     // ── Secret manifest generation ────────────────────────────────────────────
@@ -146,7 +148,7 @@ public sealed class CertificateDistributionServiceTests : IDisposable
         (await sut.GetDistributionAsync(created.Id))!.IncludeKey.Should().BeFalse();
 
         // No cluster row exists → delete just removes the DB row (no kubectl).
-        await sut.DeleteDistributionAsync(created.Id);
+        await sut.DeleteDistributionAsync(tenantId, created.Id);
         (await sut.GetDistributionsAsync(tenantId, clusterId)).Should().BeEmpty();
     }
 
