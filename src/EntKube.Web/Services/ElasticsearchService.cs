@@ -5283,7 +5283,7 @@ public class ElasticsearchService(
             string log = "";
             try
             {
-                log = await client.GetPodLogsAsync($"job/{jobName}", cluster.Namespace, 100, ct);
+                log = await client.GetPodLogsAsync($"job/{jobName}", cluster.Namespace, 100, ct: ct);
             }
             catch { /* a Job whose pod is already gone still reported its result above */ }
 

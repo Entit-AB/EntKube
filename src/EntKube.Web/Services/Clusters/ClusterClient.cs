@@ -57,6 +57,10 @@ public sealed class ClusterClient(
     public Task<HelmExecutionResult> RunHelmAsync(HelmInvocation invocation, CancellationToken ct = default)
         => inner.RunHelmAsync(invocation, kubeconfig, ct);
 
+    public Task<HelmExecutionResult> ApplyManifestFromUrlAsync(
+        string manifestUrl, string? summary = null, CancellationToken ct = default)
+        => inner.ApplyManifestFromUrlAsync(manifestUrl, kubeconfig, summary, ct);
+
     public Task<string> GetResourceYamlAsync(
         string resource, string name, string ns, CancellationToken ct = default)
         => inner.GetResourceYamlAsync(resource, name, ns, kubeconfig, ct);
@@ -79,8 +83,8 @@ public sealed class ClusterClient(
         => inner.GetJsonAllNamespacesAsync(resource, kubeconfig, labelSelector, ct);
 
     public Task<string> GetPodLogsAsync(string target, string ns, int tailLines = 200,
-        CancellationToken ct = default)
-        => inner.GetPodLogsAsync(target, ns, kubeconfig, tailLines, ct);
+        string? container = null, CancellationToken ct = default)
+        => inner.GetPodLogsAsync(target, ns, kubeconfig, tailLines, ct, container);
 
     public Task<string?> GetSecretValueAsync(string secretName, string key, string ns, CancellationToken ct = default)
         => inner.GetSecretValueAsync(secretName, key, ns, kubeconfig, ct);

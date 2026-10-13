@@ -98,7 +98,7 @@ public class ComponentInstallHelmTests : IDisposable
     {
         await SeedAsync();
 
-        HelmExecutionResult result = await sut.ExecuteHelmAsync(componentId, Install());
+        HelmExecutionResult result = await sut.ExecuteHelmAsync(tenantId, componentId, Install());
 
         result.Success.Should().BeTrue(result.Output);
 
@@ -119,7 +119,7 @@ public class ComponentInstallHelmTests : IDisposable
     {
         await SeedAsync();
 
-        await sut.ExecuteHelmAsync(componentId, Install());
+        await sut.ExecuteHelmAsync(tenantId, componentId, Install());
 
         string argv = string.Join(' ', helm.Single().Invocation.Arguments);
         argv.Should().Contain("harbor")
@@ -138,7 +138,7 @@ public class ComponentInstallHelmTests : IDisposable
     {
         await SeedAsync();
 
-        await sut.ExecuteHelmAsync(componentId, Install());
+        await sut.ExecuteHelmAsync(tenantId, componentId, Install());
 
         // The gate's own fallback for a Helm verb is the bare words "Helm manifest". An install
         // replaces whole workloads, so the chart and version are named.
@@ -151,7 +151,7 @@ public class ComponentInstallHelmTests : IDisposable
     {
         await SeedAsync();
 
-        await sut.ExecuteHelmAsync(componentId, new HelmCommand
+        await sut.ExecuteHelmAsync(tenantId, componentId, new HelmCommand
         {
             Operation = "uninstall", ReleaseName = "harbor", Namespace = "harbor",
         });
@@ -169,7 +169,7 @@ public class ComponentInstallHelmTests : IDisposable
     {
         await SeedAsync();
 
-        await sut.ExecuteHelmAsync(componentId, Install(version: null));
+        await sut.ExecuteHelmAsync(tenantId, componentId, Install(version: null));
 
         string.Join(' ', helm.Single().Invocation.Arguments).Should().NotContain("--version");
     }
@@ -179,7 +179,7 @@ public class ComponentInstallHelmTests : IDisposable
     {
         await SeedAsync(withKubeconfig: false);
 
-        HelmExecutionResult result = await sut.ExecuteHelmAsync(componentId, Install());
+        HelmExecutionResult result = await sut.ExecuteHelmAsync(tenantId, componentId, Install());
 
         result.Success.Should().BeFalse();
         result.Output.Should().Contain("kubeconfig");
@@ -191,7 +191,7 @@ public class ComponentInstallHelmTests : IDisposable
     {
         await SeedAsync();
 
-        HelmExecutionResult result = await sut.ExecuteHelmAsync(componentId, new HelmCommand
+        HelmExecutionResult result = await sut.ExecuteHelmAsync(tenantId, componentId, new HelmCommand
         {
             Operation = "noop", ReleaseName = "harbor", Namespace = "harbor",
         });

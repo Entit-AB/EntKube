@@ -113,7 +113,7 @@ public class ComponentInstallOrchestrator(
         // nobody edited. No-op unless that boundary is actually being crossed.
         await stalwartService.PrepareStorageShapeIfNeededAsync(tenantId, componentId, ct);
 
-        HelmCommand command = await lifecycleService.GetInstallCommandAsync(componentId, ct);
+        HelmCommand command = await lifecycleService.GetInstallCommandAsync(tenantId, componentId, ct);
         command.NoWait = options.NoWait;
 
         // Pre-sync component secrets so they exist in K8s before the pod starts.
@@ -121,7 +121,7 @@ public class ComponentInstallOrchestrator(
         // which happens during Helm's --wait phase, so the secret must exist first.
         HelmExecutionResult preSyncResult = await lifecycleService.SyncComponentSecretsAsync(componentId);
 
-        HelmExecutionResult result = await lifecycleService.ExecuteHelmAsync(componentId, command, ct);
+        HelmExecutionResult result = await lifecycleService.ExecuteHelmAsync(tenantId, componentId, command, ct);
 
         // Prepend pre-sync output so the caller can see exactly how many keys were synced.
         if (!string.IsNullOrWhiteSpace(preSyncResult.Output))
@@ -136,7 +136,7 @@ public class ComponentInstallOrchestrator(
 
         if (result.Success)
         {
-            HelmExecutionResult subchartResult = await lifecycleService.InstallSubchartsAsync(componentId);
+            HelmExecutionResult subchartResult = await lifecycleService.InstallSubchartsAsync(tenantId, componentId);
 
             if (!string.IsNullOrWhiteSpace(subchartResult.Output))
             {
@@ -171,7 +171,7 @@ public class ComponentInstallOrchestrator(
             await headscaleService.EnsureExternalRouteAfterInstallAsync(tenantId, componentId);
 
             // Apply HTTPRoute + Certificate manifests for any configured external routes.
-            HelmExecutionResult routeResult = await lifecycleService.ApplyExternalRoutesAsync(componentId);
+            HelmExecutionResult routeResult = await lifecycleService.ApplyExternalRoutesAsync(tenantId, componentId);
             if (!string.IsNullOrWhiteSpace(routeResult.Output))
             {
                 result = new HelmExecutionResult
@@ -186,7 +186,7 @@ public class ComponentInstallOrchestrator(
             // Save & Apply on the gateway required.
             if (await IsComponentNamedAsync(componentId, "wg-easy", ct))
             {
-                HelmExecutionResult? gwResult = await lifecycleService.EnsureGatewayWireGuardPortAsync(componentId);
+                HelmExecutionResult? gwResult = await lifecycleService.EnsureGatewayWireGuardPortAsync(tenantId, componentId);
                 if (gwResult is not null && !string.IsNullOrWhiteSpace(gwResult.Output))
                 {
                     result = new HelmExecutionResult
@@ -205,7 +205,7 @@ public class ComponentInstallOrchestrator(
             if (await IsComponentNamedAsync(componentId, EntKubeTelemetryService.IndexerKey, ct))
             {
                 HelmExecutionResult? collectorResult =
-                    await lifecycleService.EnsureCollectorShipsInClusterAsync(componentId, ct);
+                    await lifecycleService.EnsureCollectorShipsInClusterAsync(tenantId, componentId, ct);
 
                 if (collectorResult is not null && !string.IsNullOrWhiteSpace(collectorResult.Output))
                 {

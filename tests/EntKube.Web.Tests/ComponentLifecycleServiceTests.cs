@@ -375,7 +375,7 @@ public class ComponentLifecycleServiceTests : IDisposable
 
         // Act
 
-        HelmCommand command = await sut.GetInstallCommandAsync(component.Id);
+        HelmCommand command = await sut.GetInstallCommandAsync(tenantId, component.Id);
 
         // Assert — verify the command structure is correct.
 
@@ -453,7 +453,7 @@ public class ComponentLifecycleServiceTests : IDisposable
 
         // Act
 
-        HelmCommand command = await sut.GetInstallCommandAsync(component.Id);
+        HelmCommand command = await sut.GetInstallCommandAsync(tenantId, component.Id);
 
         // Assert — the values YAML should contain the injected secret.
 
@@ -485,7 +485,7 @@ public class ComponentLifecycleServiceTests : IDisposable
 
         // Act
 
-        HelmCommand command = await sut.GetInstallCommandAsync(component.Id);
+        HelmCommand command = await sut.GetInstallCommandAsync(tenantId, component.Id);
 
         // Assert — no secret injection. The operator's own values survive untouched; the document
         // is no longer byte-identical because catalog defaults this component never had are filled
@@ -520,7 +520,7 @@ public class ComponentLifecycleServiceTests : IDisposable
 
         ClusterComponent component = await sut.RegisterComponentAsync(clusterId, registration);
 
-        HelmCommand command = await sut.GetInstallCommandAsync(component.Id);
+        HelmCommand command = await sut.GetInstallCommandAsync(tenantId, component.Id);
 
         string catalogUrl = ComponentCatalog.Entries.Single(e => e.Key == "gateway-api-crds").HelmRepoUrl;
 

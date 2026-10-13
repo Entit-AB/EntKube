@@ -703,6 +703,54 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     }
 
     /// <summary>
+    /// The command line for a pod log tail, optionally for one container of several.
+    /// </summary>
+    public static string BuildPodLogsArguments(
+        string target, string ns, int tailLines, string? container, string kubeconfigPath)
+        => $"logs {target}{(string.IsNullOrEmpty(container) ? "" : $" -c {container}")}"
+           + $" -n {ns} --kubeconfig={kubeconfigPath} --tail={tailLines}";
+
+    /// <summary>
+    /// Server-side applies a manifest the cluster fetches by URL. See
+    /// <see cref="IKubernetesClientFactory.ApplyManifestFromUrlAsync"/> for why the URL is not
+    /// downloaded here, and why the flags are what they are.
+    ///
+    /// <para>Returns the result rather than throwing, because the operator installs that use this
+    /// report their output into a component's install log either way.</para>
+    /// </summary>
+    public async Task<HelmExecutionResult> ApplyManifestFromUrlAsync(
+        string manifestUrl, string kubeconfig, string? summary = null, CancellationToken ct = default)
+    {
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Apply,
+            Kubeconfig = kubeconfig,
+            Summary = summary ?? $"Apply {manifestUrl}",
+        }, ct);
+
+        string kubeconfigPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+
+            (int code, string stdout, string stderr) = await RunKubectlRawAsync(
+                BuildApplyFromUrlArguments(manifestUrl, kubeconfigPath), ct);
+
+            string output = string.IsNullOrWhiteSpace(stdout) ? stderr : stdout;
+            return new HelmExecutionResult { Success = code == 0, Output = output.TrimEnd() };
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+        }
+    }
+
+    /// <summary>The command line for a server-side apply of a manifest fetched by URL.</summary>
+    public static string BuildApplyFromUrlArguments(string manifestUrl, string kubeconfigPath)
+        => $"apply --server-side --force-conflicts -f {manifestUrl} --kubeconfig={kubeconfigPath}";
+
+    /// <summary>
     /// The command line for listing a resource as JSON, optionally by label.
     ///
     /// <para>An empty namespace means a <b>cluster-scoped</b> resource and the flag is omitted —
@@ -741,7 +789,8 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         => $"get {resource} {name} -n {ns} --kubeconfig={kubeconfigPath} -o yaml";
 
     public async Task<string> GetPodLogsAsync(
-        string target, string ns, string kubeconfig, int tailLines = 200, CancellationToken ct = default)
+        string target, string ns, string kubeconfig, int tailLines = 200,
+        CancellationToken ct = default, string? container = null)
     {
         string kubeconfigPath = Path.GetTempFileName();
 
@@ -750,7 +799,7 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
 
             return await RunKubectlAsync(
-                $"logs {target} -n {ns} --kubeconfig={kubeconfigPath} --tail={tailLines}", ct);
+                BuildPodLogsArguments(target, ns, tailLines, container, kubeconfigPath), ct);
         }
         finally
         {

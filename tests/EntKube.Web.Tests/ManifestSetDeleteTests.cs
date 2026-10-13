@@ -121,7 +121,7 @@ public class ManifestSetDeleteTests : IDisposable
         KubernetesCluster cluster = await SeedClusterAsync();
         ComponentLifecycleService sut = Lifecycle();
 
-        HelmExecutionResult result = await sut.ApplyRawManifestAsync(cluster, TwoDocuments);
+        HelmExecutionResult result = await sut.ApplyRawManifestAsync(tenantId, cluster, TwoDocuments);
 
         result.Success.Should().BeTrue(result.Output);
 
@@ -138,7 +138,7 @@ public class ManifestSetDeleteTests : IDisposable
         KubernetesCluster cluster = await SeedClusterAsync();
         ComponentLifecycleService sut = Lifecycle();
 
-        HelmExecutionResult result = await sut.ApplyRawManifestAsync(cluster, TwoDocuments, delete: true);
+        HelmExecutionResult result = await sut.ApplyRawManifestAsync(tenantId, cluster, TwoDocuments, delete: true);
 
         result.Success.Should().BeTrue(result.Output);
 
@@ -153,7 +153,7 @@ public class ManifestSetDeleteTests : IDisposable
         KubernetesCluster cluster = await SeedClusterAsync(withKubeconfig: false);
         ComponentLifecycleService sut = Lifecycle();
 
-        HelmExecutionResult result = await sut.ApplyRawManifestAsync(cluster, TwoDocuments);
+        HelmExecutionResult result = await sut.ApplyRawManifestAsync(tenantId, cluster, TwoDocuments);
 
         result.Success.Should().BeFalse();
         result.Output.Should().Contain("kubeconfig");
@@ -172,7 +172,7 @@ public class ManifestSetDeleteTests : IDisposable
 
         // VpnService inspects the result rather than catching, so an exception here would surface
         // as an unhandled error in the UI instead of a message on the page.
-        HelmExecutionResult result = await sut.ApplyRawManifestAsync(cluster, TwoDocuments);
+        HelmExecutionResult result = await sut.ApplyRawManifestAsync(tenantId, cluster, TwoDocuments);
 
         result.Success.Should().BeFalse();
         result.Output.Should().Contain("admission webhook denied");

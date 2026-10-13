@@ -403,7 +403,7 @@ public class HeadscaleService(
         };
 
         await externalRouteService.AddRouteAsync(tenantId, componentId, req, ct);
-        await lifecycleService.ApplyExternalRoutesAsync(componentId, ct);
+        await lifecycleService.ApplyExternalRoutesAsync(tenantId, componentId, ct);
     }
 
     /// <summary>
@@ -623,7 +623,7 @@ public class HeadscaleService(
             await db.SaveChangesAsync(ct);
         }
 
-        await lifecycleService.ApplyExternalRoutesAsync(comp.Id, ct);
+        await lifecycleService.ApplyExternalRoutesAsync(tenantId, comp.Id, ct);
     }
 
     /// <summary>

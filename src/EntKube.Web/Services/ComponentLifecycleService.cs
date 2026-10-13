@@ -314,7 +314,7 @@ public class ComponentLifecycleService(
     /// install the "barman-cloud" chart from the same CNPG charts repo.
     /// </summary>
     public async Task<HelmExecutionResult> InstallSubchartsAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -367,16 +367,8 @@ public class ComponentLifecycleService(
 
             string repoUrl = component.HelmRepoUrl ?? entry.HelmRepoUrl ?? "";
             string ns = component.Namespace ?? entry.DefaultNamespace ?? "default";
-            string kubeconfig = component.Cluster.Kubeconfig ?? "";
-
-            if (string.IsNullOrWhiteSpace(kubeconfig))
-            {
-                return new HelmExecutionResult
-                {
-                    Success = false,
-                    Output = "No kubeconfig stored for this cluster."
-                };
-            }
+            // The credential was read here only to check it existed; ExecuteHelmAsync below asks
+            // the seam, which answers the same question — and answers it for the right tenant.
 
             string? subchartValues = !string.IsNullOrWhiteSpace(field.SubchartDefaultValues)
                 ? field.SubchartDefaultValues
@@ -393,7 +385,7 @@ public class ComponentLifecycleService(
                 ValuesYaml = subchartValues
             };
 
-            HelmExecutionResult result = await ExecuteHelmAsync(componentId, subCommand, ct);
+            HelmExecutionResult result = await ExecuteHelmAsync(tenantId, componentId, subCommand, ct);
             output.AppendLine($"--- Subchart: {subchartName} ---");
             output.AppendLine(result.Output);
 
@@ -448,7 +440,7 @@ public class ComponentLifecycleService(
     /// Returns the combined Helm output for all subchart uninstalls.
     /// </summary>
     public async Task<HelmExecutionResult> UninstallSubchartsAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -482,16 +474,8 @@ public class ComponentLifecycleService(
             }
 
             string ns = component.Namespace ?? entry.DefaultNamespace ?? "default";
-            string kubeconfig = component.Cluster.Kubeconfig ?? "";
-
-            if (string.IsNullOrWhiteSpace(kubeconfig))
-            {
-                return new HelmExecutionResult
-                {
-                    Success = false,
-                    Output = "No kubeconfig stored for this cluster."
-                };
-            }
+            // The credential was read here only to check it existed; ExecuteHelmAsync below asks
+            // the seam, which answers the same question — and answers it for the right tenant.
 
             HelmCommand subCommand = new()
             {
@@ -500,7 +484,7 @@ public class ComponentLifecycleService(
                 Namespace = ns
             };
 
-            HelmExecutionResult result = await ExecuteHelmAsync(componentId, subCommand, ct);
+            HelmExecutionResult result = await ExecuteHelmAsync(tenantId, componentId, subCommand, ct);
 
             // "release: not found" means the subchart was never installed (e.g. the install
             // failed before Helm recorded the release). Treat this as already-uninstalled
@@ -610,7 +594,7 @@ public class ComponentLifecycleService(
     /// a "kubectl-apply" operation instead (applies raw YAML to the cluster).
     /// </summary>
     public async Task<HelmCommand> GetInstallCommandAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -795,7 +779,7 @@ public class ComponentLifecycleService(
             && string.IsNullOrWhiteSpace(YamlFormMerger.ExtractValue(valuesYaml ?? "", "imagePullSecrets.0.name")))
         {
             string? pullSecret = await EnsureImagePullSecretAsync(
-                component, valuesCatalog, component.Cluster.Kubeconfig ?? "", ct);
+                tenantId, component, valuesCatalog, ct);
 
             if (pullSecret is not null)
             {
@@ -1107,42 +1091,68 @@ public class ComponentLifecycleService(
     /// Returns null if the LB is not yet assigned or the cluster is unreachable.
     /// </summary>
     public async Task<string?> GetServiceExternalIpAsync(
-        Guid clusterId, string serviceName, string ns, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string serviceName, string ns, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
 
-        KubernetesCluster cluster = await db.KubernetesClusters
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct)
-            ?? throw new InvalidOperationException("Cluster not found.");
+        if (cluster is null) return null;
 
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return null;
-
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, cluster.Kubeconfig, ct);
+            // One list and two reads of it, rather than two `kubectl get -o jsonpath` runs with
+            // the credential written beside them. IP first — most cloud providers and MetalLB set
+            // .ingress[0].ip — then hostname, which AWS ELB and some AKS configs use instead.
+            string json = await cluster.GetJsonAsync("services", ns, ct: ct);
 
-            // Try IP first — most cloud providers and MetalLB set .ingress[0].ip
-            HelmExecutionResult ipResult = await RunProcessAsync("kubectl",
-                $"get svc {serviceName} -n {ns} --kubeconfig {tempKubeconfig} -o jsonpath={{.status.loadBalancer.ingress[0].ip}}",
-                ct);
+            using JsonDocument doc = JsonDocument.Parse(json);
+            if (!doc.RootElement.TryGetProperty("items", out JsonElement items)
+                || items.ValueKind != JsonValueKind.Array)
+            {
+                return null;
+            }
 
-            string ip = ipResult.Output.Trim();
-            if (!string.IsNullOrEmpty(ip))
-                return ip;
+            foreach (JsonElement svc in items.EnumerateArray())
+            {
+                if (!svc.TryGetProperty("metadata", out JsonElement md)
+                    || !md.TryGetProperty("name", out JsonElement nameEl)
+                    || nameEl.GetString() != serviceName)
+                {
+                    continue;
+                }
 
-            // Fallback to hostname — AWS ELB and some AKS configs use hostname
-            HelmExecutionResult hostnameResult = await RunProcessAsync("kubectl",
-                $"get svc {serviceName} -n {ns} --kubeconfig {tempKubeconfig} -o jsonpath={{.status.loadBalancer.ingress[0].hostname}}",
-                ct);
+                // Indexed only after checking the array is non-empty: `[0]` on a present-but-empty
+                // array throws, and a Service with no ingress yet is the normal case while a load
+                // balancer is still being provisioned.
+                if (!svc.TryGetProperty("status", out JsonElement status)
+                    || !status.TryGetProperty("loadBalancer", out JsonElement lb)
+                    || !lb.TryGetProperty("ingress", out JsonElement ingress)
+                    || ingress.ValueKind != JsonValueKind.Array
+                    || ingress.GetArrayLength() == 0)
+                {
+                    return null;
+                }
 
-            string hostname = hostnameResult.Output.Trim();
-            return string.IsNullOrEmpty(hostname) ? null : hostname;
+                JsonElement first = ingress[0];
+
+                if (first.TryGetProperty("ip", out JsonElement ipEl)
+                    && ipEl.GetString() is { Length: > 0 } ip)
+                {
+                    return ip;
+                }
+
+                return first.TryGetProperty("hostname", out JsonElement hostEl)
+                    && hostEl.GetString() is { Length: > 0 } hostname
+                        ? hostname : null;
+            }
+
+            return null;
         }
-        finally
+        catch (Exception ex)
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+            // The caller treats null as "not ready yet", which is what a failed read means here.
+            logger.LogDebug(ex, "Could not read the external address of {Service} in {Namespace}", serviceName, ns);
+            return null;
         }
     }
 
@@ -1196,10 +1206,10 @@ public class ComponentLifecycleService(
     /// (after wg-easy uninstall).
     /// </summary>
     public async Task<HelmExecutionResult?> ReapplyGatewayAsync(
-        Guid gatewayId, CancellationToken ct = default)
+        Guid tenantId, Guid gatewayId, CancellationToken ct = default)
     {
-        HelmCommand command = await GetInstallCommandAsync(gatewayId, ct);
-        return await ExecuteHelmAsync(gatewayId, command, ct);
+        HelmCommand command = await GetInstallCommandAsync(tenantId, gatewayId, ct);
+        return await ExecuteHelmAsync(tenantId, gatewayId, command, ct);
     }
 
     /// <summary>
@@ -1208,10 +1218,10 @@ public class ComponentLifecycleService(
     /// gateway exists.
     /// </summary>
     public async Task<HelmExecutionResult?> EnsureGatewayWireGuardPortAsync(
-        Guid wgComponentId, CancellationToken ct = default)
+        Guid tenantId, Guid wgComponentId, CancellationToken ct = default)
     {
         Guid? gatewayId = await ResolveWireGuardGatewayIdAsync(wgComponentId, ct);
-        return gatewayId is null ? null : await ReapplyGatewayAsync(gatewayId.Value, ct);
+        return gatewayId is null ? null : await ReapplyGatewayAsync(tenantId, gatewayId.Value, ct);
     }
 
     /// <summary>
@@ -1234,13 +1244,13 @@ public class ComponentLifecycleService(
     /// no installed collector, or that collector already ships somewhere the operator chose.</para>
     /// </summary>
     public async Task<HelmExecutionResult?> EnsureCollectorShipsInClusterAsync(
-        Guid indexerComponentId, CancellationToken ct = default)
+        Guid tenantId, Guid indexerComponentId, CancellationToken ct = default)
     {
         if (await RepointCollectorToInClusterAsync(indexerComponentId, ct) is not Guid collectorId)
             return null;
 
-        HelmCommand command = await GetInstallCommandAsync(collectorId, ct);
-        return await ExecuteHelmAsync(collectorId, command, ct);
+        HelmCommand command = await GetInstallCommandAsync(tenantId, collectorId, ct);
+        return await ExecuteHelmAsync(tenantId, collectorId, command, ct);
     }
 
     /// <summary>
@@ -1568,7 +1578,7 @@ public class ComponentLifecycleService(
     /// Writes a temporary kubeconfig file, runs the CLI, and cleans up.
     /// </summary>
     public async Task<HelmExecutionResult> ExecuteHelmAsync(
-        Guid componentId, HelmCommand command, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, HelmCommand command, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -1579,8 +1589,10 @@ public class ComponentLifecycleService(
             .FirstOrDefaultAsync(c => c.Id == componentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
-        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess = await clusterClients.ForAsync(
-            component.Cluster.TenantId, component.ClusterId, ct);
+        // The tenant is the caller's. It was component.Cluster.TenantId — read off the row whose
+        // id was handed to the same call, so the predicate could not fail.
+        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
+            await clusterClients.ForAsync(tenantId, component.ClusterId, ct);
 
         if (clusterAccess is null)
         {
@@ -1591,41 +1603,29 @@ public class ComponentLifecycleService(
             };
         }
 
-        // Still written for the kubectl helpers around the helm run — extracting a chart from the
-        // release secret, ensuring the namespace's LimitRange, describing stalled workloads. Those
-        // take a path, and moving them onto the seam is the follow-up to this change.
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
+        // No kubeconfig on disk here any more. It survived this long for two kubectl helpers the
+        // seam could not express — an apply from a URL, and a log tail for one container of a
+        // multi-container pod — and both are seam operations now, so the credential does not
+        // enter this method at all.
 
-        try
+        // Route to the appropriate executor based on operation type.
+
+        if (command.Operation == "noop")
         {
-            await SecretFile.WriteAsync(tempKubeconfig, component.Cluster.Kubeconfig, ct);
-
-            // Route to the appropriate executor based on operation type.
-
-            if (command.Operation == "noop")
-            {
-                return new HelmExecutionResult { Success = true, Output = "No action taken (CRD bundles are not uninstalled automatically)." };
-            }
-
-            if (command.Operation is "kubectl-apply" or "kubectl-delete")
-            {
-                return await ExecuteKubectlAsync(command, clusterAccess, ct);
-            }
-
-            if (command.Operation == "kubectl-apply-url")
-            {
-                return await ExecuteKubectlUrlAsync(command, tempKubeconfig, ct);
-            }
-
-            return await ExecuteHelmCliAsync(command, clusterAccess, tempKubeconfig, ct);
+            return new HelmExecutionResult { Success = true, Output = "No action taken (CRD bundles are not uninstalled automatically)." };
         }
-        finally
+
+        if (command.Operation is "kubectl-apply" or "kubectl-delete")
         {
-            if (File.Exists(tempKubeconfig))
-            {
-                File.Delete(tempKubeconfig);
-            }
+            return await ExecuteKubectlAsync(command, clusterAccess, ct);
         }
+
+        if (command.Operation == "kubectl-apply-url")
+        {
+            return await ExecuteKubectlUrlAsync(command, clusterAccess, ct);
+        }
+
+        return await ExecuteHelmCliAsync(command, clusterAccess, ct);
     }
 
     /// <summary>
@@ -1633,11 +1633,11 @@ public class ComponentLifecycleService(
     /// Used by VpnService to push StrongSwan ConfigMap and Secret.
     /// </summary>
     public async Task<HelmExecutionResult> ApplyRawManifestAsync(
-        KubernetesCluster cluster, string manifestYaml, bool delete = false,
+        Guid tenantId, KubernetesCluster cluster, string manifestYaml, bool delete = false,
         CancellationToken ct = default)
     {
         EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
-            await clusterClients.ForAsync(cluster.TenantId, cluster.Id, ct);
+            await clusterClients.ForAsync(tenantId, cluster.Id, ct);
 
         if (clusterAccess is null)
             return new HelmExecutionResult { Success = false, Output = "No kubeconfig stored for this cluster." };
@@ -1757,7 +1757,7 @@ public class ComponentLifecycleService(
     /// Safe to call repeatedly — kubectl apply is idempotent.
     /// </summary>
     public async Task<HelmExecutionResult> ApplyExternalRoutesAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -1807,8 +1807,8 @@ public class ComponentLifecycleService(
             return new HelmExecutionResult { Success = true, Output = "" };
         }
 
-        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess = await clusterClients.ForAsync(
-            component.Cluster.TenantId, component.Cluster.Id, ct);
+        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
+            await clusterClients.ForAsync(tenantId, component.ClusterId, ct);
 
         if (clusterAccess is null)
         {
@@ -2003,8 +2003,9 @@ public class ComponentLifecycleService(
         }
     }
 
-    private async Task<HelmExecutionResult> ExecuteKubectlUrlAsync(
-        HelmCommand command, string kubeconfigPath, CancellationToken ct)
+    private static async Task<HelmExecutionResult> ExecuteKubectlUrlAsync(
+        HelmCommand command, EntKube.Web.Services.Clusters.IClusterClient clusterAccess,
+        CancellationToken ct)
     {
         if (string.IsNullOrWhiteSpace(command.ManifestUrl))
         {
@@ -2032,9 +2033,8 @@ public class ComponentLifecycleService(
         // --force-conflicts takes ownership of fields last written by a client-side apply. Without
         // it, the first server-side apply over a client-side-managed resource is rejected as a
         // field-manager conflict — which is exactly the state every existing install is in.
-        string arguments =
-            $"apply --server-side --force-conflicts -f {command.ManifestUrl} --kubeconfig {kubeconfigPath}";
-        return await RunProcessAsync("kubectl", arguments, ct);
+        return await clusterAccess.ApplyManifestFromUrlAsync(
+            command.ManifestUrl!, $"Apply {command.ReleaseName} from {command.ManifestUrl}", ct);
     }
 
     /// <summary>
@@ -2044,7 +2044,7 @@ public class ComponentLifecycleService(
     /// </summary>
     private async Task<HelmExecutionResult> ExecuteHelmCliAsync(
         HelmCommand command, EntKube.Web.Services.Clusters.IClusterClient clusterAccess,
-        string kubeconfigPath, CancellationToken ct)
+        CancellationToken ct)
     {
         // Build the helm command arguments.
 
@@ -2204,7 +2204,7 @@ public class ComponentLifecycleService(
                 && LooksLikeWaitTimeout(result.Output))
             {
                 string stalled = await DescribeStalledWorkloadsAsync(
-                    command.Namespace!, clusterAccess, kubeconfigPath, ct);
+                    command.Namespace!, clusterAccess, ct);
 
                 if (!string.IsNullOrWhiteSpace(stalled))
                 {
@@ -2336,7 +2336,7 @@ public class ComponentLifecycleService(
     /// Returns the Secret's name when one was ensured, so the caller can reference it in the chart values.
     /// </summary>
     private async Task<string?> EnsureImagePullSecretAsync(
-        ClusterComponent component, CatalogEntry? catalog, string kubeconfig, CancellationToken ct)
+        Guid tenantId, ClusterComponent component, CatalogEntry? catalog, CancellationToken ct)
     {
         string? host = catalog?.ImageRegistryHost;
         if (string.IsNullOrWhiteSpace(host)) return null;
@@ -2379,42 +2379,46 @@ public class ComponentLifecycleService(
               .dockerconfigjson: {Convert.ToBase64String(Encoding.UTF8.GetBytes(dockerConfig))}
             """;
 
-        string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-pull-{Guid.NewGuid()}.kubeconfig");
-        string manifestPath = Path.Combine(Path.GetTempPath(), $"entkube-pull-{Guid.NewGuid()}.yaml");
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterClients.ForAsync(tenantId, component.ClusterId, ct);
+
+        if (cluster is null) return null;
+
         try
         {
-            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
-            // Written to a file rather than passed as --from-literal: process arguments are readable by
-            // any process on the host and routinely end up in logs.
-            await SecretFile.WriteAsync(manifestPath, manifest, ct);
+            // The Secret has to exist before Helm creates the pods that reference it, and the
+            // namespace before the Secret. Both are idempotent.
+            await cluster.EnsureNamespaceAsync(ns, ct);
 
-            // The Secret has to exist before Helm creates the pods that reference it, and the namespace
-            // before the Secret. Both are idempotent.
-            await RunProcessAsync("kubectl", $"create namespace {ns} --kubeconfig {kubeconfigPath}", ct);
-
-            HelmExecutionResult applied = await RunProcessAsync(
-                "kubectl", $"apply -f {manifestPath} --kubeconfig {kubeconfigPath}", ct);
-
-            if (!applied.Success)
-            {
-                // Not fatal: a pull secret may already exist by another name, or the registry may permit
-                // anonymous pulls after all. Helm's own failure is the more useful one to surface.
-                logger.LogWarning(
-                    "Could not create the image-pull Secret {Secret} in {Namespace}: {Output}",
-                    ManagedPullSecretName, ns, applied.Output);
-                return null;
-            }
-
-            logger.LogInformation(
-                "Ensured image-pull Secret {Secret} in {Namespace} for registry {Host}.",
-                ManagedPullSecretName, ns, host);
-            return ManagedPullSecretName;
+            // ReplaceSecretAsync rather than an apply: these Secrets carry no last-applied
+            // annotation, so a plain apply MERGES and a key removed from the configuration would
+            // stay in the cluster. For a revoked registry credential that is the one outcome that
+            // must not happen. The seam supplies the kubeconfig and redacts the values in the
+            // acknowledgment, so neither the credential nor a temp file passes through here.
+            await cluster.ReplaceSecretAsync(
+                ManagedPullSecretName, ns, manifest,
+                $"Image-pull credential for {host} in {ns}", ct);
         }
-        finally
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
         {
-            if (File.Exists(kubeconfigPath)) File.Delete(kubeconfigPath);
-            if (File.Exists(manifestPath)) File.Delete(manifestPath);
+            throw;
         }
+        catch (Exception ex)
+        {
+            // Not fatal: a pull secret may already exist by another name, or the registry may
+            // permit anonymous pulls after all. Helm's own failure is the more useful one to
+            // surface. The seam reports failure by throwing, where kubectl reported it as an
+            // exit code — so this catch is where that check used to be.
+            logger.LogWarning(ex,
+                "Could not create the image-pull Secret {Secret} in {Namespace}",
+                ManagedPullSecretName, ns);
+            return null;
+        }
+
+        logger.LogInformation(
+            "Ensured image-pull Secret {Secret} in {Namespace} for registry {Host}.",
+            ManagedPullSecretName, ns, host);
+        return ManagedPullSecretName;
     }
 
     /// <summary>
@@ -2812,7 +2816,7 @@ public class ComponentLifecycleService(
 
     private async Task<string> DescribeStalledWorkloadsAsync(
         string ns, EntKube.Web.Services.Clusters.IClusterClient clusterAccess,
-        string kubeconfigPath, CancellationToken ct)
+        CancellationToken ct)
     {
         try
         {
@@ -2835,14 +2839,25 @@ public class ComponentLifecycleService(
 
             foreach ((string pod, string container) in FindSilentlyUnreadyContainers(podsJson))
             {
-                HelmExecutionResult log = await RunProcessAsync(
-                    "kubectl",
-                    $"logs {pod} -c {container} --tail={LogTailLines} -n {ns} --kubeconfig {kubeconfigPath}",
-                    ct);
-
-                if (log.Success && !string.IsNullOrWhiteSpace(log.Output))
+                // Through the seam, which takes a container now. That parameter is the whole
+                // reason this method used to need a kubeconfig on disk: the log tail of ONE
+                // container of a stalled multi-container pod is what explains the stall, and
+                // GetPodLogsAsync could not ask for it.
+                string log;
+                try
                 {
-                    tails.Add($"Last {LogTailLines} log lines from {pod} ({container}):\n{log.Output.TrimEnd()}");
+                    log = await clusterAccess.GetPodLogsAsync(
+                        pod, ns, LogTailLines, container, ct);
+                }
+                catch (Exception ex)
+                {
+                    logger.LogDebug(ex, "Could not read the log tail of {Pod}/{Container}.", pod, container);
+                    continue;
+                }
+
+                if (!string.IsNullOrWhiteSpace(log))
+                {
+                    tails.Add($"Last {LogTailLines} log lines from {pod} ({container}):\n{log.TrimEnd()}");
                 }
             }
 
