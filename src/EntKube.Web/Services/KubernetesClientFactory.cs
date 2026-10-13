@@ -101,8 +101,7 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         {
             await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
 
-            await RunKubectlAsync(
-                $"delete {kind} {name} -n {ns} --kubeconfig={kubeconfigPath} --ignore-not-found", ct);
+            await RunKubectlAsync(BuildDeleteArguments(kind, name, ns, kubeconfigPath), ct);
         }
         finally
         {
@@ -703,6 +702,19 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             File.Delete(kubeconfigPath);
         }
     }
+
+    /// <summary>
+    /// The command line for deleting one named resource.
+    ///
+    /// <para><b>An empty namespace means a cluster-scoped resource</b>, so the flag is omitted
+    /// rather than sent empty — <c>kubectl delete x y -n</c> is rejected outright.
+    /// <see cref="ResourceExistsAsync"/> already read an empty <c>ns</c> that way and documents
+    /// the convention; this did not, so a caller holding a cluster-scoped CR had to keep its own
+    /// kubectl. <c>TrustBundleService</c> was doing exactly that for a trust Bundle.</para>
+    /// </summary>
+    public static string BuildDeleteArguments(string kind, string name, string ns, string kubeconfigPath)
+        => $"delete {kind} {name}{(string.IsNullOrEmpty(ns) ? "" : $" -n {ns}")}"
+           + $" --kubeconfig={kubeconfigPath} --ignore-not-found";
 
     /// <summary>
     /// The command line for one resource's YAML. Public and static so it can be asserted without

@@ -88,29 +88,25 @@ public class TrustBundleService(
     }
 
     /// <summary>Removes the bundle from the DB and best-effort deletes the live Bundle CR from the cluster.</summary>
-    public async Task DeleteBundleAsync(Guid id, CancellationToken ct = default)
+    public async Task DeleteBundleAsync(Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        CaTrustBundle? bundle = await db.CaTrustBundles.FindAsync([id], ct);
+
+        // Scoped: the bundle must be this tenant's before anything is removed from a cluster.
+        CaTrustBundle? bundle = await db.CaTrustBundles
+            .FirstOrDefaultAsync(b => b.Id == id && b.TenantId == tenantId, ct);
         if (bundle is null) return;
 
-        KubernetesCluster? cluster = await db.KubernetesClusters.FindAsync([bundle.ClusterId], ct);
-        if (cluster is not null && !string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        Clusters.IClusterClient? target = await clusterAccess.ForAsync(tenantId, bundle.ClusterId, ct);
+        if (target is not null)
         {
             try
             {
-                await gate.AcknowledgeAsync(new PlannedClusterChange
-                {
-                    Verb = ChangeVerb.Delete,
-                    Kubeconfig = cluster.Kubeconfig!,
-                    ClusterLabel = cluster.Name,
-                    Kind = "bundles.trust.cert-manager.io",
-                    Name = bundle.TargetName,
-                    Summary = $"Delete trust Bundle {bundle.TargetName}",
-                }, ct);
-                await RunKubectlAsync(
-                    $"delete bundles.trust.cert-manager.io {bundle.TargetName} --ignore-not-found",
-                    cluster.Kubeconfig!, null, ct);
+                // The Bundle CR is CLUSTER-scoped, so the namespace is empty — which the seam's
+                // delete now reads as "omit the flag" rather than sending `-n `. That gap is why
+                // this method used to run its own kubectl with its own copy of the credential.
+                await target.DeleteManifestAsync(
+                    "bundles.trust.cert-manager.io", bundle.TargetName, ns: "", ct);
             }
             catch (OperationCanceledException) when (!ct.IsCancellationRequested)
             {
@@ -119,7 +115,8 @@ public class TrustBundleService(
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Could not delete Bundle CR {Name} from {Cluster}", bundle.TargetName, cluster.Name);
+                logger.LogWarning(ex, "Could not delete Bundle CR {Name} from {Cluster}",
+                    bundle.TargetName, target.ClusterName);
             }
         }
 
@@ -177,17 +174,18 @@ public class TrustBundleService(
     /// Renders the bundle to a trust-manager Bundle CR and applies it to the cluster.
     /// trust-manager then continuously syncs the trust store into every selected namespace.
     /// </summary>
-    public async Task<(bool Success, string Output)> ApplyBundleAsync(Guid bundleId, CancellationToken ct = default)
+    public async Task<(bool Success, string Output)> ApplyBundleAsync(
+        Guid tenantId, Guid bundleId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         CaTrustBundle? bundle = await db.CaTrustBundles
             .Include(b => b.Sources)
-            .FirstOrDefaultAsync(b => b.Id == bundleId, ct);
+            .FirstOrDefaultAsync(b => b.Id == bundleId && b.TenantId == tenantId, ct);
         if (bundle is null) return (false, "Trust bundle not found.");
 
-        KubernetesCluster? cluster = await db.KubernetesClusters.FindAsync([bundle.ClusterId], ct);
-        if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return (false, "Target cluster has no kubeconfig configured.");
+        Clusters.IClusterClient? target = await clusterAccess.ForAsync(tenantId, bundle.ClusterId, ct);
+        if (target is null)
+            return (false, "The target cluster is not this tenant's, or has no kubeconfig configured.");
 
         if (bundle.Sources.Count == 0 && !bundle.IncludeDefaultCAs)
             return (false, "The bundle has no CA sources and default CAs are disabled — nothing to distribute.");
@@ -202,20 +200,23 @@ public class TrustBundleService(
 
         string manifest = BuildBundleManifest(bundle, tenantNamespaces);
 
-        await gate.AcknowledgeAsync(new PlannedClusterChange
+        // Asked through the seam, which supplies the credential and the cluster's label — this
+        // caller mutates through kubectl rather than through a seam operation, so it raises the
+        // acknowledgment itself, but it no longer needs a kubeconfig in order to.
+        await target.AcknowledgeAsync(new PlannedChange
         {
             Verb = ChangeVerb.Apply,
-            Kubeconfig = cluster.Kubeconfig!,
-            ClusterLabel = cluster.Name,
             Summary = $"Apply trust Bundle {bundle.TargetName}",
             Manifest = manifest,
         }, ct);
 
-        (bool ok, string output) = await ApplyThroughClusterAsync(cluster, manifest, ct);
+        (bool ok, string output) = await ApplyThroughClusterAsync(target, manifest, ct);
         if (ok)
-            logger.LogInformation("Trust bundle {Name} applied to {Cluster}", bundle.TargetName, cluster.Name);
+            logger.LogInformation(
+                "Trust bundle {Name} applied to {Cluster}", bundle.TargetName, target.ClusterName);
         else
-            logger.LogWarning("Trust bundle apply failed for {Cluster}: {Output}", cluster.Name, output);
+            logger.LogWarning(
+                "Trust bundle apply failed for {Cluster}: {Output}", target.ClusterName, output);
         return (ok, output);
     }
 
@@ -342,44 +343,6 @@ public class TrustBundleService(
     public static string SerializeSelector(IReadOnlyDictionary<string, string> labels) =>
         JsonSerializer.Serialize(labels);
 
-    // ── kubectl plumbing ───────────────────────────────────────────────────────
-
-
-    private static async Task<(bool, string)> RunKubectlAsync(
-        string arguments, string kubeconfig, string? extraTempToDelete, CancellationToken ct)
-    {
-        string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-trust-{Guid.NewGuid():N}.kubeconfig");
-        try
-        {
-            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
-
-            System.Diagnostics.ProcessStartInfo psi = new("kubectl", $"{arguments} --kubeconfig {kubeconfigPath}")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true,
-            };
-            psi.EnvironmentVariables["HOME"] = "/tmp";
-
-            using System.Diagnostics.Process proc = new() { StartInfo = psi };
-            StringBuilder output = new();
-            proc.OutputDataReceived += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-            proc.ErrorDataReceived += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-            proc.Start();
-            proc.BeginOutputReadLine();
-            proc.BeginErrorReadLine();
-            await proc.WaitForExitAsync(ct);
-
-            return (proc.ExitCode == 0, output.ToString().TrimEnd());
-        }
-        finally
-        {
-            if (File.Exists(kubeconfigPath)) File.Delete(kubeconfigPath);
-            if (extraTempToDelete is not null && File.Exists(extraTempToDelete)) File.Delete(extraTempToDelete);
-        }
-    }
-
     // ── helpers ────────────────────────────────────────────────────────────────
 
     /// <summary>Splits PEM into trimmed non-empty lines for block-scalar embedding.</summary>
@@ -418,16 +381,8 @@ public class TrustBundleService(
     /// and the credential stops passing through here.</para>
     /// </summary>
     private async Task<(bool Ok, string Output)> ApplyThroughClusterAsync(
-        KubernetesCluster cluster, string manifest, CancellationToken ct)
+        Clusters.IClusterClient target, string manifest, CancellationToken ct)
     {
-        Clusters.IClusterClient? target =
-            await clusterAccess.ForAsync(cluster.TenantId, cluster.Id, ct);
-
-        if (target is null)
-        {
-            return (false, "The cluster has no stored kubeconfig.");
-        }
-
         try
         {
             return (true, await target.ApplyManifestAsync(manifest, ct));

@@ -716,7 +716,7 @@
         applyResults = null;
         try
         {
-            applyResults = await KedaService.ApplyToEnvironmentAsync(AppId, EnvironmentId);
+            applyResults = await KedaService.ApplyToEnvironmentAsync(TenantId, AppId, EnvironmentId);
             applyAllOk = applyResults.All(r => r.Success);
         }
         catch (Exception ex)
@@ -754,7 +754,7 @@
         StateHasChanged();
         try
         {
-            scan = await KedaService.ScanEnvironmentAsync(AppId, EnvironmentId);
+            scan = await KedaService.ScanEnvironmentAsync(TenantId, AppId, EnvironmentId);
         }
         catch (Exception ex)
         {

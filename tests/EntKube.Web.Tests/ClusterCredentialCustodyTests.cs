@@ -280,7 +280,30 @@ public class ClusterCredentialCustodyTests
     /// <c>GetServicesInNamespaceAsync</c>/<c>GetEndpointsForServiceAsync</c> (4), and four
     /// one-site private helpers on the apply path.</para>
     ///
-    private const int BaselineOccurrences = 125;
+    /// <para><b>118 — CA trust and autoscalers, both files to zero.</b> These are the first two
+    /// of the four that held <em>both</em> a tautological seam call and credential sites, which is
+    /// why they were left until the two could move together: threading a tenant in makes the
+    /// credential reads newly inexcusable in the same step.</para>
+    ///
+    /// <para><c>KedaScalerService</c>'s target resolution stopped returning
+    /// <c>KubernetesCluster</c> rows. Including them materialized a kubeconfig through the vault
+    /// interceptor for every target — on a <em>scan</em>, which only ever needed the cluster's
+    /// name — and then put a credential within reach of every caller. It returns ids and names
+    /// now, which is what the seam wants.</para>
+    ///
+    /// <para><c>TrustBundleService</c> needed a seam gap closed first: the trust Bundle CR is
+    /// cluster-scoped, and <c>DeleteManifestAsync</c> always emitted <c>-n {ns}</c>, which kubectl
+    /// rejects when empty. <c>ResourceExistsAsync</c> had read an empty <c>ns</c> as "omit the
+    /// flag" all along and documented the convention; delete now does too. That gap was the whole
+    /// reason this service kept its own kubectl with its own copy of the credential.</para>
+    ///
+    /// <para>⚠️ And the exemption predicted in <see cref="ClusterChangeGateCoverageTests"/> expired
+    /// exactly as written: moving the acknowledgment onto <c>IClusterClient</c> made the file stop
+    /// matching that metric's "acknowledges" test, so it arrived in the ungated list and the count
+    /// went 12 → 13. The fix was not to widen the regex — the private kubectl runner had become
+    /// <b>dead code</b>, 39 lines of it, so deleting it took the file out of the list honestly.</para>
+    ///
+    private const int BaselineOccurrences = 118;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -300,8 +323,10 @@ public class ClusterCredentialCustodyTests
     ///
     /// <para>32. <c>PrometheusService</c> — which held twenty, the largest block in the whole
     /// count — and <c>CostReportService</c> with it.</para>
+    ///
+    /// <para>30. <c>KedaScalerService</c> and <c>TrustBundleService</c>.</para>
     /// </summary>
-    private const int BaselineFiles = 32;
+    private const int BaselineFiles = 30;
 
     private static (int Occurrences, int Files) Measure()
     {
