@@ -88,6 +88,23 @@ public class BackupRoundTripTests : IDisposable
             Name = "prod-1", ApiServerUrl = "https://k8s.example.com",
         });
 
+        // The audit trail: one event inside the retention window and one beyond it. Both are
+        // deliberate — the window is a stated partial loss, and a test that seeded only a recent
+        // event would pass just as well against a bundle that carried the whole table.
+        db.Set<AuditEvent>().Add(new AuditEvent
+        {
+            Id = Guid.NewGuid(), Action = "HelmInstall", ResourceKind = "Deployment",
+            ResourceName = "harbor-core", PerformedBy = "operator@entit.se",
+            Details = "chart 2.11.0", OccurredAt = DateTime.UtcNow.AddDays(-30),
+        });
+        db.Set<AuditEvent>().Add(new AuditEvent
+        {
+            Id = Guid.NewGuid(), Action = "DeleteNamespace", ResourceKind = "Namespace",
+            ResourceName = "ancient", PerformedBy = "operator@entit.se",
+            OccurredAt = DateTime.UtcNow - EntKube.Web.Services.BackupService.AuditRetention
+                         - TimeSpan.FromDays(1),
+        });
+
         // Configuration nothing live recreates.
         db.ApiTokens.Add(new ApiToken
         {
@@ -183,6 +200,33 @@ public class BackupRoundTripTests : IDisposable
         db.PortfolioAgreements.Should().ContainSingle();
         db.SupportMailboxes.Should().ContainSingle();
         db.MaintenanceWindows.Should().ContainSingle();
+    }
+
+    /// <summary>
+    /// The audit trail travels, within its window. This was the last entry on
+    /// <c>BackupCoverageTests</c>'s gap list: pure evidence rather than configuration, kept out
+    /// because a busy installation's whole history could be most of a one-document bundle.
+    /// </summary>
+    [Fact]
+    public async Task The_audit_trail_travels_within_its_window()
+    {
+        Seed();
+
+        await RoundTripAsync();
+
+        using ApplicationDbContext db = Destination();
+
+        AuditEvent carried = db.Set<AuditEvent>().Should().ContainSingle().Subject;
+
+        carried.Action.Should().Be("HelmInstall");
+        carried.ResourceName.Should().Be("harbor-core");
+        carried.PerformedBy.Should().Be("operator@entit.se",
+            "who did it is the whole reason to carry an audit event");
+        carried.Details.Should().Be("chart 2.11.0");
+
+        db.Set<AuditEvent>().Should().NotContain(a => a.Action == "DeleteNamespace",
+            "an event older than BackupService.AuditRetention is deliberately not carried — a "
+            + "stated partial loss, which is what keeps the bundle one document");
     }
 
     /// <summary>

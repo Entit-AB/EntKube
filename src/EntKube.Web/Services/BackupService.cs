@@ -27,6 +27,21 @@ public class BackupService(
         ReferenceHandler = ReferenceHandler.IgnoreCycles,
     };
 
+    /// <summary>
+    /// How much of the audit trail a bundle carries.
+    ///
+    /// <para>A year, because the reason to carry audit events at all is the question asked long
+    /// after the fact — who scaled this, who deleted that — and a year is the horizon the rest of
+    /// the product treats as "recent" for evidence. The alternative to a window was a second file
+    /// in the bundle, which changes its shape, its restore path and every consumer of it to carry
+    /// history that is mostly never read.</para>
+    ///
+    /// <para>It is a deliberate, stated partial loss: a migration keeps the last year and not the
+    /// one before it. That is written in the release notes rather than discovered by someone
+    /// looking for a two-year-old event.</para>
+    /// </summary>
+    public static readonly TimeSpan AuditRetention = TimeSpan.FromDays(365);
+
     // ── Export ──────────────────────────────────────────────────────────────
 
     public async Task<byte[]> ExportAsync(string performedBy)
@@ -43,6 +58,10 @@ public class BackupService(
             dekByVaultId[vault.Id] = dek;
             vaultRecords.Add(new VaultRecord { Id = vault.Id, TenantId = vault.TenantId, CreatedAt = vault.CreatedAt });
         }
+
+        // Computed here rather than in the query: EF cannot translate a TimeSpan subtraction, and
+        // one cutoff for the whole export is also the honest reading — a bundle is a moment.
+        DateTime auditSince = DateTime.UtcNow - AuditRetention;
 
         List<VaultSecretRecord> secretRecords = [];
         Dictionary<Guid, Guid> vaultIdBySecretId = [];
@@ -150,6 +169,9 @@ public class BackupService(
             OpenStackConnections = await db.OpenStackConnections.AsNoTracking().ToListAsync(),
             StorageLinks = await db.StorageLinks.AsNoTracking().ToListAsync(),
             AppDeployments = await db.AppDeployments.AsNoTracking().ToListAsync(),
+            AuditEvents = await db.AuditEvents.AsNoTracking()
+                .Where(a => a.OccurredAt >= auditSince)
+                .ToListAsync(),
             DeploymentManifests = await db.DeploymentManifests.AsNoTracking().ToListAsync(),
             StorageBindings = await db.StorageBindings.AsNoTracking().ToListAsync(),
             CnpgClusters = await db.CnpgClusters.AsNoTracking().ToListAsync(),
@@ -485,6 +507,9 @@ public class BackupService(
             // Deployments — apps and clusters must exist first (RESTRICT FKs).
             await InsertEntities(db, db.AppDeployments, bundle.AppDeployments);
             await InsertEntities(db, db.DeploymentManifests, bundle.DeploymentManifests);
+
+            // After AppDeployments: an audit event may name one, and the FK cascades.
+            await InsertEntities(db, db.AuditEvents, bundle.AuditEvents);
             await InsertEntities(db, db.StorageBindings, bundle.StorageBindings);
 
             // Routes/ports/bindings that reference AppDeployments (and AppRoutes/KafkaUsers inserted earlier).

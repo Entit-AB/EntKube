@@ -2,6 +2,8 @@ namespace EntKube.Web.Data.Backup;
 
 public class BackupBundle
 {
+    // Version 11 added the audit trail, within a retention window — see
+    // BackupService.AuditRetention for why a window rather than all of it.
     // Version 8 added the inbound ticket bridge: the customers' own ticketing systems and
     // what each of our tickets mirrors there.
     // Version 7 added the envelope recipients kept beside the claimed ones.
@@ -27,7 +29,7 @@ public class BackupBundle
     /// literal here and a second literal in the import's guard, which is how a bundle
     /// this very code wrote came to be rejected by it.</para>
     /// </summary>
-    public const int CurrentVersion = 10;
+    public const int CurrentVersion = 11;
 
     public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -79,6 +81,20 @@ public class BackupBundle
 
     // Deployments
     public List<AppDeployment> AppDeployments { get; set; } = [];
+
+    /// <summary>
+    /// The audit trail, limited to <see cref="EntKube.Web.Services.BackupService.AuditRetention"/>.
+    ///
+    /// <para>The last table outside this bundle that nobody had decided about. It is the one thing
+    /// here that is pure evidence rather than configuration — who restarted, scaled, deleted or
+    /// installed what — and losing it on a server migration loses the answer to questions asked
+    /// long afterwards. What kept it out was volume: the bundle is one JSON document, and a busy
+    /// installation's whole history could be most of it.</para>
+    ///
+    /// <para>A window settles that without changing the bundle's shape. Events reference a
+    /// deployment, so they are inserted after <see cref="AppDeployments"/>.</para>
+    /// </summary>
+    public List<AuditEvent> AuditEvents { get; set; } = [];
     public List<DeploymentManifest> DeploymentManifests { get; set; } = [];
     public List<StorageBinding> StorageBindings { get; set; } = [];
 
