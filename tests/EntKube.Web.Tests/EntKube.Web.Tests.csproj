@@ -5,7 +5,9 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <IsPackable>false</IsPackable>
-  </PropertyGroup>
+      <!-- Opts in to the System.Security.Cryptography.Pkcs pin (CVE-2026-84008); MailKit pulls it. -->
+    <UsesMailKit>true</UsesMailKit>
+</PropertyGroup>
 
   <ItemGroup>
     <!-- Mirrors EntKube.Web: the segment engine now lives in EntKube.Telemetry. -->
@@ -17,7 +19,7 @@
     <PackageReference Include="bunit" Version="2.9.0" />
     <PackageReference Include="coverlet.collector" Version="6.0.4" />
     <PackageReference Include="FluentAssertions" Version="8.10.0" />
-    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.1" />
+    <PackageReference Include="Microsoft.AspNetCore.Mvc.Testing" Version="10.0.13" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.InMemory" Version="10.0.8" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.8" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" Version="17.14.1" />
