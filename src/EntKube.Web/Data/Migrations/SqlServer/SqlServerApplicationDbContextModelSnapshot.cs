@@ -55,7 +55,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId")
                         .IsUnique();
 
-                    b.ToTable("AdvisorDigestConfigs");
+                    b.ToTable("AdvisorDigestConfigs", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AdvisorFindingState", b =>
@@ -109,7 +109,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "FindingKey")
                         .IsUnique();
 
-                    b.ToTable("AdvisorFindingStates");
+                    b.ToTable("AdvisorFindingStates", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AlertIncident", b =>
@@ -203,7 +203,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ClusterId", "Fingerprint")
                         .IsUnique();
 
-                    b.ToTable("AlertIncidents");
+                    b.ToTable("AlertIncidents", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AlertRoutingRule", b =>
@@ -263,7 +263,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("AlertRoutingRules");
+                    b.ToTable("AlertRoutingRules", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ApiToken", b =>
@@ -318,7 +318,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TokenHash")
                         .IsUnique();
 
-                    b.ToTable("ApiTokens");
+                    b.ToTable("ApiTokens", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.App", b =>
@@ -347,7 +347,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("CustomerId", "Name")
                         .IsUnique();
 
-                    b.ToTable("Apps");
+                    b.ToTable("Apps", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppAllowedCache", b =>
@@ -376,7 +376,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("RedisClusterId");
 
-                    b.ToTable("AppAllowedCaches");
+                    b.ToTable("AppAllowedCaches", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppAllowedDatabase", b =>
@@ -415,7 +415,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("RegisteredPostgresDatabaseId");
 
-                    b.ToTable("AppAllowedDatabases");
+                    b.ToTable("AppAllowedDatabases", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppAllowedStorage", b =>
@@ -444,7 +444,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("StorageLinkId");
 
-                    b.ToTable("AppAllowedStorages");
+                    b.ToTable("AppAllowedStorages", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppDeployment", b =>
@@ -556,7 +556,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("AppId", "Name")
                         .IsUnique();
 
-                    b.ToTable("AppDeployments");
+                    b.ToTable("AppDeployments", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppDeploymentRoute", b =>
@@ -643,7 +643,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("AppRouteId");
 
-                    b.ToTable("AppDeploymentRoutes");
+                    b.ToTable("AppDeploymentRoutes", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppEnvironment", b =>
@@ -664,7 +664,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("EnvironmentId");
 
-                    b.ToTable("AppEnvironments");
+                    b.ToTable("AppEnvironments", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppKnowledgeProfile", b =>
@@ -713,7 +713,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("AppKnowledgeProfiles");
+                    b.ToTable("AppKnowledgeProfiles", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppL4Route", b =>
@@ -778,7 +778,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("AppId");
 
-                    b.ToTable("AppL4Routes");
+                    b.ToTable("AppL4Routes", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppNetworkPolicy", b =>
@@ -817,7 +817,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("AppId", "EnvironmentId", "Name")
                         .IsUnique();
 
-                    b.ToTable("AppNetworkPolicies");
+                    b.ToTable("AppNetworkPolicies", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppQuota", b =>
@@ -864,7 +864,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("AppId", "EnvironmentId")
                         .IsUnique();
 
-                    b.ToTable("AppQuotas");
+                    b.ToTable("AppQuotas", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppRbacPolicy", b =>
@@ -894,7 +894,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("AppId", "EnvironmentId")
                         .IsUnique();
 
-                    b.ToTable("AppRbacPolicies");
+                    b.ToTable("AppRbacPolicies", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppRbacRule", b =>
@@ -925,7 +925,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("AppRbacPolicyId");
 
-                    b.ToTable("AppRbacRules");
+                    b.ToTable("AppRbacRules", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppRoute", b =>
@@ -983,7 +983,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("ClientCaBundleId");
 
-                    b.ToTable("AppRoutes");
+                    b.ToTable("AppRoutes", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppServiceDependency", b =>
@@ -1035,7 +1035,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("AppServiceDependencies");
+                    b.ToTable("AppServiceDependencies", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.AppServicePort", b =>
@@ -1098,7 +1098,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("AppId", "EnvironmentId");
 
-                    b.ToTable("AppServicePorts");
+                    b.ToTable("AppServicePorts", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ApplicationContract", b =>
@@ -1163,7 +1163,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("ApplicationContracts");
+                    b.ToTable("ApplicationContracts", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ApplicationServiceLevel", b =>
@@ -1198,7 +1198,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("ApplicationContractId", "EffectiveFrom");
 
-                    b.ToTable("ApplicationServiceLevels");
+                    b.ToTable("ApplicationServiceLevels", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ApplicationUser", b =>
@@ -1310,7 +1310,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("OccurredAt");
 
-                    b.ToTable("AuditEvents");
+                    b.ToTable("AuditEvents", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.BlueprintRollout", b =>
@@ -1349,7 +1349,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("BlueprintId");
 
-                    b.ToTable("BlueprintRollouts");
+                    b.ToTable("BlueprintRollouts", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.BlueprintRolloutTarget", b =>
@@ -1390,7 +1390,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("RolloutId", "Order");
 
-                    b.ToTable("BlueprintRolloutTargets");
+                    b.ToTable("BlueprintRolloutTargets", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.BlueprintStep", b =>
@@ -1434,7 +1434,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("BlueprintId", "Order");
 
-                    b.ToTable("BlueprintSteps");
+                    b.ToTable("BlueprintSteps", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.BlueprintVariable", b =>
@@ -1464,7 +1464,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("BlueprintId", "Name")
                         .IsUnique();
 
-                    b.ToTable("BlueprintVariables");
+                    b.ToTable("BlueprintVariables", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.BlueprintVariableValue", b =>
@@ -1489,7 +1489,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("VariableId", "EnvironmentId")
                         .IsUnique();
 
-                    b.ToTable("BlueprintVariableValues");
+                    b.ToTable("BlueprintVariableValues", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.BootstrapRun", b =>
@@ -1542,7 +1542,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("ClusterId");
 
-                    b.ToTable("BootstrapRuns");
+                    b.ToTable("BootstrapRuns", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.BootstrapStepRun", b =>
@@ -1603,7 +1603,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("BootstrapRunId", "Order");
 
-                    b.ToTable("BootstrapStepRuns");
+                    b.ToTable("BootstrapStepRuns", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CaTrustBundle", b =>
@@ -1653,7 +1653,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasKey("Id");
 
-                    b.ToTable("CaTrustBundles");
+                    b.ToTable("CaTrustBundles", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CaTrustBundleSource", b =>
@@ -1680,7 +1680,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("BundleId");
 
-                    b.ToTable("CaTrustBundleSources");
+                    b.ToTable("CaTrustBundleSources", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CacheBinding", b =>
@@ -1718,7 +1718,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("RedisClusterId");
 
-                    b.ToTable("CacheBindings");
+                    b.ToTable("CacheBindings", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CertificateDistribution", b =>
@@ -1770,7 +1770,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasKey("Id");
 
-                    b.ToTable("CertificateDistributions");
+                    b.ToTable("CertificateDistributions", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClientCaBundle", b =>
@@ -1807,7 +1807,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Name")
                         .IsUnique();
 
-                    b.ToTable("ClientCaBundles");
+                    b.ToTable("ClientCaBundles", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClientCaCertificate", b =>
@@ -1846,7 +1846,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("BundleId");
 
-                    b.ToTable("ClientCaCertificates");
+                    b.ToTable("ClientCaCertificates", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterBlueprint", b =>
@@ -1882,7 +1882,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Name")
                         .IsUnique();
 
-                    b.ToTable("ClusterBlueprints");
+                    b.ToTable("ClusterBlueprints", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterComponent", b =>
@@ -1942,7 +1942,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ClusterId", "Name")
                         .IsUnique();
 
-                    b.ToTable("ClusterComponents");
+                    b.ToTable("ClusterComponents", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterCostRate", b =>
@@ -2001,7 +2001,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ClusterId")
                         .IsUnique();
 
-                    b.ToTable("ClusterCostRates");
+                    b.ToTable("ClusterCostRates", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ClusterServer", b =>
@@ -2078,7 +2078,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ClusterId", "DisplayName")
                         .IsUnique();
 
-                    b.ToTable("ClusterServers");
+                    b.ToTable("ClusterServers", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CnpgBackup", b =>
@@ -2118,7 +2118,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("CnpgClusterId", "Name")
                         .IsUnique();
 
-                    b.ToTable("CnpgBackups");
+                    b.ToTable("CnpgBackups", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CnpgCluster", b =>
@@ -2192,7 +2192,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("KubernetesClusterId", "Name", "Namespace")
                         .IsUnique();
 
-                    b.ToTable("CnpgClusters");
+                    b.ToTable("CnpgClusters", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CnpgDatabase", b =>
@@ -2225,7 +2225,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("CnpgClusterId", "Name")
                         .IsUnique();
 
-                    b.ToTable("CnpgDatabases");
+                    b.ToTable("CnpgDatabases", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ConnectivityRule", b =>
@@ -2298,7 +2298,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("AppId", "EnvironmentId");
 
-                    b.ToTable("ConnectivityRules");
+                    b.ToTable("ConnectivityRules", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ContractContact", b =>
@@ -2355,7 +2355,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("CustomerId", "Party", "Role");
 
-                    b.ToTable("ContractContacts");
+                    b.ToTable("ContractContacts", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CostLedgerCoverage", b =>
@@ -2399,7 +2399,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId", "Day");
 
-                    b.ToTable("CostLedgerCoverages");
+                    b.ToTable("CostLedgerCoverages", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CostLedgerCursor", b =>
@@ -2419,7 +2419,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ClusterId")
                         .IsUnique();
 
-                    b.ToTable("CostLedgerCursors");
+                    b.ToTable("CostLedgerCursors", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CostLedgerEntry", b =>
@@ -2528,7 +2528,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ClusterId", "Namespace", "Day")
                         .IsUnique();
 
-                    b.ToTable("CostLedgerEntries");
+                    b.ToTable("CostLedgerEntries", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Customer", b =>
@@ -2553,7 +2553,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Name")
                         .IsUnique();
 
-                    b.ToTable("Customers");
+                    b.ToTable("Customers", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CustomerAccess", b =>
@@ -2576,7 +2576,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("CustomerId");
 
-                    b.ToTable("CustomerAccesses");
+                    b.ToTable("CustomerAccesses", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CustomerEmailDomain", b =>
@@ -2614,7 +2614,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Domain")
                         .IsUnique();
 
-                    b.ToTable("CustomerEmailDomains");
+                    b.ToTable("CustomerEmailDomains", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CustomerEnvironment", b =>
@@ -2632,7 +2632,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("EnvironmentId");
 
-                    b.ToTable("CustomerEnvironments");
+                    b.ToTable("CustomerEnvironments", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CustomerGitCredential", b =>
@@ -2680,7 +2680,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("CustomerId", "EnvironmentId", "Name")
                         .IsUnique();
 
-                    b.ToTable("CustomerGitCredentials");
+                    b.ToTable("CustomerGitCredentials", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CustomerGitRepoPolicy", b =>
@@ -2710,7 +2710,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("CustomerId", "EnvironmentId", "UrlPattern")
                         .IsUnique();
 
-                    b.ToTable("CustomerGitRepoPolicies");
+                    b.ToTable("CustomerGitRepoPolicies", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.CustomerSupportAddress", b =>
@@ -2751,7 +2751,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Address")
                         .IsUnique();
 
-                    b.ToTable("CustomerSupportAddresses");
+                    b.ToTable("CustomerSupportAddresses", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Dashboard", b =>
@@ -2779,7 +2779,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasKey("Id");
 
-                    b.ToTable("Dashboards");
+                    b.ToTable("Dashboards", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.DatabaseBinding", b =>
@@ -2824,7 +2824,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("RegisteredPostgresDatabaseId");
 
-                    b.ToTable("DatabaseBindings");
+                    b.ToTable("DatabaseBindings", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.DeploymentAppliedResource", b =>
@@ -2870,7 +2870,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("DeploymentId");
 
-                    b.ToTable("DeploymentAppliedResources");
+                    b.ToTable("DeploymentAppliedResources", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.DeploymentHealthSnapshot", b =>
@@ -2905,7 +2905,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("DeploymentId", "SnapshotAt");
 
-                    b.ToTable("DeploymentHealthSnapshots");
+                    b.ToTable("DeploymentHealthSnapshots", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.DeploymentManifest", b =>
@@ -2947,7 +2947,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("DeploymentId");
 
-                    b.ToTable("DeploymentManifests");
+                    b.ToTable("DeploymentManifests", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.DeploymentResource", b =>
@@ -3014,7 +3014,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("ParentResourceId");
 
-                    b.ToTable("DeploymentResources");
+                    b.ToTable("DeploymentResources", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.DeploymentRollout", b =>
@@ -3055,7 +3055,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("DeploymentId", "StartedAt");
 
-                    b.ToTable("DeploymentRollouts");
+                    b.ToTable("DeploymentRollouts", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.DockerRegistryCredential", b =>
@@ -3130,7 +3130,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("VaultId");
 
-                    b.ToTable("DockerRegistryCredentials");
+                    b.ToTable("DockerRegistryCredentials", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.EgressAgent", b =>
@@ -3172,7 +3172,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("EgressAgents");
+                    b.ToTable("EgressAgents", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchBinding", b =>
@@ -3216,7 +3216,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("AppDeploymentId", "KubernetesSecretName")
                         .IsUnique();
 
-                    b.ToTable("ElasticsearchBindings");
+                    b.ToTable("ElasticsearchBindings", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchCluster", b =>
@@ -3446,7 +3446,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("KubernetesClusterId", "Name", "Namespace")
                         .IsUnique();
 
-                    b.ToTable("ElasticsearchClusters");
+                    b.ToTable("ElasticsearchClusters", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchDataView", b =>
@@ -3495,7 +3495,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsUnique()
                         .HasFilter("[SpaceId] IS NOT NULL");
 
-                    b.ToTable("ElasticsearchDataViews");
+                    b.ToTable("ElasticsearchDataViews", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIlmPolicy", b =>
@@ -3566,7 +3566,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ElasticsearchClusterId", "Name")
                         .IsUnique();
 
-                    b.ToTable("ElasticsearchIlmPolicies");
+                    b.ToTable("ElasticsearchIlmPolicies", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchIngestPipeline", b =>
@@ -3637,7 +3637,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ElasticsearchClusterId", "Name")
                         .IsUnique();
 
-                    b.ToTable("ElasticsearchIngestPipelines");
+                    b.ToTable("ElasticsearchIngestPipelines", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchKibanaSpace", b =>
@@ -3681,7 +3681,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ElasticsearchClusterId", "SpaceId")
                         .IsUnique();
 
-                    b.ToTable("ElasticsearchKibanaSpaces");
+                    b.ToTable("ElasticsearchKibanaSpaces", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchRemoteLink", b =>
@@ -3726,7 +3726,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("LocalClusterId", "Alias")
                         .IsUnique();
 
-                    b.ToTable("ElasticsearchRemoteLinks");
+                    b.ToTable("ElasticsearchRemoteLinks", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ElasticsearchUser", b =>
@@ -3779,7 +3779,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ElasticsearchClusterId", "Username")
                         .IsUnique();
 
-                    b.ToTable("ElasticsearchUsers");
+                    b.ToTable("ElasticsearchUsers", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.EndOfLifeNotice", b =>
@@ -3834,7 +3834,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("AppId", "UpgradedAt");
 
-                    b.ToTable("EndOfLifeNotices");
+                    b.ToTable("EndOfLifeNotices", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Environment", b =>
@@ -3859,7 +3859,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Name")
                         .IsUnique();
 
-                    b.ToTable("Environments");
+                    b.ToTable("Environments", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ExternalDependency", b =>
@@ -3907,7 +3907,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("AppId", "EnvironmentId");
 
-                    b.ToTable("ExternalDependencies");
+                    b.ToTable("ExternalDependencies", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ExternalGroupMapping", b =>
@@ -3943,7 +3943,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ExternalGroup", "TenantId")
                         .IsUnique();
 
-                    b.ToTable("ExternalGroupMappings");
+                    b.ToTable("ExternalGroupMappings", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ExternalRoute", b =>
@@ -4026,7 +4026,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("ComponentId");
 
-                    b.ToTable("ExternalRoutes");
+                    b.ToTable("ExternalRoutes", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ExternalRouteHealthHistory", b =>
@@ -4054,7 +4054,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("RouteId", "CheckedAt");
 
-                    b.ToTable("ExternalRouteHealthHistories");
+                    b.ToTable("ExternalRouteHealthHistories", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ExternalTicketLink", b =>
@@ -4110,7 +4110,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "System", "Instance", "ExternalId")
                         .IsUnique();
 
-                    b.ToTable("ExternalTicketLinks");
+                    b.ToTable("ExternalTicketLinks", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.GitKnownHost", b =>
@@ -4150,7 +4150,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Hostname")
                         .IsUnique();
 
-                    b.ToTable("GitKnownHosts");
+                    b.ToTable("GitKnownHosts", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.GitRepository", b =>
@@ -4201,7 +4201,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Name")
                         .IsUnique();
 
-                    b.ToTable("GitRepositories");
+                    b.ToTable("GitRepositories", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Group", b =>
@@ -4226,7 +4226,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Name")
                         .IsUnique();
 
-                    b.ToTable("Groups");
+                    b.ToTable("Groups", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.GroupMembership", b =>
@@ -4244,7 +4244,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("GroupId");
 
-                    b.ToTable("GroupMemberships");
+                    b.ToTable("GroupMemberships", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.HarborComponentConfig", b =>
@@ -4290,7 +4290,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("HarborComponentConfigs");
+                    b.ToTable("HarborComponentConfigs", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.HarborProject", b =>
@@ -4325,7 +4325,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("HarborComponentConfigId", "ProjectName")
                         .IsUnique();
 
-                    b.ToTable("HarborProjects");
+                    b.ToTable("HarborProjects", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.IdentityBinding", b =>
@@ -4370,7 +4370,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("KeycloakRealmId");
 
-                    b.ToTable("IdentityBindings");
+                    b.ToTable("IdentityBindings", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.InboundMailMessage", b =>
@@ -4389,6 +4389,10 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<string>("DeliveredTo")
                         .HasColumnType("nvarchar(max)");
 
+                    b.Property<string>("FailedRecipient")
+                        .HasMaxLength(320)
+                        .HasColumnType("nvarchar(320)");
+
                     b.Property<string>("FromAddress")
                         .IsRequired()
                         .HasColumnType("nvarchar(max)");
@@ -4404,6 +4408,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<string>("InReplyTo")
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<bool>("IsDeliveryReport")
+                        .HasColumnType("bit");
 
                     b.Property<bool>("IsMachineGenerated")
                         .HasColumnType("bit");
@@ -4449,7 +4456,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId", "State");
 
-                    b.ToTable("InboundMailMessages");
+                    b.ToTable("InboundMailMessages", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.IncidentNote", b =>
@@ -4478,7 +4485,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("IncidentId");
 
-                    b.ToTable("IncidentNotes");
+                    b.ToTable("IncidentNotes", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.JitGrant", b =>
@@ -4617,7 +4624,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId", "RequestedAt");
 
-                    b.ToTable("JitGrants");
+                    b.ToTable("JitGrants", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KafkaBinding", b =>
@@ -4660,7 +4667,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("KafkaUserId");
 
-                    b.ToTable("KafkaBindings");
+                    b.ToTable("KafkaBindings", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KafkaCluster", b =>
@@ -4733,7 +4740,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("KubernetesClusterId", "Name", "Namespace")
                         .IsUnique();
 
-                    b.ToTable("KafkaClusters");
+                    b.ToTable("KafkaClusters", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KafkaTopic", b =>
@@ -4770,7 +4777,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("KafkaClusterId", "Name")
                         .IsUnique();
 
-                    b.ToTable("KafkaTopics");
+                    b.ToTable("KafkaTopics", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KafkaUser", b =>
@@ -4813,7 +4820,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("KafkaClusterId", "Username")
                         .IsUnique();
 
-                    b.ToTable("KafkaUsers");
+                    b.ToTable("KafkaUsers", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KedaScaler", b =>
@@ -4891,7 +4898,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("AppId", "EnvironmentId", "Name")
                         .IsUnique();
 
-                    b.ToTable("KedaScalers");
+                    b.ToTable("KedaScalers", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KeycloakBackup", b =>
@@ -4940,7 +4947,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("StorageLinkId");
 
-                    b.ToTable("KeycloakBackups");
+                    b.ToTable("KeycloakBackups", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KeycloakComponentConfig", b =>
@@ -4987,7 +4994,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("KeycloakComponentConfigs");
+                    b.ToTable("KeycloakComponentConfigs", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KeycloakRealm", b =>
@@ -5048,7 +5055,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("KeycloakComponentConfigId", "RealmName")
                         .IsUnique();
 
-                    b.ToTable("KeycloakRealms");
+                    b.ToTable("KeycloakRealms", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KeycloakTheme", b =>
@@ -5084,7 +5091,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("KeycloakComponentConfigId", "Name")
                         .IsUnique();
 
-                    b.ToTable("KeycloakThemes");
+                    b.ToTable("KeycloakThemes", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KnowledgeRevision", b =>
@@ -5113,7 +5120,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("SectionId", "SavedAt");
 
-                    b.ToTable("KnowledgeRevisions");
+                    b.ToTable("KnowledgeRevisions", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KnowledgeSection", b =>
@@ -5163,7 +5170,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("AppId", "Kind");
 
-                    b.ToTable("KnowledgeSections");
+                    b.ToTable("KnowledgeSections", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KubernetesCluster", b =>
@@ -5210,7 +5217,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Name")
                         .IsUnique();
 
-                    b.ToTable("KubernetesClusters");
+                    b.ToTable("KubernetesClusters", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.KyvernoPolicy", b =>
@@ -5257,7 +5264,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId", "EnvironmentId", "PolicyType");
 
-                    b.ToTable("KyvernoPolicies");
+                    b.ToTable("KyvernoPolicies", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MailSuggestion", b =>
@@ -5307,7 +5314,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("MessageId", "Kind");
 
-                    b.ToTable("MailSuggestions");
+                    b.ToTable("MailSuggestions", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MailTriageRule", b =>
@@ -5353,7 +5360,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId", "Signal", "SortOrder");
 
-                    b.ToTable("MailTriageRules");
+                    b.ToTable("MailTriageRules", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MaintenanceWindow", b =>
@@ -5405,7 +5412,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId", "StartsAt");
 
-                    b.ToTable("MaintenanceWindows");
+                    b.ToTable("MaintenanceWindows", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MeshMtlsPolicy", b =>
@@ -5444,7 +5451,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ClusterId", "Namespace")
                         .IsUnique();
 
-                    b.ToTable("MeshMtlsPolicies");
+                    b.ToTable("MeshMtlsPolicies", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MessagingBinding", b =>
@@ -5495,7 +5502,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("RabbitMQClusterId");
 
-                    b.ToTable("MessagingBindings");
+                    b.ToTable("MessagingBindings", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MongoBackup", b =>
@@ -5532,7 +5539,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("MongoClusterId", "Name")
                         .IsUnique();
 
-                    b.ToTable("MongoBackups");
+                    b.ToTable("MongoBackups", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MongoCluster", b =>
@@ -5621,7 +5628,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("KubernetesClusterId", "Name", "Namespace")
                         .IsUnique();
 
-                    b.ToTable("MongoClusters");
+                    b.ToTable("MongoClusters", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MongoDatabase", b =>
@@ -5653,7 +5660,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("MongoClusterId", "Name")
                         .IsUnique();
 
-                    b.ToTable("MongoDatabases");
+                    b.ToTable("MongoDatabases", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.NotificationChannel", b =>
@@ -5711,7 +5718,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsUnique()
                         .HasFilter("[CustomerId] IS NOT NULL");
 
-                    b.ToTable("NotificationChannels");
+                    b.ToTable("NotificationChannels", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.NotificationDelivery", b =>
@@ -5745,7 +5752,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("IncidentId", "ChannelId", "IsFiring");
 
-                    b.ToTable("NotificationDeliveries");
+                    b.ToTable("NotificationDeliveries", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.NotificationProviderConfig", b =>
@@ -5781,7 +5788,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "ProviderType")
                         .IsUnique();
 
-                    b.ToTable("NotificationProviderConfigs");
+                    b.ToTable("NotificationProviderConfigs", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OnCallSchedule", b =>
@@ -5816,7 +5823,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Name")
                         .IsUnique();
 
-                    b.ToTable("OnCallSchedules");
+                    b.ToTable("OnCallSchedules", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OnCallShift", b =>
@@ -5873,7 +5880,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("SubconsultantId");
 
-                    b.ToTable("OnCallShifts");
+                    b.ToTable("OnCallShifts", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OpenLdapComponentConfig", b =>
@@ -6020,7 +6027,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("OpenLdapComponentConfigs");
+                    b.ToTable("OpenLdapComponentConfigs", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OpenLdapGroup", b =>
@@ -6062,7 +6069,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ConfigId", "Cn")
                         .IsUnique();
 
-                    b.ToTable("OpenLdapGroups");
+                    b.ToTable("OpenLdapGroups", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OpenLdapGroupMember", b =>
@@ -6084,7 +6091,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("GroupId", "UserId")
                         .IsUnique();
 
-                    b.ToTable("OpenLdapGroupMembers");
+                    b.ToTable("OpenLdapGroupMembers", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OpenLdapOrganizationalUnit", b =>
@@ -6113,7 +6120,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ConfigId", "Name")
                         .IsUnique();
 
-                    b.ToTable("OpenLdapOrganizationalUnits");
+                    b.ToTable("OpenLdapOrganizationalUnits", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OpenLdapUser", b =>
@@ -6188,7 +6195,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ConfigId", "Uid")
                         .IsUnique();
 
-                    b.ToTable("OpenLdapUsers");
+                    b.ToTable("OpenLdapUsers", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OpenStackConnection", b =>
@@ -6248,7 +6255,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("OpenStackConnections");
+                    b.ToTable("OpenStackConnections", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.OutboundMtlsCredential", b =>
@@ -6306,7 +6313,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("AppId", "Name")
                         .IsUnique();
 
-                    b.ToTable("OutboundMtlsCredentials");
+                    b.ToTable("OutboundMtlsCredentials", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.PortfolioAgreement", b =>
@@ -6346,7 +6353,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("CustomerId", "EffectiveFrom");
 
-                    b.ToTable("PortfolioAgreements");
+                    b.ToTable("PortfolioAgreements", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.PriceList", b =>
@@ -6383,7 +6390,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId", "CustomerId", "EffectiveFrom");
 
-                    b.ToTable("PriceLists");
+                    b.ToTable("PriceLists", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.PriceListEntry", b =>
@@ -6418,7 +6425,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("PriceListId", "Kind", "Key")
                         .IsUnique();
 
-                    b.ToTable("PriceListEntries");
+                    b.ToTable("PriceListEntries", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQBackup", b =>
@@ -6467,7 +6474,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("StorageLinkId");
 
-                    b.ToTable("RabbitMQBackups");
+                    b.ToTable("RabbitMQBackups", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RabbitMQCluster", b =>
@@ -6560,7 +6567,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("KubernetesClusterId", "Name", "Namespace")
                         .IsUnique();
 
-                    b.ToTable("RabbitMQClusters");
+                    b.ToTable("RabbitMQClusters", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RedisCluster", b =>
@@ -6621,7 +6628,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("KubernetesClusterId", "Name", "Namespace")
                         .IsUnique();
 
-                    b.ToTable("RedisClusters");
+                    b.ToTable("RedisClusters", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RegisteredPostgresDatabase", b =>
@@ -6654,7 +6661,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("RegisteredPostgresInstanceId", "Name")
                         .IsUnique();
 
-                    b.ToTable("RegisteredPostgresDatabases");
+                    b.ToTable("RegisteredPostgresDatabases", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RegisteredPostgresDump", b =>
@@ -6686,7 +6693,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("StorageLinkId");
 
-                    b.ToTable("RegisteredPostgresDumps");
+                    b.ToTable("RegisteredPostgresDumps", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RegisteredPostgresInstance", b =>
@@ -6743,7 +6750,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Name")
                         .IsUnique();
 
-                    b.ToTable("RegisteredPostgresInstances");
+                    b.ToTable("RegisteredPostgresInstances", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.ResourceUsageSnapshot", b =>
@@ -6780,7 +6787,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("ClusterId", "Kind", "SnapshotAt");
 
-                    b.ToTable("ResourceUsageSnapshots");
+                    b.ToTable("ResourceUsageSnapshots", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RolloutPolicy", b =>
@@ -6838,7 +6845,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("DeploymentId")
                         .IsUnique();
 
-                    b.ToTable("RolloutPolicies");
+                    b.ToTable("RolloutPolicies", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.RumSite", b =>
@@ -6892,7 +6899,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("RumSites");
+                    b.ToTable("RumSites", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.SecretExpiryNotification", b =>
@@ -6946,7 +6953,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId", "CustomerId", "SentAt");
 
-                    b.ToTable("SecretExpiryNotifications");
+                    b.ToTable("SecretExpiryNotifications", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.SecretExpiryNotificationConfig", b =>
@@ -6981,7 +6988,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsUnique()
                         .HasFilter("[CustomerId] IS NOT NULL");
 
-                    b.ToTable("SecretExpiryNotificationConfigs");
+                    b.ToTable("SecretExpiryNotificationConfigs", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.SecretVault", b =>
@@ -7009,7 +7016,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId")
                         .IsUnique();
 
-                    b.ToTable("SecretVaults");
+                    b.ToTable("SecretVaults", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.SlaTarget", b =>
@@ -7045,7 +7052,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "CustomerId", "AppId")
                         .IsUnique();
 
-                    b.ToTable("SlaTargets");
+                    b.ToTable("SlaTargets", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.StalwartComponentConfig", b =>
@@ -7228,6 +7235,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Property<bool>("RspamdTempFailOnError")
                         .HasColumnType("bit");
 
+                    b.Property<string>("SendingIpAddresses")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<bool>("SmtpEnabled")
                         .HasColumnType("bit");
 
@@ -7264,7 +7274,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("StalwartComponentConfigs");
+                    b.ToTable("StalwartComponentConfigs", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.StalwartMailAccount", b =>
@@ -7309,7 +7319,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("DomainId", "LocalPart")
                         .IsUnique();
 
-                    b.ToTable("StalwartMailAccounts");
+                    b.ToTable("StalwartMailAccounts", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.StalwartMailDomain", b =>
@@ -7338,6 +7348,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .HasMaxLength(500)
                         .HasColumnType("nvarchar(500)");
 
+                    b.Property<string>("DkimDnsRecords")
+                        .HasColumnType("nvarchar(max)");
+
                     b.Property<bool>("IsPrimary")
                         .HasColumnType("bit");
 
@@ -7354,7 +7367,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("ConfigId", "Name")
                         .IsUnique();
 
-                    b.ToTable("StalwartMailDomains");
+                    b.ToTable("StalwartMailDomains", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.StorageBinding", b =>
@@ -7394,7 +7407,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("StorageLinkId");
 
-                    b.ToTable("StorageBindings");
+                    b.ToTable("StorageBindings", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.StorageLink", b =>
@@ -7447,7 +7460,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("StorageLinks");
+                    b.ToTable("StorageLinks", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Subconsultant", b =>
@@ -7514,7 +7527,43 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId", "IsActive");
 
-                    b.ToTable("Subconsultants");
+                    b.ToTable("Subconsultants", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SupportDuty", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<bool>("IsActive")
+                        .HasColumnType("bit");
+
+                    b.Property<string>("Note")
+                        .HasMaxLength(500)
+                        .HasColumnType("nvarchar(500)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("UpdatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("UserId")
+                        .IsRequired()
+                        .HasMaxLength(450)
+                        .HasColumnType("nvarchar(450)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "UserId")
+                        .IsUnique();
+
+                    b.ToTable("SupportDuties", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.SupportMailbox", b =>
@@ -7621,7 +7670,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId")
                         .IsUnique();
 
-                    b.ToTable("SupportMailboxes");
+                    b.ToTable("SupportMailboxes", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TelemetryAlertRule", b =>
@@ -7679,7 +7728,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasKey("Id");
 
-                    b.ToTable("TelemetryAlertRules");
+                    b.ToTable("TelemetryAlertRules", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TelemetrySegment", b =>
@@ -7720,7 +7769,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId", "Signal", "MaxTs", "MinTs");
 
-                    b.ToTable("TelemetrySegments");
+                    b.ToTable("TelemetrySegments", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TelemetryStorageSetting", b =>
@@ -7746,7 +7795,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId")
                         .IsUnique();
 
-                    b.ToTable("TelemetryStorageSettings");
+                    b.ToTable("TelemetryStorageSettings", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Tenant", b =>
@@ -7773,7 +7822,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("Slug")
                         .IsUnique();
 
-                    b.ToTable("Tenants");
+                    b.ToTable("Tenants", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TenantMembership", b =>
@@ -7796,7 +7845,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId");
 
-                    b.ToTable("TenantMemberships");
+                    b.ToTable("TenantMemberships", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TenantRole", b =>
@@ -7821,7 +7870,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Name")
                         .IsUnique();
 
-                    b.ToTable("TenantRoles");
+                    b.ToTable("TenantRoles", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.Ticket", b =>
@@ -7838,6 +7887,10 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<string>("Assignee")
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("AssigneeUserId")
+                        .HasMaxLength(450)
+                        .HasColumnType("nvarchar(450)");
 
                     b.Property<int>("Channel")
                         .HasColumnType("int");
@@ -7932,6 +7985,8 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("AppId");
 
+                    b.HasIndex("TenantId", "AssigneeUserId");
+
                     b.HasIndex("TenantId", "Number")
                         .IsUnique();
 
@@ -7939,7 +7994,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("CustomerId", "Status", "Priority");
 
-                    b.ToTable("Tickets");
+                    b.ToTable("Tickets", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TicketAffectedApp", b =>
@@ -7957,7 +8012,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("AppId");
 
-                    b.ToTable("TicketAffectedApps");
+                    b.ToTable("TicketAffectedApps", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TicketBridgeConnection", b =>
@@ -8017,7 +8072,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TenantId", "CustomerId");
 
-                    b.ToTable("TicketBridgeConnections");
+                    b.ToTable("TicketBridgeConnections", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TicketEvent", b =>
@@ -8049,7 +8104,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TicketId", "At");
 
-                    b.ToTable("TicketEvents");
+                    b.ToTable("TicketEvents", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TicketPause", b =>
@@ -8087,7 +8142,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("TicketId", "StartedAt");
 
-                    b.ToTable("TicketPauses");
+                    b.ToTable("TicketPauses", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TimeEntry", b =>
@@ -8142,7 +8197,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("CustomerId", "StartedAt");
 
-                    b.ToTable("TimeEntries");
+                    b.ToTable("TimeEntries", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.VaultSecret", b =>
@@ -8299,7 +8354,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("VaultId", "AppId", "EnvironmentId", "Name")
                         .IsUnique();
 
-                    b.ToTable("VaultSecrets");
+                    b.ToTable("VaultSecrets", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.VaultSecretVersion", b =>
@@ -8333,7 +8388,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("SecretId", "VersionNumber");
 
-                    b.ToTable("VaultSecretVersions");
+                    b.ToTable("VaultSecretVersions", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.VpnLocalEndpoint", b =>
@@ -8381,7 +8436,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("VpnTunnelId");
 
-                    b.ToTable("VpnLocalEndpoints");
+                    b.ToTable("VpnLocalEndpoints", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.VpnRemoteEndpoint", b =>
@@ -8436,7 +8491,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("VpnTunnelId");
 
-                    b.ToTable("VpnRemoteEndpoints");
+                    b.ToTable("VpnRemoteEndpoints", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.VpnTunnel", b =>
@@ -8502,7 +8557,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("TenantId", "Name")
                         .IsUnique();
 
-                    b.ToTable("VpnTunnels");
+                    b.ToTable("VpnTunnels", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.WorkAuthorisation", b =>
@@ -8550,7 +8605,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasIndex("CustomerId", "Month");
 
-                    b.ToTable("WorkAuthorisations");
+                    b.ToTable("WorkAuthorisations", (string)null);
                 });
 
             modelBuilder.Entity("Microsoft.AspNetCore.Identity.IdentityRole", b =>
@@ -11070,6 +11125,17 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                         .IsRequired();
 
                     b.Navigation("Customer");
+
+                    b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SupportDuty", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.Tenant", "Tenant")
+                        .WithMany()
+                        .HasForeignKey("TenantId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
 
                     b.Navigation("Tenant");
                 });
