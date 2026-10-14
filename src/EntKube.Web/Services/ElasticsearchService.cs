@@ -705,52 +705,66 @@ public class ElasticsearchService(
     /// enough that "nothing has been backed up for days" is noticed within hours of being true,
     /// which is the whole point of the advisor knowing about it at all.</para>
     /// </summary>
+    /// <summary>
+    /// One tenant's Elasticsearch clusters that a status poll should look at. Public and static so
+    /// the scoping is assertable without a cluster; see <c>ReconcileSweepTenancyTests</c>.
+    /// </summary>
+    public static IQueryable<ElasticsearchCluster> ReconcilableFor(ApplicationDbContext db, Guid tenantId)
+        => db.ElasticsearchClusters
+            .Where(c => c.TenantId == tenantId && c.Status != ElasticsearchClusterStatus.Failed);
+
     public async Task ReconcileAllAsync(CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        List<ElasticsearchCluster> clusters = await db.ElasticsearchClusters
-            .Include(c => c.KubernetesCluster)
-            .Where(c => c.Status != ElasticsearchClusterStatus.Failed)
-            .ToListAsync(ct);
 
         DateTime now = DateTime.UtcNow;
 
-        foreach (ElasticsearchCluster cluster in clusters)
+        // One tenant at a time, outermost (docs/decomposition.md §4.0.1.2) — and the Include went
+        // with the flat select, for the reason given in KafkaService: nothing here reads the
+        // navigation, and materializing a KubernetesCluster fills in its kubeconfig.
+        foreach (Guid tenantId in await db.Tenants.Select(x => x.Id).ToListAsync(ct))
         {
-            Clusters.IClusterClient? reachable =
-                await clusterAccess.ForAsync(cluster.TenantId, cluster.KubernetesClusterId, ct);
+            if (ct.IsCancellationRequested) break;
 
-            if (reachable is null) continue;
+            List<ElasticsearchCluster> clusters = await ReconcilableFor(db, tenantId).ToListAsync(ct);
 
-            bool ready = false;
-            try
+            foreach (ElasticsearchCluster cluster in clusters)
             {
-                string json = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
-                    $"elasticsearch.elasticsearch.k8s.elastic.co/{cluster.Name}", cluster.Namespace,
-                     ct: ct);
-                (string? health, string? phase, _) = ParseElasticsearchStatus(json);
-                ready = string.Equals(phase, "Ready", StringComparison.OrdinalIgnoreCase);
-                await ReconcileStatusAsync(cluster.Id, ready, health, ct);
-            }
-            catch { /* cluster unreachable — leave status as-is */ }
+                Clusters.IClusterClient? reachable =
+                    await clusterAccess.ForAsync(tenantId, cluster.KubernetesClusterId, ct);
 
-            // Only worth asking a cluster that is up; a starting one has no disk story to tell.
-            if (!ready) continue;
+                if (reachable is null) continue;
 
-            if (cluster.InsightCheckedAt is null || now - cluster.InsightCheckedAt.Value > InsightMaxAge)
-                await RefreshInsightAsync(cluster.Id, ct);
-
-            if (cluster.SnapshotsEnabled
-                && (cluster.SnapshotLastCheckedAt is null
-                    || now - cluster.SnapshotLastCheckedAt.Value > SnapshotCheckInterval))
-            {
+                bool ready = false;
                 try
                 {
-                    await RefreshSnapshotStatusAsync(cluster.TenantId, cluster.Id, ct);
+                    string json = await (await ClusterFor(tenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+                        $"elasticsearch.elasticsearch.k8s.elastic.co/{cluster.Name}", cluster.Namespace,
+                         ct: ct);
+                    (string? health, string? phase, _) = ParseElasticsearchStatus(json);
+                    ready = string.Equals(phase, "Ready", StringComparison.OrdinalIgnoreCase);
+                    await ReconcileStatusAsync(cluster.Id, ready, health, ct);
                 }
-                catch (Exception ex)
+                catch { /* cluster unreachable — leave status as-is */ }
+
+                // Only worth asking a cluster that is up; a starting one has no disk story to tell.
+                if (!ready) continue;
+
+                if (cluster.InsightCheckedAt is null || now - cluster.InsightCheckedAt.Value > InsightMaxAge)
+                    await RefreshInsightAsync(cluster.Id, ct);
+
+                if (cluster.SnapshotsEnabled
+                    && (cluster.SnapshotLastCheckedAt is null
+                        || now - cluster.SnapshotLastCheckedAt.Value > SnapshotCheckInterval))
                 {
-                    logger.LogDebug(ex, "Snapshot status refresh failed for {Cluster}", cluster.Name);
+                    try
+                    {
+                        await RefreshSnapshotStatusAsync(tenantId, cluster.Id, ct);
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogDebug(ex, "Snapshot status refresh failed for {Cluster}", cluster.Name);
+                    }
                 }
             }
         }

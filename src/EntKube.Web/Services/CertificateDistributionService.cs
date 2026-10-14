@@ -187,39 +187,47 @@ public class CertificateDistributionService(
     /// Re-applies every distribution across all tenants/clusters. Used by the background reconciler,
     /// where the cluster-change gate has no interactive sink and therefore does not block.
     /// </summary>
+    /// <summary>
+    /// One tenant's certificate distributions. Public and static so the scoping is assertable
+    /// without a cluster; see <c>ReconcileSweepTenancyTests</c>.
+    /// </summary>
+    public static IQueryable<CertificateDistribution> DistributionsFor(ApplicationDbContext db, Guid tenantId)
+        => db.CertificateDistributions.Where(d => d.TenantId == tenantId);
+
     public async Task ReconcileAllAsync(CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        // One tenant at a time (docs/decomposition.md §4.0.1.2). This writes a Secret — a
-        // certificate and often its private key — into namespaces on a cluster, so which tenant
-        // it acts as is the whole question. It used to select every distribution in the
-        // installation and apply each one by id.
-        List<(Guid TenantId, Guid DistributionId)> targets =
-        [
-            .. (await db.CertificateDistributions
-                    .Select(d => new { d.TenantId, d.Id })
-                    .ToListAsync(ct))
-                .Select(d => (d.TenantId, d.Id)),
-        ];
-
-        foreach ((Guid tenantId, Guid distributionId) in targets)
+        // One tenant at a time, outermost (docs/decomposition.md §4.0.1.2). This writes a Secret —
+        // a certificate and often its private key — into namespaces on a cluster, so which tenant
+        // it acts as is the whole question.
+        //
+        // ⚠️ The previous version of this loop claimed to be that and was not. It selected every
+        // distribution in the installation, took the tenant off each row, and then re-read the row
+        // with `d.Id == distributionId && d.TenantId == tenantId` — a predicate comparing a row to
+        // itself, which can never fail. It preserved the (tenant, distribution) pair, which is why
+        // it looked converted; the tenant was still the row's own answer. The tenant is an input
+        // now, so a distribution can only be applied as its owner.
+        foreach (Guid tenantId in await db.Tenants.Select(x => x.Id).ToListAsync(ct))
         {
             if (ct.IsCancellationRequested) break;
 
-            CertificateDistribution? dist = await db.CertificateDistributions
-                .FirstOrDefaultAsync(d => d.Id == distributionId && d.TenantId == tenantId, ct);
-            if (dist is null) continue;
+            List<CertificateDistribution> distributions = await DistributionsFor(db, tenantId).ToListAsync(ct);
 
-            try
+            foreach (CertificateDistribution dist in distributions)
             {
-                CertificateDistributionResult r = await ApplyCoreAsync(db, tenantId, dist, ct);
-                if (!r.Success)
-                    logger.LogWarning("Reconcile of cert distribution {Name} failed: {Output}", dist.Name, r.Output);
-            }
-            catch (Exception ex) when (ex is not OperationCanceledException)
-            {
-                logger.LogWarning(ex, "Reconcile of cert distribution {Name} threw", dist.Name);
+                if (ct.IsCancellationRequested) break;
+
+                try
+                {
+                    CertificateDistributionResult r = await ApplyCoreAsync(db, tenantId, dist, ct);
+                    if (!r.Success)
+                        logger.LogWarning("Reconcile of cert distribution {Name} failed: {Output}", dist.Name, r.Output);
+                }
+                catch (Exception ex) when (ex is not OperationCanceledException)
+                {
+                    logger.LogWarning(ex, "Reconcile of cert distribution {Name} threw", dist.Name);
+                }
             }
         }
     }
