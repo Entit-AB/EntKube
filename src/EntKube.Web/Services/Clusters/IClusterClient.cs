@@ -91,6 +91,14 @@ public interface IClusterClient
     /// Drains this node: cordons it, then evicts every evictable pod. See
     /// <see cref="IKubernetesClientFactory.DrainNodeAsync"/> for why this is its own verb.
     /// </summary>
+    /// <summary>
+    /// Sets a Deployment's replica count. The credential is supplied from here and the
+    /// acknowledgment is raised on the way through — see
+    /// <see cref="IKubernetesClientFactory.ScaleDeploymentAsync"/> for why it is its own verb.
+    /// </summary>
+    Task<HelmExecutionResult> ScaleDeploymentAsync(
+        string name, string ns, int replicas, string? summary = null, CancellationToken ct = default);
+
     Task<HelmExecutionResult> DrainNodeAsync(
         string nodeName, int gracePeriodSeconds = 30, bool ignoreDaemonSets = true,
         bool deleteEmptyDirData = false, string? summary = null, CancellationToken ct = default);

@@ -127,8 +127,18 @@ public class ClusterChangeGateCoverageTests
     ///   all along: <c>EnsureNamespaceAsync</c> then <c>ReplaceSecretAsync</c>. It wrote a registry
     ///   password into a namespace with nobody asked and nothing recorded. Its two credential reads
     ///   and its private process runner went with it.</item>
-    ///   <item><c>ReleaseVolumeGuard</c> — scales a Deployment and reads it back, which the seam
-    ///   also expresses. Same block: two credential reads in the file.</item>
+    ///   <item><s><c>ReleaseVolumeGuard</c></s> — <b>converted here, and it needed the gate to
+    ///   learn something.</b> Its own comment said the direct <c>kubectl</c> was deliberate: "the
+    ///   upgrade dialog already names every workload that will be taken down, so routing each
+    ///   scale through the change gate would ask the operator to acknowledge, mid-run, something
+    ///   they just approved". True of a per-call verb — and the conclusion was still wrong, because
+    ///   what it bought was a service invisible to the gate, writing a kubeconfig to disk, with
+    ///   nothing recorded. §5.4's own remedy is the one taken:
+    ///   <c>IClusterChangeGate.DeclareConsequence(reason)</c>, which suppresses the second dialog
+    ///   and records each scale as <c>AppliedAsConsequence</c>. The seam also gained the
+    ///   <c>ScaleDeploymentAsync</c> it never had — <c>ChangeVerb.Scale</c> has existed since the
+    ///   gate was written, so this is the fifth conversion blocked by a missing verb rather than by
+    ///   a caller.</item>
     ///   <item><c>VpnService</c> — same again: expressible, two credential reads.</item>
     ///   <item><c>ClusterEgressTunnel</c> — <c>kubectl port-forward</c>, and this one is a
     ///   <b>seam addition rather than a caller fix</b>. Every verb on the seam is one-shot: run,
@@ -139,7 +149,7 @@ public class ClusterChangeGateCoverageTests
     ///   read nor a change but a channel.</item>
     /// </list>
     /// </summary>
-    private const int BaselineUngatedInvocations = 3;
+    private const int BaselineUngatedInvocations = 2;
 
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the
@@ -157,7 +167,6 @@ public class ClusterChangeGateCoverageTests
     private static readonly string[] Baseline =
     [
         "ClusterEgressTunnel",
-        "ReleaseVolumeGuard",
         "VpnService",
         // ComponentLifecycleService left this list entirely — see the baseline's note, and
         // DriftDetectionService followed it: its runner was dead code, not an invocation.

@@ -67,14 +67,22 @@ public sealed record VolumePreflight
 /// down. So the restore reads the live value back and only re-applies the recorded count
 /// when Helm did not set one of its own.
 ///
-/// Reads go through <see cref="IKubernetesClientFactory"/>. The scale itself is a direct
-/// kubectl call rather than the gated patch path on purpose: the upgrade dialog already
-/// names every workload that will be taken down, so routing each scale through the change
-/// gate would ask the operator to acknowledge, mid-run, something they just approved.
+/// Everything here goes through <see cref="IClusterClient"/>, so this service holds no
+/// credential and every scale is recorded.
+///
+/// <para><b>This used to run its own kubectl, and the reason was sound.</b> The comment said:
+/// "the upgrade dialog already names every workload that will be taken down, so routing each
+/// scale through the change gate would ask the operator to acknowledge, mid-run, something they
+/// just approved". That is true of a per-call verb — and the conclusion drawn from it was wrong,
+/// because the alternative chosen was a service invisible to the gate, writing a kubeconfig to
+/// disk, changing clusters with nothing recorded (§5.4). The scales are now declared for what they
+/// are, through <see cref="EntKube.Web.Services.ClusterChanges.IClusterChangeGate.DeclareConsequence"/>: no second dialog, and an audit
+/// row per scale naming the upgrade it followed from.</para>
 /// </summary>
 public class ReleaseVolumeGuard(
     IDbContextFactory<CatalogDbContext> dbFactory,
-    IKubernetesClientFactory k8s,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
     ILogger<ReleaseVolumeGuard> logger)
 {
     /// <summary>How long to wait for the last pod of a scaled-down workload to disappear.</summary>
@@ -89,7 +97,8 @@ public class ReleaseVolumeGuard(
     /// Inspects the Deployments of a component's Helm release and reports the ones a
     /// rolling update could not get past. Read-only.
     /// </summary>
-    public async Task<VolumePreflight> InspectAsync(Guid componentId, CancellationToken ct = default)
+    public async Task<VolumePreflight> InspectAsync(
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
         ClusterComponent? component;
         await using (CatalogDbContext db = await dbFactory.CreateDbContextAsync(ct))
@@ -102,8 +111,12 @@ public class ReleaseVolumeGuard(
         if (component is null)
             return VolumePreflight.Failure("Component not found.");
 
-        if (string.IsNullOrWhiteSpace(component.Cluster.Kubeconfig))
-            return VolumePreflight.Failure("Cluster has no kubeconfig configured.");
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterAccess.ForAsync(tenantId, component.ClusterId, ct);
+
+        if (cluster is null)
+            return VolumePreflight.Failure(
+                "That cluster is not this tenant's, or it has no kubeconfig configured.");
 
         // Only Helm releases are inspected here; a Manifest component is applied wholesale
         // by kubectl and carries no release identity to match resources against.
@@ -115,14 +128,13 @@ public class ReleaseVolumeGuard(
             return VolumePreflight.Failure("Component has no namespace recorded.");
 
         string release = (component.ReleaseName ?? component.Name).Trim();
-        string kubeconfig = component.Cluster.Kubeconfig;
 
         List<string> warnings = [];
 
         string deploymentsJson;
         try
         {
-            deploymentsJson = await k8s.GetJsonAsync("deployments", ns, kubeconfig, ct: ct);
+            deploymentsJson = await cluster.GetJsonAsync("deployments", ns, ct: ct);
         }
         catch (Exception ex)
         {
@@ -133,7 +145,7 @@ public class ReleaseVolumeGuard(
         Dictionary<string, string[]> claimModes;
         try
         {
-            string pvcJson = await k8s.GetJsonAsync("persistentvolumeclaims", ns, kubeconfig, ct: ct);
+            string pvcJson = await cluster.GetJsonAsync("persistentvolumeclaims", ns, ct: ct);
             claimModes = ParseClaimAccessModes(pvcJson);
         }
         catch (Exception ex)
@@ -231,8 +243,13 @@ public class ReleaseVolumeGuard(
     /// Takes each blocked workload to zero replicas and waits for its pods to actually
     /// terminate — the volume is not detached until the last one is gone.
     /// </summary>
+    /// <param name="release">
+    /// What the operator approved, for the audit row behind each scale. The scales are consequences
+    /// of that act, not separate decisions — see <see cref="EntKube.Web.Services.ClusterChanges.IClusterChangeGate.DeclareConsequence"/>.
+    /// </param>
     public async Task<HelmExecutionResult> ScaleDownAsync(
-        string kubeconfig, IReadOnlyList<BlockedWorkload> blocked, CancellationToken ct = default)
+        EntKube.Web.Services.Clusters.IClusterClient cluster, string release,
+        IReadOnlyList<BlockedWorkload> blocked, CancellationToken ct = default)
     {
         if (blocked.Count == 0)
             return new HelmExecutionResult { Success = true, Output = "" };
@@ -240,34 +257,31 @@ public class ReleaseVolumeGuard(
         StringBuilder log = new();
         bool ok = true;
 
-        string kubeconfigPath = await WriteKubeconfigAsync(kubeconfig, ct);
-        try
+        using IDisposable consequence = gate.DeclareConsequence(
+            $"workloads taken down for the '{release}' upgrade the operator acknowledged");
+
+        foreach (BlockedWorkload workload in blocked)
         {
-            foreach (BlockedWorkload workload in blocked)
+            log.AppendLine($"Scaling Deployment/{workload.Name} to 0 (was {workload.Replicas}) so "
+                + $"{string.Join(", ", workload.Claims)} can be released.");
+
+            HelmExecutionResult scale = await cluster.ScaleDeploymentAsync(
+                workload.Name, workload.Namespace, 0,
+                $"Scale Deployment/{workload.Name} to 0 for the '{release}' upgrade "
+                + $"(releases {string.Join(", ", workload.Claims)})", ct);
+
+            log.AppendLine(scale.Output);
+
+            if (!scale.Success)
             {
-                log.AppendLine($"Scaling Deployment/{workload.Name} to 0 (was {workload.Replicas}) so "
-                    + $"{string.Join(", ", workload.Claims)} can be released.");
-
-                HelmExecutionResult scale = await RunKubectlAsync(
-                    $"scale deployment/{workload.Name} -n {workload.Namespace} --replicas=0 --kubeconfig={kubeconfigPath}", ct);
-
-                log.AppendLine(scale.Output);
-
-                if (!scale.Success)
-                {
-                    ok = false;
-                    continue;
-                }
-
-                (bool drained, string detail) = await WaitForDrainAsync(workload, kubeconfigPath, ct);
-                log.AppendLine(detail);
-                if (!drained)
-                    ok = false;
+                ok = false;
+                continue;
             }
-        }
-        finally
-        {
-            DeleteQuietly(kubeconfigPath);
+
+            (bool drained, string detail) = await WaitForDrainAsync(cluster, workload, ct);
+            log.AppendLine(detail);
+            if (!drained)
+                ok = false;
         }
 
         return new HelmExecutionResult { Success = ok, Output = log.ToString().TrimEnd() };
@@ -278,8 +292,10 @@ public class ReleaseVolumeGuard(
     /// leaves our zero in place, so a workload still sitting at zero is restored to the
     /// count recorded before the upgrade; one Helm scaled itself is left alone.
     /// </summary>
+    /// <param name="release">As <see cref="ScaleDownAsync"/>: the approved act these follow from.</param>
     public async Task<HelmExecutionResult> RestoreAsync(
-        string kubeconfig, IReadOnlyList<BlockedWorkload> blocked, CancellationToken ct = default)
+        EntKube.Web.Services.Clusters.IClusterClient cluster, string release,
+        IReadOnlyList<BlockedWorkload> blocked, CancellationToken ct = default)
     {
         if (blocked.Count == 0)
             return new HelmExecutionResult { Success = true, Output = "" };
@@ -287,45 +303,42 @@ public class ReleaseVolumeGuard(
         StringBuilder log = new();
         bool ok = true;
 
+        using IDisposable consequence = gate.DeclareConsequence(
+            $"workloads put back after the '{release}' upgrade the operator acknowledged");
+
         // Deliberately not honouring the caller's cancellation for the scale-up itself: a
-        // cancelled upgrade must still leave the component running rather than at zero.
-        string kubeconfigPath = await WriteKubeconfigAsync(kubeconfig, CancellationToken.None);
-        try
+        // cancelled upgrade must still leave the component running rather than at zero. That is
+        // also why the declaration above matters — a cancelled upgrade has no dialog left to ask.
+        foreach (BlockedWorkload workload in blocked)
         {
-            foreach (BlockedWorkload workload in blocked)
+            int? live = await ReadReplicasAsync(cluster, workload);
+
+            if (live is > 0)
             {
-                int? live = await ReadReplicasAsync(workload, kubeconfigPath);
-
-                if (live is > 0)
-                {
-                    log.AppendLine($"Deployment/{workload.Name} was set to {live} replicas by the upgrade — leaving it.");
-                    continue;
-                }
-
-                log.AppendLine($"Restoring Deployment/{workload.Name} to {workload.Replicas} replica(s).");
-
-                HelmExecutionResult scale = await RunKubectlAsync(
-                    $"scale deployment/{workload.Name} -n {workload.Namespace} --replicas={workload.Replicas} --kubeconfig={kubeconfigPath}",
-                    CancellationToken.None);
-
-                log.AppendLine(scale.Output);
-
-                if (!scale.Success)
-                {
-                    ok = false;
-                    log.AppendLine($"WARNING: {workload.Name} is still at zero replicas and needs to be scaled up by hand.");
-                    continue;
-                }
-
-                (bool ready, string detail) = await WaitForReadyAsync(workload, kubeconfigPath);
-                log.AppendLine(detail);
-                if (!ready)
-                    ok = false;
+                log.AppendLine($"Deployment/{workload.Name} was set to {live} replicas by the upgrade — leaving it.");
+                continue;
             }
-        }
-        finally
-        {
-            DeleteQuietly(kubeconfigPath);
+
+            log.AppendLine($"Restoring Deployment/{workload.Name} to {workload.Replicas} replica(s).");
+
+            HelmExecutionResult scale = await cluster.ScaleDeploymentAsync(
+                workload.Name, workload.Namespace, workload.Replicas,
+                $"Restore Deployment/{workload.Name} to {workload.Replicas} replica(s) after the "
+                + $"'{release}' upgrade", CancellationToken.None);
+
+            log.AppendLine(scale.Output);
+
+            if (!scale.Success)
+            {
+                ok = false;
+                log.AppendLine($"WARNING: {workload.Name} is still at zero replicas and needs to be scaled up by hand.");
+                continue;
+            }
+
+            (bool ready, string detail) = await WaitForReadyAsync(cluster, workload);
+            log.AppendLine(detail);
+            if (!ready)
+                ok = false;
         }
 
         return new HelmExecutionResult { Success = ok, Output = log.ToString().TrimEnd() };
@@ -334,20 +347,17 @@ public class ReleaseVolumeGuard(
     // ── waiting ────────────────────────────────────────────────────────────
 
     private async Task<(bool Drained, string Detail)> WaitForDrainAsync(
-        BlockedWorkload workload, string kubeconfigPath, CancellationToken ct)
+        EntKube.Web.Services.Clusters.IClusterClient cluster, BlockedWorkload workload, CancellationToken ct)
     {
         DateTime deadline = DateTime.UtcNow + DrainTimeout;
 
         while (DateTime.UtcNow < deadline)
         {
-            HelmExecutionResult get = await RunKubectlAsync(
-                $"get deployment {workload.Name} -n {workload.Namespace} "
-                + $"-o jsonpath={{.status.replicas}} --kubeconfig={kubeconfigPath}", ct);
+            // An absent field is how the API reports "no pods left" — the same answer as an
+            // explicit 0, which is what the jsonpath read this replaces relied on too.
+            (bool ok, int? replicas) = await ReadIntAsync(cluster, workload, "status", "replicas", ct);
 
-            // An empty jsonpath result is the field being absent, which is how the API
-            // reports "no pods left" — the same answer as an explicit 0.
-            string value = get.Output.Trim();
-            if (get.Success && (value.Length == 0 || value == "0"))
+            if (ok && (replicas is null || replicas == 0))
                 return (true, $"Deployment/{workload.Name} has no pods left; its volumes are released.");
 
             await Task.Delay(PollInterval, ct);
@@ -357,17 +367,17 @@ public class ReleaseVolumeGuard(
             + "the upgrade may still hit a Multi-Attach error.");
     }
 
-    private async Task<(bool Ready, string Detail)> WaitForReadyAsync(BlockedWorkload workload, string kubeconfigPath)
+    private async Task<(bool Ready, string Detail)> WaitForReadyAsync(
+        EntKube.Web.Services.Clusters.IClusterClient cluster, BlockedWorkload workload)
     {
         DateTime deadline = DateTime.UtcNow + ReadyTimeout;
 
         while (DateTime.UtcNow < deadline)
         {
-            HelmExecutionResult get = await RunKubectlAsync(
-                $"get deployment {workload.Name} -n {workload.Namespace} "
-                + $"-o jsonpath={{.status.availableReplicas}} --kubeconfig={kubeconfigPath}", CancellationToken.None);
+            (bool ok, int? available) =
+                await ReadIntAsync(cluster, workload, "status", "availableReplicas", CancellationToken.None);
 
-            if (get.Success && int.TryParse(get.Output.Trim(), out int available) && available >= 1)
+            if (ok && available >= 1)
                 return (true, $"Deployment/{workload.Name} is available again ({available} replica(s) ready).");
 
             await Task.Delay(PollInterval, CancellationToken.None);
@@ -377,17 +387,56 @@ public class ReleaseVolumeGuard(
             + $"{ReadyTimeout.TotalMinutes:0} minutes — check its pods.");
     }
 
-    private static async Task<int?> ReadReplicasAsync(BlockedWorkload workload, string kubeconfigPath)
+    private async Task<int?> ReadReplicasAsync(
+        EntKube.Web.Services.Clusters.IClusterClient cluster, BlockedWorkload workload)
     {
-        HelmExecutionResult get = await RunKubectlAsync(
-            $"get deployment {workload.Name} -n {workload.Namespace} "
-            + $"-o jsonpath={{.spec.replicas}} --kubeconfig={kubeconfigPath}", CancellationToken.None);
+        (bool ok, int? replicas) =
+            await ReadIntAsync(cluster, workload, "spec", "replicas", CancellationToken.None);
 
-        if (!get.Success)
-            return null;
+        // Unreadable is null (the caller leaves the workload alone); readable-but-absent is 0,
+        // which is what an empty jsonpath result meant before.
+        return ok ? replicas ?? 0 : null;
+    }
 
-        string value = get.Output.Trim();
-        return value.Length == 0 ? 0 : int.TryParse(value, out int parsed) ? parsed : null;
+    /// <summary>
+    /// One integer field of a Deployment, read as JSON through the seam rather than with
+    /// <c>-o jsonpath</c>. The jsonpath form needed a kubeconfig on disk and an escaped expression
+    /// in a command line; this parses the document the seam already knows how to fetch.
+    /// </summary>
+    private async Task<(bool Ok, int? Value)> ReadIntAsync(
+        EntKube.Web.Services.Clusters.IClusterClient cluster, BlockedWorkload workload,
+        string section, string field, CancellationToken ct)
+    {
+        HelmExecutionResult get;
+        try
+        {
+            get = await cluster.GetResourceJsonAsync("deployment", workload.Name, workload.Namespace, ct);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogDebug(ex, "Could not read Deployment/{Name} in {Namespace}", workload.Name, workload.Namespace);
+            return (false, null);
+        }
+
+        if (!get.Success) return (false, null);
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(get.Output);
+            return doc.RootElement.TryGetProperty(section, out JsonElement s)
+                   && s.TryGetProperty(field, out JsonElement v)
+                   && v.TryGetInt32(out int parsed)
+                ? (true, parsed)
+                : (true, null);
+        }
+        catch (JsonException)
+        {
+            return (false, null);
+        }
     }
 
     // ── JSON helpers ───────────────────────────────────────────────────────
@@ -546,67 +595,4 @@ public class ReleaseVolumeGuard(
 
     // ── process ────────────────────────────────────────────────────────────
 
-    private static async Task<string> WriteKubeconfigAsync(string kubeconfig, CancellationToken ct)
-    {
-        string path = Path.Combine(Path.GetTempPath(), $"entkube-upgrade-{Guid.NewGuid()}.kubeconfig");
-        await SecretFile.WriteAsync(path, kubeconfig, ct);
-        return path;
-    }
-
-    private static void DeleteQuietly(string path)
-    {
-        try
-        {
-            if (File.Exists(path))
-                File.Delete(path);
-        }
-        catch (IOException)
-        {
-            // A leftover temp kubeconfig is not worth failing an upgrade over.
-        }
-    }
-
-    private static async Task<HelmExecutionResult> RunKubectlAsync(string arguments, CancellationToken ct)
-    {
-        ProcessStartInfo psi = new()
-        {
-            FileName = "kubectl",
-            Arguments = arguments,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        psi.EnvironmentVariables["HOME"] = "/tmp";
-
-        using Process process = new() { StartInfo = psi };
-
-        try
-        {
-            process.Start();
-
-            Task<string> stdoutTask = process.StandardOutput.ReadToEndAsync(ct);
-            Task<string> stderrTask = process.StandardError.ReadToEndAsync(ct);
-
-            await process.WaitForExitAsync(ct);
-
-            string stdout = (await stdoutTask).Trim();
-            string stderr = (await stderrTask).Trim();
-
-            return new HelmExecutionResult
-            {
-                Success = process.ExitCode == 0,
-                ExitCode = process.ExitCode,
-                Output = (stdout + (stderr.Length == 0 ? "" : "\n" + stderr)).Trim(),
-            };
-        }
-        catch (Exception ex)
-        {
-            return new HelmExecutionResult
-            {
-                Success = false,
-                Output = HelmExecutionResult.DescribeLaunchFailure("kubectl", ex),
-            };
-        }
-    }
 }

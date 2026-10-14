@@ -117,6 +117,71 @@ public class ClusterChangeGateTests
     /// A sink outranks a declaration. A background scope that somehow has an operator attached
     /// should still ask them — the declaration says "there may be nobody", not "do not ask".
     /// </summary>
+    // ──────── Consequences of an already-acknowledged change ────────
+
+    /// <summary>
+    /// An approved act with per-resource consequences — an upgrade that has to take three
+    /// workloads down and put them back — asks once, not seven times.
+    /// </summary>
+    [Fact]
+    public async Task A_consequence_declaration_does_not_ask_again()
+    {
+        ClusterChangeGate gate = NewGate();
+        FakeSink sink = new(ClusterChangeDecision.Acknowledged);
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        using (gate.DeclareConsequence("the Harbor 2.11 upgrade the operator acknowledged"))
+        {
+            await gate.AcknowledgeAsync(PatchChange());
+            await gate.AcknowledgeAsync(PatchChange());
+        }
+
+        sink.Calls.Should().Be(0, "the operator approved the act these follow from");
+    }
+
+    /// <summary>
+    /// <b>The safety property.</b> A consequence declaration suppresses the question, never the
+    /// refusal: a scope with nobody to ask and no unattended declaration is still refused. Without
+    /// this, declaring a consequence would be a way to manufacture an approver who was never
+    /// there — which is exactly the bypass §4.0.1.2's decision closed.
+    /// </summary>
+    [Fact]
+    public async Task A_consequence_declaration_does_not_rescue_a_scope_with_nobody_to_ask()
+    {
+        ClusterChangeGate gate = NewGate();
+
+        using (gate.DeclareConsequence("something an operator supposedly approved"))
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => gate.AcknowledgeAsync(PatchChange()));
+        }
+    }
+
+    [Fact]
+    public async Task A_consequence_declaration_ends_when_it_is_disposed()
+    {
+        ClusterChangeGate gate = NewGate();
+        FakeSink sink = new(ClusterChangeDecision.Acknowledged);
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        using (gate.DeclareConsequence("an acknowledged upgrade"))
+        {
+            await gate.AcknowledgeAsync(PatchChange());
+        }
+
+        await gate.AcknowledgeAsync(PatchChange());
+
+        sink.Calls.Should().Be(1, "outside the declaration the gate asks as it always did");
+    }
+
+    [Fact]
+    public void A_consequence_must_name_the_act_it_follows_from()
+    {
+        ClusterChangeGate gate = NewGate();
+
+        Assert.Throws<ArgumentException>(() => gate.DeclareConsequence("   "));
+    }
+
     [Fact]
     public async Task A_declared_scope_with_a_sink_still_asks()
     {
