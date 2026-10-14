@@ -2,6 +2,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.EntityFrameworkCore;
+using Moq;
 
 namespace EntKube.Web.Tests;
 
@@ -19,13 +20,37 @@ public class DockerRegistryServiceTests : IDisposable
     private readonly ApplicationDbContext db;
     private readonly VaultService vault;
     private readonly DockerRegistryService sut;
+    private readonly Mock<IKubernetesClientFactory> k8s = new();
+
+    /// <summary>Namespaces the sync ensured, in order.</summary>
+    private readonly List<string> namespacesEnsured = [];
+
+    /// <summary>Secrets the sync replaced, as (name, namespace, manifest).</summary>
+    private readonly List<(string Name, string Ns, string Manifest)> secretsReplaced = [];
 
     public DockerRegistryServiceTests()
     {
         testDb = new InterceptingTestDb(TestRootKey);
         db = testDb.CreateContext();
         vault = testDb.CreateVaultService();
-        sut = new DockerRegistryService(testDb.Factory, testDb.Encryption);
+
+        k8s.Setup(f => f.EnsureNamespaceAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((ns, _, _) => namespacesEnsured.Add(ns))
+            .Returns(Task.CompletedTask);
+
+        k8s.Setup(f => f.ReplaceSecretAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, string, string, string?, CancellationToken>(
+                (name, ns, manifest, _, _, _) => secretsReplaced.Add((name, ns, manifest)))
+            .ReturnsAsync("secret/registry-creds replaced");
+        // The real factory over the intercepting test database: the credential reaches the cluster
+        // the way production resolves it, and a cross-tenant ask refuses here rather than in a mock.
+        sut = new DockerRegistryService(
+            testDb.Factory,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
+            testDb.Encryption);
     }
 
     public void Dispose()
@@ -140,9 +165,73 @@ public class DockerRegistryServiceTests : IDisposable
         DockerRegistryCredential cred = await CreateAsync(tenant.Id, app.Id, "prod-cred", prod.Id);
         await sut.ConfigureSyncAsync(cred.Id, cluster.Id, "registry-creds", "app");
 
-        KubernetesOperationResult<string> result = await sut.SyncToKubernetesAsync(cred.Id);
+        KubernetesOperationResult<string> result = await sut.SyncToKubernetesAsync(tenant.Id, cred.Id);
 
         result.IsSuccess.Should().BeFalse();
         result.Error.Should().Contain("different environment");
+
+        secretsReplaced.Should().BeEmpty("the guard runs before anything reaches the cluster");
+    }
+
+    /// <summary>
+    /// The sync writes a registry password into a namespace, so it is exactly the kind of change
+    /// that must not happen without the gate seeing it. Through the seam it is
+    /// <c>EnsureNamespaceAsync</c> + <c>ReplaceSecretAsync</c>; it used to be <c>kubectl apply -f</c>
+    /// run as its own process with <c>--kubeconfig</c>, which the gate cannot see at all.
+    /// </summary>
+    [Fact]
+    public async Task SyncToKubernetesAsync_WritesTheSecretThroughTheSeam()
+    {
+        (Tenant tenant, App app, Data.Environment prod, _) = await SeedAsync();
+
+        KubernetesCluster cluster = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenant.Id, EnvironmentId = prod.Id,
+            Name = "prod-cluster", ApiServerUrl = "https://k8s",
+        };
+        db.KubernetesClusters.Add(cluster);
+        await db.SaveChangesAsync();
+        await testDb.SeedKubeconfigAsync(vault, tenant.Id, cluster.Id, TestKubeconfig.Valid);
+
+        DockerRegistryCredential cred = await CreateAsync(tenant.Id, app.Id, "prod-cred", prod.Id);
+        await sut.ConfigureSyncAsync(cred.Id, cluster.Id, "registry-creds", "app");
+
+        (await sut.SyncToKubernetesAsync(tenant.Id, cred.Id)).IsSuccess.Should().BeTrue();
+
+        namespacesEnsured.Should().Equal(["app"]);
+        secretsReplaced.Should().ContainSingle()
+            .Which.Should().Match<(string Name, string Ns, string Manifest)>(s =>
+                s.Name == "registry-creds" && s.Ns == "app"
+                && s.Manifest.Contains("kubernetes.io/dockerconfigjson")
+                && !s.Manifest.Contains("kind: Namespace"));
+    }
+
+    /// <summary>
+    /// And another tenant cannot use it to write into a cluster that is not theirs: the seam
+    /// refuses, so nothing is ensured and nothing is written.
+    /// </summary>
+    [Fact]
+    public async Task SyncToKubernetesAsync_RefusesAnotherTenantsCluster()
+    {
+        (Tenant tenant, App app, Data.Environment prod, _) = await SeedAsync();
+
+        KubernetesCluster cluster = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenant.Id, EnvironmentId = prod.Id,
+            Name = "prod-cluster", ApiServerUrl = "https://k8s",
+        };
+        db.KubernetesClusters.Add(cluster);
+        await db.SaveChangesAsync();
+        await testDb.SeedKubeconfigAsync(vault, tenant.Id, cluster.Id, TestKubeconfig.Valid);
+
+        DockerRegistryCredential cred = await CreateAsync(tenant.Id, app.Id, "prod-cred", prod.Id);
+        await sut.ConfigureSyncAsync(cred.Id, cluster.Id, "registry-creds", "app");
+
+        KubernetesOperationResult<string> result =
+            await sut.SyncToKubernetesAsync(Guid.NewGuid(), cred.Id);
+
+        result.IsSuccess.Should().BeFalse();
+        secretsReplaced.Should().BeEmpty("nothing should reach anyone's cluster");
+        namespacesEnsured.Should().BeEmpty();
     }
 }
