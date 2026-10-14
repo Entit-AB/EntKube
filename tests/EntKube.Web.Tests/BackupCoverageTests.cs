@@ -88,15 +88,19 @@ public class BackupCoverageTests
     /// with, and nothing new should go on it. Something genuinely not worth carrying
     /// belongs in <see cref="DeliberatelyExcluded"/> with its reason instead.</para>
     /// </summary>
-    private static readonly HashSet<string> KnownGaps =
-    [
-        // The question is volume against evidence. An audit event is written on every
-        // destructive operation and says who did it, which is exactly the sort of thing
-        // that is wanted a year later — but the bundle is one JSON document, and a busy
-        // installation's audit history could be most of it. Carrying it probably means
-        // giving the bundle a second file or a retention window first.
-        "AuditEvent",
-    ];
+    /// <remarks>
+    /// <b>Empty, as of the audit trail being carried.</b> That entry had stood as "volume against
+    /// evidence": an audit event says who did the destructive thing, which is exactly what is
+    /// wanted a year later, but the bundle is one JSON document and a busy installation's whole
+    /// history could be most of it. It is now carried within
+    /// <see cref="EntKube.Web.Services.BackupService.AuditRetention"/> — a year — which answers the
+    /// volume objection without giving the bundle a second file.
+    ///
+    /// <para>The list staying empty is the point: a table nobody has decided about is a silent loss
+    /// on a server migration, and something genuinely not worth carrying belongs in
+    /// <see cref="DeliberatelyExcluded"/> with its reason instead.</para>
+    /// </remarks>
+    private static readonly HashSet<string> KnownGaps = [];
 
     private static IModel Model()
     {
