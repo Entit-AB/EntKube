@@ -374,6 +374,33 @@ which satisfies any test that only counts what came back for one tenant. `SweepT
 two tenants a qualifying row each and requires each to see exactly its own — verified by deleting
 the tenant predicate, which fails exactly the three tests that are about it.
 
+**The set is now classified rather than counted.** `SweepTenancyRatchetTests` names every
+management-plane hosted service as one of four things: it loops the tenant table, it delegates to
+something that does (and that owner is named), it has no tenant-scoped work (with a reason), or it
+is in the backlog (with a reason). **16 loop, 3 delegate, 2 are exempt, 6 remain** — and a new
+sweep cannot be added without picking one, which is the part that pays: every conversion so far
+began by re-deriving which sweeps were left.
+
+The honest half of it is the test that requires the loop signal to be **absent** from the backlog
+and the exemptions. Without that, a sweep someone converts and forgets to move out of the backlog
+sits there forever, making finished work look like work remaining — and the count would drift the
+way it already had.
+
+⚠️ Three things the classification corrected, all of them measurement rather than code:
+
+- **Enumerating `AddHostedService<T>` alone finds 25; the answer is 27.** `GitSyncService` and five
+  `SegmentSealService`s are registered through lambdas (`sp => new …`,
+  `sp => sp.GetRequiredService<…>()`).
+- **`SupportMailPoller` reads as converted and is not.** It has
+  `foreach (Guid tenantId in due)` — and `due` comes from `SupportMailboxes`, so the tenants it
+  takes mail in as are taken from the work rows. *The loop variable's name is not evidence of where
+  its value came from*, which is the third time in this programme that name-shaped evidence was
+  wrong.
+- **The in-cluster node has three hosted services of its own** — `ObjectStorageBudgetService`,
+  `SegmentCacheTrimService`, `VolumeGuardService` — and this decision does not reach them: a node
+  serves one cluster and authenticates with a token, so there is no tenant to act as. They are
+  named in the test so the next reader can see they were considered rather than missed.
+
 ⚠️ **A count of "sweeps that loop tenants" is easy to get wrong, twice over.** A regex for
 `.Tenants ... Select(` misses `AdvisorScanService`, which loops `db.Tenants.ToListAsync()`, and
 misses `GitSyncService`, whose loop is upstream of a queue. Separately, four hosted services look

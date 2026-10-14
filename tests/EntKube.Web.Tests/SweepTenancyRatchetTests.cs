@@ -1,0 +1,272 @@
+using System.Text.RegularExpressions;
+using FluentAssertions;
+
+namespace EntKube.Web.Tests;
+
+/// <summary>
+/// Every background sweep, and whether it acts as each tenant in turn (docs/decomposition.md
+/// §4.0.1.2) — classified by name, so a new sweep cannot join without someone deciding.
+///
+/// <para><b>Why a list and not just a count.</b> The decision this measures has been applied
+/// thirteen times across #175–#206, and each time the hard part was knowing which sweeps were
+/// left. The count was repeatedly wrong, in both directions, and always for the same reason: it
+/// was inferred from a pattern instead of read. This file is the classification, so the next
+/// conversion starts from a decision rather than a grep.</para>
+///
+/// <para><b>What the signal is worth.</b> <see cref="LoopsTenants"/> looks for the tenant table
+/// and a loop in the same file. That is a <em>claim-checker, not a prover</em>: it cannot tell an
+/// outer loop from an incidental one. It earns its place through
+/// <see cref="Nothing_in_the_backlog_or_the_exemptions_quietly_loops_already"/>, which requires
+/// the signal to be ABSENT from everything not claiming to loop — so a sweep that gets converted
+/// and left in the backlog fails, which is the drift this would otherwise accumulate.</para>
+///
+/// <para>⚠️ <b>Two things this file exists because I got wrong.</b> Enumerating
+/// <c>AddHostedService&lt;T&gt;</c> alone misses the lambda registrations —
+/// <c>GitSyncService</c> and five <c>SegmentSealService</c>s — so a count built that way says 25
+/// where the answer is 27. And <c>SupportMailPoller</c> reads as converted if you stop at
+/// <c>foreach (Guid tenantId in due)</c>: <c>due</c> comes from <c>SupportMailboxes</c>, so the
+/// tenants it acts as are taken from the work rows, which is the thing §4.0.1.2 forbids. <b>The
+/// loop variable's name is not evidence of where its value came from.</b></para>
+/// </summary>
+public class SweepTenancyRatchetTests
+{
+    private const string Src = "../../../../../src";
+
+    /// <summary>
+    /// The management plane. Registrations are read from here only — <c>EntKube.TelemetryNode</c>
+    /// registers three hosted services of its own (<c>ObjectStorageBudgetService</c>,
+    /// <c>SegmentCacheTrimService</c>, <c>VolumeGuardService</c>) and §4.0.1.2 does not reach them:
+    /// the node serves exactly one cluster and authenticates with a token, so there is no tenant to
+    /// act as. Named here so the next reader can see they were considered rather than missed.
+    ///
+    /// <para>Source files are still resolved across all of <c>src</c>, because the management plane
+    /// registers one type that lives elsewhere — <c>SegmentSealService</c>, in
+    /// <c>EntKube.Telemetry</c>.</para>
+    /// </summary>
+    private const string ManagementPlane = "../../../../../src/EntKube.Web";
+
+    /// <summary>
+    /// Sweeps whose outer loop is over the tenant table, so the tenant is an input to everything
+    /// below it.
+    /// </summary>
+    private static readonly string[] ActsAsEachTenant =
+    [
+        "AdvisorScanService",
+        "AlertEscalationService",
+        "AlertSyncService",
+        "AppL4RouteHealthService",
+        "BootstrapRunnerService",
+        "CostScanService",
+        "DeploymentSyncService",
+        "DrScanService",
+        "DriftScanService",
+        "GitSyncService",
+        "HeadscaleCertSyncService",
+        "KeycloakBackupSchedulerService",
+        "ResourceUsageCollectorService",
+        "RolloutWatcherService",
+        "SupplyChainScanService",
+        "TelemetryAlertEvaluator",
+    ];
+
+    /// <summary>
+    /// Thin hosts: they call one method on another service, and that service owns the loop. Named
+    /// rather than waved through, because all four of these looked exempt for exactly this reason
+    /// while none of their owners looped either (#202).
+    /// </summary>
+    private static readonly Dictionary<string, string[]> DelegatesTo = new(StringComparer.Ordinal)
+    {
+        ["CertificateDistributionReconcileService"] = ["CertificateDistributionService"],
+        ["MessagingStatusPollingService"] = ["RabbitMQService", "KafkaService"],
+        ["SearchStatusPollingService"] = ["ElasticsearchService"],
+    };
+
+    /// <summary>Sweeps with no tenant-scoped work to do, and why.</summary>
+    private static readonly Dictionary<string, string> NoTenantScopedWork = new(StringComparer.Ordinal)
+    {
+        ["PresenceHeartbeatService"] =
+            "refreshes an in-memory presence tracker; touches no rows and reaches no cluster",
+        ["SegmentSealService"] =
+            "iterates the live per-tenant segment managers for one signal and seals or expires that "
+            + "tenant's own segments — per-tenant by construction, with no cross-tenant decision to make",
+    };
+
+    /// <summary>
+    /// The backlog: sweeps that still read the installation, or take the tenant off the rows they
+    /// then act as. Each needs the §4.0.1.2 conversion. <b>This list may only shrink.</b>
+    /// </summary>
+    private static readonly Dictionary<string, string> NotYetTenantScoped = new(StringComparer.Ordinal)
+    {
+        ["SupportMailPoller"] =
+            "DueTenantsAsync selects m.TenantId from SupportMailboxes, so the tenant it takes mail "
+            + "in as comes from the mailbox row. Same shape as AlertEscalationService before #200",
+        ["ExternalRouteHealthService"] =
+            "probes every ExternalRoute in the installation; no tenant anywhere in the cycle",
+        ["ObservedSecretRefreshService"] =
+            "VaultService.GetObservedAppSecretIdsAsync returns secret ids across the installation, "
+            + "and the refresh then reads each one from its cluster",
+        ["SecretExpiryNotificationService"] =
+            "notification scopes come from SecretExpiryNotificationConfigs rows, which carry the "
+            + "tenant it then notifies as",
+        ["JitGrantReaperService"] =
+            "reaps expiring grants installation-wide and takes the tenant off the grant row; it also "
+            + "holds three credential reads, so it converts with the custody work rather than before it",
+        ["UptimeTrackingService"] =
+            "snapshots every deployment's health and prunes old rows installation-wide. Nothing is "
+            + "authorized against the tenant here, so this one buys isolation rather than safety — "
+            + "a tenant's cycle that can fail on its own is what the worker extraction needs",
+    };
+
+    private const int BaselineNotYetTenantScoped = 6;
+
+    // ──────────────────────────────────────────────────────────────────────────
+
+    [Fact]
+    public void Every_hosted_service_is_classified_exactly_once()
+    {
+        IReadOnlySet<string> hosted = HostedServices();
+
+        hosted.Count.Should().BeGreaterThan(20,
+            "if the enumeration stops finding registrations, this whole file silently passes");
+
+        List<string> unclassified = [.. hosted.Where(s => Classifications(s) == 0).Order()];
+        List<string> twice = [.. hosted.Where(s => Classifications(s) > 1).Order()];
+        List<string> ghosts =
+        [
+            .. ActsAsEachTenant.Concat(DelegatesTo.Keys).Concat(NoTenantScopedWork.Keys)
+                .Concat(NotYetTenantScoped.Keys)
+                .Where(s => !hosted.Contains(s)).Order()
+        ];
+
+        string.Join(", ", unclassified).Should().BeEmpty(
+            "a new background sweep either acts as each tenant in turn (§4.0.1.2) or says here why "
+            + "it does not. Deciding that when it is written costs a line; deciding it later means "
+            + "re-reading a sweep nobody remembers");
+
+        string.Join(", ", twice).Should().BeEmpty("each sweep belongs in one list");
+
+        string.Join(", ", ghosts).Should().BeEmpty(
+            "this names a service that is no longer a hosted service — the entry should go with it");
+    }
+
+    [Fact]
+    public void Every_sweep_that_claims_to_loop_tenants_shows_it()
+    {
+        List<string> missing =
+        [
+            .. ActsAsEachTenant.Where(s => !LoopsTenants(s)).Order(),
+            .. DelegatesTo.SelectMany(kv => kv.Value).Where(s => !LoopsTenants(s)).Order(),
+        ];
+
+        string.Join(", ", missing).Should().BeEmpty(
+            "either the loop was removed or the owner named here is the wrong one. A thin host is "
+            + "only exempt because something else does the work — if that something stopped, the "
+            + "host is back in the backlog");
+    }
+
+    /// <summary>
+    /// The half that keeps the lists honest. A sweep someone converts and forgets to move out of
+    /// the backlog would otherwise sit there forever, making the number look like work remaining
+    /// when it is work already done.
+    /// </summary>
+    [Fact]
+    public void Nothing_in_the_backlog_or_the_exemptions_quietly_loops_already()
+    {
+        List<string> converted =
+        [
+            .. NotYetTenantScoped.Keys.Where(LoopsTenants).Order(),
+            .. NoTenantScopedWork.Keys.Where(LoopsTenants).Order(),
+        ];
+
+        string.Join(", ", converted).Should().BeEmpty(
+            "this sweep now reads the tenant table and loops — move it to ActsAsEachTenant and "
+            + "lower the baseline, which is the whole point of having one");
+    }
+
+    [Fact]
+    public void The_backlog_does_not_carry_slack()
+    {
+        NotYetTenantScoped.Count.Should().Be(BaselineNotYetTenantScoped,
+            $"now {NotYetTenantScoped.Count} — bank it, or the slack lets a sweep come back");
+
+        NotYetTenantScoped.Values.Should().OnlyContain(r => r.Length > 20,
+            "a backlog entry without a reason is a name someone has to re-derive");
+        NoTenantScopedWork.Values.Should().OnlyContain(r => r.Length > 20,
+            "an exemption is a claim, and the claim is the reason");
+    }
+
+    // ──────── measurement ────────
+
+    private static int Classifications(string service)
+        => (ActsAsEachTenant.Contains(service) ? 1 : 0)
+         + (DelegatesTo.ContainsKey(service) ? 1 : 0)
+         + (NoTenantScopedWork.ContainsKey(service) ? 1 : 0)
+         + (NotYetTenantScoped.ContainsKey(service) ? 1 : 0);
+
+    /// <summary>
+    /// Every type registered as a hosted service. <b>All three registration forms</b>, because the
+    /// generic one alone misses six registrations — see this class's remarks.
+    /// </summary>
+    private static IReadOnlySet<string> HostedServices()
+    {
+        HashSet<string> found = new(StringComparer.Ordinal);
+
+        foreach (string path in ManagementPlaneFiles())
+        {
+            string code = File.ReadAllText(path);
+
+            foreach (string pattern in new[]
+                     {
+                         @"AddHostedService<([\w.]+)>",
+                         @"AddHostedService\(sp => new ([\w.]+)\(",
+                         @"AddHostedService\(sp => sp\.GetRequiredService<([\w.]+)>",
+                     })
+            {
+                foreach (Match m in Regex.Matches(code, pattern))
+                {
+                    found.Add(m.Groups[1].Value.Split('.')[^1]);
+                }
+            }
+        }
+
+        return found;
+    }
+
+    /// <summary>
+    /// Whether a type's source reads the tenant table and loops. A claim-checker: see this class's
+    /// remarks for why that is enough here and not enough on its own.
+    /// </summary>
+    private static bool LoopsTenants(string typeName)
+    {
+        string? path = SourceFiles()
+            .FirstOrDefault(p => Path.GetFileNameWithoutExtension(p) == typeName);
+
+        if (path is null) return false;
+
+        string code = string.Join('\n', File.ReadLines(path)
+            .Where(l => !l.TrimStart().StartsWith("//", StringComparison.Ordinal)
+                     && !l.TrimStart().StartsWith("*", StringComparison.Ordinal)));
+
+        return code.Contains(".Tenants", StringComparison.Ordinal)
+            && code.Contains("foreach", StringComparison.Ordinal);
+    }
+
+    private static IEnumerable<string> ManagementPlaneFiles()
+        => Files(ManagementPlane);
+
+    private static IEnumerable<string> SourceFiles()
+        => Files(Src);
+
+    private static IEnumerable<string> Files(string relative)
+    {
+        string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, relative));
+
+        Directory.Exists(root).Should().BeTrue(
+            "this test reads the source tree; if it moved, the test has to follow rather than "
+            + "quietly stop checking anything");
+
+        return Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories)
+            .Where(p => !p.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
+                     && !p.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"));
+    }
+}
