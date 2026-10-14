@@ -407,7 +407,20 @@ public class ClusterCredentialCustodyTests
     /// credential's own vault row. That distinction is the whole value: a tenant read off the row
     /// being acted on cannot decide whether this cluster may be reached.</para>
     /// </summary>
-    private const int BaselineOccurrences = 70;
+    /// <summary>
+    /// <b>66 in 23 files.</b> <c>ReleaseVolumeGuard</c> and <c>ComponentUpgradeRunner</c> left
+    /// together, because they were one holding: the runner read the kubeconfig in order to hand it
+    /// to the guard, and the guard wrote it to disk for its own <c>kubectl</c>. The runner hands a
+    /// client now and the guard takes one, so the credential never leaves the seam — and the guard
+    /// stopped being invisible to the change gate at the same time
+    /// (<see cref="ClusterChangeGateCoverageTests"/> 3 → 2).
+    ///
+    /// <para>Worth recording as a shape: <b>a caller that passes a credential to another service
+    /// makes two files hold one credential.</b> Neither could be converted alone — converting the
+    /// guard first would have left the runner reading a kubeconfig to pass nothing, and converting
+    /// the runner first would have left the guard with no way to reach a cluster.</para>
+    /// </summary>
+    private const int BaselineOccurrences = 66;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -439,7 +452,7 @@ public class ClusterCredentialCustodyTests
     ///
     /// <para>26. <c>ComponentScanService</c>.</para>
     /// </summary>
-    private const int BaselineFiles = 25;
+    private const int BaselineFiles = 23;
 
     private static (int Occurrences, int Files) Measure()
     {

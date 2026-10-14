@@ -19,6 +19,7 @@ public sealed class ClusterChangeGate : IClusterChangeGate
     private readonly IClusterChangeRecorder _recorder;
     private IClusterChangeAckSink? _sink;
     private string? _unattendedReason;
+    private string? _consequenceReason;
 
     /// <param name="recorder">
     /// Where outcomes are written. Optional so that the tests about acknowledgment can keep
@@ -55,6 +56,20 @@ public sealed class ClusterChangeGate : IClusterChangeGate
 
         _unattendedReason = reason;
         return new Undeclare(this, reason);
+    }
+
+    public IDisposable DeclareConsequence(string reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            // Same rule as the unattended declaration: the reason is the whole value of it, because
+            // the reason is what the audit trail shows in place of an acknowledgment.
+            throw new ArgumentException(
+                "A consequence declaration must name the approved act it follows from.", nameof(reason));
+        }
+
+        _consequenceReason = reason;
+        return new Unconsequence(this, reason);
     }
 
     public async Task AcknowledgeAsync(PlannedClusterChange change, CancellationToken ct = default)
@@ -94,6 +109,19 @@ public sealed class ClusterChangeGate : IClusterChangeGate
                 change.ClusterLabel, _unattendedReason, change.Describe());
 
             await RecordAsync(change, ClusterChangeOutcome.AppliedUnattended, null, ct);
+            return;
+        }
+
+        if (_consequenceReason is not null)
+        {
+            // Deliberately below the sinkless branch above: a consequence declaration suppresses the
+            // QUESTION, not the refusal. A scope with nobody to ask is still refused — otherwise this
+            // would be a way to manufacture an approver who was never there.
+            _logger.LogInformation(
+                "Cluster change applied on {Cluster} as a consequence of {Reason}: {Change}",
+                change.ClusterLabel, _consequenceReason, change.Describe());
+
+            await RecordAsync(change, ClusterChangeOutcome.AppliedAsConsequence, null, ct);
             return;
         }
 
@@ -329,6 +357,17 @@ public sealed class ClusterChangeGate : IClusterChangeGate
     /// reason before clearing, for the same reason <see cref="Unregister"/> compares the sink:
     /// disposing an older declaration must not revoke a newer one.
     /// </summary>
+    private sealed class Unconsequence : IDisposable
+    {
+        private readonly ClusterChangeGate _gate;
+        private readonly string _reason;
+        public Unconsequence(ClusterChangeGate gate, string reason) { _gate = gate; _reason = reason; }
+        public void Dispose()
+        {
+            if (ReferenceEquals(_gate._consequenceReason, _reason)) _gate._consequenceReason = null;
+        }
+    }
+
     private sealed class Undeclare : IDisposable
     {
         private readonly ClusterChangeGate _gate;

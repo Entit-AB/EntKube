@@ -39,6 +39,29 @@ public class ClusterChangeRecordTests
         Summary = summary,
     };
 
+    /// <summary>
+    /// A consequence is not asked about, so the record is the only trace it leaves. It is recorded
+    /// under its own outcome rather than as <c>AppliedUnattended</c>: that one means nobody was
+    /// watching, and folding the two together would hide unsupervised changes inside approved ones
+    /// as more work moves behind the seam.
+    /// </summary>
+    [Fact]
+    public async Task A_consequence_is_recorded_under_its_own_outcome_with_its_reason()
+    {
+        RecordingRecorder recorder = new();
+        ClusterChangeGate gate = NewGate(recorder);
+        using IDisposable registration = gate.RegisterSink(new FakeSink(ClusterChangeDecision.Acknowledged));
+
+        using (gate.DeclareConsequence("the Harbor 2.11 upgrade the operator acknowledged"))
+        {
+            await gate.AcknowledgeAsync(PatchChange("Scale Deployment/harbor-core to 0"));
+        }
+
+        recorder.Entries.Should().ContainSingle()
+            .Which.Outcome.Should().Be(ClusterChangeOutcome.AppliedAsConsequence);
+        recorder.Entries[0].Change.Summary.Should().Be("Scale Deployment/harbor-core to 0");
+    }
+
     private sealed class RecordingRecorder : IClusterChangeRecorder
     {
         public List<(ClusterChangeOutcome Outcome, PlannedClusterChange Change, ClusterChangeDiff? Diff)> Entries { get; } = [];

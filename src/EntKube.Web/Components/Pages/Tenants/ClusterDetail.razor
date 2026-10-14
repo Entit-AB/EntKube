@@ -2814,7 +2814,7 @@ else if (section == "components")
         EntKube.Web.Services.Upgrades.VolumePreflight preflight;
         try
         {
-            preflight = await VolumeGuard.InspectAsync(componentId);
+            preflight = await VolumeGuard.InspectAsync(TenantId, componentId);
         }
         catch (Exception ex)
         {

@@ -145,6 +145,19 @@ public interface IKubernetesClientFactory
     /// <para>The result is returned rather than thrown: a drain that evicted most of a node and
     /// then hit a budget is the outcome an operator needs to read.</para>
     /// </summary>
+    /// <summary>
+    /// Sets a Deployment's replica count, as one acknowledged change.
+    ///
+    /// <para>Its own verb rather than a patch, because <c>ChangeVerb.Scale</c> is what the
+    /// acknowledgment dialog can describe in the operator's terms — "take Deployment/x to 0
+    /// replicas" — where a strategic patch would show them a JSON fragment. The gate has known
+    /// this verb since it was written; the seam simply never had the operation, which is why the
+    /// one service that needed it kept its own <c>kubectl</c> (§5.4).</para>
+    /// </summary>
+    Task<HelmExecutionResult> ScaleDeploymentAsync(
+        string name, string ns, int replicas, string kubeconfig,
+        string? summary = null, CancellationToken ct = default);
+
     Task<HelmExecutionResult> DrainNodeAsync(
         string nodeName, string kubeconfig, int gracePeriodSeconds = 30,
         bool ignoreDaemonSets = true, bool deleteEmptyDirData = false,

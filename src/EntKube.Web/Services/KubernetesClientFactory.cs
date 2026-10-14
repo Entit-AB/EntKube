@@ -424,6 +424,39 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// <summary>
     /// Drains a node. See <see cref="IKubernetesClientFactory.DrainNodeAsync"/>.
     /// </summary>
+    public async Task<HelmExecutionResult> ScaleDeploymentAsync(
+        string name, string ns, int replicas, string kubeconfig,
+        string? summary = null, CancellationToken ct = default)
+    {
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Scale,
+            Kind = "Deployment",
+            Name = name,
+            Namespace = ns,
+            Resource = $"deployment/{name}",
+            Kubeconfig = kubeconfig,
+            Summary = summary ?? $"Scale Deployment/{name} in {ns} to {replicas} replica(s)",
+        }, ct);
+
+        string kubeconfigPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+
+            (int code, string stdout, string stderr) = await RunKubectlRawAsync(
+                BuildScaleArguments(name, ns, replicas, kubeconfigPath), ct);
+
+            string output = string.IsNullOrWhiteSpace(stdout) ? stderr : stdout;
+            return new HelmExecutionResult { Success = code == 0, Output = output.TrimEnd() };
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+        }
+    }
+
     public async Task<HelmExecutionResult> DrainNodeAsync(
         string nodeName, string kubeconfig, int gracePeriodSeconds = 30,
         bool ignoreDaemonSets = true, bool deleteEmptyDirData = false,
@@ -465,6 +498,13 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// The command line for a node drain. <c>--timeout=5m</c> is not optional: without it a drain
     /// blocked by a PodDisruptionBudget waits forever, and this runs inside a request.
     /// </summary>
+    /// <summary>
+    /// <c>kubectl scale deployment/&lt;name&gt; --replicas=N</c>. Public and static so the command
+    /// line is assertable without a cluster.
+    /// </summary>
+    public static string BuildScaleArguments(string name, string ns, int replicas, string kubeconfigPath)
+        => $"scale deployment/{name} -n {ns} --replicas={replicas} --kubeconfig={kubeconfigPath}";
+
     public static string BuildDrainArguments(
         string nodeName, int gracePeriodSeconds, bool ignoreDaemonSets,
         bool deleteEmptyDirData, string kubeconfigPath)

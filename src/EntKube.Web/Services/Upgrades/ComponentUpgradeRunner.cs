@@ -58,6 +58,7 @@ public class ComponentUpgradeRunner(
     ComponentLifecycleService lifecycleService,
     ComponentInstallOrchestrator orchestrator,
     ReleaseVolumeGuard volumeGuard,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     ILogger<ComponentUpgradeRunner> logger)
 {
     public async Task<ComponentUpgradeOutcome> UpgradeAsync(
@@ -80,11 +81,15 @@ public class ComponentUpgradeRunner(
             return ComponentUpgradeOutcome.Refused(
                 $"'{component.Name}' has an operation in progress. Wait for it to finish.");
 
-        if (string.IsNullOrWhiteSpace(component.Cluster.Kubeconfig))
-            return ComponentUpgradeOutcome.Refused(
-                $"Cluster '{component.Cluster.Name}' has no kubeconfig configured.");
+        // The credential stays inside the seam: this runner hands the volume guard a client, not a
+        // kubeconfig, which is what let the guard stop writing one to disk.
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterAccess.ForAsync(request.TenantId, component.ClusterId, ct);
 
-        string kubeconfig = component.Cluster.Kubeconfig;
+        if (cluster is null)
+            return ComponentUpgradeOutcome.Refused(
+                $"Cluster '{component.Cluster.Name}' is not this tenant's, or has no kubeconfig configured.");
+
         bool wasInstalled = component.Status == ComponentStatus.Installed;
 
         // Helm builds the command from the component's *stored* chart version, so without
@@ -103,7 +108,10 @@ public class ComponentUpgradeRunner(
             + $"({component.HelmChartVersion ?? "unversioned"} → {version}).");
         log.AppendLine();
 
-        VolumePreflight preflight = await volumeGuard.InspectAsync(request.ComponentId, ct);
+        VolumePreflight preflight = await volumeGuard.InspectAsync(request.TenantId, request.ComponentId, ct);
+
+        // What the operator approved, named once and carried into the audit row behind every scale.
+        string release = $"{component.Name} {version}";
 
         foreach (string warning in preflight.Warnings)
             log.AppendLine($"NOTE: {warning}");
@@ -135,7 +143,7 @@ public class ComponentUpgradeRunner(
             if (blocked.Count > 0)
             {
                 log.AppendLine("--- Scale down (volumes cannot be shared between old and new pods) ---");
-                HelmExecutionResult down = await volumeGuard.ScaleDownAsync(kubeconfig, blocked, ct);
+                HelmExecutionResult down = await volumeGuard.ScaleDownAsync(cluster, release, blocked, ct);
                 scaledDown = true;
                 log.AppendLine(down.Output);
                 log.AppendLine();
@@ -181,7 +189,7 @@ public class ComponentUpgradeRunner(
                 log.AppendLine("--- Scale up ---");
                 try
                 {
-                    HelmExecutionResult up = await volumeGuard.RestoreAsync(kubeconfig, blocked, ct);
+                    HelmExecutionResult up = await volumeGuard.RestoreAsync(cluster, release, blocked, ct);
                     log.AppendLine(up.Output);
 
                     if (!up.Success)

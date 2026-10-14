@@ -78,6 +78,10 @@ public sealed class ClusterClient(
         CancellationToken ct = default)
         => inner.CreateJobFromCronJobAsync(jobName, cronJobName, ns, kubeconfig, summary, ct);
 
+    public Task<HelmExecutionResult> ScaleDeploymentAsync(
+        string name, string ns, int replicas, string? summary = null, CancellationToken ct = default)
+        => inner.ScaleDeploymentAsync(name, ns, replicas, kubeconfig, summary, ct);
+
     public Task<HelmExecutionResult> DrainNodeAsync(
         string nodeName, int gracePeriodSeconds = 30, bool ignoreDaemonSets = true,
         bool deleteEmptyDirData = false, string? summary = null, CancellationToken ct = default)

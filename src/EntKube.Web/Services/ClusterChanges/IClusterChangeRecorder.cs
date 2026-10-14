@@ -24,6 +24,18 @@ public enum ClusterChangeOutcome
     GateDisabled,
 
     /// <summary>
+    /// Nobody was asked <em>again</em>: the change is a declared consequence of one an operator had
+    /// already acknowledged in this scope — a workload scaled down for an upgrade whose dialog
+    /// named it, a resource pruned by an apply that was approved.
+    ///
+    /// <para>Distinct from <see cref="AppliedUnattended"/> on purpose. That one means the change
+    /// reached a cluster with nobody watching; this one means somebody approved the act it belongs
+    /// to and the gate did not re-ask per resource. Counting them together would hide the first
+    /// inside the second as more work moves behind the seam.</para>
+    /// </summary>
+    AppliedAsConsequence,
+
+    /// <summary>
     /// Nobody was asked and nobody had declared that this context may act unattended, so the
     /// change was <b>refused</b>.
     ///

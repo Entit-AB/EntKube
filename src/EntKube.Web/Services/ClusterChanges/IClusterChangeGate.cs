@@ -50,6 +50,33 @@ public interface IClusterChangeGate
     /// rather than the mechanism — "drift-remediation", not "background".</para>
     /// </summary>
     IDisposable DeclareUnattended(string reason);
+
+    /// <summary>
+    /// Declares that changes made in this scope are <b>consequences of a change an operator has
+    /// already acknowledged</b>, and what that work is. Within the returned disposable's lifetime
+    /// the gate does not ask again; every change is still recorded, as
+    /// <see cref="ClusterChangeOutcome.AppliedAsConsequence"/>.
+    ///
+    /// <para><b>Why this exists.</b> Some approved acts have per-resource consequences. An upgrade
+    /// of a chart whose volumes are ReadWriteOnce has to take each blocked workload to zero and put
+    /// it back; an apply that removes a resource from a manifest has to delete it. The dialog for
+    /// the act already named them. Asking per consequence would mean three dialogs for one upgrade
+    /// an operator has just approved, which is how an operator learns to click through dialogs
+    /// without reading them — so the alternative to this declaration is not more safety, it is a
+    /// service that keeps its own <c>kubectl</c> and is invisible to the gate entirely. That is
+    /// what <c>ReleaseVolumeGuard</c> did, and §5.4 names the remedy: the ungated path should be
+    /// auditable rather than accidental.</para>
+    ///
+    /// <para><b>It suppresses the question, never the refusal.</b> A scope with no sink and no
+    /// <see cref="DeclareUnattended"/> is still refused — declaring a consequence cannot conjure
+    /// an approver who was never there. So this is only ever a shortcut past a dialog that exists,
+    /// which is the one case where skipping it is honest.</para>
+    ///
+    /// <para><paramref name="reason"/> goes to the audit trail and should name the approved act it
+    /// follows from, not the mechanism — "scaled down for the Harbor 2.11 upgrade", not
+    /// "volume guard".</para>
+    /// </summary>
+    IDisposable DeclareConsequence(string reason);
 }
 
 /// <summary>

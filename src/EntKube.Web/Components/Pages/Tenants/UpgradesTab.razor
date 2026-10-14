@@ -542,7 +542,7 @@
 
         try
         {
-            preflight = await VolumeGuard.InspectAsync(component.ComponentId);
+            preflight = await VolumeGuard.InspectAsync(TenantId, component.ComponentId);
         }
         catch (Exception ex)
         {
