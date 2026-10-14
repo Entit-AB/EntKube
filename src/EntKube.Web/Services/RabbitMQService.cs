@@ -961,23 +961,37 @@ public class RabbitMQService(
     /// cluster state. Called on an interval by the background status poller so clusters
     /// don't get stuck in "Creating" when the operator finishes out of band.
     /// </summary>
+    /// <summary>
+    /// One tenant's brokers that a status poll should look at. Public and static so the scoping is
+    /// assertable without a cluster; see <c>ReconcileSweepTenancyTests</c>.
+    /// </summary>
+    public static IQueryable<RabbitMQCluster> ReconcilableFor(ApplicationDbContext db, Guid tenantId)
+        => db.RabbitMQClusters
+            .Where(c => c.TenantId == tenantId && c.Status != RabbitMQClusterStatus.Deleting);
+
     public async Task ReconcileAllAsync(CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        // Failed must be included: it is a verdict from a previous poll, not a terminal state.
-        // Excluding it meant a cluster marked Failed by a transient blip could never be observed
-        // recovering, so the badge stayed wrong until someone hit "Refresh Status" by hand.
-        // Only Deleting is skipped — that one is mid-teardown and owned by DeleteClusterAsync.
-        List<RabbitMQCluster> clusters = await db.RabbitMQClusters
-            .Where(c => c.Status != RabbitMQClusterStatus.Deleting)
-            .ToListAsync(ct);
-
-        foreach (RabbitMQCluster cluster in clusters)
+        // One tenant at a time, outermost (docs/decomposition.md §4.0.1.2). The brokers were
+        // selected across the installation and each one's tenant taken off its own row, which is
+        // the tenant ReconcileStatusAsync then reaches the cluster as.
+        foreach (Guid tenantId in await db.Tenants.Select(x => x.Id).ToListAsync(ct))
         {
             if (ct.IsCancellationRequested) break;
-            try { await ReconcileStatusAsync(cluster.TenantId, cluster.Id, ct); }
-            catch { /* cluster unreachable — leave status as-is */ }
+
+            // Failed must be included: it is a verdict from a previous poll, not a terminal state.
+            // Excluding it meant a cluster marked Failed by a transient blip could never be observed
+            // recovering, so the badge stayed wrong until someone hit "Refresh Status" by hand.
+            // Only Deleting is skipped — that one is mid-teardown and owned by DeleteClusterAsync.
+            List<Guid> clusterIds = await ReconcilableFor(db, tenantId).Select(c => c.Id).ToListAsync(ct);
+
+            foreach (Guid clusterId in clusterIds)
+            {
+                if (ct.IsCancellationRequested) break;
+                try { await ReconcileStatusAsync(tenantId, clusterId, ct); }
+                catch { /* cluster unreachable — leave status as-is */ }
+            }
         }
     }
 

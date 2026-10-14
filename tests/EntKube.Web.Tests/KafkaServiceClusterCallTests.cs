@@ -30,11 +30,21 @@ public class KafkaServiceClusterCallTests : IDisposable
     private readonly KafkaService sut;
     private readonly List<string> applied = [];
 
+    /// <summary>Every status poll, as (resource asked for, credential it was asked with).</summary>
+    private readonly List<(string Resource, string Kubeconfig)> polled = [];
+
     public KafkaServiceClusterCallTests()
     {
         testDb = new InterceptingTestDb(TestRootKey);
         db = testDb.CreateContext();
         vault = testDb.CreateVaultService();
+
+        k8s.Setup(f => f.GetJsonAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .Callback<string, string, string, string, CancellationToken>(
+                (resource, _, kubeconfig, _, _) => polled.Add((resource, kubeconfig)))
+            .ReturnsAsync("{}");
 
         k8s.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
@@ -71,7 +81,13 @@ public class KafkaServiceClusterCallTests : IDisposable
         await db.SaveChangesAsync();
 
         await vault.InitializeVaultAsync(tenantId);
-        await testDb.SeedKubeconfigAsync(vault, tenantId, clusterId, TestKubeconfig.Valid);
+
+        // Each tenant's kubeconfig is made identifiable, so an assertion can tell WHOSE credential
+        // reached the cluster rather than only that one did. With the same literal for both, a
+        // sweep that polled every broker with the first tenant's credential would look correct.
+        await testDb.SeedKubeconfigAsync(
+            vault, tenantId, clusterId,
+            TestKubeconfig.Valid.Replace("https://k8s.example.com", $"https://{label}.example.com"));
 
         return (tenantId, clusterId);
     }
@@ -124,5 +140,41 @@ public class KafkaServiceClusterCallTests : IDisposable
             () => sut.CreateTopicAsync(ourTenant, theirs.Id, "orders", 3, 3, null));
 
         applied.Should().BeEmpty("nothing should reach anyone's cluster");
+    }
+
+    /// <summary>
+    /// The status sweep polls every tenant's brokers, each with its own tenant's credential.
+    ///
+    /// <para>This is the assertion the sweep conversion needed and could not have before: the loop
+    /// used to select every broker in the installation and take the tenant off each row, so the
+    /// tenant reaching <c>ForAsync</c> was the row's own claim. Pairing the resource polled with
+    /// the credential it was polled with is what shows the two never cross — a test that only
+    /// counted polls would pass against a sweep that used one tenant's credential for all of
+    /// them.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_status_sweep_polls_each_tenants_broker_with_that_tenants_credential()
+    {
+        (Guid ourTenant, Guid ourCluster) = await SeedAsync("ours");
+        (Guid theirTenant, Guid theirCluster) = await SeedAsync("theirs");
+
+        await sut.CreateClusterAsync(
+            ourTenant, ourCluster, "ours-events", "messaging", 3, "3.7.0", "10Gi", null, true,
+            null, null, null);
+        await sut.CreateClusterAsync(
+            theirTenant, theirCluster, "theirs-events", "messaging", 3, "3.7.0", "10Gi", null, true,
+            null, null, null);
+        polled.Clear();
+
+        await sut.ReconcileAllAsync();
+
+        polled.Should().HaveCount(2, "both tenants' brokers are polled");
+
+        polled.Should().Contain(p => p.Resource.Contains("ours-events") && p.Kubeconfig.Contains("ours.example.com"));
+        polled.Should().Contain(p => p.Resource.Contains("theirs-events") && p.Kubeconfig.Contains("theirs.example.com"));
+
+        polled.Should().NotContain(p => p.Resource.Contains("ours-events") && p.Kubeconfig.Contains("theirs.example.com"),
+            "one tenant's credential must never be the one that reads another's broker");
+        polled.Should().NotContain(p => p.Resource.Contains("theirs-events") && p.Kubeconfig.Contains("ours.example.com"));
     }
 }

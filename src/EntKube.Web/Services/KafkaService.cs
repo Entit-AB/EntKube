@@ -313,28 +313,43 @@ public class KafkaService(
     }
 
     /// <summary>Reconciles every tenant's clusters — used by the background poller.</summary>
+    /// <summary>
+    /// One tenant's Kafka clusters that a status poll should look at. Public and static so the
+    /// scoping is assertable without a cluster; see <c>ReconcileSweepTenancyTests</c>.
+    /// </summary>
+    public static IQueryable<KafkaCluster> ReconcilableFor(ApplicationDbContext db, Guid tenantId)
+        => db.KafkaClusters
+            .Where(c => c.TenantId == tenantId && c.Status != KafkaClusterStatus.Failed);
+
     public async Task ReconcileAllAsync(CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        List<KafkaCluster> clusters = await db.KafkaClusters
-            .Include(c => c.KubernetesCluster)
-            .Where(c => c.Status != KafkaClusterStatus.Failed)
-            .ToListAsync(ct);
 
-        foreach (KafkaCluster cluster in clusters)
+        // One tenant at a time, outermost (docs/decomposition.md §4.0.1.2). The Include went with
+        // the flat select: nothing in this loop reads the navigation, and a materialized
+        // KubernetesCluster carries the kubeconfig the interceptor fills in — not work worth doing
+        // every poll for a row that is never read.
+        foreach (Guid tenantId in await db.Tenants.Select(x => x.Id).ToListAsync(ct))
         {
-            Clusters.IClusterClient? reachable =
-                await clusterAccess.ForAsync(cluster.TenantId, cluster.KubernetesClusterId, ct);
+            if (ct.IsCancellationRequested) break;
 
-            if (reachable is null) continue;
-            try
+            List<KafkaCluster> clusters = await ReconcilableFor(db, tenantId).ToListAsync(ct);
+
+            foreach (KafkaCluster cluster in clusters)
             {
-                string crdJson = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
-                    $"kafka.kafka.strimzi.io/{cluster.Name}", cluster.Namespace,
-                     ct: ct);
-                await ReconcileStatusAsync(cluster.Id, ParseReadyCondition(crdJson), ct);
+                Clusters.IClusterClient? reachable =
+                    await clusterAccess.ForAsync(tenantId, cluster.KubernetesClusterId, ct);
+
+                if (reachable is null) continue;
+                try
+                {
+                    string crdJson = await (await ClusterFor(tenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
+                        $"kafka.kafka.strimzi.io/{cluster.Name}", cluster.Namespace,
+                         ct: ct);
+                    await ReconcileStatusAsync(cluster.Id, ParseReadyCondition(crdJson), ct);
+                }
+                catch { /* cluster unreachable — leave status as-is */ }
             }
-            catch { /* cluster unreachable — leave status as-is */ }
         }
     }
 
