@@ -143,6 +143,21 @@ public class ModuleContractTests
     /// <c>DriftAdoptionService</c> <em>writes</em> Delivery's tables, which a read-only contract
     /// cannot serve. None of those four is a missing method on <c>IDeliveryApi</c>.</para>
     ///
+    /// <para><b>Telemetry 10 → 9</b>, and it gave <c>IFleetApi</c>'s sibling its second consumer
+    /// rather than needing anything new. <c>PrometheusService</c> held the all-seeing context for
+    /// three reads of <c>AppDeployment</c> — one deployment by id, and an app's or a customer's
+    /// deployments grouped by cluster — all three now <c>IDeliveryApi</c>.</para>
+    ///
+    /// <para><b>The field I expected to have to add to <c>IFleetApi</c> was not needed</b>, and the
+    /// reason is worth keeping. Two of those reads filtered on
+    /// <c>d.Cluster.KubeconfigSecretId != null</c>, which looks like it needs the contract to admit
+    /// whether a credential is stored. It does not: <c>IClusterClientFactory.ForAsync</c> already
+    /// answers that question by refusing, and this service already had a private funnel —
+    /// <c>ResolveReachableAsync</c> — that resolved the cluster through the seam and its Prometheus
+    /// through Catalog. The two aggregate methods were each doing half of what that funnel does, so
+    /// the conversion moved the lookup into one place instead of adding contract surface. The
+    /// general form: before widening a contract, check whether the seam already refuses.</para>
+    ///
     /// <para><b>Telemetry 11 → 10</b>, and it came for free: <c>LogQueryService</c> held the
     /// all-seeing context for one read — "is EntKube's collector installed on this cluster" —
     /// which is a Catalog question. Asking <c>ICatalogApi</c> instead left it with no reason to
@@ -152,7 +167,7 @@ public class ModuleContractTests
     private static readonly Dictionary<Module, int> Baseline = new()
     {
         [Module.DataServices] = 12,
-        [Module.Telemetry] = 10,
+        [Module.Telemetry] = 9,
         [Module.Connectivity] = 8,
         [Module.Support] = 7,
         [Module.Catalog] = 6,

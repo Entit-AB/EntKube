@@ -57,7 +57,7 @@ public class IngressDashboardProbeTests : IDisposable
             // Constructed rather than null: the traffic path asks it per route, and a null here
             // would be a landmine for the first test that produces one.
             new PrometheusService(
-                testDb.Factory,
+                new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory),
                 new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
                 new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
                 new PromQueryCache(),
