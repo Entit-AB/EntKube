@@ -702,21 +702,36 @@ background services. It stops being defensible when a remote agent is a caller.
 This is a prerequisite, not a phase-4 nicety. Everything else in this document can
 slip; this cannot.
 
-⚠️ **And the gate's reach is narrower than "every human-triggered mutation" suggests: 46
-invocations in nine files never reach it at all.** The gate covers every mutation that goes
+⚠️ **The gate's reach used to be far narrower than "every human-triggered mutation" suggests: 46
+invocations in nine files never reached it at all.** The gate covers every mutation that goes
 through `IKubernetesClientFactory`, because the factory raises the acknowledgment itself. A
 service that spawns `kubectl` or `helm` as its own process bypasses the factory, so the gate is
 never invoked — and the recorder below cannot see those either, because there is no outcome to
-record when nothing asked. `ComponentLifecycleService` holds 21 of them and is what installs,
+record when nothing asked. `ComponentLifecycleService` held 21 of them, and is what installs,
 upgrades and removes every catalog component on every cluster; `VaultService` 11, syncing secrets
-into namespaces; `ClusterProvisioningService` 7.
+into namespaces; `ClusterProvisioningService` 7. All three are now at zero or exempt for a stated
+reason.
 
 This is the same work as §4.0.1 arriving from the other side: routing a call through
 `IClusterClient` puts it behind the factory and therefore behind the gate, so custody and gate
 coverage come down together. `ClusterChangeGateCoverageTests` ratchets the number and names the
 files, and is deliberately a **lower bound** — a file that acknowledges some paths and not others
-scores zero, so it can understate the gap but never overstate it. The helm invocations need a seam
-operation that does not exist, which is what stops the number reaching zero today.
+scores zero, so it can understate the gap but never overstate it.
+
+**Four are left, and the earlier claim that "the helm invocations need a seam operation that does
+not exist" is retired: it was wrong twice over.** The `helm repo`/`helm registry` calls never
+touch a cluster at all and are excluded by name; the rest needed verbs and parameters that were
+small to add, not operations that could not exist (§4.0.1.4). `DockerRegistryService` is converted — it
+applied a Namespace+Secret manifest, and the seam has had `EnsureNamespaceAsync` and
+`ReplaceSecretAsync` all along, so a registry password was being written into a namespace with
+nobody asked and nothing recorded. What remains is two invocations the seam already expresses —
+`ReleaseVolumeGuard` and `VpnService`, a scale and a read — each in a file that also holds
+credential reads, so they move the custody baseline too and are worth doing as custody work rather
+than as gate work. The third, `ClusterEgressTunnel`'s `kubectl port-forward`, is the one genuine
+gap in the seam's vocabulary:
+every verb on it is one-shot, and a port-forward is a long-lived process that must stay alive for
+as long as the tunnel is used. It is also the only entry that changes nothing — a tunnel is
+neither a read nor a change but a channel.
 
 ### 5.4.1 Decided (2026-10-09): declare or be refused
 

@@ -394,7 +394,20 @@ public class ClusterCredentialCustodyTests
     /// what <c>ReplaceSecretAsync</c> exists to avoid. It needs a verb that asks once for the
     /// set, which deserves its own change rather than being buried in this one.</para>
     ///
-    private const int BaselineOccurrences = 72;
+    /// <summary>
+    /// <b>70 in 25 files.</b> <c>DockerRegistryService</c> left both this list and
+    /// <see cref="ClusterChangeGateCoverageTests"/>'s in one change, which is the shape §5.4
+    /// predicted: its two credential reads existed only to write a kubeconfig to disk for a
+    /// <c>kubectl apply -f</c> it ran itself. Through <c>EnsureNamespaceAsync</c> +
+    /// <c>ReplaceSecretAsync</c> the credential never leaves the seam and the write is
+    /// acknowledged — and its private process runner was deleted rather than moved, because
+    /// nothing else in the file used it.
+    ///
+    /// <para>The tenant comes from the panel that triggers the sync rather than from the
+    /// credential's own vault row. That distinction is the whole value: a tenant read off the row
+    /// being acted on cannot decide whether this cluster may be reached.</para>
+    /// </summary>
+    private const int BaselineOccurrences = 70;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -426,7 +439,7 @@ public class ClusterCredentialCustodyTests
     ///
     /// <para>26. <c>ComponentScanService</c>.</para>
     /// </summary>
-    private const int BaselineFiles = 26;
+    private const int BaselineFiles = 25;
 
     private static (int Occurrences, int Files) Measure()
     {

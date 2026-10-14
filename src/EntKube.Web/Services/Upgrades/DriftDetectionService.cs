@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
 
@@ -328,66 +327,6 @@ public class DriftDetectionService(
         int dash = work.IndexOf('-');
         if (dash >= 0) work = work[..dash];
         return work;
-    }
-
-    private static async Task<(int Code, string Stdout, string Stderr)> RunKubectlAsync(
-        string arguments, CancellationToken ct)
-    {
-        ProcessStartInfo psi = new()
-        {
-            FileName = "kubectl",
-            Arguments = arguments,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            // Redirected so stdin can be closed immediately. A kubeconfig whose user has no
-            // usable credentials makes kubectl PROMPT for a username; with inherited stdin
-            // that prompt never receives EOF in a server process and the diff hangs until
-            // the timeout — once per deployment, four at a time.
-            RedirectStandardInput = true,
-            UseShellExecute = false,
-            CreateNoWindow = true,
-        };
-        psi.EnvironmentVariables["HOME"] = "/tmp";
-        // kubectl diff shells out to a differ; without this it looks for $KUBECTL_EXTERNAL_DIFF
-        // or `diff`, and on a minimal container image neither choice is guaranteed.
-        psi.EnvironmentVariables["KUBECTL_EXTERNAL_DIFF"] = "diff -u -N";
-
-        using Process process = new() { StartInfo = psi };
-        process.Start();
-        process.StandardInput.Close();
-
-        Task<string> stdout = process.StandardOutput.ReadToEndAsync(ct);
-        Task<string> stderr = process.StandardError.ReadToEndAsync(ct);
-
-        try
-        {
-            await process.WaitForExitAsync(ct);
-        }
-        catch (OperationCanceledException)
-        {
-            // WaitForExitAsync only stops awaiting — it does not stop the process. Without an
-            // explicit kill, a timed-out diff keeps running against the cluster forever and
-            // every sweep leaks another one.
-            TryKill(process);
-            throw;
-        }
-
-        return (process.ExitCode, await stdout, await stderr);
-    }
-
-    private static void TryKill(Process process)
-    {
-        try
-        {
-            if (!process.HasExited)
-            {
-                process.Kill(entireProcessTree: true);
-            }
-        }
-        catch (Exception)
-        {
-            // The process may have exited between the check and the kill; nothing to do.
-        }
     }
 
     /// <summary>Counts added/removed lines in a unified diff, ignoring file headers.</summary>

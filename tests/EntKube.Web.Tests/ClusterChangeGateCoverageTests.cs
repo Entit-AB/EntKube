@@ -104,8 +104,42 @@ public class ClusterChangeGateCoverageTests
     /// own exemption: "cannot" written next to a number is a claim, and this one survived three
     /// re-readings of this comment because it sounded like an architectural limit. It was a
     /// missing parameter.</para>
+    ///
+    /// <para><b>4, and the two halves of that are different in kind.</b> One is a removal:
+    /// <c>DriftDetectionService</c>'s private <c>RunKubectlAsync</c> (and the <c>TryKill</c> only
+    /// it used) had <b>no callers</b>. #137 moved the drift diff onto
+    /// <c>IClusterClient.DiffManifestAsync</c> and left the runner behind, so for several PRs this
+    /// number counted a kubectl launch that could not happen — though it was one edit away from
+    /// happening again, which is why deleting it is progress and not bookkeeping.</para>
+    ///
+    /// <para>The other is a <b>measurement correction</b>, and it is the second one this metric has
+    /// needed. <c>ReleaseVolumeGuard</c> was counted twice: once for the launch it really does, and
+    /// once for <c>HelmExecutionResult.DescribeLaunchFailure("kubectl", ex)</c> — a helper that
+    /// formats the message when a launch has already failed. Naming the program in an error string
+    /// is not running it. Same correction as dropping <c>helm repo</c>: leaving it in made the
+    /// number mean something other than its name, and a number in a doc comment is read as a
+    /// fact.</para>
+    ///
+    /// <para><b>What the four are, and why none of them is a caller fix today:</b></para>
+    /// <list type="bullet">
+    ///   <item><s><c>DockerRegistryService</c></s> — <b>converted here.</b> It was a plain
+    ///   <c>kubectl apply -f</c> of a Namespace+Secret manifest, and the seam has had both verbs
+    ///   all along: <c>EnsureNamespaceAsync</c> then <c>ReplaceSecretAsync</c>. It wrote a registry
+    ///   password into a namespace with nobody asked and nothing recorded. Its two credential reads
+    ///   and its private process runner went with it.</item>
+    ///   <item><c>ReleaseVolumeGuard</c> — scales a Deployment and reads it back, which the seam
+    ///   also expresses. Same block: two credential reads in the file.</item>
+    ///   <item><c>VpnService</c> — same again: expressible, two credential reads.</item>
+    ///   <item><c>ClusterEgressTunnel</c> — <c>kubectl port-forward</c>, and this one is a
+    ///   <b>seam addition rather than a caller fix</b>. Every verb on the seam is one-shot: run,
+    ///   capture output, exit. A port-forward is a long-lived process that reports a local port on
+    ///   stderr and must stay alive for as long as the tunnel is used, so there is no existing
+    ///   shape to move it onto. It is also the one entry here that changes nothing on the cluster —
+    ///   the metric counts reads on purpose (see <see cref="Measure"/>), and a tunnel is neither a
+    ///   read nor a change but a channel.</item>
+    /// </list>
     /// </summary>
-    private const int BaselineUngatedInvocations = 6;
+    private const int BaselineUngatedInvocations = 3;
 
     /// <summary>
     /// Files that run the CLI themselves and never acknowledge. Named rather than counted, so the
@@ -123,11 +157,10 @@ public class ClusterChangeGateCoverageTests
     private static readonly string[] Baseline =
     [
         "ClusterEgressTunnel",
-        "DockerRegistryService",
-        "DriftDetectionService",
         "ReleaseVolumeGuard",
         "VpnService",
-        // ComponentLifecycleService left this list entirely — see the baseline's note.
+        // ComponentLifecycleService left this list entirely — see the baseline's note, and
+        // DriftDetectionService followed it: its runner was dead code, not an invocation.
     ];
 
     /// <summary>
@@ -203,6 +236,20 @@ public class ClusterChangeGateCoverageTests
     /// <c>repo add</c> and <c>repo update</c> both succeed with a malformed kubeconfig and with a
     /// path that does not exist.</para>
     /// </summary>
+    /// <summary>
+    /// A literal naming <c>kubectl</c>/<c>helm</c> as the <em>subject of a message</em> rather than
+    /// as a program to run: <c>DescribeLaunchFailure("kubectl", ex)</c> formats the text shown when
+    /// a launch has already failed.
+    ///
+    /// <para>Excluded for the same reason as <see cref="LooksLocal"/>: counting it made this number
+    /// larger than the thing it is named after, and this number is quoted as a fact in
+    /// docs/decomposition.md §5.4. Narrow on purpose — only a call whose name says it describes —
+    /// because the containing regex is deliberately crude and must keep catching argument lists and
+    /// object initializers alike.</para>
+    /// </summary>
+    private static int NamesTheProgramInAMessage(string code)
+        => Regex.Matches(code, "Describe\\w*\\(\\s*\"(?:kubectl|helm)\"").Count;
+
     private static int LooksLocal(string code)
         => Regex.Matches(code, "\"helm\"\\s*,\\s*\\$?\"(?:repo|registry)\\b").Count
          + Regex.Matches(code, "\"helm\"\\s*,\\s*\\n\\s*\\$?\"(?:repo|registry)\\b").Count;
@@ -243,7 +290,8 @@ public class ClusterChangeGateCoverageTests
                          && !l.TrimStart().StartsWith("*", StringComparison.Ordinal)));
 
             int cli = Regex.Matches(code, "\"(?:kubectl|helm)\"\\s*,").Count
-                      - LooksLocal(code);
+                      - LooksLocal(code)
+                      - NamesTheProgramInAMessage(code);
 
             if (cli <= 0) continue;
 

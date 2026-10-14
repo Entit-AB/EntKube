@@ -756,7 +756,7 @@ else
         syncingId = cred.Id;
         syncOutput.Remove(cred.Id);
 
-        KubernetesOperationResult<string> result = await DockerRegistryService.SyncToKubernetesAsync(cred.Id);
+        KubernetesOperationResult<string> result = await DockerRegistryService.SyncToKubernetesAsync(TenantId, cred.Id);
 
         syncOutput[cred.Id] = (result.IsSuccess, result.IsSuccess ? result.Data ?? "" : result.Error ?? "Unknown error");
         syncingId = null;

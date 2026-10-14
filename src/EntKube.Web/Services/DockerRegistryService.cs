@@ -1,4 +1,3 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
@@ -18,6 +17,7 @@ namespace EntKube.Web.Services;
 /// </summary>
 public class DockerRegistryService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     VaultEncryptionService encryption)
 {
     // ─── CRUD ──────────────────────────────────────────────────────────────────
@@ -207,13 +207,25 @@ public class DockerRegistryService(
     }
 
     /// <summary>
-    /// Generates a kubernetes.io/dockerconfigjson Secret manifest from the credential
-    /// and applies it to the configured cluster with kubectl. Idempotent — safe to
-    /// call multiple times; kubectl apply will update in place.
+    /// Writes the credential into the configured cluster as a
+    /// <c>kubernetes.io/dockerconfigjson</c> Secret, so workloads can reference it as an
+    /// <c>imagePullSecret</c>. Idempotent.
     ///
-    /// A Namespace manifest is prepended so the namespace is created if absent.
+    /// <para><b>Through the seam, so the write is acknowledged.</b> This used to build a combined
+    /// Namespace+Secret manifest and run <c>kubectl apply -f</c> as its own process with
+    /// <c>--kubeconfig</c>, which bypassed <c>ClusterChangeGate</c> entirely (§5.4): a registry
+    /// password was written into a namespace with nobody asked and nothing recorded. It is now
+    /// <c>EnsureNamespaceAsync</c> followed by <c>ReplaceSecretAsync</c> — replace rather than
+    /// apply, because a Secret written this way carries no last-applied annotation and an apply
+    /// would leave a removed key behind. The acknowledgment dialog shows the Secret's keys and not
+    /// its values, which is what made routing secrets through the gate acceptable.</para>
+    ///
+    /// <para>The tenant comes from the caller rather than from the credential's vault row: it is
+    /// what decides whether this cluster may be reached at all, and a value read off the row being
+    /// acted on cannot decide that.</para>
     /// </summary>
     public async Task<KubernetesOperationResult<string>> SyncToKubernetesAsync(
+        Guid tenantId,
         Guid credentialId,
         CancellationToken ct = default)
     {
@@ -227,7 +239,7 @@ public class DockerRegistryService(
         if (cred is null)
             return KubernetesOperationResult<string>.Failure("Credential not found.");
 
-        if (cred.KubernetesCluster is null || string.IsNullOrEmpty(cred.KubernetesCluster.Kubeconfig))
+        if (cred.KubernetesCluster is null || cred.KubernetesClusterId is not Guid clusterId)
             return KubernetesOperationResult<string>.Failure(
                 "No Kubernetes cluster configured for this credential. Configure sync first.");
 
@@ -266,13 +278,9 @@ public class DockerRegistryService(
         });
         string dockerConfigBase64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(dockerConfigJson));
 
-        // Build the combined manifest: namespace + secret.
+        // The Secret alone: the namespace is its own operation now rather than a document
+        // prepended to the manifest, because ReplaceSecretAsync replaces one named Secret.
         string manifest = $"""
-            apiVersion: v1
-            kind: Namespace
-            metadata:
-              name: {cred.KubernetesNamespace}
-            ---
             apiVersion: v1
             kind: Secret
             metadata:
@@ -283,25 +291,31 @@ public class DockerRegistryService(
               .dockerconfigjson: {dockerConfigBase64}
             """;
 
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-        string tempManifest = Path.Combine(Path.GetTempPath(), $"entkube-docker-{Guid.NewGuid()}.yaml");
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterAccess.ForAsync(tenantId, clusterId, ct);
+
+        if (cluster is null)
+            return KubernetesOperationResult<string>.Failure(
+                "That cluster is not this tenant's, or it has no stored kubeconfig.");
 
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, cred.KubernetesCluster.Kubeconfig, ct);
-            await SecretFile.WriteAsync(tempManifest, manifest, ct);
+            await cluster.EnsureNamespaceAsync(cred.KubernetesNamespace, ct);
 
-            HelmExecutionResult result = await RunCliAsync(
-                "kubectl", $"apply -f {tempManifest} --kubeconfig {tempKubeconfig}", ct);
+            string output = await cluster.ReplaceSecretAsync(
+                cred.KubernetesSecretName, cred.KubernetesNamespace, manifest,
+                $"Write the '{cred.Server}' registry pull secret into {cred.KubernetesNamespace}",
+                ct);
 
-            return result.Success
-                ? KubernetesOperationResult<string>.Success(result.Output)
-                : KubernetesOperationResult<string>.Failure(result.Output);
+            return KubernetesOperationResult<string>.Success(output);
         }
-        finally
+        catch (OperationCanceledException)
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
-            if (File.Exists(tempManifest)) File.Delete(tempManifest);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            return KubernetesOperationResult<string>.Failure(ex.Message);
         }
     }
 
@@ -356,28 +370,4 @@ public class DockerRegistryService(
         return encryption.UnsealDataKey(vault.EncryptedDataKey, vault.Nonce);
     }
 
-    private static async Task<HelmExecutionResult> RunCliAsync(
-        string program, string arguments, CancellationToken ct)
-    {
-        var psi = new ProcessStartInfo
-        {
-            FileName = program,
-            Arguments = arguments,
-            RedirectStandardOutput = true,
-            RedirectStandardError = true,
-            UseShellExecute = false,
-            CreateNoWindow = true
-        };
-
-        using Process process = Process.Start(psi)!;
-        string stdout = await process.StandardOutput.ReadToEndAsync(ct);
-        string stderr = await process.StandardError.ReadToEndAsync(ct);
-        await process.WaitForExitAsync(ct);
-
-        string combined = string.IsNullOrWhiteSpace(stderr)
-            ? stdout
-            : string.IsNullOrWhiteSpace(stdout) ? stderr : $"{stdout}\n{stderr}";
-
-        return new HelmExecutionResult { Success = process.ExitCode == 0, Output = combined };
-    }
 }
