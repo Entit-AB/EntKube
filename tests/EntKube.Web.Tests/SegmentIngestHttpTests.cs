@@ -94,10 +94,12 @@ public sealed class SegmentIngestHttpTests : IDisposable
 
         // Read it back through the live log backend.
         using IServiceScope scope = services.CreateScope();
-        var logs = scope.ServiceProvider.GetRequiredService<ILogBackend>();
-        // Reads go through the per-cluster router now. This test's cluster has no in-cluster telemetry
-        // node, so the router must fall back to the management plane's own segment store — which is the
-        // behaviour every cluster not yet cut over depends on.
+        // Reads go through the per-cluster router now, and it is obtained for the asking tenant: the
+        // routing decision asks Catalog whether this cluster's collector still exports here, which is
+        // a tenant-scoped question. This test's cluster has no in-cluster telemetry node, so the router
+        // must fall back to the management plane's own segment store — the behaviour every cluster not
+        // yet cut over depends on.
+        var logs = scope.ServiceProvider.GetRequiredService<ITelemetryBackends>().LogsFor(tenantId);
         logs.Should().BeOfType<ClusterRoutedLogBackend>();
 
         var result = await logs.QueryAsync(

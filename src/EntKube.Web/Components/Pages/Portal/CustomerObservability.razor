@@ -140,7 +140,7 @@ else
             }
             @if (tab == "traces")
             {
-                <TraceExplorer @key="@ScopeKey" ClusterId="selectedClusterId.Value" Namespaces="Namespaces" PodPattern="@podPattern" />
+                <TraceExplorer @key="@ScopeKey" TenantId="TenantId" ClusterId="selectedClusterId.Value" Namespaces="Namespaces" PodPattern="@podPattern" />
             }
             else if (tab == "metrics")
             {

@@ -1,7 +1,7 @@
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Telemetry
 @inject IMetricsQuery Metrics
-@inject ITraceQueryService Traces
+@inject ITelemetryBackends Backends
 @inject LogQueryService Logs
 
 <div class="card h-100">
@@ -120,7 +120,8 @@
                 red = [];
                 if (!string.IsNullOrEmpty(Panel.Service))
                 {
-                    var r = await Traces.GetServiceRedAsync(ClusterId, Panel.Service, From, To);
+                    var r = await Backends.TracesFor(TenantId)
+                        .GetServiceRedAsync(ClusterId, Panel.Service, From, To);
                     if (r.IsSuccess && r.Data is not null) red = r.Data;
                 }
                 break;

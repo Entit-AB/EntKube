@@ -16,7 +16,7 @@ namespace EntKube.Web.Services;
 /// PgLogService exactly, so switching a viewer's injection to this type is a drop-in.
 /// </summary>
 public class LogQueryService(
-    ILogBackend native,
+    ITelemetryBackends backends,
     LokiService loki,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<LogQueryService> logger)
@@ -81,11 +81,19 @@ public class LogQueryService(
         return installed;
     }
 
+    /// <summary>
+    /// The native backend as the asking tenant sees it. Obtained per call rather than injected,
+    /// because the routing underneath it (in-cluster node vs management-plane store) asks Catalog a
+    /// tenant-scoped question — see <see cref="ITelemetryBackends"/> for why that tenant arrives
+    /// through a factory instead of on <see cref="ILogBackend"/>'s own methods.
+    /// </summary>
+    private ILogBackend Native(Guid tenantId) => backends.LogsFor(tenantId);
+
     // Auto = policy default; Native/Loki = the viewer's explicit override (a cluster can have both).
     private async Task<bool> UseNativeAsync(
         Guid tenantId, Guid clusterId, LogBackendKind backend, CancellationToken ct)
     {
-        if (!native.IsEnabled) return false;
+        if (!Native(tenantId).IsEnabled) return false;
         if (backend == LogBackendKind.Native) return true;
         if (backend == LogBackendKind.Loki) return false;
 
@@ -96,7 +104,7 @@ public class LogQueryService(
         // Auto: EntKube takes over when its collector is installed (even before data arrives);
         // otherwise use native only if it already holds data, else fall back to Loki.
         bool useNative = await NativeCollectorInstalledAsync(tenantId, clusterId, ct)
-            || await WithinBudgetAsync(native.HasDataAsync(clusterId, ct), clusterId, "EntKube telemetry");
+            || await WithinBudgetAsync(Native(tenantId).HasDataAsync(clusterId, ct), clusterId, "EntKube telemetry");
         _routeCache[(tenantId, clusterId)] = (useNative, DateTime.UtcNow);
         return useNative;
     }
@@ -115,7 +123,7 @@ public class LogQueryService(
     public async Task<(bool Native, bool Loki)> ProbeBackendsAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        Task<bool> nativeProbe = native.IsEnabled
+        Task<bool> nativeProbe = Native(tenantId).IsEnabled
             ? NativeUsableAsync(tenantId, clusterId, ct)
             : Task.FromResult(false);
         Task<bool> lokiProbe = loki.IsAvailableAsync(clusterId, ct);
@@ -142,7 +150,7 @@ public class LogQueryService(
 
     private async Task<bool> NativeUsableAsync(Guid tenantId, Guid clusterId, CancellationToken ct)
         => await NativeCollectorInstalledAsync(tenantId, clusterId, ct)
-            || await native.HasDataAsync(clusterId, ct);
+            || await Native(tenantId).HasDataAsync(clusterId, ct);
 
     public async Task<bool> IsAvailableAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
         => await UseNativeAsync(tenantId, clusterId, LogBackendKind.Auto, ct)
@@ -151,26 +159,26 @@ public class LogQueryService(
     public async Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(
         Guid tenantId, Guid clusterId, LogBackendKind backend = LogBackendKind.Auto, int windowMinutes = 60, CancellationToken ct = default)
         => await UseNativeAsync(tenantId, clusterId, backend, ct)
-            ? await native.GetNamespacesAsync(clusterId, windowMinutes, ct)
+            ? await Native(tenantId).GetNamespacesAsync(clusterId, windowMinutes, ct)
             : await loki.GetNamespacesAsync(clusterId, ct);
 
     public async Task<KubernetesOperationResult<List<string>>> GetPodsAsync(
         Guid tenantId, Guid clusterId, string namespaceName, LogBackendKind backend = LogBackendKind.Auto, int windowMinutes = 60, CancellationToken ct = default)
         => await UseNativeAsync(tenantId, clusterId, backend, ct)
-            ? await native.GetPodsAsync(clusterId, namespaceName, windowMinutes, ct)
+            ? await Native(tenantId).GetPodsAsync(clusterId, namespaceName, windowMinutes, ct)
             : await loki.GetPodsAsync(clusterId, namespaceName, ct);
 
     public async Task<KubernetesOperationResult<List<string>>> GetContainersAsync(
         Guid tenantId, Guid clusterId, string namespaceName, LogBackendKind backend = LogBackendKind.Auto, int windowMinutes = 60, CancellationToken ct = default)
         => await UseNativeAsync(tenantId, clusterId, backend, ct)
-            ? await native.GetContainersAsync(clusterId, namespaceName, windowMinutes, ct)
+            ? await Native(tenantId).GetContainersAsync(clusterId, namespaceName, windowMinutes, ct)
             : await loki.GetContainersAsync(clusterId, namespaceName, ct);
 
     public async Task<KubernetesOperationResult<List<LokiLogStream>>> QueryAsync(
         Guid tenantId, Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int limit = 200,
         LogBackendKind backend = LogBackendKind.Auto, CancellationToken ct = default)
         => await UseNativeAsync(tenantId, clusterId, backend, ct)
-            ? await native.QueryAsync(clusterId, filter, from, to, limit, ct)
+            ? await Native(tenantId).QueryAsync(clusterId, filter, from, to, limit, ct)
             // Loki path: minLevel is re-applied client-side by the viewer; attribute filters are native-only.
             : await loki.QueryRangeMultiAsync(clusterId, filter.Namespaces, filter.Pod, filter.Container, filter.Text, from, to, limit, ct);
 
@@ -182,7 +190,7 @@ public class LogQueryService(
         Guid tenantId, Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int buckets = 48,
         LogBackendKind backend = LogBackendKind.Auto, CancellationToken ct = default)
         => await UseNativeAsync(tenantId, clusterId, backend, ct)
-            ? await native.GetHistogramAsync(clusterId, filter, from, to, buckets, ct)
+            ? await Native(tenantId).GetHistogramAsync(clusterId, filter, from, to, buckets, ct)
             : await loki.GetHistogramAsync(clusterId, filter, from, to, buckets, ct);
 }
 

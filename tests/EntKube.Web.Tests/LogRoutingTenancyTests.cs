@@ -1,6 +1,7 @@
 using EntKube.Telemetry;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
+using EntKube.Web.Services.Telemetry;
 using FluentAssertions;
 using Microsoft.Extensions.Logging.Abstractions;
 
@@ -37,7 +38,7 @@ public class LogRoutingTenancyTests : IDisposable
         // routing decision, which is the only half the tenant changes, and the Loki half needs a
         // vault, a storage service and a cluster to reach. Nothing here routes to it.
         sut = new LogQueryService(
-            new NoNativeData(),
+            new FixedBackends(new NoNativeData()),
             loki: null!,
             new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             NullLogger<LogQueryService>.Instance);
@@ -119,6 +120,18 @@ public class LogRoutingTenancyTests : IDisposable
 
         (await sut.NativeCollectorInstalledAsync(owner, clusterId)).Should().BeTrue(
             "the probe is memoized for a few seconds, which is why it is not re-read here");
+    }
+
+    /// <summary>
+    /// Hands the same backend to every tenant. The per-tenant routing underneath the real one is
+    /// <see cref="TelemetryRoutingTenancyTests"/>'s subject; what is asserted here is the half of the
+    /// decision <see cref="LogQueryService"/> makes itself.
+    /// </summary>
+    private sealed class FixedBackends(ILogBackend logs) : ITelemetryBackends
+    {
+        public ILogBackend LogsFor(Guid tenantId) => logs;
+
+        public ITraceQueryService TracesFor(Guid tenantId) => throw new NotSupportedException();
     }
 
     /// <summary>A native backend that is configured but holds nothing, so routing turns on the probe alone.</summary>

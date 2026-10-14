@@ -226,7 +226,31 @@ public class CatalogContractAdoptionTests
     /// <c>ClusterRoutedBackends</c>, the telemetry routing layer, which addresses clusters by id
     /// and has no tenant of its own — a different cascade, and the next one.</para>
     ///
-    private const int BaselineQueries = 14;
+    /// <para><b>13.</b> That cascade, and it was not shaped the way it looked. The routing layer
+    /// hands the viewers an <c>ILogBackend</c>/<c>ITraceQueryService</c>, so the obvious move was a
+    /// <c>tenantId</c> on those interfaces — and it is the wrong one. <b>Both live in
+    /// <c>EntKube.Telemetry</c> and are implemented inside the in-cluster node</b>
+    /// (<c>HttpLogBackend</c>, <c>FederatedLogBackend</c>, <c>HttpTraceBackend</c>,
+    /// <c>FederatedTraceService</c>) and mapped onto its HTTP routes. A node serves one cluster and
+    /// authenticates with a token: a tenant means nothing there, so every implementation but the
+    /// management plane's would ignore the parameter — and a management-plane authorization change
+    /// would have become a change to the node's wire surface, which reaches no cluster until the
+    /// chart's appVersion and both catalog pins are bumped and a new image ships.</para>
+    ///
+    /// <para>So the tenant arrives through <c>ITelemetryBackends.LogsFor(tenantId)</c> /
+    /// <c>TracesFor(tenantId)</c> — the same shape as <c>IClusterClientFactory.ForAsync</c>, which
+    /// is where every other authorization input in this codebase is supplied. <b>An interface that
+    /// is part of a shipped artifact cannot take an authorization parameter</b>; the factory in
+    /// front of it can. Worth remembering before the next cascade that ends at an interface.</para>
+    ///
+    /// <para>Five consumers had a tenant already (<c>LogQueryService</c>,
+    /// <c>DashboardPanelCard</c>, <c>RolloutService</c>, and the two hosts of
+    /// <c>TraceExplorer</c>), one page had none at all, and the sixth was
+    /// <c>TelemetryAlertEvaluator</c> — a sweep, so it now loops tenants per §4.0.1.2 rather than
+    /// reading <c>rule.TenantId</c> off the row it had just loaded. That is a tenant to label an
+    /// incident with, not a tenant to ask as.</para>
+    ///
+    private const int BaselineQueries = 13;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

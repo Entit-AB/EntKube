@@ -1,7 +1,6 @@
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Telemetry
-@inject ITraceQueryService Traces
-@inject ILogBackend Logs
+@inject ITelemetryBackends Backends
 
 @if (!available && !isLoading)
 {
@@ -314,9 +313,21 @@ ERROR checkout failed trace-id: 4bf92f35…</pre>
 }
 
 @code {
+    /// <summary>
+    /// Whose cluster this is. Needed because the telemetry backends are obtained per tenant — the
+    /// routing decision underneath them asks Catalog a tenant-scoped question (see
+    /// <see cref="ITelemetryBackends"/>), and this page was the only consumer of them that had no
+    /// tenant at all. Both hosts of this component already have one.
+    /// </summary>
+    [Parameter] public required Guid TenantId { get; set; }
+
     [Parameter] public required Guid ClusterId { get; set; }
     /// <summary>Deep-link: a trace id to auto-open once on load (from a log line's trace badge).</summary>
     [Parameter] public string? PresetTraceId { get; set; }
+
+    private ITraceQueryService Traces => Backends.TracesFor(TenantId);
+
+    private ILogBackend Logs => Backends.LogsFor(TenantId);
     /// <summary>Optional namespace scope (customer portal). When set, every span query is restricted to
     /// these namespaces so a customer only sees their own apps' traces. Null = cluster-wide (tenant view).</summary>
     [Parameter] public IReadOnlyList<string>? Namespaces { get; set; }
