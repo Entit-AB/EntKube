@@ -28,32 +28,46 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                 oldType: "INTEGER",
                 oldDefaultValue: true);
 
-            migrationBuilder.AlterColumn<bool>(
+            // ⚠️ Three AlterColumn calls on AlertRoutingRules were here, and all three did nothing
+            // but drop a column default. On SQLite EF cannot alter a column in place: it rebuilds
+            // the table from the MODEL SNAPSHOT and copies the old rows across. The snapshot
+            // contains SuppressIncident and MatchClusterId — columns created only by
+            // 20260611060000_AddAlertRoutingSuppression, which is one of the migrations EF cannot
+            // see (docs/migrations-defect.md). So on a database built by running the migrations,
+            // the rebuild selected two columns that do not exist.
+            //
+            // It did not fail, which is why nobody knew. SQLite before 3.50 accepted a
+            // double-quoted identifier that resolved to nothing as a string literal, so
+            // "MatchClusterId" became the text 'MatchClusterId' and the copy carried on. The
+            // columns ended up present (the rebuild's CREATE TABLE came from the snapshot) and
+            // empty, which is also why a schema comparison found nothing wrong. SQLite 3.54 —
+            // which the CVE-2025-6965 fix requires — refuses it, and eleven from-scratch
+            // migration tests fail.
+            //
+            // So the two columns are added here, where they were always needed, and the three
+            // default-dropping alters are gone: a leftover DEFAULT on a column EF always writes
+            // explicitly costs nothing, and it is not worth a table rebuild to remove.
+            //
+            // A database that already ran this migration is untouched — it has the columns, from
+            // that same accidental rebuild, and carries the history row that stops it running
+            // again.
+            migrationBuilder.AddColumn<bool>(
                 name: "SuppressIncident",
                 table: "AlertRoutingRules",
                 type: "INTEGER",
                 nullable: false,
-                oldClrType: typeof(bool),
-                oldType: "INTEGER",
-                oldDefaultValue: false);
+                defaultValue: false);
 
-            migrationBuilder.AlterColumn<int>(
-                name: "Priority",
+            migrationBuilder.AddColumn<Guid>(
+                name: "MatchClusterId",
                 table: "AlertRoutingRules",
-                type: "INTEGER",
-                nullable: false,
-                oldClrType: typeof(int),
-                oldType: "INTEGER",
-                oldDefaultValue: 0);
+                type: "TEXT",
+                nullable: true);
 
-            migrationBuilder.AlterColumn<bool>(
-                name: "IsEnabled",
+            migrationBuilder.CreateIndex(
+                name: "IX_AlertRoutingRules_MatchClusterId",
                 table: "AlertRoutingRules",
-                type: "INTEGER",
-                nullable: false,
-                oldClrType: typeof(bool),
-                oldType: "INTEGER",
-                oldDefaultValue: true);
+                column: "MatchClusterId");
 
             migrationBuilder.AlterColumn<string>(
                 name: "RunbookUrl",
@@ -161,33 +175,6 @@ namespace EntKube.Web.Data.Migrations.Sqlite
             migrationBuilder.AlterColumn<bool>(
                 name: "IsEnabled",
                 table: "OnCallSchedules",
-                type: "INTEGER",
-                nullable: false,
-                defaultValue: true,
-                oldClrType: typeof(bool),
-                oldType: "INTEGER");
-
-            migrationBuilder.AlterColumn<bool>(
-                name: "SuppressIncident",
-                table: "AlertRoutingRules",
-                type: "INTEGER",
-                nullable: false,
-                defaultValue: false,
-                oldClrType: typeof(bool),
-                oldType: "INTEGER");
-
-            migrationBuilder.AlterColumn<int>(
-                name: "Priority",
-                table: "AlertRoutingRules",
-                type: "INTEGER",
-                nullable: false,
-                defaultValue: 0,
-                oldClrType: typeof(int),
-                oldType: "INTEGER");
-
-            migrationBuilder.AlterColumn<bool>(
-                name: "IsEnabled",
-                table: "AlertRoutingRules",
                 type: "INTEGER",
                 nullable: false,
                 defaultValue: true,

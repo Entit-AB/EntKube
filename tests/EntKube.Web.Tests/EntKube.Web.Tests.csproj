@@ -41,4 +41,25 @@
     <ProjectReference Include="..\..\src\EntKube.Installer.Gui\EntKube.Installer.Gui.csproj" />
   </ItemGroup>
 
+
+  <!--
+    CVE-2025-6965 (GHSA-2m69-gcr7-jv3q, high): SQLitePCLRaw.lib.e_sqlite3 <= 2.1.11 ships a
+    vulnerable SQLite, and it arrives here transitively through Microsoft.Data.Sqlite. The advisory
+    records no patched package version and the nuspecs name no SQLite version, so the versions were
+    read out of the shipped native libraries rather than inferred:
+
+        2.1.11 -> SQLite 3.49.1   (vulnerable; the fix is in 3.50.2)
+        2.1.14 -> SQLite 3.54.0   (fixed)
+        3.50.3 -> SQLite 3.50.3   (fixed, but the 3.x line renumbers the package to track SQLite)
+
+    2.1.14 keeps the native library on the same package line as the managed SQLitePCLRaw.core and
+    bundle that Microsoft.Data.Sqlite depends on, so nothing else has to move.
+
+    This bump is what exposed the AlertRoutingRules rebuild in
+    20260611122519_AddClusterServers (SQLite); the two changes belong together, because the pin
+    without that repair breaks every fresh SQLite install.
+  -->
+  <ItemGroup>
+    <PackageReference Include="SQLitePCLRaw.lib.e_sqlite3" Version="2.1.14" />
+  </ItemGroup>
 </Project>
