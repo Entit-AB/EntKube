@@ -50,24 +50,49 @@ public class BootstrapRunnerService(
         using IDisposable unattended = scope.DeclareUnattended("bootstrap-runner");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
 
-        List<Guid> queuedRunIds;
+        // One tenant at a time, outermost (docs/decomposition.md §4.0.1.2). The queue used to be read
+        // across the whole installation and each run's tenant taken off its cluster row — and that
+        // tenant is what the registrar and the install orchestrator then act as, all the way down to
+        // the cluster credential. The (tenant, run) pair travels together from here, rather than being
+        // flattened to a list of run ids and re-derived: flattening it is the documented way to throw
+        // away exactly what this loop establishes.
+        List<Guid> tenants;
+        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+            tenants = await db.Tenants.Select(x => x.Id).ToListAsync(ct);
+
+        List<(Guid TenantId, Guid RunId)> queued = [];
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
-            queuedRunIds = await db.BootstrapRuns
-                .Where(r => r.Status == BootstrapRunStatus.Queued)
-                .OrderBy(r => r.CreatedAt)
-                .Select(r => r.Id)
-                .ToListAsync(ct);
+            foreach (Guid tenantId in tenants)
+            {
+                queued.AddRange((await QueuedFor(db, tenantId)
+                        .Select(r => r.Id)
+                        .ToListAsync(ct))
+                    .Select(id => (tenantId, id)));
+            }
         }
 
-        foreach (Guid runId in queuedRunIds)
+        foreach ((Guid tenantId, Guid runId) in queued)
         {
             if (ct.IsCancellationRequested) break;
-            await ExecuteRunAsync(runId, ct);
+            await ExecuteRunAsync(tenantId, runId, ct);
         }
     }
 
-    private async Task ExecuteRunAsync(Guid runId, CancellationToken ct)
+    /// <summary>
+    /// One tenant's queued bootstrap runs, oldest first.
+    ///
+    /// <para>Public and static so the scoping can be asserted without running the poller: the queue
+    /// used to be read across the whole installation, with each run's tenant taken off its cluster
+    /// row and then used to install components — which is the tenant the credential is resolved
+    /// for.</para>
+    /// </summary>
+    public static IQueryable<BootstrapRun> QueuedFor(ApplicationDbContext db, Guid tenantId)
+        => db.BootstrapRuns
+            .Where(r => r.Cluster.TenantId == tenantId && r.Status == BootstrapRunStatus.Queued)
+            .OrderBy(r => r.CreatedAt);
+
+    private async Task ExecuteRunAsync(Guid tenantId, Guid runId, CancellationToken ct)
     {
         // Each run gets its own scope so scoped services (registrar, orchestrator,
         // CNPG/Redis/RabbitMQ services) resolve cleanly outside any request context.
@@ -82,20 +107,19 @@ public class BootstrapRunnerService(
         var blueprintService = scope.ServiceProvider.GetRequiredService<ClusterBlueprintService>();
         var provisioningService = scope.ServiceProvider.GetRequiredService<ClusterProvisioningService>();
 
-        Guid tenantId;
         List<Guid> stepIds;
 
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
+            // Named by the caller's tenant as well as by id: this is the one query that decides a run
+            // may proceed, so it is where the pair has to be checked rather than taken apart.
             BootstrapRun? run = await db.BootstrapRuns
-                .Include(r => r.Cluster)
                 .Include(r => r.StepRuns)
-                .FirstOrDefaultAsync(r => r.Id == runId, ct);
+                .FirstOrDefaultAsync(r => r.Id == runId && r.Cluster.TenantId == tenantId, ct);
 
             // Skip if it was cancelled or picked up by another pass in the meantime.
             if (run is null || run.Status != BootstrapRunStatus.Queued) return;
 
-            tenantId = run.Cluster.TenantId;
             run.Status = BootstrapRunStatus.Running;
             run.StartedAt ??= DateTime.UtcNow;
             stepIds = run.StepRuns.OrderBy(s => s.Order).Select(s => s.Id).ToList();
