@@ -115,6 +115,34 @@ public class ModuleContractTests
     /// reads, <c>ClusterComponent</c> (Catalog) is read by 36 services and <c>AppDeployment</c>
     /// (Delivery) by 22. Two contracts would unblock most of what is left.</para>
     ///
+    /// <para><b>Cost is at zero</b>, the second module entirely off the all-seeing context — and
+    /// the first consumer <c>IDeliveryApi</c> has ever had. That contract was written, implemented
+    /// over Delivery's own context and registered in DI, and <em>nothing called it</em>, which is
+    /// the exact failure this file exists to measure. <c>CostReportService</c> held the shared
+    /// context for one method with three queries: clusters and rates are Cost's own (or a hub it
+    /// already had read-only), and the third was "which app, in which environment, deployed into
+    /// this namespace" — Delivery's question. Asked through the contract, nothing is left to hold a
+    /// context for.</para>
+    ///
+    /// <para><b>Adopting it needed a field added to the DTO</b>, and that is worth recording as a
+    /// pattern rather than an accident: <c>DeploymentSummary</c> carried <c>EnvironmentId</c> but
+    /// not the environment's <em>name</em>, which the report groups by, so the only way to adopt
+    /// the contract would have been to keep a context open for <c>Environments</c>. Same lesson as
+    /// <c>InstalledComponent.Configuration</c>: a contract missing the one field its callers read
+    /// cannot be adopted by them. <c>ModuleApiTests</c> now asserts the new field, because a
+    /// projection nothing asserts is one that silently stops being projected.</para>
+    ///
+    /// <para><b>What the measurement says about the next ones</b>, having opened each rather than
+    /// guessed: <c>PrometheusService</c> (Telemetry) reads exactly one foreign table, but two of
+    /// its three reads also need a cluster's components and whether a cluster has a credential
+    /// stored at all — so it needs <c>ICatalogApi</c> and a new <c>IFleetApi</c> field, not just
+    /// this contract. <c>AppL4RouteService</c> (Connectivity) is one deployment read away, except
+    /// that it resolves the Istio gateway from <c>deployment.Cluster.Components</c> and its method
+    /// takes no tenant, so the cascade reaches its pages. <c>CertificateDistributionService</c>
+    /// (Catalog) is blocked on one <c>VaultSecrets</c> read with no Secrets contract to ask, and
+    /// <c>DriftAdoptionService</c> <em>writes</em> Delivery's tables, which a read-only contract
+    /// cannot serve. None of those four is a missing method on <c>IDeliveryApi</c>.</para>
+    ///
     /// <para><b>Telemetry 11 → 10</b>, and it came for free: <c>LogQueryService</c> held the
     /// all-seeing context for one read — "is EntKube's collector installed on this cluster" —
     /// which is a Catalog question. Asking <c>ICatalogApi</c> instead left it with no reason to
@@ -132,7 +160,7 @@ public class ModuleContractTests
         [Module.Identity] = 4,
         [Module.Fleet] = 2,
         [Module.Mail] = 2,
-        [Module.Cost] = 1,
+        [Module.Cost] = 0,
         [Module.Advisor] = 1,
         [Module.Secrets] = 0,
     };

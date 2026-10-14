@@ -83,6 +83,7 @@ public sealed class DeliveryApi(IDbContextFactory<DeliveryDbContext> dbFactory) 
             d.AppId,
             d.App.Name,
             d.EnvironmentId,
+            d.Environment.Name,
             d.ClusterId,
             d.Name,
             (ContractDeploymentType)(int)d.Type,

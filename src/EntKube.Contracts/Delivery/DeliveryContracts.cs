@@ -59,6 +59,14 @@ public sealed record AppSummary(
 /// <param name="AppId">The app being deployed.</param>
 /// <param name="AppName">Its name, to save a second lookup.</param>
 /// <param name="EnvironmentId">Which environment.</param>
+/// <param name="EnvironmentName">
+/// That environment's name, carried inline for the same reason <see cref="AppName"/> is: a caller
+/// grouping deployments by environment — a cost report, a report by stage — would otherwise need
+/// Delivery's <c>Environments</c> table, which is the dependency this contract exists to remove.
+/// Added when the first consumer was written, because a contract missing the one field its callers
+/// read cannot be adopted by them: that is how <c>InstalledComponent.Configuration</c> was missed,
+/// and how an interface stays unused.
+/// </param>
 /// <param name="ClusterId">Which cluster.</param>
 /// <param name="Name">The deployment's name.</param>
 /// <param name="Type">How it is delivered.</param>
@@ -74,6 +82,7 @@ public sealed record DeploymentSummary(
     Guid AppId,
     string AppName,
     Guid EnvironmentId,
+    string EnvironmentName,
     Guid ClusterId,
     string Name,
     DeploymentType Type,
