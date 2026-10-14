@@ -3,6 +3,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Services.ClusterChanges;
+using EntKube.Web.Services.Outbound;
 
 namespace EntKube.Web.Services.Dr;
 
@@ -80,6 +81,7 @@ public class DrScanService(
         using IDisposable unattended = scope.DeclareUnattended("dr-scan");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<FleetDbContext>>();
         var velero = scope.ServiceProvider.GetRequiredService<VeleroService>();
+        var notifications = scope.ServiceProvider.GetRequiredService<NotificationService>();
 
         List<Guid> tenantIds;
         await using (FleetDbContext db = await dbFactory.CreateDbContextAsync(ct))
@@ -91,7 +93,14 @@ public class DrScanService(
         {
             try
             {
-                cache.Set(tenantId, await velero.GetTenantStatusAsync(tenantId, ct));
+                // Read before the write, as the drift sweep does: the cached statuses are the
+                // previous sweep, and a gap that was already open is not news.
+                IReadOnlyList<ClusterDrStatus>? previous = cache.Get(tenantId);
+
+                List<ClusterDrStatus> statuses = await velero.GetTenantStatusAsync(tenantId, ct);
+                cache.Set(tenantId, statuses);
+
+                await NotifyNewGapsAsync(notifications, tenantId, previous, statuses, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -101,6 +110,37 @@ public class DrScanService(
             {
                 logger.LogWarning(ex, "DR sweep failed for tenant {TenantId}", tenantId);
             }
+        }
+    }
+
+    /// <summary>
+    /// Tells the tenant's channels about backup gaps that opened <em>since the last sweep</em>. The
+    /// rule, including why an Info gap is left to the digest, is on <see cref="ScanTransitions"/>.
+    /// </summary>
+    private async Task NotifyNewGapsAsync(
+        NotificationService notifications, Guid tenantId,
+        IReadOnlyList<ClusterDrStatus>? previous, IReadOnlyList<ClusterDrStatus> current,
+        CancellationToken ct)
+    {
+        if (ScanTransitions.DrMessage(ScanTransitions.NewlyOpenedGaps(previous, current, DateTime.UtcNow))
+            is not (string title, string body, string severity))
+        {
+            return;
+        }
+
+        try
+        {
+            await notifications.DispatchDigestAsync(tenantId, title, body, severity, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // The statuses are cached either way, so a failed notification costs the alert and not
+            // the finding.
+            logger.LogWarning(ex, "Could not notify on new DR gaps for tenant {TenantId}", tenantId);
         }
     }
 }

@@ -3,6 +3,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Services.ClusterChanges;
+using EntKube.Web.Services.Outbound;
 
 namespace EntKube.Web.Services.Upgrades;
 
@@ -123,6 +124,7 @@ public class DriftScanService(
         using IDisposable unattended = scope.DeclareUnattended("drift-scan");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<CatalogDbContext>>();
         var drift = scope.ServiceProvider.GetRequiredService<DriftDetectionService>();
+        var notifications = scope.ServiceProvider.GetRequiredService<NotificationService>();
 
         List<Guid> tenantIds;
         await using (CatalogDbContext db = await dbFactory.CreateDbContextAsync(ct))
@@ -134,8 +136,14 @@ public class DriftScanService(
         {
             try
             {
+                // Read before the write: the cached report is the previous sweep, and the
+                // difference between the two is the only part worth telling a channel about.
+                DriftReport? previous = cache.Get(tenantId);
+
                 DriftReport report = await drift.GetTenantDriftAsync(tenantId, DateTime.UtcNow, ct);
                 cache.Set(tenantId, report);
+
+                await NotifyNewDriftAsync(notifications, tenantId, previous, report, ct);
             }
             catch (OperationCanceledException) when (ct.IsCancellationRequested)
             {
@@ -146,6 +154,37 @@ public class DriftScanService(
                 // One tenant's unreachable clusters must not stop the others being swept.
                 logger.LogWarning(ex, "Drift sweep failed for tenant {TenantId}", tenantId);
             }
+        }
+    }
+
+    /// <summary>
+    /// Tells the tenant's channels about deployments that drifted <em>since the last sweep</em> —
+    /// see <see cref="ScanTransitions"/> for why the transition rather than the state, and why the
+    /// first sweep after a restart says nothing.
+    /// </summary>
+    private async Task NotifyNewDriftAsync(
+        NotificationService notifications, Guid tenantId,
+        DriftReport? previous, DriftReport current, CancellationToken ct)
+    {
+        if (ScanTransitions.DriftMessage(ScanTransitions.NewlyDrifted(previous, current))
+            is not (string title, string body, string severity))
+        {
+            return;
+        }
+
+        try
+        {
+            await notifications.DispatchDigestAsync(tenantId, title, body, severity, ct);
+        }
+        catch (OperationCanceledException) when (ct.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            // The report is already cached, so a failed notification loses the alert and never the
+            // finding — the Advisor and its digest still carry it.
+            logger.LogWarning(ex, "Could not notify on new drift for tenant {TenantId}", tenantId);
         }
     }
 }
