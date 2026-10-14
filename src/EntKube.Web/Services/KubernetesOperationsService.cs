@@ -109,7 +109,7 @@ public class KubernetesOperationsService(
     {
         try
         {
-            if (deployment.Cluster is null || string.IsNullOrWhiteSpace(deployment.Cluster.Kubeconfig))
+            if (deployment.Cluster is null)
                 return;
 
             Guid tenantId;
@@ -2984,14 +2984,13 @@ public class KubernetesOperationsService(
     /// from the CronJob name and the current Unix timestamp to stay unique.
     /// </summary>
     public async Task<KubernetesOperationResult<string>> TriggerCronJobAsync(
-        Guid deploymentId, string cronJobName,
+        Guid tenantId, Guid deploymentId, string cronJobName,
         string? performedBy = null, CancellationToken ct = default)
     {
-        AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
-        if (deployment is null)
-            return KubernetesOperationResult<string>.Failure("Deployment not found.");
-        if (string.IsNullOrEmpty(deployment.Cluster?.Kubeconfig))
-            return KubernetesOperationResult<string>.Failure("Cluster has no kubeconfig configured.");
+        var (target, error) = await ResolveTargetAsync(tenantId, deploymentId, ct);
+        if (target is null) return KubernetesOperationResult<string>.Failure(error!);
+
+        AppDeployment deployment = target.Deployment;
 
         // Build a unique, K8s-safe job name (max 63 chars).
         string raw = $"{cronJobName}-manual-{DateTimeOffset.UtcNow.ToUnixTimeSeconds()}";
@@ -2999,35 +2998,24 @@ public class KubernetesOperationsService(
             raw.ToLowerInvariant(), @"[^a-z0-9]+", "-").Trim('-');
         if (jobName.Length > 63) jobName = jobName[..63].TrimEnd('-');
 
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
-        try
+        // Through the seam, which raises the acknowledgment and supplies the credential. "Run
+        // this CronJob now" is its own verb there: the template lives on the cluster, so there is
+        // no manifest for EntKube to apply and nothing to reconstruct.
+        HelmExecutionResult result = await target.Cluster.CreateJobFromCronJobAsync(
+            jobName, cronJobName, deployment.Namespace,
+            $"Create Job/{jobName} from CronJob/{cronJobName}", ct);
+
+        if (result.Success)
         {
-            await RequireAckAsync(ChangeVerb.Apply, deployment.Cluster.Kubeconfig, deployment.Cluster.Name,
-                deployment.Namespace, $"Create Job/{jobName} from CronJob/{cronJobName}", ct: ct);
-
-            await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster.Kubeconfig, ct);
-            HelmExecutionResult result = await RunCliAsync(
-                "kubectl",
-                $"create job {jobName} --from=cronjob/{cronJobName}" +
-                $" -n {deployment.Namespace} --kubeconfig {tempKubeconfig}",
-                ct);
-
-            if (result.Success)
-            {
-                logger.LogInformation("CronJob {CronJob} triggered as Job {Job} in {Namespace} by {User}",
-                    cronJobName, jobName, deployment.Namespace, performedBy ?? "system");
-                await auditService.RecordAsync(deploymentId, "TriggerCronJob", "CronJob",
-                    cronJobName, $"job={jobName}", performedBy, ct);
-            }
-
-            return result.Success
-                ? KubernetesOperationResult<string>.Success($"Job '{jobName}' created.")
-                : KubernetesOperationResult<string>.Failure(result.Output);
+            logger.LogInformation("CronJob {CronJob} triggered as Job {Job} in {Namespace} by {User}",
+                cronJobName, jobName, deployment.Namespace, performedBy ?? "system");
+            await auditService.RecordAsync(deploymentId, "TriggerCronJob", "CronJob",
+                cronJobName, $"job={jobName}", performedBy, ct);
         }
-        finally
-        {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
-        }
+
+        return result.Success
+            ? KubernetesOperationResult<string>.Success($"Job '{jobName}' created.")
+            : KubernetesOperationResult<string>.Failure(result.Output);
     }
 
     /// <summary>
@@ -3089,11 +3077,12 @@ public class KubernetesOperationsService(
     /// never touches the cluster (the workload keeps running under its current owner).
     /// </summary>
     public async Task<KubernetesOperationResult<string>> SetDeploymentManagementAsync(
-        Guid deploymentId, bool managed, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentId, bool managed, CancellationToken ct = default)
     {
-        AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
-        if (deployment is null)
-            return KubernetesOperationResult<string>.Failure("Deployment not found.");
+        var (target, error) = await ResolveTargetAsync(tenantId, deploymentId, ct);
+        if (target is null) return KubernetesOperationResult<string>.Failure(error!);
+
+        AppDeployment deployment = target.Deployment;
 
         if (deployment.IsManaged == managed)
             return KubernetesOperationResult<string>.Success("No change.");
@@ -3105,10 +3094,10 @@ public class KubernetesOperationsService(
                 "Management disabled — EntKube will no longer apply this deployment.");
         }
 
-        // Enabling → adopt the current live spec before allowing apply.
-        (int refreshed, int missing) = (0, 0);
-        if (!string.IsNullOrWhiteSpace(deployment.Cluster?.Kubeconfig))
-            (refreshed, missing) = await RefreshManifestsFromLiveAsync(deployment, ct);
+        // Enabling → adopt the current live spec before allowing apply. The credential check this
+        // used to make is the seam's answer above: there is a reachable cluster or there is not.
+        (int refreshed, int missing) =
+            await RefreshManifestsFromLiveAsync(target.Cluster, deployment, ct);
 
         await UpdateDeploymentIsManagedAsync(deploymentId, true, ct);
 
@@ -3133,7 +3122,7 @@ public class KubernetesOperationsService(
     /// exists live is left as-is and counted as missing.
     /// </summary>
     private async Task<(int refreshed, int missing)> RefreshManifestsFromLiveAsync(
-        AppDeployment deployment, CancellationToken ct)
+        IClusterClient cluster, AppDeployment deployment, CancellationToken ct)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         List<DeploymentManifest> manifests = await db.DeploymentManifests
@@ -3143,19 +3132,15 @@ public class KubernetesOperationsService(
         if (manifests.Count == 0)
             return (0, 0);
 
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
         int refreshed = 0, missing = 0;
-        try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, deployment.Cluster!.Kubeconfig!, ct);
-
             foreach (DeploymentManifest m in manifests)
             {
-                HelmExecutionResult res = await RunCliAsync(
-                    "kubectl",
-                    $"get {m.Kind.ToLowerInvariant()} {m.Name} -n {deployment.Namespace}" +
-                    $" --kubeconfig {tempKubeconfig} -o json",
-                    ct);
+                // One named resource as JSON, through the seam. A resource the cluster no longer
+                // has comes back unsuccessful, which is counted rather than raised — the whole
+                // method is best-effort adoption of whatever is live.
+                HelmExecutionResult res = await cluster.GetResourceJsonAsync(
+                    m.Kind.ToLowerInvariant(), m.Name, deployment.Namespace, ct);
 
                 if (!res.Success)
                 {
@@ -3178,10 +3163,6 @@ public class KubernetesOperationsService(
             }
 
             await db.SaveChangesAsync(ct);
-        }
-        finally
-        {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
         }
 
         return (refreshed, missing);
@@ -3219,16 +3200,14 @@ public class KubernetesOperationsService(
     /// Returns an empty list rather than throwing if the cluster is unreachable.
     /// </summary>
     public async Task<List<KubeServiceInfo>> GetServicesInNamespaceAsync(
-        Guid clusterId, string ns, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string ns, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        KubernetesCluster? cluster = await db.KubernetesClusters.FirstOrDefaultAsync(c => c.Id == clusterId, ct);
-        if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return [];
+        IClusterClient? cluster = await clusterClients.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null) return [];
 
         try
         {
-            using Kubernetes client = CreateClient(cluster.Kubeconfig);
+            Kubernetes client = cluster.GetPooledSdkClient();
             V1ServiceList list = await client.CoreV1.ListNamespacedServiceAsync(ns, cancellationToken: ct);
 
             return list.Items
@@ -3255,16 +3234,14 @@ public class KubernetesOperationsService(
     /// Useful for showing operators whether the service has live pods behind it.
     /// </summary>
     public async Task<KubeEndpointSummary> GetEndpointsForServiceAsync(
-        Guid clusterId, string ns, string serviceName, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string ns, string serviceName, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        KubernetesCluster? cluster = await db.KubernetesClusters.FirstOrDefaultAsync(c => c.Id == clusterId, ct);
-        if (cluster is null || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return new KubeEndpointSummary([], []);
+        IClusterClient? cluster = await clusterClients.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null) return new KubeEndpointSummary([], []);
 
         try
         {
-            using Kubernetes client = CreateClient(cluster.Kubeconfig);
+            Kubernetes client = cluster.GetPooledSdkClient();
             V1Endpoints ep = await client.CoreV1.ReadNamespacedEndpointsAsync(serviceName, ns, cancellationToken: ct);
 
             List<string> ready = [];

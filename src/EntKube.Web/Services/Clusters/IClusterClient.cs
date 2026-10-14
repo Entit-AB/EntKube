@@ -80,6 +80,14 @@ public interface IClusterClient
         EntKube.Web.Services.ClusterChanges.PlannedChange change, CancellationToken ct = default);
 
     /// <summary>
+    /// Runs a CronJob now, by copying its template into a new Job. See
+    /// <see cref="IKubernetesClientFactory.CreateJobFromCronJobAsync"/>.
+    /// </summary>
+    Task<HelmExecutionResult> CreateJobFromCronJobAsync(
+        string jobName, string cronJobName, string ns, string? summary = null,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// Drains this node: cordons it, then evicts every evictable pod. See
     /// <see cref="IKubernetesClientFactory.DrainNodeAsync"/> for why this is its own verb.
     /// </summary>
@@ -109,6 +117,13 @@ public interface IClusterClient
     /// <see cref="GetJsonAsync"/>.
     /// </summary>
     Task<string> GetResourceYamlAsync(
+        string resource, string name, string ns, CancellationToken ct = default);
+
+    /// <summary>
+    /// One named resource as JSON, for callers that parse it. See
+    /// <see cref="IKubernetesClientFactory.GetResourceJsonAsync"/>.
+    /// </summary>
+    Task<HelmExecutionResult> GetResourceJsonAsync(
         string resource, string name, string ns, CancellationToken ct = default);
 
     /// <summary>

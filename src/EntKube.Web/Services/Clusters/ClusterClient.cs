@@ -61,6 +61,10 @@ public sealed class ClusterClient(
         string manifestUrl, string? summary = null, CancellationToken ct = default)
         => inner.ApplyManifestFromUrlAsync(manifestUrl, kubeconfig, summary, ct);
 
+    public Task<HelmExecutionResult> GetResourceJsonAsync(
+        string resource, string name, string ns, CancellationToken ct = default)
+        => inner.GetResourceJsonAsync(resource, name, ns, kubeconfig, ct);
+
     public Task<string> GetResourceYamlAsync(
         string resource, string name, string ns, CancellationToken ct = default)
         => inner.GetResourceYamlAsync(resource, name, ns, kubeconfig, ct);
@@ -68,6 +72,11 @@ public sealed class ClusterClient(
     public Task AcknowledgeAsync(
         EntKube.Web.Services.ClusterChanges.PlannedChange change, CancellationToken ct = default)
         => inner.AcknowledgeAsync(change, kubeconfig, clusterName, ct);
+
+    public Task<HelmExecutionResult> CreateJobFromCronJobAsync(
+        string jobName, string cronJobName, string ns, string? summary = null,
+        CancellationToken ct = default)
+        => inner.CreateJobFromCronJobAsync(jobName, cronJobName, ns, kubeconfig, summary, ct);
 
     public Task<HelmExecutionResult> DrainNodeAsync(
         string nodeName, int gracePeriodSeconds = 30, bool ignoreDaemonSets = true,

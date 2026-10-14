@@ -373,7 +373,28 @@ public class ClusterCredentialCustodyTests
     /// tenant read off a row is the <em>other</em> ratchet, but they are the same mistake and
     /// they went in the same change.</para>
     ///
-    private const int BaselineOccurrences = 82;
+    /// <para><b>72 — <c>KubernetesOperationsService</c> down to its last one.</b> Ten of the
+    /// eleven that were left: the cronjob trigger, the two route-panel reads, the management
+    /// toggle with its live-manifest refresh, and the Kyverno hook's guard.</para>
+    ///
+    /// <para>Two more seam verbs, both narrow: <c>CreateJobFromCronJobAsync</c> (the template
+    /// lives on the cluster, so there is nothing for EntKube to apply and reconstructing it would
+    /// be a guess at what the CronJob says) and <c>GetResourceJsonAsync</c>, the sibling of the
+    /// YAML read for callers that parse rather than display.</para>
+    ///
+    /// <para>⚠️ <see cref="CustodyTriageTests"/> went 3 → 5 in the middle of this, because
+    /// <c>GetEndpointsForServiceAsync</c> had its <em>signature</em> converted and its body left
+    /// alone — a tenant parameter above two credential reads. Exactly what that ratchet is for,
+    /// and the second time in this programme it has caught a half-finished method.</para>
+    ///
+    /// <para><b>The one left is the prune path</b>, and it is a design decision rather than a
+    /// conversion. <c>DeletePrunedResourceAsync</c> maps cleanly onto the seam's delete — but the
+    /// seam acknowledges each delete, and pruning is a consequence of an apply the operator has
+    /// already acknowledged. Asking again, once per pruned resource, would be the opposite of
+    /// what <c>ReplaceSecretAsync</c> exists to avoid. It needs a verb that asks once for the
+    /// set, which deserves its own change rather than being buried in this one.</para>
+    ///
+    private const int BaselineOccurrences = 72;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.

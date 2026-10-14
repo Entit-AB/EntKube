@@ -749,7 +749,7 @@ else if (!Loading && Error is null && Resources is not null && Resources.Count >
     private async Task ApplyTriggerAsync(DeploymentResource node)
     {
         _opBusy = true; StateHasChanged();
-        var r = await K8sOps.TriggerCronJobAsync(DeploymentId, node.Name);
+        var r = await K8sOps.TriggerCronJobAsync(TenantId, DeploymentId, node.Name);
         _opBusy = false; ClosePanel();
         SetFeedback(r.IsSuccess, r.IsSuccess
             ? r.Data ?? "Job created."
