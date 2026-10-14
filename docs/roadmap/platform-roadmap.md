@@ -2,15 +2,22 @@
 
 Status legend: ☐ not started · ◐ in progress · ☑ shipped
 
+*The table and the feature sections had drifted apart: #2 and #5 were marked shipped here
+while their own sections said ◐ and named what was left, and #7 was marked in progress
+while its section described every part as shipped and verified. The sections were right in
+all three cases, so the table follows them. #2 now has one outstanding item (the Terraform
+provider) and #5 one (the canary stepping loop, deliberately held until the path has been
+exercised live).*
+
 | # | Feature | Phase | Status |
 |---|---|---|---|
 | 1 | Fleet upgrade & lifecycle planner | 1 | ☑ |
 | 6 | Drift detection for managed components | 1 | ☑ |
 | 4 | Supply-chain security (CVE + signing) | 2 | ☑ |
-| 2 | Public API, tokens, CLI, MCP server | 2 | ☑ |
+| 2 | Public API, tokens, CLI, MCP server | 2 | ◐ |
 | 3 | Cost & chargeback | 3 | ☑ |
-| 5 | Progressive delivery + auto-rollback | 3 | ☑ |
-| 7 | OIDC/SSO + SCIM for the portal | 4 | ◐ |
+| 5 | Progressive delivery + auto-rollback | 3 | ◐ |
+| 7 | OIDC/SSO + SCIM for the portal | 4 | ☑ |
 | 8 | Velero cluster DR | 4 | ☑ |
 
 ## Why this order
@@ -26,7 +33,7 @@ are sequenced by value rather than dependency.
 
 ## Verification status
 
-Unit tests: **1679**, all passing. A clean checkout builds, and the app now starts
+Unit tests: **3917**, all passing. A clean checkout builds, and the app now starts
 from a plain `dotnet ef database update` (neither was true at the start — see
 `docs/migrations-defect.md`).
 
@@ -291,9 +298,32 @@ rollback as critical, failed analysis as warning, unverifiable release as info.
 Promoted and superseded stay silent — a channel firing on every successful deploy is
 muted within a week, and the rollback notification is muted along with it.
 
-**Outstanding**: the Terraform provider, and webhook events for the remaining new
-signals (drift detected, DR gap opened) — advisor findings already reach channels
-through the daily digest.
+**Webhook events for drift and DR gaps now ship.** Both sweeps dispatch through the
+tenant's channels — so SSRF-guarded and signable, after the hardening above — when a
+deployment *becomes* drifted, and when a backup gap *opens*.
+
+The restraint is the design. Drift and DR gaps are states, not events: a drifted
+component is still drifted on the next sweep, and a cluster with no backups will have
+none in five minutes either. A channel told about the state fires for as long as the
+problem lasts, which is how an operator learns to mute it — and #5's rollback alert is
+muted along with it. So each sweep compares what it found with what it found last time
+(the caches already hold the previous report) and speaks only about the difference:
+
+- **The first sweep after a restart says nothing.** The caches are per-process, so there
+  is nothing to compare against and everything already wrong would read as new.
+  Deploying EntKube itself must not page anybody. Pinned by a test, which is the one
+  that fails if someone "simplifies" the comparison away.
+- **Clearing says nothing** — the digest carries recoveries, and a channel that speaks on
+  both edges is twice as easy to mute.
+- **"Could not tell" is not drift.** An unreadable cluster stays silent, the same rule the
+  sweep itself keeps.
+- **Info-level DR gaps stay in the digest** ("you have never exercised a restore" is
+  advice, not something that just broke). A cluster with nothing to restore from is
+  critical; everything else warning.
+- Several new findings in one sweep are **one message**, not one per finding.
+
+**Outstanding**: the Terraform provider. Advisor findings already reach channels through
+the daily digest.
 
 ## Phase 3 — Prove and control value
 
@@ -486,7 +516,7 @@ Safety properties, each pinned by a test:
 
 ## Phase 4 — Enterprise edges
 
-### 7. OIDC/SSO + SCIM  ◐
+### 7. OIDC/SSO + SCIM  ☑
 
 **Shipped: OIDC login and group→tenant role mapping.** See `docs/sso.md`.
 
