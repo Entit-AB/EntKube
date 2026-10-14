@@ -9,28 +9,27 @@ namespace EntKube.Web.Tests;
 /// Whether running the migrations from nothing produces the schema the model expects, on the
 /// provider a new install gets by default (<c>Program.cs</c>'s switch falls through to SQLite).
 ///
-/// <para><b>What this found.</b> It did not. Five columns the model insists on were absent from a
-/// freshly migrated database, so every query touching an app route or a deployment's git URL would
-/// have failed on a column EF was certain existed. Two causes, and the second is the one worth
-/// remembering:</para>
-/// <list type="bullet">
-///   <item>Two migrations were <b>invisible to EF</b>. A migration is found by its
-///   <c>[Migration]</c> attribute, which normally lives in the Designer file — and these were
-///   hand-written with neither. They were not failing; they were never running, which is quieter.
-///   Four of them existed, across SQLite and SqlServer.</item>
-///   <item>The weighted-release columns were created by <b>no migration on any provider</b>, while
-///   the model, every Designer file and all three ModelSnapshots carried them. A snapshot that
-///   already describes a column makes the next <c>migrations add</c> produce nothing, so the gap
-///   is self-concealing — and on SqlServer it was worse than a missing column: a later
-///   <em>visible</em> migration does <c>AlterColumn</c> on <c>GitUrl</c>, which the invisible one
-///   was supposed to create, so a fresh SqlServer database could not be migrated at all.</item>
-/// </list>
+/// <para><b>What this found.</b> Three columns the model insists on — the weighted-release fields
+/// on <c>AppDeploymentRoutes</c> — were created by <b>no migration on any provider</b>, while the
+/// model, every Designer file and all three ModelSnapshots carried them. That gap is
+/// self-concealing: a snapshot which already describes a column makes the next
+/// <c>migrations add</c> produce nothing, so it cannot be found by scaffolding. Only comparing a
+/// migrated schema against the model's own finds it. They are added by
+/// <c>AddRouteCanaryColumns</c>, by hand, for all three providers.</para>
 ///
-/// <para>⚠️ <b>Not asserted here, but true:</b> <c>Database.HasPendingModelChanges()</c> is still
-/// <c>true</c>. That compares the model against the ModelSnapshot rather than against the database,
-/// so it says some other model change was never scaffolded — a separate audit, and a larger one,
-/// since EF will not say which. The schema comparison below is the property a new install actually
-/// depends on, and it is the one that was broken.</para>
+/// <para><b>What this does NOT treat as a defect, and why that is the interesting part.</b>
+/// <c>AppDeployments.GitUrl</c> and <c>AppDeploymentRoutes.ClusterAppliedAt</c> are absent from a
+/// migrated schema on purpose. Their migrations are deliberately invisible to EF — see
+/// docs/migrations-defect.md — and <c>Program.cs</c> creates both at startup with idempotent
+/// shims. So the boundary this test draws is the real one: some schema comes from migrations and
+/// some is repaired at startup, and the allowance below is the first place that division has been
+/// written down where it can fail.</para>
+///
+/// <para>⚠️ The repair must not be "make those migrations visible". An existing database already
+/// has the columns, from the shim, while carrying no history row — so a visible migration would
+/// <c>AddColumn</c> onto a column that exists. On SQLite that is a duplicate-column error raised
+/// inside a migration, where the shim's own try/catch cannot help, and the application does not
+/// start. I made exactly that change before reading the document that warned about it.</para>
 /// </summary>
 public sealed class SqliteMigrationPathTests : IDisposable
 {
@@ -77,9 +76,14 @@ public sealed class SqliteMigrationPathTests : IDisposable
         string.Join(", ", missingTables).Should().BeEmpty(
             "a table only EnsureCreated makes is a table a migrated install does not have");
 
-        string.Join(", ", missingColumns).Should().BeEmpty(
+        string.Join(", ", missingColumns.Except(RepairedAtStartup)).Should().BeEmpty(
             "a column only EnsureCreated makes is one EF will select on a migrated install and the "
-            + "database will refuse — which is what five of these were doing");
+            + "database will refuse. If it genuinely belongs to a startup shim instead, add it to "
+            + "RepairedAtStartup with the shim's name — do not make its migration visible");
+
+        RepairedAtStartup.Should().BeSubsetOf(missingColumns,
+            "this column is in the schema the migrations build, so its startup shim is now dead "
+            + "code and the allowance is hiding nothing");
     }
 
     /// <summary>
@@ -109,6 +113,18 @@ public sealed class SqliteMigrationPathTests : IDisposable
             "a table the migrations create and the model does not describe is either a leftover or "
             + "an entity someone forgot to map");
     }
+
+    /// <summary>
+    /// Columns a migrated database legitimately lacks because <c>Program.cs</c> adds them at
+    /// startup: <c>EnsureDeploymentGitUrlAsync</c> and
+    /// <c>EnsureDeploymentRouteClusterAppliedAtAsync</c>. Both are idempotent and both exist
+    /// because their migrations are invisible by design.
+    /// </summary>
+    private static readonly string[] RepairedAtStartup =
+    [
+        "AppDeploymentRoutes.ClusterAppliedAt",
+        "AppDeployments.GitUrl",
+    ];
 
     private static ApplicationDbContext Open(string file)
         => new(new DbContextOptionsBuilder<ApplicationDbContext>()

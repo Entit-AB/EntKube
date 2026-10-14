@@ -144,3 +144,74 @@ Not decided here, because each option changes something only you should choose:
 
 Whichever is chosen, the current state is the worst of the three: the provider is
 selectable, appears supported, and fails partway through creating the schema.
+
+---
+
+# Re-measured 2026-10-14
+
+The diff above was run when there were 121 migrations. There are now 168, and running it
+again found one new gap and corrected one claim. Postgres 16 and SQL Server 2022
+containers were **not** available this time, so everything below is SQLite measured plus
+the three providers' migration bodies read; where that distinction matters it is stated.
+
+## New: three columns no migration creates, on any provider
+
+`AppDeploymentRoutes.CanaryServiceName`, `.CanaryServicePort` and `.CanaryWeight` — the
+weighted-release fields — are described by the model, by every Designer file and by all
+three ModelSnapshots, and are created by **no migration body in any provider**. Unlike
+`GitUrl` there is no startup shim for them either, so a migrated database does not have
+them and nothing repairs it.
+
+This is why the earlier "Postgres: clean" result does not cover it: the canary feature
+landed after that measurement. Postgres is missing these three as well, which means a
+production database is.
+
+**How a column goes missing with nobody noticing.** `dotnet ef migrations add` diffs the
+model against `ModelSnapshot`, not against the database. The snapshot already described
+these columns, so the scaffolder had nothing to emit — an empty migration, which looks
+like "no schema change needed" rather than like a problem. The inverse of the
+invisible-migration failure, and quieter: there is no file to notice.
+
+Added by `20261014090000_AddRouteCanaryColumns` for all three providers, by hand, since
+scaffolding would again produce nothing. Safe on an existing database precisely because
+nothing — no migration, no shim — ever created them.
+
+## Correction: "EF never runs them" is true of five, not ten
+
+The ten files have no `.Designer.cs`, as stated. But five of them carry `[DbContext]` and
+`[Migration]` **inline**, which is all EF needs: those five are found and do run. Counted
+per provider, the migrations EF genuinely cannot see are:
+
+| Provider | Invisible |
+|---|---|
+| SQLite | 5 |
+| SQL Server | 4 |
+| Postgres | **0** — every one of the ten carries the attributes inline here |
+
+That explains the asymmetry the original document noticed from the other side: Postgres is
+clean on `GitUrl` not only because `AddClusterServers` happened to include it, but because
+`AddDeploymentGitUrl` is visible there and ran.
+
+## ⚠️ The repair this document warned against, attempted and reverted
+
+I gave `AddDeploymentRouteApplied` and `AddDeploymentGitUrl` their attributes on SQLite and
+SQL Server — the obvious fix, and the one this document had already explained is wrong. It
+would break exactly the databases it was meant to help: the startup shims have *already*
+created those columns on every existing install, while no history row records the
+migration, so the newly visible migration runs `AddColumn` against a column that exists.
+On SQLite that is a duplicate-column error raised inside a migration, where the shim's own
+try/catch does not apply, and the application does not start.
+
+Reverted, and each file now says so at the class rather than only here, because the file is
+where the next person will be when they have the same idea.
+
+`SqliteMigrationPathTests` now pins the division: migrations must produce the model's whole
+schema **except** the columns listed as repaired at startup, and that allowance is itself
+checked — if a shim's column ever arrives from a migration, the test fails rather than
+quietly tolerating a shim that has become dead code.
+
+## Still open, unchanged
+
+SQL Server still cannot be migrated at all (the cascade-path failure above), the ten
+Designer partials are still deliberately not regenerated, and both still need the facts
+only you have about live databases.
