@@ -63,8 +63,11 @@ public class SweepTenancyRatchetTests
         "GitSyncService",
         "HeadscaleCertSyncService",
         "KeycloakBackupSchedulerService",
+        "ExternalRouteHealthService",
         "ResourceUsageCollectorService",
         "RolloutWatcherService",
+        "SecretExpiryNotificationService",
+        "SupportMailPoller",
         "SupplyChainScanService",
         "TelemetryAlertEvaluator",
     ];
@@ -97,17 +100,9 @@ public class SweepTenancyRatchetTests
     /// </summary>
     private static readonly Dictionary<string, string> NotYetTenantScoped = new(StringComparer.Ordinal)
     {
-        ["SupportMailPoller"] =
-            "DueTenantsAsync selects m.TenantId from SupportMailboxes, so the tenant it takes mail "
-            + "in as comes from the mailbox row. Same shape as AlertEscalationService before #200",
-        ["ExternalRouteHealthService"] =
-            "probes every ExternalRoute in the installation; no tenant anywhere in the cycle",
         ["ObservedSecretRefreshService"] =
             "VaultService.GetObservedAppSecretIdsAsync returns secret ids across the installation, "
             + "and the refresh then reads each one from its cluster",
-        ["SecretExpiryNotificationService"] =
-            "notification scopes come from SecretExpiryNotificationConfigs rows, which carry the "
-            + "tenant it then notifies as",
         ["JitGrantReaperService"] =
             "reaps expiring grants installation-wide and takes the tenant off the grant row; it also "
             + "holds three credential reads, so it converts with the custody work rather than before it",
@@ -117,7 +112,21 @@ public class SweepTenancyRatchetTests
             + "a tenant's cycle that can fail on its own is what the worker extraction needs",
     };
 
-    private const int BaselineNotYetTenantScoped = 6;
+    /// <summary>
+    /// <b>3.</b> Three left the backlog, and they were not equal in value — which is worth keeping
+    /// separate rather than counting as a uniform win:
+    ///
+    /// <para><c>SupportMailPoller</c> and <c>SecretExpiryNotificationService</c> each took the
+    /// tenant off the rows they then acted <em>as</em> — taking mail in as that tenant, notifying
+    /// as that tenant — so a mis-stamped row would have filed one tenant's mail into another's
+    /// tickets, or sent one tenant's expiring-secret list to another's channels.</para>
+    ///
+    /// <para><c>ExternalRouteHealthService</c> makes no tenant-scoped decision at all: it probes a
+    /// hostname over HTTPS and writes history on the row it probed. Its conversion buys a cycle per
+    /// tenant — isolation for the worker extraction — and nothing about safety. Said here because
+    /// a backlog that counts those two kinds the same invites the wrong one being done first.</para>
+    /// </summary>
+    private const int BaselineNotYetTenantScoped = 3;
 
     // ──────────────────────────────────────────────────────────────────────────
 

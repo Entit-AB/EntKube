@@ -34,19 +34,36 @@ public class ExternalRouteHealthService(
         }
     }
 
+    /// <summary>
+    /// One tenant's external routes. A route reaches its tenant through its component's cluster —
+    /// it carries no tenant of its own — so the predicate is the long way round on purpose.
+    /// Public and static so the scoping is assertable without an HTTP server.
+    /// </summary>
+    public static IQueryable<ExternalRoute> RoutesFor(ConnectivityDbContext db, Guid tenantId)
+        => db.ExternalRoutes.Where(r => r.Component.Cluster.TenantId == tenantId);
+
     private async Task CheckAllRoutesAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
         using IDisposable unattended = scope.DeclareUnattended("external-route-health");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ConnectivityDbContext>>();
 
-        List<(Guid Id, string Hostname, string PathPrefix)> routes;
+        // One tenant at a time (docs/decomposition.md §4.0.1.2). ⚠️ Unlike most of that work, this
+        // one buys isolation rather than safety, and it is worth saying which: the probe is an
+        // outbound HTTPS GET to a hostname and the write is history on the row it just probed, so
+        // no tenant-scoped decision is made either way. What it buys is a cycle per tenant — one
+        // tenant's unreachable hosts cannot delay or abort another's checks, and the worker that
+        // will run these sweeps needs them separable.
+        List<(Guid Id, string Hostname, string PathPrefix)> routes = [];
 
         using (ConnectivityDbContext db = dbFactory.CreateDbContext())
         {
-            routes = await db.ExternalRoutes
-                .Select(r => new ValueTuple<Guid, string, string>(r.Id, r.Hostname, r.PathPrefix))
-                .ToListAsync(ct);
+            foreach (Guid tenantId in await db.Tenants.Select(x => x.Id).ToListAsync(ct))
+            {
+                routes.AddRange(await RoutesFor(db, tenantId)
+                    .Select(r => new ValueTuple<Guid, string, string>(r.Id, r.Hostname, r.PathPrefix))
+                    .ToListAsync(ct));
+            }
         }
 
         if (routes.Count == 0) return;

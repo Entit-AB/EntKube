@@ -110,23 +110,44 @@ public class SupportMailPoller(
     /// Whose mailbox is due. Read in one query so a sweep does not open a connection per
     /// tenant to discover there is nothing to do.
     /// </summary>
+    /// <summary>
+    /// One tenant's mailboxes that are due a poll. Public and static so the scoping is assertable
+    /// without a mail server; the status rules stay here because "due" is this sweep's policy.
+    /// </summary>
+    public static IQueryable<SupportMailbox> PollableFor(SupportDbContext db, Guid tenantId)
+        => db.SupportMailboxes.AsNoTracking()
+            .Where(m => m.TenantId == tenantId
+                && m.IsEnabled
+                && m.ConsecutiveFailures < SupportMailboxService.FailuresBeforeBackingOff);
+
+    /// <summary>
+    /// Whose mailbox is due, one tenant at a time (docs/decomposition.md §4.0.1.2).
+    ///
+    /// <para>This used to select every enabled mailbox in the installation and take
+    /// <c>m.TenantId</c> off each row — and that tenant is who the poller then <b>takes mail in
+    /// as</b>, so a mailbox row carrying the wrong tenant would have filed another tenant's mail
+    /// into this one's tickets. It read as converted because the loop variable was called
+    /// <c>tenantId</c>; the name of a loop variable says nothing about where its value came from,
+    /// which is what <c>SweepTenancyRatchetTests</c> recorded when it put this on the backlog.</para>
+    /// </summary>
     private async Task<List<Guid>> DueTenantsAsync(CancellationToken ct)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        List<SupportMailbox> enabled = await db.SupportMailboxes.AsNoTracking()
-            .Where(m => m.IsEnabled
-                && m.ConsecutiveFailures < SupportMailboxService.FailuresBeforeBackingOff)
-            .ToListAsync(ct);
-
         DateTime now = DateTime.UtcNow;
+        List<Guid> due = [];
 
-        return
-        [
-            .. enabled
-                .Where(m => m.LastPolledAt is null || now - m.LastPolledAt >= IntervalOf(m))
-                .Select(m => m.TenantId)
-        ];
+        foreach (Guid tenantId in await db.Tenants.Select(x => x.Id).ToListAsync(ct))
+        {
+            List<SupportMailbox> pollable = await PollableFor(db, tenantId).ToListAsync(ct);
+
+            if (pollable.Any(m => m.LastPolledAt is null || now - m.LastPolledAt >= IntervalOf(m)))
+            {
+                due.Add(tenantId);
+            }
+        }
+
+        return due;
     }
 
     private static TimeSpan IntervalOf(SupportMailbox mailbox)

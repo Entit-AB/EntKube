@@ -31,6 +31,14 @@ public class SecretExpiryNotificationService(
         }
     }
 
+    /// <summary>
+    /// One tenant's enabled notification scopes. Public and static so the scoping is assertable
+    /// without a notification channel.
+    /// </summary>
+    public static IQueryable<SecretExpiryNotificationConfig> EnabledScopesFor(
+        SecretsDbContext db, Guid tenantId)
+        => db.SecretExpiryNotificationConfigs.Where(c => c.TenantId == tenantId && c.IsEnabled);
+
     private async Task ScanAsync(CancellationToken ct)
     {
         try
@@ -40,19 +48,23 @@ public class SecretExpiryNotificationService(
             var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<SecretsDbContext>>();
             var expiry = scope.ServiceProvider.GetRequiredService<SecretExpiryService>();
 
-            List<(Guid TenantId, Guid? CustomerId)> scopes;
+            // One tenant at a time (docs/decomposition.md §4.0.1.2). The scopes used to be every
+            // enabled config row in the installation with c.TenantId taken off each one — and that
+            // tenant is who the scan then NOTIFIES as, so a config row carrying the wrong tenant
+            // would have sent one tenant's expiring-secret list to another's channels. The retention
+            // prune stays installation-wide, because old history is old history.
+            List<(Guid TenantId, Guid? CustomerId)> scopes = [];
             using (SecretsDbContext db = dbFactory.CreateDbContext())
             {
-                // Prune very old history to bound table growth.
                 DateTime cutoff = DateTime.UtcNow - HistoryRetention;
                 await db.SecretExpiryNotifications.Where(n => n.SentAt < cutoff).ExecuteDeleteAsync(ct);
 
-                scopes = (await db.SecretExpiryNotificationConfigs
-                        .Where(c => c.IsEnabled)
-                        .Select(c => new { c.TenantId, c.CustomerId })
-                        .ToListAsync(ct))
-                    .Select(c => (c.TenantId, c.CustomerId))
-                    .ToList();
+                foreach (Guid tenantId in await db.Tenants.Select(x => x.Id).ToListAsync(ct))
+                {
+                    scopes.AddRange(
+                        (await EnabledScopesFor(db, tenantId).Select(c => c.CustomerId).ToListAsync(ct))
+                            .Select(customerId => (tenantId, customerId)));
+                }
             }
 
             int total = 0;
