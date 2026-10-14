@@ -425,7 +425,7 @@ public class CnpgDatabaseSize
 /// HTTP API via the K8s API server proxy endpoint.
 /// </summary>
 public class PrometheusService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Contracts.Delivery.IDeliveryApi delivery,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     EntKube.Web.Services.Telemetry.PromQueryCache queryCache,
@@ -750,27 +750,19 @@ public class PrometheusService(
     public async Task<KubernetesOperationResult<DeploymentMetricsSummary>> GetDeploymentMetricsAsync(
         Guid tenantId, Guid deploymentId, CancellationToken ct = default)
     {
-        Guid clusterId;
-        string ns;
+        // Asked of Delivery rather than read out of its table — and the question is now
+        // tenant-scoped, where the direct read was by id alone. The old comment here argued that
+        // was safe because ForAsync decides whether the credential may be held; that is still
+        // true, and this is better: a deployment that is not this tenant's does not resolve at
+        // all, so the failure says "not found" rather than "cannot reach that cluster".
+        EntKube.Contracts.Delivery.DeploymentSummary? deployment =
+            await delivery.GetDeploymentAsync(tenantId, deploymentId, ct);
 
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
-        {
-            // The deployment is read by id alone, and the cluster id it carries is an input to
-            // the seam rather than permission to use that cluster: ForAsync is what decides
-            // whether this tenant may hold the credential, so a deployment pointing at another
-            // tenant's cluster fails there instead of being trusted here.
-            var deployment = await db.AppDeployments
-                .AsNoTracking()
-                .Where(d => d.Id == deploymentId)
-                .Select(d => new { d.ClusterId, d.Namespace })
-                .FirstOrDefaultAsync(ct);
+        if (deployment is null)
+            return KubernetesOperationResult<DeploymentMetricsSummary>.Failure("Deployment not found.");
 
-            if (deployment is null)
-                return KubernetesOperationResult<DeploymentMetricsSummary>.Failure("Deployment not found.");
-
-            clusterId = deployment.ClusterId;
-            ns = deployment.Namespace;
-        }
+        Guid clusterId = deployment.ClusterId;
+        string ns = deployment.Namespace ?? "";
 
         var (info, error) = await ResolveReachableAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<DeploymentMetricsSummary>.Failure(error!);
@@ -879,32 +871,19 @@ public class PrometheusService(
     public async Task<KubernetesOperationResult<DeploymentMetricsSummary>> GetAppMetricsAsync(
         Guid tenantId, Guid appId, CancellationToken ct = default)
     {
-        List<(Guid ClusterId, PrometheusConfig Config, string NsRegex)> clusterQueries;
-
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
-        {
-            List<AppDeployment> deployments = await db.AppDeployments
-                .Include(d => d.Cluster)
-                    .ThenInclude(c => c.Components)
-                .Where(d => d.AppId == appId && d.Cluster.KubeconfigSecretId != null)
-                .ToListAsync(ct);
-
-            if (deployments.Count == 0)
-                return KubernetesOperationResult<DeploymentMetricsSummary>.Failure("No deployments with clusters configured for this app.");
-
-            clusterQueries = deployments
+        // Delivery's question, asked of Delivery. What is left here is the grouping, and the
+        // per-cluster Prometheus lookup moved into AggregateMetricsAsync — which already resolved
+        // each cluster through the seam, so this method was resolving half of it a second time.
+        // The "has a stored kubeconfig" filter went with it: ForAsync refuses a cluster with no
+        // credential, which is the same answer read from the place that owns it.
+        List<(Guid ClusterId, string NsRegex)> clusterQueries =
+            [.. (await delivery.GetDeploymentsForTenantAsync(tenantId, ct))
+                .Where(d => d.AppId == appId)
                 .GroupBy(d => d.ClusterId)
-                .Select(g =>
-                {
-                    AppDeployment first = g.First();
-                    ClusterComponent? pc = first.Cluster.Components
-                        .FirstOrDefault(c => c.Name.Contains("prometheus", StringComparison.OrdinalIgnoreCase));
-                    PrometheusConfig cfg = pc is not null ? GetPrometheusConfig(pc) : new PrometheusConfig();
-                    string nsRegex = string.Join("|", g.Select(d => Regex.Escape(d.Namespace)));
-                    return (first.ClusterId, cfg, nsRegex);
-                })
-                .ToList();
-        }
+                .Select(g => (g.Key, NsRegex(g)))];
+
+        if (clusterQueries.Count == 0)
+            return KubernetesOperationResult<DeploymentMetricsSummary>.Failure("No deployments with clusters configured for this app.");
 
         return await AggregateMetricsAsync(tenantId, clusterQueries, $"app metrics {appId}", ct);
     }
@@ -915,34 +894,22 @@ public class PrometheusService(
     public async Task<KubernetesOperationResult<DeploymentMetricsSummary>> GetCustomerMetricsAsync(
         Guid tenantId, Guid customerId, CancellationToken ct = default)
     {
-        List<(Guid ClusterId, PrometheusConfig Config, string NsRegex)> clusterQueries;
+        // A customer's deployments are two hops in the model — customer → apps → deployments —
+        // and the contract answers both, so this composes them rather than asking for a third
+        // method that nothing else would use. The tenant scopes both halves.
+        HashSet<Guid> customerApps =
+            [.. (await delivery.GetAppsAsync(tenantId, ct))
+                .Where(a => a.CustomerId == customerId)
+                .Select(a => a.Id)];
 
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
-        {
-            List<AppDeployment> deployments = await db.AppDeployments
-                .Include(d => d.App)
-                .Include(d => d.Cluster)
-                    .ThenInclude(c => c.Components)
-                .Where(d => d.App.CustomerId == customerId
-                         && d.Cluster.KubeconfigSecretId != null)
-                .ToListAsync(ct);
-
-            if (deployments.Count == 0)
-                return KubernetesOperationResult<DeploymentMetricsSummary>.Failure("No deployments with clusters configured for this customer.");
-
-            clusterQueries = deployments
+        List<(Guid ClusterId, string NsRegex)> clusterQueries =
+            [.. (await delivery.GetDeploymentsForTenantAsync(tenantId, ct))
+                .Where(d => customerApps.Contains(d.AppId))
                 .GroupBy(d => d.ClusterId)
-                .Select(g =>
-                {
-                    AppDeployment first = g.First();
-                    ClusterComponent? pc = first.Cluster.Components
-                        .FirstOrDefault(c => c.Name.Contains("prometheus", StringComparison.OrdinalIgnoreCase));
-                    PrometheusConfig cfg = pc is not null ? GetPrometheusConfig(pc) : new PrometheusConfig();
-                    string nsRegex = string.Join("|", g.Select(d => Regex.Escape(d.Namespace)).Distinct());
-                    return (first.ClusterId, cfg, nsRegex);
-                })
-                .ToList();
-        }
+                .Select(g => (g.Key, NsRegex(g)))];
+
+        if (clusterQueries.Count == 0)
+            return KubernetesOperationResult<DeploymentMetricsSummary>.Failure("No deployments with clusters configured for this customer.");
 
         return await AggregateMetricsAsync(tenantId, clusterQueries, $"customer metrics {customerId}", ct);
     }
@@ -2045,23 +2012,43 @@ public class PrometheusService(
     /// through the seam, so a cluster this tenant does not own is skipped rather than queried —
     /// the tuple used to carry a kubeconfig, which made every producer of it a custodian.
     /// </summary>
+    /// <summary>
+    /// The namespace alternation for one cluster's deployments, escaped. Distinct, because several
+    /// deployments of one app can share a namespace and a repeated alternative is a longer query
+    /// for the same answer.
+    /// </summary>
+    private static string NsRegex(IEnumerable<EntKube.Contracts.Delivery.DeploymentSummary> deployments)
+        => string.Join("|", deployments
+            .Select(d => Regex.Escape(d.Namespace ?? ""))
+            .Where(ns => ns.Length > 0)
+            .Distinct());
+
     private async Task<KubernetesOperationResult<DeploymentMetricsSummary>> AggregateMetricsAsync(
         Guid tenantId,
-        IEnumerable<(Guid ClusterId, PrometheusConfig Config, string NsRegex)> clusterQueries,
+        IEnumerable<(Guid ClusterId, string NsRegex)> clusterQueries,
         string logContext,
         CancellationToken ct)
     {
         double totalCpu = 0, totalMemBytes = 0, totalPods = 0, totalRestarts = 0;
         bool anySuccess = false;
 
-        foreach ((Guid clusterId, PrometheusConfig cfg, string nsRegex) in clusterQueries)
+        foreach ((Guid clusterId, string nsRegex) in clusterQueries)
         {
-            EntKube.Web.Services.Clusters.IClusterClient? cluster = await clusterClients.ForAsync(tenantId, clusterId, ct);
+            // Resolved here rather than by the callers, which were each doing half of it: the
+            // cluster comes from the seam and the Prometheus service from Catalog. `requireComponent:
+            // false` keeps the behaviour the callers had — a cluster running a Prometheus EntKube did
+            // not install is still queried on the default service name, which is the only way those
+            // clusters ever answered.
+            (ReachablePrometheus? reachable, _) =
+                await ResolveReachableAsync(tenantId, clusterId, ct, requireComponent: false);
 
             // Skipped, not failed: this aggregates across a tenant's clusters and one it cannot
             // reach contributes nothing. `anySuccess` below is what decides whether the whole
             // answer is a failure, so an unreachable cluster cannot masquerade as a zero.
-            if (cluster is null) continue;
+            if (reachable is null) continue;
+
+            EntKube.Web.Services.Clusters.IClusterClient cluster = reachable.Cluster;
+            PrometheusConfig cfg = reachable.Config;
 
             KubernetesOperationResult<(double, double, double, double)> result =
                 await WithServiceAsync<(double, double, double, double)>(
@@ -2126,8 +2113,15 @@ public class PrometheusService(
     /// The tenant-scoped resolution. The old one is <c>c.Id == clusterId</c> with no tenant
     /// predicate, which is why a cluster id alone answered about any cluster in the installation.
     /// </summary>
+    /// <param name="requireComponent">
+    /// Whether a registered prometheus component is required. The single-cluster callers say yes:
+    /// they are answering a question about one cluster, and "there is no Prometheus here" is the
+    /// answer rather than an empty graph. The aggregate paths say no, because they query several
+    /// clusters and one that runs a Prometheus EntKube did not install still answers on the
+    /// default service name — which is the behaviour they had before the lookup moved here.
+    /// </param>
     private async Task<(ReachablePrometheus? Info, string? Error)> ResolveReachableAsync(
-        Guid tenantId, Guid clusterId, CancellationToken ct)
+        Guid tenantId, Guid clusterId, CancellationToken ct, bool requireComponent = true)
     {
         EntKube.Web.Services.Clusters.IClusterClient? cluster = await clusterClients.ForAsync(tenantId, clusterId, ct);
 
@@ -2139,7 +2133,11 @@ public class PrometheusService(
             .FirstOrDefault(c => c.Name.Contains("prometheus", StringComparison.OrdinalIgnoreCase));
 
         if (prometheusComponent is null)
-            return (null, "No prometheus component found on this cluster.");
+        {
+            return requireComponent
+                ? (null, "No prometheus component found on this cluster.")
+                : (new ReachablePrometheus(cluster, new PrometheusConfig()), null);
+        }
 
         return (new ReachablePrometheus(cluster, GetPrometheusConfig(prometheusComponent)), null);
     }

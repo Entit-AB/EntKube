@@ -57,7 +57,7 @@ public class CustomerTabRenderTests : BunitContext, IDisposable
         Services.AddSingleton(new TenantService(testDb.Factory, vault, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory)));
         Services.AddSingleton(new CustomerAccessService(testDb.Factory));
         Services.AddSingleton(new PrometheusService(
-            testDb.Factory,
+            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory),
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, new Mock<IKubernetesClientFactory>().Object),
             new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             new PromQueryCache(),

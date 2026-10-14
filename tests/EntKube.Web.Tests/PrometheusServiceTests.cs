@@ -33,7 +33,7 @@ public class PrometheusServiceTests : IDisposable
         vaultService = testDb.CreateVaultService();
 
         sut = new PrometheusService(
-            testDb.Factory,
+            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory),
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, new Mock<IKubernetesClientFactory>().Object),
             new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             new PromQueryCache(),
@@ -902,12 +902,17 @@ public class PrometheusServiceTests : IDisposable
     // ──────── The deployment path: the id is an input, not permission ────────
 
     /// <summary>
-    /// A deployment id belonging to somebody else's cluster is refused.
+    /// A deployment id belonging to somebody else is refused.
     ///
     /// <para>This method used to take a deployment id and nothing else, load the deployment's
     /// cluster by that id, and read the kubeconfig straight off it — so the id was the whole
-    /// authorization. It is now an input: the cluster id the deployment carries goes into the
-    /// seam, and the seam compares it against the asking tenant.</para>
+    /// authorization. Then the id became an input and the seam compared the cluster against the
+    /// asking tenant, which is what this test was written for.</para>
+    ///
+    /// <para><b>The refusal has since moved one step earlier, and the assertion with it.</b> The
+    /// deployment is read through <c>IDeliveryApi</c> now, and every method on that contract is
+    /// tenant-scoped — so a stranger does not learn that the deployment exists at all. Both
+    /// refusals are correct; this one says less.</para>
     /// </summary>
     [Fact]
     public async Task GetDeploymentMetricsAsync_DeploymentOnAnotherTenantsCluster_IsRefused()
@@ -921,8 +926,9 @@ public class PrometheusServiceTests : IDisposable
             await sut.GetDeploymentMetricsAsync(stranger, deploymentId);
 
         result.IsSuccess.Should().BeFalse();
-        result.Error.Should().Contain("not found for this tenant",
-            "the deployment was found — it is the cluster behind it that this tenant may not hold");
+        result.Error.Should().Contain("not found",
+            "a deployment that is not this tenant's does not resolve, so the refusal does not "
+            + "disclose that it exists");
     }
 
     [Fact]
