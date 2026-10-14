@@ -250,7 +250,44 @@ public class CatalogContractAdoptionTests
     /// reading <c>rule.TenantId</c> off the row it had just loaded. That is a tenant to label an
     /// incident with, not a tenant to ask as.</para>
     ///
-    private const int BaselineQueries = 13;
+    /// <summary>
+    /// <b>10 — and the three that moved are the ones this file recorded as unservable.</b> The ⚠️
+    /// above says of <c>HeadscaleService</c> and <c>KubernetesOperationsService</c>: "all four the
+    /// same <c>Where(c =&gt; c.ClusterId == clusterId)</c> feeding a resolver — have <b>no tenant in
+    /// scope</b>, so the contract still cannot serve them", and congratulates itself for measuring
+    /// before building a batch around them. That was true when written and <b>stopped being true in
+    /// #198</b>, which gave this file's methods their tenants:
+    /// <c>ApplyDeploymentRouteAsync</c>, <c>ApplyL4RouteAsync</c> and
+    /// <c>DeleteL4RouteFromClusterAsync</c> all take one now.
+    ///
+    /// <para>So this is the fourth expired exemption in this programme, and the first whose expiry
+    /// was <em>caused</em> by other work in it rather than by never having been checked. The
+    /// previous three were claims about a caller written without opening it; this one was correct
+    /// and then rotted. A dated exemption would not have helped — nothing about #198 announced that
+    /// it had unblocked a different ratchet. What catches this is re-measuring the blocked set when
+    /// a related conversion lands, which is now the habit rather than a note.</para>
+    ///
+    /// <para>The third read was in a <c>private static</c> helper with no tenant to pass. It takes
+    /// the component list as a parameter now instead of querying for it — both its callers have a
+    /// tenant, and one of them had already asked Catalog for exactly that list.</para>
+    ///
+    /// <para><b>What the remaining 10 are</b>, each opened rather than assumed:
+    /// <c>StalwartService</c> 2 and <c>StorageService</c> 1 are <c>static</c> or public methods
+    /// taking <c>(db, config)</c> or an id with no tenant; <c>StorageLinkClientFactory</c> 2 and
+    /// <c>StorageService</c> 1 sit on credential-resolution paths, so they belong with that file's
+    /// custody conversion; <c>SupportMailboxService</c> 1 reads the tenant off the mailbox row;
+    /// <c>TailscaleService</c> 1 is still blocked by the DTO its Razor page reaches through;
+    /// <c>TelemetryNodeClient</c> 1 <em>selects the kubeconfig in the same projection</em>, so
+    /// converting it moves the custody baseline and belongs there.</para>
+    ///
+    /// <para>⚠️ <c>VeleroService</c> 1 is the one blocked by the <em>contract</em> rather than by a
+    /// caller, and its own comment is accurate — verified, not repeated: it filters on
+    /// <c>Status</c> and takes the most recently <b>created</b> match, and
+    /// <c>InstalledComponent</c> carries <c>InstalledAt</c>, not <c>CreatedAt</c>. Converting it
+    /// would change which component is picked when a cluster has two. That is an argument for a
+    /// field, not for a conversion, and nothing else asks for it yet.</para>
+    /// </summary>
+    private const int BaselineQueries = 10;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

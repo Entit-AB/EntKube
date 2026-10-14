@@ -75,6 +75,7 @@ public class KubernetesOperationsService(
     KyvernoPolicyService kyvernoPolicyService,
     IClusterChangeGate gate,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     EntKube.Web.Services.Rollouts.IRolloutStarter rollouts,
     ILogger<KubernetesOperationsService> logger,
     // Optional: used only to read the client certificate for outbound mTLS. Absent in unit tests,
@@ -1140,9 +1141,12 @@ public class KubernetesOperationsService(
         // both kinds work. A namespace an operator has moved to STRICT keeps STRICT here: this
         // apply runs on every route change, so hardcoding PERMISSIVE would quietly undo it.
         // Apply to ALL namespaces involved — not just the primary — so cross-namespace backends work too.
-        List<ClusterComponent> clusterComponents = await db.ClusterComponents
-            .Where(c => c.ClusterId == clusterId)
-            .ToListAsync(ct);
+        // Asked of Catalog, tenant-first. This was one of the four reads the adoption ratchet
+        // recorded as unservable because "all four … have no tenant in scope" — which stopped
+        // being true when #198 gave this file's methods their tenants. The resolvers take
+        // IComponentNaming (#172), so the contract's DTO goes straight in.
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> clusterComponents =
+            await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct);
         string gatewayClass = ExternalRouteService.ResolveGatewayClass(clusterComponents);
         (_, string gwNamespace) = ExternalRouteService.ResolveGateway(clusterComponents);
         if (gatewayClass == "istio")
@@ -1811,9 +1815,8 @@ public class KubernetesOperationsService(
         string backendNs = route.AppDeployment.Namespace;
         string proto = route.Protocol.ToString().ToUpperInvariant();
 
-        List<ClusterComponent> components = await db.ClusterComponents
-            .Where(c => c.ClusterId == clusterId)
-            .ToListAsync(ct);
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> components =
+            await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct);
 
         if (ExternalRouteService.ResolveGatewayClass(components) != "istio")
             return KubernetesOperationResult<string>.Failure(
@@ -1830,7 +1833,8 @@ public class KubernetesOperationsService(
                 "Install the experimental channel of the Gateway API CRDs to enable L4 routing.");
 
         // Apply the dedicated L4 Gateway first so the listener exists before the route attaches.
-        KubernetesOperationResult<string> gatewayResult = await ApplyL4GatewayForClusterAsync(clusterAccess, clusterId, db, null, ct);
+        KubernetesOperationResult<string> gatewayResult =
+            await ApplyL4GatewayForClusterAsync(clusterAccess, clusterId, db, components, null, ct);
         if (!gatewayResult.IsSuccess)
             return gatewayResult;
 
@@ -1914,7 +1918,10 @@ public class KubernetesOperationsService(
             AppL4RouteService.RouteResourceName(route), ns, ct);
 
         // Regenerate the gateway from the remaining routes (this one excluded — it is still in the DB).
-        return await ApplyL4GatewayForClusterAsync(clusterAccess, clusterId, db, l4RouteId, ct);
+        return await ApplyL4GatewayForClusterAsync(
+            clusterAccess, clusterId, db,
+            await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct),
+            l4RouteId, ct);
     }
 
     /// <summary>
@@ -1922,14 +1929,16 @@ public class KubernetesOperationsService(
     /// routes (optionally excluding one being deleted). When no ports remain the Gateway is deleted so
     /// its auto-provisioned LoadBalancer is released.
     /// </summary>
+    /// <param name="components">
+    /// The cluster's installed components, from <c>ICatalogApi</c>. Passed in rather than queried
+    /// here: this is <c>static</c> and has no tenant, and the tenant is what the contract needs —
+    /// both callers have one, and the apply path had already asked for the same list.
+    /// </param>
     private static async Task<KubernetesOperationResult<string>> ApplyL4GatewayForClusterAsync(
-        IClusterClient clusterAccess, Guid clusterId, ApplicationDbContext db, Guid? excludeRouteId,
-        CancellationToken ct)
+        IClusterClient clusterAccess, Guid clusterId, ApplicationDbContext db,
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> components,
+        Guid? excludeRouteId, CancellationToken ct)
     {
-        List<ClusterComponent> components = await db.ClusterComponents
-            .Where(c => c.ClusterId == clusterId)
-            .ToListAsync(ct);
-
         (_, string gwNamespace) = ExternalRouteService.ResolveL4Gateway(components);
         string gatewayClass = ExternalRouteService.ResolveGatewayClass(components);
 

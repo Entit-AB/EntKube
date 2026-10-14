@@ -83,6 +83,7 @@ public class RoutingClusterCallTests : IDisposable
                 new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), NullLogger<KyvernoPolicyService>.Instance),
             gate,
             new ClusterClientFactory(testDb.Factory, k8s.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             new EntKube.Web.Services.Rollouts.NoOpRolloutStarter(),
             NullLogger<KubernetesOperationsService>.Instance);
     }
@@ -177,6 +178,86 @@ public class RoutingClusterCallTests : IDisposable
                 $"gateway/{ExternalRouteService.L4GatewayName}", It.IsAny<string>(),
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync($"{{\"status\":{{\"addresses\":[{{\"type\":\"IPAddress\",\"value\":\"{address}\"}}]}}}}");
+
+    /// <summary>One managed hostname pointing at the seeded deployment.</summary>
+    private async Task<AppDeploymentRoute> SeedHttpRouteAsync(bool managed = true)
+    {
+        AppDeployment deployment = db.AppDeployments.First(d => d.Id == deploymentId);
+
+        AppRoute route = new()
+        {
+            Id = Guid.NewGuid(), AppId = deployment.AppId,
+            Hostname = "billing.example.com", IsEnabled = true, IsManaged = managed,
+        };
+        AppDeploymentRoute dr = new()
+        {
+            Id = Guid.NewGuid(), AppRouteId = route.Id, AppDeploymentId = deploymentId,
+            ServiceName = "billing-api", ServicePort = 80, IsEnabled = true,
+        };
+        db.Set<AppRoute>().Add(route);
+        db.Set<AppDeploymentRoute>().Add(dr);
+        await db.SaveChangesAsync();
+        return dr;
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  ApplyDeploymentRouteAsync — the path that had no test at all
+    // ════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// The route and the mesh posture reach the cluster. This method had <b>no test of any kind</b>
+    /// before, which is the reason for it: it applies a Gateway, an HTTPRoute and a
+    /// PeerAuthentication per backend namespace, and it is the path a hostname stops serving on.
+    ///
+    /// <para>⚠️ <b>It does not discriminate the component-source change</b> this test was written
+    /// alongside, and two injections were needed to establish that rather than assume it. Asking
+    /// Catalog as a stranger — an empty component list — changes neither assertion below:</para>
+    /// <list type="bullet">
+    ///   <item><c>ResolveGatewayClass</c> returns "istio" for an empty list; it answers "traefik"
+    ///   only when Traefik is actually present. So the mesh branch runs either way.</item>
+    ///   <item>The HTTPRoute's <c>parentRefs</c> come from the route row's stored
+    ///   <c>GatewayName</c>/<c>GatewayNamespace</c>, written when the route was created — not from
+    ///   the components resolved at apply time. Worth knowing on its own: changing a cluster's
+    ///   ingress controller does not re-point existing routes.</item>
+    /// </list>
+    ///
+    /// <para>So the conversion at that read is defensive — the tenant now scopes a list that was
+    /// read by cluster id alone — and this test is coverage for the path, not proof of the scoping.
+    /// The scoping of the sibling read is pinned by
+    /// <c>Another_tenant_cannot_apply_or_delete_an_l4_route</c>, where the Istio check does gate
+    /// the apply.</para>
+    /// </summary>
+    [Fact]
+    public async Task ApplyDeploymentRouteAsync_OnAnIstioCluster_AppliesTheRouteAndTheMeshPosture()
+    {
+        await SeedAsync();
+        AppDeploymentRoute dr = await SeedHttpRouteAsync();
+
+        KubernetesOperationResult<string> result = await sut.ApplyDeploymentRouteAsync(tenantId, dr.Id);
+
+        result.IsSuccess.Should().BeTrue(result.Error);
+        applied.Should().Contain(m => m.Contains(Document("HTTPRoute")),
+            "the route itself must reach the cluster");
+        applied.Should().Contain(m => m.Contains(Document("PeerAuthentication")) && m.Contains("billing-ns"),
+            "the backend namespace's mesh posture is applied alongside the route");
+    }
+
+    /// <summary>
+    /// And asked by somebody else, nothing is applied at all — the seam refuses before any
+    /// manifest is generated, so the component list is never even consulted.
+    /// </summary>
+    [Fact]
+    public async Task ApplyDeploymentRouteAsync_ForAnotherTenant_SendsNothing()
+    {
+        await SeedAsync();
+        AppDeploymentRoute dr = await SeedHttpRouteAsync();
+
+        KubernetesOperationResult<string> result =
+            await sut.ApplyDeploymentRouteAsync(Guid.NewGuid(), dr.Id);
+
+        result.IsSuccess.Should().BeFalse();
+        applied.Should().BeEmpty("nothing should reach anyone's cluster");
+    }
 
     // ════════════════════════════════════════════════════════════════
     //  ApplyL4RouteAsync — what lands on the cluster

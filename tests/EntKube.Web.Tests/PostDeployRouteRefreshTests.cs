@@ -74,6 +74,7 @@ public class PostDeployRouteRefreshTests : IDisposable
             gate,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(
                 dbFactory, new Mock<IKubernetesClientFactory>().Object),
+            new EntKube.Web.Modules.Api.CatalogApi(dbFactory),
             new EntKube.Web.Services.Rollouts.NoOpRolloutStarter(),
             logger)
     {
