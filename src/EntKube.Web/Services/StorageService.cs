@@ -1671,14 +1671,20 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         await db.SaveChangesAsync(ct);
 
         // Configure vault secrets for K8s sync using the component's namespace.
+        //
+        // The link is loaded first now, because its tenant is what the component is then asked for.
+        // This read used to be FindAsync(componentId) with no tenant at all, so a component id from
+        // any tenant in the installation resolved — and its namespace decided where this tenant's
+        // storage credentials were synced to. Scoped by the link's tenant it is a cross-row check
+        // (the link's tenant against the component's cluster), which can actually fail.
+        StorageLink? link = await db.StorageLinks.FindAsync([storageLinkId], ct);
 
-        ClusterComponent? component = await db.ClusterComponents.FindAsync([componentId], ct);
-
-        if (component is not null && component.Namespace is not null)
+        if (link is not null)
         {
-            StorageLink? link = await db.StorageLinks.FindAsync([storageLinkId], ct);
+            EntKube.Contracts.Catalog.InstalledComponent? component =
+                await catalog.GetComponentAsync(link.TenantId, componentId, ct);
 
-            if (link is not null)
+            if (component?.Namespace is not null)
             {
                 await ConfigureSecretsForSyncAsync(
                     link.TenantId, storageLinkId, kubernetesSecretName, component.Namespace, ct);
