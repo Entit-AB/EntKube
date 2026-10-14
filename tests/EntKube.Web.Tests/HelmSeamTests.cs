@@ -68,6 +68,7 @@ public class HelmSeamTests : IDisposable
                 new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), NullLogger<KyvernoPolicyService>.Instance),
             gate,
             new ClusterClientFactory(testDb.Factory, k8s.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             new EntKube.Web.Services.Rollouts.NoOpRolloutStarter(),
             NullLogger<KubernetesOperationsService>.Instance);
     }

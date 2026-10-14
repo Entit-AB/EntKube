@@ -55,6 +55,7 @@ public class YamlDeploymentApplyTests : IDisposable
                 NullLogger<KyvernoPolicyService>.Instance),
             gate.Object,
             new ClusterClientFactory(testDb.Factory, k8s.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             new EntKube.Web.Services.Rollouts.NoOpRolloutStarter(),
             NullLogger<KubernetesOperationsService>.Instance);
     }
