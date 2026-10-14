@@ -1,4 +1,6 @@
 using System;
+using EntKube.Web.Data;
+using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 
 #nullable disable
@@ -6,6 +8,11 @@ using Microsoft.EntityFrameworkCore.Migrations;
 namespace EntKube.Web.Data.Migrations.Sqlite
 {
     /// <inheritdoc />
+    // Was invisible to EF until 2026-10-14: no Designer file and no attributes, so the
+    // migrations assembly never found it and a database built from migrations lacked the
+    // column. The attributes are what a Designer file would have carried.
+    [DbContext(typeof(ApplicationDbContext))]
+    [Migration("20260609210000_AddDeploymentRouteApplied")]
     public partial class AddDeploymentRouteApplied : Migration
     {
         /// <inheritdoc />
