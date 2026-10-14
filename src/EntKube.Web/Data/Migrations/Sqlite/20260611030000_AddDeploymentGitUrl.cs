@@ -6,11 +6,14 @@ using Microsoft.EntityFrameworkCore.Migrations;
 
 namespace EntKube.Web.Data.Migrations.Sqlite
 {
-    // Was invisible to EF until 2026-10-14: no Designer file and no attributes, so the
-    // migrations assembly never found it and a database built from migrations lacked the
-    // column. The attributes are what a Designer file would have carried.
-    [DbContext(typeof(ApplicationDbContext))]
-    [Migration("20260611030000_AddDeploymentGitUrl")]
+    // ⚠️ Deliberately invisible to EF: no Designer file and no [Migration] attribute, so the
+    // migrations assembly does not find it and this never runs. That is not an oversight to
+    // repair — docs/migrations-defect.md explains why. The column it adds is created at
+    // startup instead, by an idempotent shim in Program.cs, which means an existing database
+    // already HAS the column while carrying no history row for this migration. Give it the
+    // attributes and the next startup runs it against a column that exists: on SQLite that is
+    // a duplicate-column error inside a migration, where no try/catch protects it, and the
+    // application does not start.
     public partial class AddDeploymentGitUrl : Migration
     {
         protected override void Up(MigrationBuilder migrationBuilder)
