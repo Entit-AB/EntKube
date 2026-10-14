@@ -1039,7 +1039,7 @@ else
         StateHasChanged();
         try
         {
-            nsCheck = await GovernanceService.CheckNamespaceAsync(AppId, EnvironmentId, ns);
+            nsCheck = await GovernanceService.CheckNamespaceAsync(TenantId, AppId, EnvironmentId, ns);
         }
         catch (Exception ex)
         {
@@ -1057,7 +1057,7 @@ else
         StateHasChanged();
         try
         {
-            (bool ok, string output) = await GovernanceService.CreateNamespaceOnClusterAsync(clusterId, nsValue);
+            (bool ok, string output) = await GovernanceService.CreateNamespaceOnClusterAsync(TenantId, clusterId, nsValue);
             nsCreateOk = ok;
             nsCreateMessage = ok ? $"Namespace {nsValue.Trim().ToLowerInvariant()} created." : output;
         }
@@ -1091,7 +1091,7 @@ else
             StateHasChanged();
             try
             {
-                (bool ok, string output) = await GovernanceService.CreateNamespaceOnClusterAsync(c.ClusterId, nsValue);
+                (bool ok, string output) = await GovernanceService.CreateNamespaceOnClusterAsync(TenantId, c.ClusterId, nsValue);
                 if (!ok) failures.Add($"{c.ClusterName}: {output}");
             }
             catch (OperationCanceledException) { failures.Add($"{c.ClusterName}: cancelled"); }
@@ -1266,7 +1266,7 @@ else
         foreach (AppDeployment deploy in envDeployments)
         {
             (bool ok, string output) = await GovernanceService.ApplyToClusterAsync(
-                AppId, EnvironmentId, deploy.Cluster!);
+                TenantId, AppId, EnvironmentId, deploy.Cluster!);
             sb.AppendLine($"── {deploy.Cluster!.Name} ({deploy.Namespace}) ──");
             sb.AppendLine(ok ? "✓ Applied" : $"✗ {output}");
             if (!ok) anyFail = true;
