@@ -2,4 +2,13 @@
   <PropertyGroup>
     <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
   </PropertyGroup>
+
+  <!--
+    CVE-2026-84008 (GHSA-846f-f764-76mx, high): System.Security.Cryptography.Pkcs 10.0.0 has a
+    denial-of-service vulnerability, fixed in 10.0.13. It arrives transitively through
+    MailKit -> MimeKit, so it is pinned for the projects that pull MailKit.
+  -->
+  <ItemGroup>
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="10.0.13" Condition="'$(UsesMailKit)' == 'true'" />
+  </ItemGroup>
 </Project>
