@@ -514,7 +514,7 @@ else
         StateHasChanged();
 
         KubernetesOperationResult result =
-            await RemediationService.ExecuteAsync(row.ClusterId, row.Remediation, currentUser);
+            await RemediationService.ExecuteAsync(TenantId, row.ClusterId, row.Remediation, currentUser);
 
         remediationResults[row.Key] = result.IsSuccess
             ? "✓ Remediation executed successfully. The alert should clear shortly."

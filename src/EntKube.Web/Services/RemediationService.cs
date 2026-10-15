@@ -34,7 +34,7 @@ public record AlertRemediation(
 /// Node-level actions (drain, cordon) are excluded.
 /// </summary>
 public class RemediationService(
-    IDbContextFactory<FleetDbContext> dbFactory,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     AuditService auditService,
     ILogger<RemediationService> logger)
 {
@@ -93,26 +93,35 @@ public class RemediationService(
     /// Executes the remediation against the specified cluster.
     /// The cluster kubeconfig is loaded from the database by clusterId.
     /// </summary>
+    /// <param name="tenantId">
+    /// Who is remediating. This method loaded its cluster by id with <b>no tenant predicate</b>,
+    /// so the id was the whole authorization — on a method whose job is deleting pods and
+    /// restarting workloads. The alerts page has always had a tenant.
+    /// </param>
     public async Task<KubernetesOperationResult> ExecuteAsync(
+        Guid tenantId,
         Guid clusterId,
         AlertRemediation remediation,
         string? performedBy = null,
         CancellationToken ct = default)
     {
-        using FleetDbContext db = dbFactory.CreateDbContext();
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+        // Both refusals in one: not this tenant's cluster, or no credential stored for it. This
+        // service used to build its own Kubernetes client from the kubeconfig off the row; the
+        // seam hands out a configured one and keeps the credential.
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterAccess.ForAsync(tenantId, clusterId, ct);
 
         if (cluster is null)
-            return KubernetesOperationResult.Failure("Cluster not found.");
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return KubernetesOperationResult.Failure("Cluster has no kubeconfig configured.");
+            return KubernetesOperationResult.Failure(
+                "That cluster is not this tenant's, or has no kubeconfig configured.");
 
         try
         {
-            using MemoryStream stream = new(System.Text.Encoding.UTF8.GetBytes(cluster.Kubeconfig));
-            KubernetesClientConfiguration config = KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
-            using Kubernetes client = new(config);
+            // ⚠️ Deliberately NOT routed through the change gate: see docs/decomposition.md §5.4.1,
+            // where remediation is the one flow that must act without asking. Moving the
+            // credential into the seam does not change that — the SDK calls below are the same
+            // ones, made with a client the service no longer has to construct.
+            using Kubernetes client = cluster.CreateSdkClient();
 
             switch (remediation.Action)
             {

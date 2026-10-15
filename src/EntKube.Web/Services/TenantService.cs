@@ -588,9 +588,11 @@ public class TenantService(
                 throw new InvalidOperationException(error ?? "Failed to store the cluster kubeconfig.");
             }
 
-            // Reflect the just-persisted values on the returned entity for the caller.
+            // Reflect the just-persisted id on the returned entity. The plaintext is deliberately
+            // NOT set back: all three callers read only Name and Id, so assigning it handed a
+            // cluster credential to callers that never asked for one — and anything that does need
+            // it later gets it from the vault through the materialization interceptor.
             cluster.KubeconfigSecretId = secretId;
-            cluster.Kubeconfig = kubeconfig;
         }
 
         return cluster;

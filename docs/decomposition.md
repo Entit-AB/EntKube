@@ -547,7 +547,7 @@ shape the work turned out to have. Where it stands, against the figures this sec
 
 | measure | at the start | now |
 |---|---|---|
-| credential sites | 508 in 57 files | **22 in 13** |
+| credential sites | 508 in 57 files | **18 in 10** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
 | foreign reads of `ClusterComponents` | 87 | **6** |
 | foreign *writes* to it | 22 | **0** |
@@ -658,13 +658,44 @@ bumped and a new image ships. The tenant goes on a factory in front of the inter
 checking, before the next cascade that ends at an interface, whether anything outside this process
 implements it.
 
-**What the remaining 22 are made of** (re-measured 2026-10-15, not carried forward — an earlier
-version of this list still named `ComponentScanService` with ten after it had reached zero).
-Seven files hold conversions that are ordinary work: `StorageLinkClientFactory` (3),
-`StorageService` (2), `RemediationService` (2), `OpenStackKeystoneClient` (2),
-`DeploymentImportService` (2), and single reads in `TenantService`,
-`KubernetesOperationsService`, `JitAccessService` and `PortalJitAccessPanel.razor`.
-*(`VpnService` held two and `LokiService` three; both are at zero — see §5.4 and §4.0.1.5.)*
+**What the remaining 18 are made of** (re-measured 2026-10-15, not carried forward — an earlier
+version of this list still named `ComponentScanService` with ten after it had reached zero), and
+the useful thing now is that almost none of it is work:
+
+- **Supposed to hold a credential — the floor, 6:** `KubeconfigMaterializationInterceptor` (2),
+  `ClusterClient` (2), `ClusterChangeGate` (2).
+- **A kubeconfig EntKube *mints*, not a cluster's — 2:** `JitAccessService`,
+  `PortalJitAccessPanel.razor`. Counted anyway, and correctly: a generated kubeconfig carrying a
+  live token is also a place it can be logged or cached.
+- **Waiting on the credentialed-channel decision — 7:** `StorageLinkClientFactory` (3) and
+  `StorageService` (2) hand a kubeconfig to the S3 proxy; and ⚠️ **`OpenStackKeystoneClient`'s 2
+  were reclassified on inspection** — they looked like ordinary callers, and the kubeconfig they
+  load goes to `ClusterEgressTunnel.GetLocalPortAsync`, the `kubectl port-forward` that is the
+  same blocker. *Check where a credential goes, not just how it is read.*
+- **Ordinary work — 3:** `DeploymentImportService` (2), `KubernetesOperationsService` (1).
+
+⚠️ **`RemediationService` was the worst-placed missing check this programme has found.** The method
+deletes pods and restarts Deployments, StatefulSets and DaemonSets, and it loaded its cluster with
+`FirstOrDefaultAsync(c => c.Id == clusterId)` — no tenant predicate anywhere in the file — so a
+cluster id was the whole authorization for the most destructive verb in the product. Its one caller
+is the alerts page, which always had a tenant. Its **gate** exemption is deliberate and unchanged
+(§5.4.1: remediation is the one flow that must act without asking), which is worth stating in a
+conversion like this: moving the credential into the seam does not gate the calls.
+
+**`TenantService` reached zero by deleting a line.** Registration stored the kubeconfig in the
+vault and then assigned `cluster.Kubeconfig = kubeconfig` "to reflect the just-persisted values on
+the returned entity" — handing the plaintext back to callers that never asked, since all three read
+only `Name` and `Id`. `CustodyTriageTests` had classified it as *reachable*, i.e. convertible; the
+conversion was to remove it. **A reachable site is not always a conversion** — sometimes it is a
+credential being handed to people who did not want one.
+
+⚠️ **And one of the 22 was never a credential site at all.** `Program.cs`'s single occurrence was
+the log line *"Dropped legacy plaintext KubernetesClusters.Kubeconfig column after vault
+migration."* — prose about the column this programme removed, counted as a place the credential
+lives, and enough to keep a whole file on the list. The metric now skips matches inside string
+literals, as it already skipped comments for the same reason. It is a counting rule rather than a
+named exemption on purpose: an exemption would claim `Program.cs` may hold a credential, when what
+is true is that a sentence mentioning one is not one.
 
 Six of those sites are **blocked on one undecided seam shape**, and it is worth naming rather than
 rediscovering: `StorageService` + `StorageLinkClientFactory` reach an in-cluster S3 gateway with
