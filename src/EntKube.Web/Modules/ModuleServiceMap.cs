@@ -173,6 +173,7 @@ public static partial class ModuleMap
         [typeof(AlertRoutingService)] = Module.Telemetry,
         [typeof(AlertSyncService)] = Module.Telemetry,
         [typeof(EntKube.Web.Services.Tickets.AlertTicketBridge)] = Module.Telemetry,
+        [typeof(Api.TelemetryApi)] = Module.Telemetry,
         [typeof(TelemetryBackendRouter)] = Module.Telemetry,
         [typeof(CustomerNotificationService)] = Module.Telemetry,
         [typeof(DashboardService)] = Module.Telemetry,

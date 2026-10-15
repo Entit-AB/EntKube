@@ -25,9 +25,13 @@ namespace EntKube.Web.Tests;
 /// <para><b>What the two are, and why they are not conversions.</b> Both need contract surface that
 /// does not exist, which is a different change from adopting surface that does:</para>
 /// <list type="bullet">
-///   <item><c>db.AlertIncidents</c> — Telemetry has <b>no contract at all</b>. Writing one is the
-///     sixth module contract, and on this programme's own evidence it should be written from its
-///     callers backwards rather than as a surface to adopt later.</item>
+///   <item><s><c>db.AlertIncidents</c></s> — <b>done.</b> Telemetry has a contract now, with
+///     exactly one method, because this route is its only service-level consumer. Measuring first
+///     is what kept it that small: thirty foreign reads touch Telemetry's tables, but twenty are
+///     <c>BackupService</c>'s whole-database export and <c>TenantService</c>'s tenant purge —
+///     neither of which a per-module <em>read</em> contract can serve — and eight more are in Razor
+///     pages, which are not modules. Notification-provider config is deliberately left out: that
+///     row carries an SMTP password, and a contract method would publish it to every module.</item>
 ///   <item><c>db.DeploymentRollouts</c> — Delivery owns rollouts but <c>IDeliveryApi</c> has no
 ///     method for them. One method with one consumer is exactly how <c>IDataServicesApi</c> was
 ///     added, so this is a small addition rather than a blocked one — just not the same idea as
@@ -49,7 +53,7 @@ public class PublicApiContractAdoptionTests
     /// Direct module-table reads left in the public API. Was 8.
     /// See this class's remarks for what the two are and why.
     /// </summary>
-    private const int BaselineDirectReads = 2;
+    private const int BaselineDirectReads = 1;
 
     [Fact]
     public void The_public_api_asks_the_contracts()
