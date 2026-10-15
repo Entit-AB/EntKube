@@ -1,6 +1,27 @@
 <Project>
   <PropertyGroup>
     <EnableSourceControlManagerQueries>false</EnableSourceControlManagerQueries>
+
+    <!--
+      Restore reports a known vulnerability as NU1903 (high/critical) or NU1902 (moderate). Both
+      were being PRINTED on every build and nobody read them: four advisories sat in this
+      repository for months — two ASP.NET Core remote-code-execution issues, a SQLite one and a
+      Pkcs denial of service — each visible in every single build log the whole time. A warning
+      that is always present is not a signal, and the only way it becomes one is if it stops the
+      build.
+
+      So NU1903 is an error. NU1902 (moderate) stays a warning on purpose: a moderate advisory
+      with no fixed version available would otherwise make the repository unbuildable until
+      upstream ships, which turns a security control into a reason to disable the security
+      control. Moderates are triaged, not enforced.
+
+      When this fires, the fix is `dotnet list package` with the vulnerable and
+      include-transitive switches, then a pin: in this file when the package arrives transitively
+      for several projects, or on the project itself when it does not. Do NOT add the code to
+      NoWarn. (Those switches are spelled out rather than written, because a double hyphen cannot
+      appear inside an XML comment.)
+    -->
+    <WarningsAsErrors>$(WarningsAsErrors);NU1903</WarningsAsErrors>
   </PropertyGroup>
 
   <!--
