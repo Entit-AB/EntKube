@@ -549,7 +549,7 @@ shape the work turned out to have. Where it stands, against the figures this sec
 |---|---|---|
 | credential sites | 508 in 57 files | **22 in 13** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
-| foreign reads of `ClusterComponents` | 87 | **6** |
+| foreign reads of `ClusterComponents` | 87 | **4 direct + 2 navigation** |
 | foreign *writes* to it | 22 | **0** |
 | own-process kubectl/helm outside the gate (§5.4) | 49 | **1** |
 | component lookups escaping their tenant | 14 | **0** |
@@ -709,12 +709,122 @@ read Catalog's table through `Include(c => c.Components)` on the cluster row, an
 by a different spelling — it is a query against another module's table, it breaks the same way when
 that table moves, and the contract has to serve it either way.
 
-Measured independently (`ModuleServiceMap` for ownership, Catalog's own services excluded, as the
-test does): **8 navigation reads in 5 files** —`KubernetesOperationsService` (4), `AppRouteService`,
-`AppL4RouteService`, `IngressDashboardService` and `StorageService`. So the row that says 4 should
-say 12, and until the metric is taught, this coupling can grow for free in the one spelling nobody
-is counting. Same class of error as the file-name/type-name bug in §4.0.1.4, and the same lesson:
-a count that becomes an argument has to be checked against a second measurement.
+**49 navigation reads in 11 files**, in three spellings: `KubernetesOperationsService` 13,
+`ExternalRouteService` 11, `IngressDashboardService` 5, `KeycloakService` 5, `StorageService` 5,
+`AppL4RouteService` 3, `AppRouteService` 2, `DatabaseService` 2, and one each in
+`ExternalRouteHealthService`, `HeadscaleCertSyncService` and `VpnService`. The metric now counts
+them with the same per-mention unit as the DbSet form, and — this is the part that matters — it
+**derives the navigation names from the entity model** rather than listing them, so a twelfth
+entity gaining a link to Catalog's table is counted the day it is added. The ledger row reads
+**4 direct + 49 navigation**, and a new one in any spelling fails the build.
+
+⚠️ **Two measurements of this gap were wrong before this one, both in the same direction, and the
+first had already been quoted.** It counted only the `Include`/`ThenInclude` form of `.Components`
+and reported *8 in 5 files*, missing every in-memory traversal of the loaded collection; the figure
+8 reached a commit message, a pull request and this document. The correction to 22 was then itself
+one spelling of three — `Component` and `ClusterComponent` on ten other entities hold the other 27.
+That is the third time in this programme that a count became an argument before it was checked (see
+§4.0.1.4's file-name/type-name bug), and the rule it keeps earning is: **enumerate a metric's
+spellings before trusting its total**, and treat a conversion that moves a ratchet by zero as
+evidence about the ratchet.
+
+**47 of the 49 are converted (2026-10-15), and no new contract method was needed for any of
+them** — which was the prediction, so it is worth saying that it held. Eight files are at zero:
+`ExternalRouteService` (11), `IngressDashboardService` (5), `KeycloakService` (5),
+`AppL4RouteService` (3), `AppRouteService` (2), `DatabaseService` (2), `ExternalRouteHealthService`
+and `HeadscaleCertSyncService`.
+
+`ExternalRouteService` is the one worth reading. Its eleven were six public static YAML generators
+and two split-backend helpers reading `route.Component` for a namespace, a name, a chart name and a
+release name — *exactly* `IComponentNaming`'s four members. They take that interface now, so the
+contract's DTO and the entity both satisfy them with no conversion, and the two async loaders
+resolve the component through `GetComponentAsync(tenantId, …)`. **An interface the contract already
+published turned out to be the whole conversion**, which is the inverse of the #138 lesson: there,
+four contracts had no consumers; here, a consumer-shaped interface was sitting unused by the people
+who needed it most.
+
+⚠️ **Two of the conversions closed real holes that nobody was looking for.**
+`DeploymentImportService.ImportAsync` opened with `Guid tenantId = cluster.TenantId;` — a label, not
+a check, so whatever cluster row arrived was imported into its own tenant and every tenant-scoped
+call beneath it compared that row to itself. And `KeycloakService` took the component off the row
+the theme pointed at, so a theme naming another tenant's component deployed a theme onto it; the
+contract's lookup is tenant-first, so that now resolves to nothing. Both were found by *threading
+the tenant*, not by auditing for missing checks — which is the argument for doing these conversions
+rather than only measuring them.
+
+Three of the fourteen in the first pass were reads that had already been **half** moved, and that
+pattern is worth watching for: `HeadscaleCertSyncService` asked Catalog for its component ids and
+then joined back into Catalog's table for `r.Component.ClusterId`, a field the contract answer in
+its hand already carried; `IngressDashboardService` walked `ExternalRoute → ClusterComponent →
+KubernetesCluster` for a cluster *name* that `InstalledComponent` also carries; and
+`ExternalRouteHealthService`'s `RoutesFor` reached its tenant through two navigations. A service
+that asks the contract and *then* follows a navigation has not finished converting — it has added a
+round trip.
+
+`KubernetesOperationsService` (13) was the last large holding and the clearest case of the
+**half-moved** shape: it already asked `GetComponentsForClusterAsync` in three methods while four
+others walked `cluster.Components`, and two of those carried comments explaining that the cluster
+row was read "for its COMPONENTS" — the exact read the contract exists to serve. Converting it
+**removed more than it moved**: `GetL4EndpointAddressAsync` loaded the row tenant-scoped,
+null-checked it and *then* called `ForAsync(tenantId, clusterId)`, the same question twice; and
+`ApplyGatewayForClusterAsync`'s `r.Component = c` mutated the navigation purely to feed one line in
+`LabelRouteNamespacesAsync`. It also gained a tenant check it never had — its "Cluster not found."
+came from `FirstOrDefaultAsync(c => c.Id == clusterId)` with no tenant predicate, so a cluster id
+from elsewhere had its Gateway reconciled.
+
+**The two that remain are one blocked method**, and that is the floor until a decision is made
+rather than work anyone can pick up: `StorageService.ResolveMinioKubeconfigAsync` walks
+`StorageLink → ClusterComponent → KubernetesCluster` to hand a *raw kubeconfig* to
+`KubernetesS3Proxy` for the AWS SDK. It sits on the custody ratchet and this one for the same
+reason — the **credentialed channel** seam shape below.
+
+The last two conversions were both a *page* holding the entity graph, and neither half could move
+alone, because removing the `Include` first leaves the navigation null and the UI silently wrong.
+`GetStorageLinksAsync`'s `Include(s => s.Component)` had exactly one reader in the product —
+`StorageTab`'s "is this MinIO instance already registered?" check, which wanted the component's
+*cluster id* — so the page builds that map from `ICatalogApi` now.
+
+⚠️ **`VpnService`'s looked like the same blocker and was dead code.** Nothing that loads a tunnel
+through `GetTunnelWithDetailsAsync` reads `Component` (both callers are the swanctl generators), and
+the page's component badge read it off `GetTunnelsForTenantAsync`'s tunnels, which never included
+it — so the badge had never rendered, on a field `ReconcileGatewayLinksAsync` does populate. **Check
+who actually consumes a navigation before concluding that a page blocks you**: this one cost a line
+to delete and fixed a feature on the way past.
+
+⚠️ **The ratchet reads the source tree at test time, so it cannot be trusted while that tree is
+being edited.** A full run during this work reported one failure — the navigation count had dropped
+below the banked figure because conversions landed while the suite was running — and an earlier
+disrupted run reported green on 3,983 of 4,005 tests in 30 minutes. Neither is a result. Any
+source-reading ratchet makes the suite non-hermetic with respect to the working tree: finish the
+edits, then run it.
+
+**This is the gap the module contexts already documented, and it had no number.**
+`ModuleDbContext`'s own summary says it plainly: "the model still contains every entity, so a
+navigation property that already crosses a module boundary — there are 94 of those — can still be
+walked with `Include` from an entity the context does own. Starting a query from another module's
+table is prevented; following an existing foreign key out of your own is not." So the ratchet was
+counting **only the spelling the type system already prevents**, and none of the spelling the
+design explicitly still allows — which is why "foreign reads: 4" read as *Catalog is nearly done*
+while 49 crossings into its table remained. A ratchet aimed at what the compiler already catches
+measures the compiler, not the work.
+
+⚠️ Note also what this does *not* mean: a navigation read **compiles and runs fine** on a module
+context, because the model is shared. It blocks the next phase, not this one. (I assumed the
+opposite for a few minutes — that `ConnectivityDbContext` not exposing `ClusterComponents` would
+make `cluster.Components` fail — and the base class's own doc says otherwise.)
+
+**No new contract method serves any of the 49.** Fifteen pass the loaded collection to one of
+`ExternalRouteService`'s gateway resolvers, and those already take `IComponentNaming` — the
+contract's own interface — so they are contract-shaped today and only their callers feed them an EF
+navigation. Four ask "which of this tenant's clusters have X installed?", which is
+`GetComponentsForTenantAsync` plus a name predicate in memory. The rest reach *through* Catalog's
+row into a foreign module's own table: `ExternalRoute`, `StorageLink`, `KeycloakComponentConfig` and
+`VpnLocalEndpoint` are each keyed by component id, so those are real conversions — ask Catalog which
+components are on the cluster, then query your own table by those ids.
+
+Tenant availability, which is what decides whether each can move: three of the four
+`KubernetesOperationsService` entry points already take one; its private
+`ApplyGatewayForClusterAsync` does not and will have to.
 
 ## 5. The agent model
 

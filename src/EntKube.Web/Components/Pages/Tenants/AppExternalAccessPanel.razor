@@ -1005,7 +1005,7 @@
         addingDr = true;
         try
         {
-            await AppRouteService.AddDeploymentRouteAsync(routeId, newDrDeploymentId, new AppDeploymentRouteRequest
+            await AppRouteService.AddDeploymentRouteAsync(TenantId, routeId, newDrDeploymentId, new AppDeploymentRouteRequest
             {
                 ServiceName = newDrService,
                 ServicePort = newDrPort,

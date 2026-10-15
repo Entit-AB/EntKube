@@ -25,6 +25,7 @@ public class AppL4RouteRequest
 /// </summary>
 public class AppL4RouteService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<AppL4RouteService> logger)
 {
     /// <summary>
@@ -63,27 +64,33 @@ public class AppL4RouteService(
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose cluster's gateway to resolve — an input, not a walk through
+    /// <c>deployment.Cluster.Components</c> into Catalog's table.
+    /// </param>
     public async Task<AppL4Route> AddRouteAsync(
-        Guid appId, Guid deploymentId, AppL4RouteRequest request, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid deploymentId, AppL4RouteRequest request,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         AppDeployment deployment = await db.AppDeployments
             .Include(d => d.Cluster)
-                .ThenInclude(c => c.Components)
             .FirstOrDefaultAsync(d => d.Id == deploymentId, ct)
             ?? throw new InvalidOperationException("Deployment not found.");
 
         ValidatePorts(request);
 
-        if (ExternalRouteService.ResolveGatewayClass(deployment.Cluster.Components) != "istio")
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> components =
+            await catalog.GetComponentsForClusterAsync(tenantId, deployment.ClusterId, ct);
+
+        if (ExternalRouteService.ResolveGatewayClass(components) != "istio")
             throw new InvalidOperationException(
                 "L4 (TCP/UDP) routes require an Istio ingress gateway on this cluster. This cluster does not have Istio installed.");
 
         await EnsurePortFreeAsync(db, deployment.ClusterId, request.Protocol, request.ExternalPort, excludeRouteId: null, ct);
 
-        (string gatewayName, string gatewayNamespace) =
-            ExternalRouteService.ResolveL4Gateway(deployment.Cluster.Components);
+        (string gatewayName, string gatewayNamespace) = ExternalRouteService.ResolveL4Gateway(components);
 
         AppL4Route route = new()
         {

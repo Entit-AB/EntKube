@@ -14,6 +14,14 @@ namespace EntKube.Web.Tests;
 /// </summary>
 public class ExternalRouteServiceTests : IDisposable
 {
+
+    /// <summary>
+    /// The generator takes the component explicitly now — it used to reach through
+    /// <c>route.Component</c>, which was a read of Catalog's table from Connectivity's own row.
+    /// A test legitimately holds the entity graph, so it passes the same object it built.
+    /// </summary>
+    private static string HttpRouteYaml(ExternalRoute route)
+        => ExternalRouteService.GenerateHttpRouteYaml(route, route.Component);
     private readonly SqliteConnection connection;
     private readonly ApplicationDbContext db;
     private readonly TestDbContextFactory dbFactory;
@@ -282,7 +290,7 @@ public class ExternalRouteServiceTests : IDisposable
         };
 
         ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, request);
-        string yaml = await sut.GenerateFullManifestYamlAsync(route.Id);
+        string yaml = await sut.GenerateFullManifestYamlAsync(tenantId, route.Id);
 
         // ClusterIssuer mode appends a cert-manager Certificate (issuerRef → ClusterIssuer),
         // not an ingress-shim annotation — TLS terminates at the Gateway listener.
@@ -310,12 +318,12 @@ public class ExternalRouteServiceTests : IDisposable
         ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, request);
 
         // The applied route manifest is just the HTTPRoute (TLS terminates at the gateway)…
-        string yaml = await sut.GenerateHttpRouteYamlAsync(route.Id);
+        string yaml = await sut.GenerateHttpRouteYamlAsync(tenantId, route.Id);
         yaml.Should().Contain("kind: HTTPRoute");
         yaml.Should().Contain("manual.example.com");
 
         // …the manually-supplied certificate is applied as a separate TLS Secret.
-        string secret = ExternalRouteService.GenerateTlsSecretYaml(route);
+        string secret = ExternalRouteService.GenerateTlsSecretYaml(route, route.Component);
         secret.Should().Contain("kind: Secret");
         secret.Should().Contain("my-service-tls");
     }
@@ -343,7 +351,7 @@ public class ExternalRouteServiceTests : IDisposable
             }
         };
 
-        string yaml = ExternalRouteService.GenerateTlsSecretYaml(route);
+        string yaml = ExternalRouteService.GenerateTlsSecretYaml(route, route.Component);
 
         yaml.Should().Contain("kind: Secret");
         yaml.Should().Contain("type: kubernetes.io/tls");
@@ -367,7 +375,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         };
 
-        string yaml = ExternalRouteService.GenerateTlsSecretYaml(route);
+        string yaml = ExternalRouteService.GenerateTlsSecretYaml(route, route.Component);
 
         yaml.Should().BeEmpty();
     }
@@ -401,7 +409,7 @@ public class ExternalRouteServiceTests : IDisposable
         // Without a timeouts block the gateway waits forever, so a wedged upstream hangs the
         // browser instead of failing fast. Routes that set nothing get the platform default.
 
-        string yaml = ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/", null));
+        string yaml = HttpRouteYaml(TimeoutRoute("/", null));
 
         yaml.Should().Contain("      timeouts:");
         yaml.Should().Contain($"        request: {ExternalRouteService.DefaultRequestTimeoutSeconds}s");
@@ -411,7 +419,7 @@ public class ExternalRouteServiceTests : IDisposable
     [Fact]
     public void GenerateHttpRouteYaml_ExplicitTimeout_UsesIt()
     {
-        string yaml = ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/", 15));
+        string yaml = HttpRouteYaml(TimeoutRoute("/", 15));
 
         yaml.Should().Contain("        request: 15s");
         yaml.Should().Contain("        backendRequest: 15s");
@@ -424,7 +432,7 @@ public class ExternalRouteServiceTests : IDisposable
         // 0 is the escape hatch for long-lived streams (websockets, ts2021): the rule carries
         // no timeouts at all, so the gateway keeps its own no-timeout behaviour.
 
-        string yaml = ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/", 0));
+        string yaml = HttpRouteYaml(TimeoutRoute("/", 0));
 
         yaml.Should().NotContain("timeouts:");
         yaml.Should().NotContain("backendRequest:");
@@ -436,7 +444,7 @@ public class ExternalRouteServiceTests : IDisposable
         // The timeouts block is a sibling of matches/backendRefs, not of the list item —
         // one indent level deeper than the rule's "- " marker.
 
-        string yaml = ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/api", 30));
+        string yaml = HttpRouteYaml(TimeoutRoute("/api", 30));
 
         yaml.Should().Contain("    - matches:");
         yaml.Should().Contain("      backendRefs:");
@@ -463,7 +471,7 @@ public class ExternalRouteServiceTests : IDisposable
         // A connection refused or reset before the backend read the request is safe to retry for
         // any method — nothing happened upstream to repeat. Without this the client owns it.
         Dictionary<object, object> retry = FirstRuleRetry(
-            ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/", null)));
+            HttpRouteYaml(TimeoutRoute("/", null)));
 
         retry["attempts"].Should().Be(ExternalRouteService.DefaultRetryAttempts.ToString());
         retry["backoff"].Should().Be(ExternalRouteService.DefaultRetryBackoff);
@@ -476,7 +484,7 @@ public class ExternalRouteServiceTests : IDisposable
         // retries 503 through retriable-status-codes. Setting retry replaces the default whole,
         // so leaving codes out would silently withdraw retries the cluster already has.
         List<object> codes = (List<object>)FirstRuleRetry(
-            ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/", null)))["codes"];
+            HttpRouteYaml(TimeoutRoute("/", null)))["codes"];
 
         codes.Should().ContainSingle().Which.Should().Be("503");
     }
@@ -486,7 +494,7 @@ public class ExternalRouteServiceTests : IDisposable
     {
         // A timeout of 0 opts out of timeouts, not out of retries: a stream that never opened
         // because the socket was dead is exactly the case worth a second attempt.
-        string yaml = ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/", 0));
+        string yaml = HttpRouteYaml(TimeoutRoute("/", 0));
 
         yaml.Should().NotContain("timeouts:");
         FirstRuleRetry(yaml)["attempts"].Should().Be(ExternalRouteService.DefaultRetryAttempts.ToString());
@@ -496,7 +504,7 @@ public class ExternalRouteServiceTests : IDisposable
     public void GenerateHttpRouteYaml_PathPrefixedRoute_NestsRetryInsideTheRule()
     {
         // Same level as timeouts — a sibling of matches/backendRefs, not of the list item.
-        ExternalRouteService.GenerateHttpRouteYaml(TimeoutRoute("/api", 30))
+        HttpRouteYaml(TimeoutRoute("/api", 30))
             .Should().Contain("      retry:");
     }
 

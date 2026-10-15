@@ -132,20 +132,30 @@ public sealed class SweepBacklogTenancyTests : IDisposable
     /// <summary>
     /// A route carries no tenant of its own — it reaches one through its component's cluster — so
     /// this is the predicate most likely to be written the short way and be wrong.
+    ///
+    /// <para>The predicate used to do that walk itself (<c>r.Component.Cluster.TenantId</c>), which
+    /// was correct and was also a two-hop read into Catalog's table and then Fleet's. The tenant
+    /// check now comes from Catalog's tenant-first lookup, so this test asks the way the sweep
+    /// asks: components for the tenant, then that tenant's routes. The property under test is
+    /// unchanged — one tenant's hostnames, never the other's.</para>
     /// </summary>
     [Fact]
-    public void A_route_health_sweep_reaches_a_tenants_routes_through_the_cluster()
+    public async Task A_route_health_sweep_reaches_a_tenants_routes_through_the_cluster()
     {
         Seed(ours, "ours.example.com");
         Seed(theirs, "theirs.example.com");
 
         using ConnectivityDbContext connectivity =
             ((IDbContextFactory<ConnectivityDbContext>)factory).CreateDbContext();
+        EntKube.Contracts.Catalog.ICatalogApi catalog = new EntKube.Web.Modules.Api.CatalogApi(factory);
 
-        ExternalRouteHealthService.RoutesFor(connectivity, ours)
+        ExternalRouteHealthService.RoutesFor(connectivity, await ComponentIdsOf(ours))
             .Select(r => r.Hostname).Should().Equal(["ours.example.com"]);
-        ExternalRouteHealthService.RoutesFor(connectivity, theirs)
+        ExternalRouteHealthService.RoutesFor(connectivity, await ComponentIdsOf(theirs))
             .Select(r => r.Hostname).Should().Equal(["theirs.example.com"]);
+
+        async Task<List<Guid>> ComponentIdsOf(Guid tenantId) =>
+            [.. (await catalog.GetComponentsForTenantAsync(tenantId)).Select(c => c.Id)];
 
         void Seed(Guid tenantId, string hostname)
         {

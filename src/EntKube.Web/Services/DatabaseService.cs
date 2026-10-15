@@ -82,14 +82,24 @@ public class DatabaseService(
     public async Task<List<KubernetesCluster>> GetCnpgEnabledClustersAsync(
         Guid tenantId, CancellationToken ct = default)
     {
+        // Which clusters run the operator is Catalog's answer, not a subquery into its table.
+        // The alias pair is asymmetric — the catalog name and the release name — so that half
+        // stays in memory, the same way every other converted predicate here does.
+        HashSet<Guid> clusterIds =
+        [
+            .. (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+                .Where(c => (c.Name == "cloudnative-pg" || c.ReleaseName == "cnpg")
+                    && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed)
+                .Select(c => c.ClusterId),
+        ];
+
+        if (clusterIds.Count == 0) return [];
+
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.KubernetesClusters
             .Include(k => k.Environment)
-            .Where(k => k.TenantId == tenantId
-                && k.Components.Any(c =>
-                    (c.Name == "cloudnative-pg" || c.ReleaseName == "cnpg")
-                    && c.Status == ComponentStatus.Installed))
+            .Where(k => k.TenantId == tenantId && clusterIds.Contains(k.Id))
             .OrderBy(k => k.Name)
             .ToListAsync(ct);
     }
@@ -102,16 +112,23 @@ public class DatabaseService(
     public async Task<List<KubernetesCluster>> GetMongoEnabledClustersAsync(
         Guid tenantId, CancellationToken ct = default)
     {
+        HashSet<Guid> clusterIds =
+        [
+            .. (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+                .Where(c => (c.Name == "mongodb-community-operator" || c.Name == "mongodb-operator"
+                        || c.ReleaseName == "mongodb-community-operator" || c.ReleaseName == "mongodb-operator"
+                        || c.HelmChartName == "community-operator")
+                    && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed)
+                .Select(c => c.ClusterId),
+        ];
+
+        if (clusterIds.Count == 0) return [];
+
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.KubernetesClusters
             .Include(k => k.Environment)
-            .Where(k => k.TenantId == tenantId
-                && k.Components.Any(c =>
-                    (c.Name == "mongodb-community-operator" || c.Name == "mongodb-operator"
-                     || c.ReleaseName == "mongodb-community-operator" || c.ReleaseName == "mongodb-operator"
-                     || c.HelmChartName == "community-operator")
-                    && c.Status == ComponentStatus.Installed))
+            .Where(k => k.TenantId == tenantId && clusterIds.Contains(k.Id))
             .OrderBy(k => k.Name)
             .ToListAsync(ct);
     }

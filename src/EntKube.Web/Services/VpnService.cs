@@ -49,9 +49,12 @@ public class VpnService(
     public async Task<VpnTunnel?> GetTunnelWithDetailsAsync(Guid tunnelId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+        // The component navigation used to be included here and was read by nobody: both callers
+        // are the swanctl generators, which want endpoint roles and remote peers. The page's
+        // component badge reads it off GetTunnelsForTenantAsync's tunnels, which never included it
+        // — so the badge has never rendered. It resolves the name from ICatalogApi now.
         return await db.VpnTunnels
             .Include(t => t.LocalEndpoints).ThenInclude(e => e.Cluster)
-            .Include(t => t.LocalEndpoints).ThenInclude(e => e.Component)
             .Include(t => t.RemoteEndpoints)
             .FirstOrDefaultAsync(t => t.Id == tunnelId, ct);
     }

@@ -59,19 +59,22 @@ public class HeadscaleCertSyncService(
                 // The headscale installs this tenant owns, from Catalog; then the ones published
                 // with TLS passthrough, which is the only reason this sweep exists. The alias is
                 // asymmetric (Name or HelmChartName) so that half stays in memory.
-                List<Guid> componentIds =
-                [
-                    .. (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+                Dictionary<Guid, Guid> clusterByComponent =
+                    (await catalog.GetComponentsForTenantAsync(tenantId, ct))
                         .Where(c => c.HelmChartName == "headscale" || c.Name == "headscale")
-                        .Select(c => c.Id),
-                ];
+                        .ToDictionary(c => c.Id, c => c.ClusterId);
 
-                clusterIds = await db.ExternalRoutes
-                    .Where(r => componentIds.Contains(r.ComponentId)
+                // `r.Component.ClusterId` was a JOIN back into Catalog's table for a field the
+                // contract answer already carries — the shape this sweep had half-converted. The
+                // query now selects its own column and the mapping happens here.
+                List<Guid> componentIds = await db.ExternalRoutes
+                    .Where(r => clusterByComponent.Keys.Contains(r.ComponentId)
                         && r.TlsMode == TlsMode.Passthrough)
-                    .Select(r => r.Component.ClusterId)
+                    .Select(r => r.ComponentId)
                     .Distinct()
                     .ToListAsync(ct);
+
+                clusterIds = [.. componentIds.Select(id => clusterByComponent[id]).Distinct()];
             }
 
             foreach (Guid clusterId in clusterIds)

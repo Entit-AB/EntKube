@@ -1118,7 +1118,8 @@ public class KubernetesOperationsService(
         Guid clusterId = dr.AppDeployment!.ClusterId;
 
         // Apply the Gateway first so the HTTPS listener + cert exist before the HTTPRoute attaches.
-        KubernetesOperationResult<string> gatewayResult = await ApplyGatewayForClusterAsync(clusterAccess, clusterId, db, ct);
+        KubernetesOperationResult<string> gatewayResult =
+            await ApplyGatewayForClusterAsync(tenantId, clusterAccess, clusterId, db, ct);
         if (!gatewayResult.IsSuccess)
             return gatewayResult;
 
@@ -1354,7 +1355,7 @@ public class KubernetesOperationsService(
             // Regenerate the Gateway without this hostname so the HTTPS listener is removed.
             // The Certificate in cert-manager namespace is left in place (cert-manager cleans it up
             // if needed, and deleting it here would break any in-flight ACME challenges).
-            await ApplyGatewayForClusterAsync(clusterAccess, clusterId, db, ct);
+            await ApplyGatewayForClusterAsync(tenantId, clusterAccess, clusterId, db, ct);
 
             return KubernetesOperationResult<string>.Success(
                 $"HTTPRoute {routeName} deleted from {ns}.");
@@ -1374,22 +1375,36 @@ public class KubernetesOperationsService(
     /// with a certificateRefs entry. This must be called whenever an AppRoute hostname
     /// is added or removed so the Gateway tracks the current set of exposed hostnames.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose cluster this is. Both callers already had one; this method did not, and its
+    /// "Cluster not found." came from <c>FirstOrDefaultAsync(c =&gt; c.Id == clusterId)</c> with no
+    /// tenant predicate anywhere — so a cluster id from elsewhere had its Gateway reconciled.
+    /// </param>
     private async Task<KubernetesOperationResult<string>> ApplyGatewayForClusterAsync(
-        IClusterClient clusterAccess, Guid clusterId, ApplicationDbContext db, CancellationToken ct)
+        Guid tenantId, IClusterClient clusterAccess, Guid clusterId, ApplicationDbContext db,
+        CancellationToken ct)
     {
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .Include(c => c.Components)
-                .ThenInclude(comp => comp.ExternalRoutes)
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
-
-        if (cluster is null)
+        if (!await db.KubernetesClusters.AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct))
             return KubernetesOperationResult<string>.Failure("Cluster not found.");
 
-        (string gatewayName, string gatewayNamespace) = ExternalRouteService.ResolveGateway(cluster.Components);
+        // The components come from Catalog. The route set used to be reached by walking
+        // cluster.Components into each component's ExternalRoutes — a join THROUGH Catalog's table
+        // to get at Connectivity's own rows, which are keyed by component id and can be asked for
+        // directly once you know the ids.
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> components =
+            await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct);
 
-        List<ExternalRoute> externalRoutes = cluster.Components
-            .SelectMany(c => c.ExternalRoutes.Select(r => { r.Component = c; return r; }))
-            .ToList();
+        (string gatewayName, string gatewayNamespace) = ExternalRouteService.ResolveGateway(components);
+
+        Dictionary<Guid, EntKube.Contracts.Catalog.InstalledComponent> componentsById =
+            components.ToDictionary(c => c.Id);
+        List<Guid> componentIds = [.. componentsById.Keys];
+
+        List<ExternalRoute> externalRoutes = componentIds.Count == 0
+            ? []
+            : await db.ExternalRoutes
+                .Where(r => componentIds.Contains(r.ComponentId))
+                .ToListAsync(ct);
 
         // ClientCaBundle is Included because the Gateway generator refuses to emit a route that
         // requires a client certificate without its trust anchor loaded — an unloaded navigation
@@ -1408,7 +1423,7 @@ public class KubernetesOperationsService(
         if (externalRoutes.Count == 0 && appRoutes.Count == 0)
             return KubernetesOperationResult<string>.Success("No routes to apply.");
 
-        string gatewayClass = ExternalRouteService.ResolveGatewayClass(cluster.Components);
+        string gatewayClass = ExternalRouteService.ResolveGatewayClass(components);
 
         // Traefik has no Gateway API client-certificate validation (traefik#11975): its only knob
         // is a cluster-wide default TLSOption. Applying the Gateway anyway would leave the mTLS
@@ -1423,7 +1438,8 @@ public class KubernetesOperationsService(
         // Label first, apply second. The listeners admit routes by namespace label, so a Gateway
         // that lands before the labels do detaches every route on the cluster for as long as the
         // gap lasts — the ordering here is the difference between a policy change and an outage.
-        await LabelRouteNamespacesAsync(clusterAccess, externalRoutes, appRoutes, clusterId, ct);
+        await LabelRouteNamespacesAsync(
+            clusterAccess, externalRoutes, componentsById, appRoutes, clusterId, ct);
 
         string yaml = ExternalRouteService.GenerateGatewayYaml(gatewayName, gatewayNamespace, externalRoutes, appRoutes, gatewayClass: gatewayClass);
         KubernetesOperationResult<string> applyResult = await ApplyRawYamlAsync(clusterAccess, yaml, ct);
@@ -1533,7 +1549,6 @@ public class KubernetesOperationsService(
 
         List<AppDeployment> deployments = await db.AppDeployments
             .Include(d => d.Cluster)
-                .ThenInclude(c => c.Components)
             .Where(d => d.AppId == credential.AppId
                      && (credential.EnvironmentId == null || d.EnvironmentId == credential.EnvironmentId))
             .ToListAsync(ct);
@@ -1561,7 +1576,10 @@ public class KubernetesOperationsService(
                 continue;
             }
 
-            bool hasMesh = ExternalRouteService.ResolveGatewayClass(first.Cluster!.Components) == "istio";
+            // Asked of Catalog for the cluster the seam just resolved, rather than off the
+            // deployment's own cluster row.
+            bool hasMesh = ExternalRouteService.ResolveGatewayClass(
+                await catalog.GetComponentsForClusterAsync(tenantId, first.ClusterId, ct)) == "istio";
 
             // Falling back to the Secret alone is better than applying mesh resources that nothing
             // reads — but it changes who performs the handshake, so it is said out loud.
@@ -1686,22 +1704,22 @@ public class KubernetesOperationsService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        // The cluster row is still read, but for its COMPONENTS — the gateway class decides
-        // whether PeerAuthentication means anything here. It is scoped by the tenant now rather
-        // than supplying one.
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .Include(c => c.Components)
-            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
-
-        if (cluster is null)
+        // The row is read to confirm the cluster is this tenant's; its COMPONENTS — which decide
+        // whether PeerAuthentication means anything here — come from Catalog. The comment that
+        // used to sit here said the row was read "for its COMPONENTS", which is the half-converted
+        // shape: this file already asks GetComponentsForClusterAsync in three other methods.
+        if (!await db.KubernetesClusters.AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct))
             return KubernetesOperationResult<string>.Failure("Cluster not found for this tenant.");
+
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> components =
+            await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct);
 
         IClusterClient? clusterAccess = await clusterClients.ForAsync(tenantId, clusterId, ct);
         if (clusterAccess is null)
             return KubernetesOperationResult<string>.Failure(
                 "The cluster has no kubeconfig configured.");
 
-        if (ExternalRouteService.ResolveGatewayClass(cluster.Components) != "istio")
+        if (ExternalRouteService.ResolveGatewayClass(components) != "istio")
             return KubernetesOperationResult<string>.Failure(
                 "Service-to-service mTLS requires an Istio service mesh on this cluster. PeerAuthentication is " +
                 "an Istio resource — there is no equivalent on a cluster running Traefik alone.");
@@ -1741,7 +1759,7 @@ public class KubernetesOperationsService(
         if (!peerAuthResult.IsSuccess) return peerAuthResult;
 
         // Move the gateway's side of the hop to match.
-        (_, string gwNamespace) = ExternalRouteService.ResolveGateway(cluster.Components);
+        (_, string gwNamespace) = ExternalRouteService.ResolveGateway(components);
         string backendTlsMode = MeshMtlsService.BackendTlsMode(mode);
 
         // The routes, not just their service names: this rewrites the same DestinationRules the
@@ -1970,18 +1988,16 @@ public class KubernetesOperationsService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        // Scoped by the tenant rather than supplying one. The row is still needed for its
-        // components: the L4 gateway's namespace comes from what is installed.
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .Include(c => c.Components)
-            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
-
-        if (cluster is null) return null;
+        // The row is not needed at all now: the L4 gateway's namespace comes from what is
+        // installed, which is Catalog's answer, and ForAsync below already refuses a cluster that
+        // is not this tenant's — so the row load and its null check were the same question twice.
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> components =
+            await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct);
 
         IClusterClient? clusterAccess = await clusterClients.ForAsync(tenantId, clusterId, ct);
         if (clusterAccess is null) return null;
 
-        (_, string gwNamespace) = ExternalRouteService.ResolveL4Gateway(cluster.Components);
+        (_, string gwNamespace) = ExternalRouteService.ResolveL4Gateway(components);
         return await GetL4GatewayAddressAsync(clusterAccess, gwNamespace, ct);
     }
 
@@ -2143,16 +2159,24 @@ public class KubernetesOperationsService(
     /// keeps serving from a Gateway that already works; aborting the whole reconcile over it would
     /// hold back the other listeners for no gain. This is why each patch is caught individually.
     /// </summary>
+    /// <param name="componentsById">
+    /// The cluster's components, from Catalog. A route's namespace is its component's, and this
+    /// used to be read as <c>r.Component?.Namespace</c> — which worked only because the caller had
+    /// assigned <c>r.Component = c</c> while walking the navigation. That assignment existed for
+    /// this one line; nothing else read it.
+    /// </param>
     private async Task LabelRouteNamespacesAsync(
         IClusterClient clusterAccess,
         IEnumerable<ExternalRoute> externalRoutes,
+        IReadOnlyDictionary<Guid, EntKube.Contracts.Catalog.InstalledComponent> componentsById,
         IEnumerable<AppRoute> appRoutes,
         Guid clusterId,
         CancellationToken ct)
     {
         HashSet<string> namespaces = [
             .. externalRoutes
-                .Select(r => r.Component?.Namespace)
+                .Select(r => componentsById.TryGetValue(r.ComponentId,
+                    out EntKube.Contracts.Catalog.InstalledComponent? c) ? c.Namespace : null)
                 .Where(ns => !string.IsNullOrWhiteSpace(ns))
                 .Select(ns => ns!),
             .. appRoutes

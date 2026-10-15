@@ -1876,8 +1876,10 @@ public class ComponentLifecycleService(
             .Where(r => !WouldOverwriteAppRoute(r, appRouteHostnames))
             .Select(r =>
                 r.TlsMode == TlsMode.Passthrough
-                    ? ExternalRouteService.GenerateTlsRouteYaml(r)
-                    : ExternalRouteService.GenerateHttpRouteYaml(r));
+                    // Catalog's own service, and it loaded the component graph on purpose, so it
+                    // is the one caller that still passes the entity in.
+                    ? ExternalRouteService.GenerateTlsRouteYaml(r, r.Component)
+                    : ExternalRouteService.GenerateHttpRouteYaml(r, r.Component));
 
         List<string> documents = [gatewayYaml, .. httpRoutes];
 
@@ -1901,7 +1903,7 @@ public class ComponentLifecycleService(
             IEnumerable<IGrouping<(string Namespace, string Service), ExternalRoute>> byService = allRoutes
                 .Where(r => r.TlsMode != TlsMode.Passthrough)
                 .OrderBy(r => r.Hostname, StringComparer.Ordinal)
-                .SelectMany(r => ExternalRouteService.BackendServiceNames(r)
+                .SelectMany(r => ExternalRouteService.BackendServiceNames(r, r.Component)
                     .Select(svc => (
                         Key: (Namespace: r.Component?.Namespace ?? "default", Service: svc),
                         Route: r)))

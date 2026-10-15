@@ -2780,14 +2780,14 @@ public class KeycloakService(
 
         // Deploy to Kubernetes for managed Keycloak instances.
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+        // The ClusterComponent (and its cluster) used to come along as two more ThenIncludes —
+        // Catalog's table and Fleet's, reached from Identity's own row. The id is all this needs;
+        // DeployNamedThemeToClusterAsync asks Catalog for the component itself.
         KeycloakTheme? theme = await db.KeycloakThemes
             .Include(t => t.ComponentConfig)
-                .ThenInclude(c => c.ClusterComponent!)
-                .ThenInclude(cc => cc.Cluster)
             .FirstOrDefaultAsync(t => t.Id == themeId && t.TenantId == tenantId, ct);
 
-        if (theme?.ComponentConfig.ClusterComponentId is null
-            || theme.ComponentConfig.ClusterComponent is null)
+        if (theme?.ComponentConfig.ClusterComponentId is null)
             return null; // external Keycloak — vault only
 
         try
@@ -2936,21 +2936,24 @@ public class KeycloakService(
     {
         if (theme.ComponentConfig is null)
         {
-            // Reload with navigation properties.
+            // Reload with the config — but not with Catalog's row behind it.
             using ApplicationDbContext db2 = dbFactory.CreateDbContext();
             theme = await db2.KeycloakThemes
                 .Include(t => t.ComponentConfig)
-                    .ThenInclude(c => c.ClusterComponent!)
-                    .ThenInclude(cc => cc.Cluster)
                 .FirstOrDefaultAsync(t => t.Id == theme.Id && t.TenantId == tenantId, ct)
                 ?? throw new InvalidOperationException("Theme not found.");
         }
 
-        if (theme.ComponentConfig.ClusterComponentId is null
-            || theme.ComponentConfig.ClusterComponent is null)
+        if (theme.ComponentConfig.ClusterComponentId is null)
             return;
 
-        ClusterComponent comp = theme.ComponentConfig.ClusterComponent;
+        // Asked of Catalog as this tenant. The old path took the component off the row the theme
+        // pointed at, so a theme naming another tenant's component deployed onto it; the lookup is
+        // tenant-first, so that now resolves to nothing.
+        InstalledComponent? comp = await catalog.GetComponentAsync(
+            tenantId, theme.ComponentConfig.ClusterComponentId.Value, ct);
+        if (comp is null)
+            return;
         EntKube.Web.Services.Clusters.IClusterClient? cluster = await clusterClients.ForAsync(tenantId, comp.ClusterId, ct);
         if (cluster is null || string.IsNullOrEmpty(comp.Namespace))
             return;

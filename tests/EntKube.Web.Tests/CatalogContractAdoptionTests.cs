@@ -408,10 +408,135 @@ public class CatalogContractAdoptionTests
     /// </summary>
     private const int BaselineWrites = 0;
 
+    /// <summary>
+    /// Catalog's table reached through a <b>navigation</b> rather than the DbSet — eleven entities
+    /// declare one — in services Catalog does not own. <b>49 in 11 files</b>, measured 2026-10-15,
+    /// and every one of them was invisible to this test until now.
+    ///
+    /// <para><b>Why they were missed.</b> <see cref="BaselineQueries"/> counts
+    /// <c>.ClusterComponents</c>, the DbSet. A navigation read is the same coupling in a different
+    /// spelling: an <c>Include</c> is a JOIN, <c>k.Components.Any(…)</c> is an EXISTS, and a
+    /// traversal of the loaded collection is a read of a Catalog row that a foreign module is
+    /// holding. All of it breaks when that table moves to another database, and all of it is what
+    /// <c>ICatalogApi</c> has to serve. <c>LokiService</c> is what surfaced it: converting its
+    /// component read to the contract moved this ratchet by <em>zero</em>.</para>
+    ///
+    /// <para><b>2 now, from 49, and no new contract method was needed for any of it.</b> Eleven
+    /// files are at zero: <c>KubernetesOperationsService</c> (13), <c>ExternalRouteService</c> (11),
+    /// <c>IngressDashboardService</c> (5), <c>KeycloakService</c> (5), <c>AppL4RouteService</c> (3),
+    /// <c>AppRouteService</c> (2), <c>DatabaseService</c> (2), <c>StorageService</c> (1 of 3),
+    /// <c>VpnService</c>, <c>ExternalRouteHealthService</c> and <c>HeadscaleCertSyncService</c>.</para>
+    ///
+    /// <para><b>The two that remain are one blocked method</b>, and this is the floor until a
+    /// decision is made rather than work anyone can pick up:
+    /// <c>StorageService.ResolveMinioKubeconfigAsync</c> walks
+    /// <c>StorageLink → ClusterComponent → KubernetesCluster</c> to hand a <em>raw kubeconfig</em>
+    /// to <c>KubernetesS3Proxy</c> for the AWS SDK. It is one of the sites waiting on the
+    /// <b>credentialed channel</b> seam shape (§4.0.1.5) — many calls, arbitrary object paths,
+    /// binary bodies — so it is on the custody ratchet and this one for the same reason.</para>
+    ///
+    /// <para>The last two conversions were both a <em>page</em> holding the entity graph, and
+    /// neither half could move alone: removing the <c>Include</c> first would leave the navigation
+    /// null and the UI silently wrong. <c>StorageService.GetStorageLinksAsync</c>'s
+    /// <c>Include(s =&gt; s.Component)</c> had exactly one reader in the whole product —
+    /// <c>StorageTab</c>'s "is this MinIO instance already registered?" check, which wanted the
+    /// component's <em>cluster id</em> — so the page builds that map from <c>ICatalogApi</c> now.</para>
+    ///
+    /// <para>⚠️ <c>VpnService</c>'s looked like the same blocker and was <b>dead code</b>. Nothing
+    /// that loads a tunnel through <c>GetTunnelWithDetailsAsync</c> reads <c>Component</c> — both
+    /// callers are the swanctl generators — and the page's component badge read it off
+    /// <c>GetTunnelsForTenantAsync</c>'s tunnels, which never included it. So the badge had never
+    /// rendered, on a field <c>ReconcileGatewayLinksAsync</c> does populate. <b>Check who actually
+    /// consumes a navigation before concluding that a page blocks you</b>; this one cost a line to
+    /// delete and fixed a feature on the way past.</para>
+    ///
+    /// <para><c>KubernetesOperationsService</c> was the last large holding and the clearest case of
+    /// the <b>half-moved</b> shape: it already asked <c>GetComponentsForClusterAsync</c> in three
+    /// methods while four others walked <c>cluster.Components</c>, and two of those carried comments
+    /// explaining that the cluster row was read "for its COMPONENTS" — the exact read the contract
+    /// exists to serve. Converting it removed more than it moved: <c>GetL4EndpointAddressAsync</c>
+    /// loaded the row tenant-scoped, null-checked it, and <em>then</em> called
+    /// <c>ForAsync(tenantId, clusterId)</c> — the same question twice — and
+    /// <c>ApplyGatewayForClusterAsync</c>'s <c>r.Component = c</c> mutated the navigation purely to
+    /// feed one line in <c>LabelRouteNamespacesAsync</c>. It also gained a tenant check it never
+    /// had: its "Cluster not found." came from <c>FirstOrDefaultAsync(c =&gt; c.Id == clusterId)</c>
+    /// with no tenant predicate, so a cluster id from elsewhere had its Gateway reconciled.</para>
+    ///
+    /// <para><c>ExternalRouteService</c> was the interesting one. Its eleven were six public static
+    /// YAML generators plus the two split-backend helpers reading <c>route.Component</c> for a
+    /// namespace, a name, a chart name and a release name — <em>exactly</em>
+    /// <see cref="EntKube.Contracts.Catalog.IComponentNaming"/>'s four members, so they take that
+    /// interface now and both the contract's DTO and the entity satisfy it. Its two async loaders
+    /// take a tenant and resolve the component through <c>GetComponentAsync</c>: a route carries no
+    /// tenant of its own, and the <c>Include</c> they used to do asked nobody's permission.</para>
+    ///
+    /// <para><c>KeycloakService</c>'s five were two <c>ThenInclude</c> chains walking
+    /// <c>KeycloakTheme → KeycloakComponentConfig → ClusterComponent → KubernetesCluster</c>. The
+    /// theme's config is Identity's own row; the rest was Catalog's and Fleet's. Converting it
+    /// closed a real hole: the component came off the row the theme pointed at, so a theme naming
+    /// another tenant's component deployed a theme onto it. Catalog's lookup is tenant-first, so
+    /// that now resolves to nothing.</para>
+    ///
+    /// <para>Three of those conversions were not swaps and are worth naming, because each was a
+    /// read that had already been *half* moved:</para>
+    /// <list type="bullet">
+    ///   <item><c>HeadscaleCertSyncService</c> asked Catalog for its component ids and then did
+    ///   <c>.Select(r =&gt; r.Component.ClusterId)</c> — a JOIN back into Catalog's table for a
+    ///   field the contract answer it already held carries.</item>
+    ///   <item><c>ExternalRouteHealthService.RoutesFor</c> was
+    ///   <c>Where(r =&gt; r.Component.Cluster.TenantId == tenantId)</c>: a correct predicate, and a
+    ///   two-hop read out of Connectivity's own table into Catalog's and then Fleet's. The tenant
+    ///   check is not weaker — it has moved into Catalog's tenant-first lookup, which is the one
+    ///   place that answers "whose components are these?".</item>
+    ///   <item><c>IngressDashboardService</c> walked <c>ExternalRoute → ClusterComponent →
+    ///   KubernetesCluster</c> for a cluster <em>name</em> that <c>InstalledComponent</c> already
+    ///   carries. One contract call now serves the gateway class per cluster, which routes are this
+    ///   tenant's, and that name.</item>
+    /// </list>
+    ///
+    /// <para><c>AppRouteService.AddDeploymentRouteAsync</c> and
+    /// <c>AppL4RouteService.AddRouteAsync</c> took the tenant as a parameter instead, from the three
+    /// pages that already had one — and that surfaced a real authorization hole in a third caller:
+    /// <c>DeploymentImportService.ImportAsync</c> opened with <c>Guid tenantId = cluster.TenantId;</c>,
+    /// a label rather than a check, so whatever cluster row arrived was imported into its own
+    /// tenant and every tenant-scoped call beneath it compared that row to itself. It takes a
+    /// tenant now and refuses the mismatch; see <c>DeploymentImportTenancyTests</c>.</para>
+    ///
+    /// <para><b>No new contract method serves any of them</b>, which is worth saying because the
+    /// first guess was that this number was asking for one. Fifteen pass the loaded collection to
+    /// one of <c>ExternalRouteService</c>'s gateway resolvers, and those already take
+    /// <c>IComponentNaming</c> — the contract's own interface — so they are contract-shaped today
+    /// and only their callers feed them an EF navigation. Four ask "which of this tenant's clusters
+    /// have X installed?", which is <c>GetComponentsForTenantAsync</c> plus a name predicate in
+    /// memory. The rest reach <em>through</em> Catalog's row to a foreign module's own
+    /// table — <c>ExternalRoute</c>, <c>StorageLink</c>, <c>KeycloakComponentConfig</c> and
+    /// <c>VpnLocalEndpoint</c> are all keyed by component id — and those are real conversions:
+    /// ask Catalog which components are on the cluster, then query your own table by those ids.</para>
+    ///
+    /// <para>Counted per <em>mention</em>, like <see cref="BaselineQueries"/>: an <c>Include</c>
+    /// and the traversal it enables are two, because that is how the DbSet form has always been
+    /// counted and a unit that changes with the spelling is how this went unnoticed.</para>
+    ///
+    /// <para>⚠️ <b>Two measurements of this gap were wrong before this one, in the same direction,
+    /// and the first had already been quoted.</b> It counted only <c>Include</c>/<c>ThenInclude</c>
+    /// of <c>.Components</c> and said <b>8 in 5 files</b>; the figure reached a commit message, a
+    /// pull request and <c>docs/decomposition.md</c> before a second count said 22. Then 22 was
+    /// itself one spelling of three: <c>Component</c> and <c>ClusterComponent</c> on ten other
+    /// entities account for the other 27. The names are now <b>derived from the entity model</b>
+    /// (<see cref="ComponentNavigations"/>) rather than listed, so a fourth cannot hide the same
+    /// way, and <see cref="Measure"/> asserts which three the model declares — if that changes,
+    /// this test says so instead of quietly counting less.</para>
+    ///
+    /// <para>The lesson, third time it has been earned in this programme: <b>enumerate a metric's
+    /// spellings before trusting its total</b>, and a conversion that moves a ratchet by zero is
+    /// evidence about the ratchet rather than about the conversion.</para>
+    /// </summary>
+    private const int BaselineNavigation = 2;
+
     [Fact]
     public void No_new_service_reaches_past_the_catalog_contract()
     {
-        (int queries, int writes) = Measure();
+        (int queries, int writes, int navigation) = Measure();
 
         queries.Should().BeLessThanOrEqualTo(BaselineQueries,
             "a new direct query on Catalog's table is one more caller that cannot be moved off "
@@ -420,19 +545,79 @@ public class CatalogContractAdoptionTests
         writes.Should().BeLessThanOrEqualTo(BaselineWrites,
             "a foreign module mutating a component through change tracking is the write this "
             + "contract exists to express — use MergeHelmValuesAsync or SetHelmValuesAsync");
+
+        navigation.Should().BeLessThanOrEqualTo(BaselineNavigation,
+            "reaching Catalog's table through cluster.Components is the same coupling as "
+            + "querying it directly — it is a JOIN or an EXISTS against another module's table");
     }
 
     [Fact]
     public void The_adoption_baseline_does_not_carry_slack()
     {
-        (int queries, int writes) = Measure();
+        (int queries, int writes, int navigation) = Measure();
 
         queries.Should().Be(BaselineQueries,
             $"now {queries} — bank it by lowering the baseline, or the slack lets direct access "
             + "creep back for free");
 
         writes.Should().Be(BaselineWrites, $"now {writes} writes; lower the baseline to match");
+
+        navigation.Should().Be(BaselineNavigation,
+            $"now {navigation} navigation reads; lower the baseline to match");
     }
+
+    /// <summary>
+    /// Navigation properties whose target is <c>ClusterComponent</c>, read out of the entity
+    /// model rather than listed here.
+    ///
+    /// <para><b>Why derived.</b> The first version of the navigation count matched
+    /// <c>.Components</c> — one spelling, taken from the one site that happened to surface it.
+    /// There are three (<c>KubernetesCluster.Components</c>, and <c>Component</c> /
+    /// <c>ClusterComponent</c> on ten other entities), and a hand-listed pattern would have gone
+    /// on missing the other two exactly as the DbSet pattern missed all three. Deriving the names
+    /// from the properties that declare them means a new navigation to Catalog's table is counted
+    /// the day it is added.</para>
+    ///
+    /// <para><c>ClusterComponents</c> is excluded: its only declarer is <c>BackupBundle</c>'s
+    /// list, and the DbSet pattern already matches that spelling.</para>
+    /// </summary>
+    private static IReadOnlySet<string> ComponentNavigations(string root)
+    {
+        HashSet<string> names = new(StringComparer.Ordinal);
+
+        foreach (string path in Directory.EnumerateFiles(
+                     Path.Combine(root, "Data"), "*.cs", SearchOption.AllDirectories))
+        {
+            foreach (Match m in Regex.Matches(
+                         File.ReadAllText(path),
+                         @"(?:ICollection|List|IReadOnlyList)?<?ClusterComponent>?[?!]?\s+(\w+)\s*\{\s*get;"))
+            {
+                if (m.Groups[1].Value != "ClusterComponents") names.Add(m.Groups[1].Value);
+            }
+        }
+
+        return names;
+    }
+
+    /// <summary>
+    /// Mentions of a component navigation that are not reads of Catalog's table. Each is a claim
+    /// that something is not coupling, so each says what it is instead — and anything new is
+    /// counted rather than assumed.
+    ///
+    /// <list type="bullet">
+    ///   <item><c>BlueprintStepType.Component</c> — an enum member.</item>
+    ///   <item><c>report.Components</c> — <c>UpgradeReport.Components</c>, a list of
+    ///   <c>ComponentUpgrade</c> the upgrade service builds.</item>
+    ///   <item><c>notice.Component</c> — a product name on a support notice, a string.</item>
+    ///   <item><c>Source.Component</c> — a field on a node-event DTO.</item>
+    ///   <item><c>SupportMailboxService</c>'s <c>r.Component</c> — the <em>contract's</em>
+    ///   <c>InstalledComponent</c>, which is the point of the contract. It is recognisable in the
+    ///   code by <c>.ClusterName</c>, which the entity does not have.</item>
+    /// </list>
+    /// </summary>
+    private static bool NotTheNavigation(string file, string receiver)
+        => receiver is "BlueprintStepType" or "report" or "notice" or "Source"
+           || (file == "SupportMailboxService.cs" && receiver == "r");
 
     /// <summary>
     /// Mutable scalar properties on <c>ClusterComponent</c>, read out of the entity itself so a
@@ -496,7 +681,7 @@ public class CatalogContractAdoptionTests
         [.. Regex.Matches(body, @"\b(?:class|record|struct|interface)\s+(\w+)")
             .Select(m => m.Groups[1].Value)];
 
-    private static (int Queries, int Writes) Measure()
+    private static (int Queries, int Writes, int Navigation) Measure()
     {
         string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, Web));
 
@@ -507,11 +692,15 @@ public class CatalogContractAdoptionTests
         IReadOnlyDictionary<string, string> modules = ServiceModules(root);
         IReadOnlySet<string> properties = MutableProperties(root);
         IReadOnlySet<string> platform = PlatformServices(root);
+        IReadOnlySet<string> navigations = ComponentNavigations(root);
 
         modules.Should().NotBeEmpty("ModuleServiceMap is how this test knows whose code it is reading");
         properties.Should().NotBeEmpty("ClusterComponent's settable properties are what a write writes");
+        navigations.Should().BeEquivalentTo(["Components", "Component", "ClusterComponent"],
+            "these are the three spellings the entity model declares today; if the model grows a "
+            + "fourth this test should start counting it, and if it loses one, say so here");
 
-        int queries = 0, writes = 0;
+        int queries = 0, writes = 0, navigation = 0;
 
         foreach (string path in Directory.EnumerateFiles(
                      Path.Combine(root, "Services"), "*.cs", SearchOption.AllDirectories))
@@ -554,7 +743,24 @@ public class CatalogContractAdoptionTests
                 if (trimmed.StartsWith("//", StringComparison.Ordinal)
                     || trimmed.StartsWith("*", StringComparison.Ordinal)) continue;
 
+                // A using directive is not a read of anything. It matters only for the navigation
+                // count below, where `using Microsoft.AspNetCore.Components;` otherwise scores as
+                // one — which is how the first run of this came out at 23 instead of 22.
+                if (trimmed.StartsWith("using ", StringComparison.Ordinal)) continue;
+
                 queries += Regex.Matches(line, @"\.ClusterComponents\b").Count;
+
+                // The navigation spellings, derived from the model above. `(?<!Web)` keeps the
+                // EntKube.Web.Components namespace out of it; NotTheNavigation keeps the five
+                // mentions that are an enum member or a DTO out. Both are narrow on purpose —
+                // anything new is counted, so it forces a decision rather than passing in silence.
+                foreach (Match m in Regex.Matches(
+                             line, @"(?<!Web)(?:(\w+)[?!]?\s*)?\.(Components|Component|ClusterComponent)\b(?!s)"))
+                {
+                    if (!navigations.Contains(m.Groups[2].Value)) continue;
+                    if (NotTheNavigation(Path.GetFileName(path), m.Groups[1].Value)) continue;
+                    navigation++;
+                }
 
                 foreach (string name in held)
                 {
@@ -566,6 +772,8 @@ public class CatalogContractAdoptionTests
             }
         }
 
-        return (queries, writes);
+        return (queries, writes, navigation);
     }
+
+
 }

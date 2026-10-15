@@ -765,9 +765,20 @@ public class DeploymentImportService(
     /// Best-effort per item: a single resource/secret/postgres failure is collected
     /// into the result rather than aborting the whole import.
     /// </summary>
-    public async Task<ImportResult> ImportAsync(KubernetesCluster cluster, ImportRequest request, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Who is importing. It used to be read off <paramref name="cluster"/> — <c>cluster.TenantId</c>
+    /// — which is a label, not a check: whatever row arrived was imported into its own tenant, and
+    /// every tenant-scoped call below then compared that row to itself. The page has always had a
+    /// tenant, so it is an input now and the mismatch is refused.
+    /// </param>
+    public async Task<ImportResult> ImportAsync(
+        Guid tenantId, KubernetesCluster cluster, ImportRequest request, CancellationToken ct = default)
     {
-        Guid tenantId = cluster.TenantId;
+        if (cluster.TenantId != tenantId)
+        {
+            throw new InvalidOperationException("That cluster is not this tenant's.");
+        }
+
         ImportPreview preview = request.Preview;
         ImportResult result = new() { AppName = request.AppName };
 
@@ -1032,7 +1043,7 @@ public class DeploymentImportService(
                     {
                         try
                         {
-                            await appRouteService.AddDeploymentRouteAsync(routeId, deployment.Id, new AppDeploymentRouteRequest
+                            await appRouteService.AddDeploymentRouteAsync(tenantId, routeId, deployment.Id, new AppDeploymentRouteRequest
                             {
                                 ServiceName = rule.ServiceName ?? "",
                                 ServicePort = rule.ServicePort,

@@ -4188,6 +4188,6 @@ else if (section == "components")
 
     private async Task ShowRouteYaml(Guid routeId)
     {
-        routeYamlPreview = await RouteService.GenerateFullManifestYamlAsync(routeId);
+        routeYamlPreview = await RouteService.GenerateFullManifestYamlAsync(TenantId, routeId);
     }
 }

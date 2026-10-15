@@ -348,39 +348,64 @@ public class ExternalRouteService(
     /// For Manual TLS, it references a Kubernetes Secret (the caller must
     /// create the Secret separately with the cert/key data).
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose route this is. The component used to arrive as <c>Include(r =&gt; r.Component)</c> — a
+    /// read of Catalog's table through Connectivity's own row, which no tenant ever checked.
+    /// </param>
     public async Task<string> GenerateHttpRouteYamlAsync(
-        Guid routeId, CancellationToken ct = default)
+        Guid tenantId, Guid routeId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        (ExternalRoute route, EntKube.Contracts.Catalog.InstalledComponent? component) =
+            await LoadRouteAsync(tenantId, routeId, ct);
 
-        ExternalRoute route = await db.ExternalRoutes
-            .Include(r => r.Component)
-            .FirstOrDefaultAsync(r => r.Id == routeId, ct)
-            ?? throw new InvalidOperationException("Route not found.");
-
-        return GenerateHttpRouteYaml(route);
+        return GenerateHttpRouteYaml(route, component);
     }
 
+    /// <inheritdoc cref="GenerateHttpRouteYamlAsync" />
     public async Task<string> GenerateFullManifestYamlAsync(
-        Guid routeId, CancellationToken ct = default)
+        Guid tenantId, Guid routeId, CancellationToken ct = default)
+    {
+        (ExternalRoute route, EntKube.Contracts.Catalog.InstalledComponent? component) =
+            await LoadRouteAsync(tenantId, routeId, ct);
+
+        return GenerateFullManifestYaml(route, component);
+    }
+
+    /// <summary>
+    /// A route and the component it hangs off, asked for as this tenant.
+    ///
+    /// <para>A route carries no tenant of its own — it reaches one through its component — so the
+    /// authorization is Catalog's tenant-first lookup. A component the tenant may not see comes
+    /// back null, and the generators then render the <c>default</c> namespace rather than another
+    /// tenant's, which is what they already did for a route whose component is gone.</para>
+    /// </summary>
+    private async Task<(ExternalRoute Route, EntKube.Contracts.Catalog.InstalledComponent? Component)>
+        LoadRouteAsync(Guid tenantId, Guid routeId, CancellationToken ct)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ExternalRoute route = await db.ExternalRoutes
-            .Include(r => r.Component)
             .FirstOrDefaultAsync(r => r.Id == routeId, ct)
             ?? throw new InvalidOperationException("Route not found.");
 
-        return GenerateFullManifestYaml(route);
+        return (route, await catalog.GetComponentAsync(tenantId, route.ComponentId, ct));
     }
 
     /// <summary>
     /// Generates HTTPRoute YAML from an in-memory route object.
     /// Useful for previewing before saving.
     /// </summary>
-    public static string GenerateHttpRouteYaml(ExternalRoute route)
+    /// <param name="component">
+    /// The component this route hangs off, or null when the caller cannot see one. It used to be
+    /// read as <c>route.Component</c>; the four things these generators want from it — namespace,
+    /// name, chart name, release name — are exactly
+    /// <see cref="EntKube.Contracts.Catalog.IComponentNaming"/>, so the contract's DTO fits
+    /// without a conversion and so does the entity.
+    /// </param>
+    public static string GenerateHttpRouteYaml(
+        ExternalRoute route, EntKube.Contracts.Catalog.IComponentNaming? component)
     {
-        string ns = route.Component?.Namespace ?? "default";
+        string ns = component?.Namespace ?? "default";
         // Name is hostname-based so it stays stable even when the service name is corrected.
         string routeName = ToListenerName(route.Hostname) + "-route";
 
@@ -394,7 +419,7 @@ public class ExternalRouteService(
         // rule still carries the same filters, timeout and retry policy as a single-backend route —
         // they are the platform's policy for the hostname, not a property of one backend.
         IReadOnlyList<(IReadOnlyList<string> Paths, string Service, int Port)> split =
-            ResolveSplitBackends(route);
+            ResolveSplitBackends(route, component);
 
         if (split.Count > 0)
         {
@@ -474,25 +499,26 @@ public class ExternalRouteService(
     /// would serve something they did not ask for.</para>
     /// </summary>
     public static IReadOnlyList<(IReadOnlyList<string> Paths, string Service, int Port)>
-        ResolveSplitBackends(ExternalRoute route)
+        ResolveSplitBackends(
+            ExternalRoute route, EntKube.Contracts.Catalog.IComponentNaming? component)
     {
-        if (route.Component is null || route.PathPrefix != "/")
+        if (component is null || route.PathPrefix != "/")
         {
             return [];
         }
 
-        CatalogEntry? catalog = ComponentCatalog.ResolveForComponent(
-            route.Component.Name, route.Component.HelmChartName);
+        CatalogEntry? catalogEntry = ComponentCatalog.ResolveForComponent(
+            component.Name, component.HelmChartName);
 
-        if (catalog is null || catalog.RouteBackends.Count == 0)
+        if (catalogEntry is null || catalogEntry.RouteBackends.Count == 0)
         {
             return [];
         }
 
         string fullname = ChartFullname(
-            route.Component.ReleaseName ?? route.Component.Name, catalog.HelmChartName);
+            component.ReleaseName ?? component.Name, catalogEntry.HelmChartName);
 
-        return [.. catalog.RouteBackends.Select(b =>
+        return [.. catalogEntry.RouteBackends.Select(b =>
             (b.PathPrefixes, b.ServiceNameTemplate.Replace("{fullname}", fullname), b.Port))];
     }
 
@@ -500,10 +526,11 @@ public class ExternalRouteService(
     /// Every Service a route sends traffic to — its own backend, or the several a path split names.
     /// The DestinationRule a route needs is per Service, so this is what that grouping walks.
     /// </summary>
-    public static IEnumerable<string> BackendServiceNames(ExternalRoute route)
+    public static IEnumerable<string> BackendServiceNames(
+        ExternalRoute route, EntKube.Contracts.Catalog.IComponentNaming? component)
     {
         IReadOnlyList<(IReadOnlyList<string> Paths, string Service, int Port)> split =
-            ResolveSplitBackends(route);
+            ResolveSplitBackends(route, component);
 
         return split.Count > 0
             ? split.Select(b => b.Service)
@@ -957,9 +984,10 @@ public class ExternalRouteService(
     /// Generates a TLSRoute YAML for passthrough-mode routes. The gateway routes by SNI
     /// without terminating TLS — the backend pod must handle TLS itself.
     /// </summary>
-    public static string GenerateTlsRouteYaml(ExternalRoute route)
+    public static string GenerateTlsRouteYaml(
+        ExternalRoute route, EntKube.Contracts.Catalog.IComponentNaming? component)
     {
-        string ns = route.Component?.Namespace ?? "default";
+        string ns = component?.Namespace ?? "default";
         string routeName = ToListenerName(route.Hostname) + "-route";
         string sectionName = ToListenerName(route.Hostname);
 
@@ -988,14 +1016,15 @@ public class ExternalRouteService(
     /// cert-manager will provision and renew the TLS secret automatically.
     /// Returns empty string for Manual TLS (user supplies the certificate).
     /// </summary>
-    public static string GenerateCertificateYaml(ExternalRoute route)
+    public static string GenerateCertificateYaml(
+        ExternalRoute route, EntKube.Contracts.Catalog.IComponentNaming? component)
     {
         if (route.TlsMode != TlsMode.ClusterIssuer || string.IsNullOrWhiteSpace(route.ClusterIssuerName))
         {
             return "";
         }
 
-        string ns = route.Component?.Namespace ?? "default";
+        string ns = component?.Namespace ?? "default";
         string secretName = $"{route.ServiceName}-tls";
 
         return $"""
@@ -1018,10 +1047,11 @@ public class ExternalRouteService(
     /// Generates the complete manifest for a route: HTTPRoute plus a Certificate
     /// resource (when using ClusterIssuer TLS). Apply this single YAML to the cluster.
     /// </summary>
-    public static string GenerateFullManifestYaml(ExternalRoute route)
+    public static string GenerateFullManifestYaml(
+        ExternalRoute route, EntKube.Contracts.Catalog.IComponentNaming? component)
     {
-        string httpRoute = GenerateHttpRouteYaml(route);
-        string certificate = GenerateCertificateYaml(route);
+        string httpRoute = GenerateHttpRouteYaml(route, component);
+        string certificate = GenerateCertificateYaml(route, component);
 
         return string.IsNullOrEmpty(certificate)
             ? httpRoute
@@ -1032,14 +1062,15 @@ public class ExternalRouteService(
     /// Generates a Kubernetes TLS Secret YAML for manual certificate mode.
     /// The caller applies this to the cluster before or alongside the HTTPRoute.
     /// </summary>
-    public static string GenerateTlsSecretYaml(ExternalRoute route)
+    public static string GenerateTlsSecretYaml(
+        ExternalRoute route, EntKube.Contracts.Catalog.IComponentNaming? component)
     {
         if (route.TlsMode != TlsMode.Manual || string.IsNullOrWhiteSpace(route.TlsCertificate))
         {
             return "";
         }
 
-        string ns = route.Component?.Namespace ?? "default";
+        string ns = component?.Namespace ?? "default";
         string secretName = $"{route.ServiceName}-tls";
 
         // Base64-encode the cert and key for Kubernetes Secret.

@@ -1,6 +1,7 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject VpnService VpnService
+@inject EntKube.Contracts.Catalog.ICatalogApi Catalog
 @inject TenantService TenantService
 
 @* ============================================================================
@@ -556,10 +557,11 @@
                                                 }
                                             </td>
                                             <td>
-                                                @if (ep.Component is not null)
+                                                @if (ep.ComponentId is Guid linkedId
+                                                     && componentNames.TryGetValue(linkedId, out string? linkedName))
                                                 {
                                                     <span class="badge bg-success-subtle text-success border border-success-subtle small">
-                                                        <i class="bi bi-puzzle me-1"></i>@ep.Component.Name
+                                                        <i class="bi bi-puzzle me-1"></i>@linkedName
                                                     </span>
                                                 }
                                                 else
@@ -801,6 +803,13 @@
     private string? errorMessage;
 
     private List<VpnTunnel> tunnels = [];
+
+    /// <summary>
+    /// Component names by id, for the gateway badge on a local endpoint. The endpoint carries a
+    /// ComponentId; the name is Catalog's to answer, and the page used to reach for it through an
+    /// EF navigation that was never loaded on this path.
+    /// </summary>
+    private Dictionary<Guid, string> componentNames = [];
     private List<KubernetesCluster> availableClusters = [];
 
     // Expand state
@@ -906,6 +915,10 @@
             await VpnService.ReconcileGatewayLinksAsync(TenantId);
             tunnels = await VpnService.GetTunnelsForTenantAsync(TenantId);
             availableClusters = await TenantService.GetClustersAsync(TenantId);
+
+            // Asked after the reconcile, which is what sets an endpoint's ComponentId.
+            componentNames = (await Catalog.GetComponentsForTenantAsync(TenantId))
+                .ToDictionary(c => c.Id, c => c.Name);
         }
         catch (Exception ex)
         {

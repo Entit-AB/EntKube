@@ -35,18 +35,25 @@ public class ExternalRouteHealthService(
     }
 
     /// <summary>
-    /// One tenant's external routes. A route reaches its tenant through its component's cluster —
-    /// it carries no tenant of its own — so the predicate is the long way round on purpose.
-    /// Public and static so the scoping is assertable without an HTTP server.
+    /// The external routes belonging to a set of components — the tenant's, when
+    /// <paramref name="componentIds"/> came from <c>ICatalogApi.GetComponentsForTenantAsync</c>.
+    ///
+    /// <para>This used to be <c>Where(r =&gt; r.Component.Cluster.TenantId == tenantId)</c>: a
+    /// correct predicate, and a two-hop read out of Connectivity's own table into Catalog's and
+    /// then Fleet's. The tenant check has not been weakened — it has moved into Catalog's
+    /// tenant-first lookup, which is the one place that answers "whose components are these?".
+    /// Still public and static so the scoping is assertable without an HTTP server.</para>
     /// </summary>
-    public static IQueryable<ExternalRoute> RoutesFor(ConnectivityDbContext db, Guid tenantId)
-        => db.ExternalRoutes.Where(r => r.Component.Cluster.TenantId == tenantId);
+    public static IQueryable<ExternalRoute> RoutesFor(
+        ConnectivityDbContext db, IReadOnlyCollection<Guid> componentIds)
+        => db.ExternalRoutes.Where(r => componentIds.Contains(r.ComponentId));
 
     private async Task CheckAllRoutesAsync(CancellationToken ct)
     {
         using IServiceScope scope = scopeFactory.CreateScope();
         using IDisposable unattended = scope.DeclareUnattended("external-route-health");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ConnectivityDbContext>>();
+        var catalog = scope.ServiceProvider.GetRequiredService<EntKube.Contracts.Catalog.ICatalogApi>();
 
         // One tenant at a time (docs/decomposition.md §4.0.1.2). ⚠️ Unlike most of that work, this
         // one buys isolation rather than safety, and it is worth saying which: the probe is an
@@ -60,7 +67,15 @@ public class ExternalRouteHealthService(
         {
             foreach (Guid tenantId in await db.Tenants.Select(x => x.Id).ToListAsync(ct))
             {
-                routes.AddRange(await RoutesFor(db, tenantId)
+                // Asked of Catalog as each tenant in turn — the tenant is the input, never read
+                // back off a row this sweep happens to have loaded.
+                List<Guid> componentIds =
+                [
+                    .. (await catalog.GetComponentsForTenantAsync(tenantId, ct)).Select(c => c.Id),
+                ];
+                if (componentIds.Count == 0) continue;
+
+                routes.AddRange(await RoutesFor(db, componentIds)
                     .Select(r => new ValueTuple<Guid, string, string>(r.Id, r.Hostname, r.PathPrefix))
                     .ToListAsync(ct));
             }
