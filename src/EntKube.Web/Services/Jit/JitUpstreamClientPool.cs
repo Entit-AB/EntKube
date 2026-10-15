@@ -4,6 +4,8 @@ using System.Security.Cryptography.X509Certificates;
 using System.Text;
 using k8s;
 
+using EntKube.Web.Services.Clusters;
+
 namespace EntKube.Web.Services.Jit;
 
 /// <summary>
@@ -41,14 +43,19 @@ public sealed class JitUpstreamClientPool(ILogger<JitUpstreamClientPool> logger)
     private bool disposed;
 
     /// <summary>
-    /// Returns a client for the cluster this kubeconfig describes. The caller must not dispose it —
+    /// Returns a client for the cluster this connection describes. The caller must not dispose it —
     /// the pool owns its lifetime.
+    ///
+    /// <para>Takes a <see cref="ClusterConnection"/> rather than a kubeconfig: this pool only ever
+    /// used the address, the CA and the skip-TLS flag — it leaves <c>ClientCertificates</c> empty on
+    /// purpose, see the class comment — so taking the whole credential was taking more than it
+    /// needed in the one place that must not act as EntKube.</para>
     /// </summary>
-    public Upstream Get(string kubeconfig)
+    public Upstream Get(ClusterConnection connection)
     {
         ObjectDisposedException.ThrowIf(disposed, this);
 
-        string key = Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(kubeconfig)));
+        string key = KeyFor(connection);
 
         if (entries.TryGetValue(key, out Entry? existing))
         {
@@ -59,7 +66,7 @@ public sealed class JitUpstreamClientPool(ILogger<JitUpstreamClientPool> logger)
                 Retire(stale);
         }
 
-        Entry created = Build(kubeconfig);
+        Entry created = Build(connection);
         Entry actual = entries.GetOrAdd(key, created);
 
         // Lost a race — another thread built one first. Drop ours rather than leaking it.
@@ -68,12 +75,26 @@ public sealed class JitUpstreamClientPool(ILogger<JitUpstreamClientPool> logger)
         return new Upstream(actual.Client, actual.BaseAddress);
     }
 
-    private Entry Build(string kubeconfig)
+    /// <summary>
+    /// What distinguishes one upstream from another: where it points, what it trusts, and whether
+    /// it verifies at all.
+    ///
+    /// <para>The key used to be a hash of the kubeconfig text, so <em>any</em> rotation rebuilt the
+    /// client — including a client-certificate rotation this pool does not use. Keying on what the
+    /// connection actually is keeps the property that mattered (a changed CA or address builds a new
+    /// entry rather than reusing a stale one) and drops the rebuilds that never meant anything.</para>
+    /// </summary>
+    private static string KeyFor(ClusterConnection connection)
     {
-        using MemoryStream stream = new(Encoding.UTF8.GetBytes(kubeconfig));
-        KubernetesClientConfiguration config =
-            KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
+        string roots = connection.CaCerts is null
+            ? ""
+            : string.Join(',', connection.CaCerts.Cast<X509Certificate2>().Select(c => c.Thumbprint).Order());
 
+        return $"{connection.Server}|{connection.SkipTlsVerify}|{roots}";
+    }
+
+    private Entry Build(ClusterConnection connection)
+    {
         HttpClientHandler handler = new()
         {
             // Redirects are not followed. The API server does not issue them, and following one
@@ -84,27 +105,27 @@ public sealed class JitUpstreamClientPool(ILogger<JitUpstreamClientPool> logger)
         // ClientCertificates is deliberately left empty. See the class comment: presenting one
         // would make the API server authenticate the certificate and ignore the bearer token.
 
-        if (config.SkipTlsVerify)
+        if (connection.SkipTlsVerify)
         {
             // Inherited from the stored kubeconfig rather than chosen here. Worth a warning: it
             // means the proxy cannot tell the real API server from anything that answers on its
             // address, and the grant's token is what would be handed over.
             logger.LogWarning(
                 "JIT upstream for {Host} skips TLS verification because its kubeconfig does",
-                config.Host);
+                connection.Server);
             handler.ServerCertificateCustomValidationCallback =
                 HttpClientHandler.DangerousAcceptAnyServerCertificateValidator;
         }
-        else if (config.SslCaCerts is { Count: > 0 })
+        else if (connection.CaCerts is { Count: > 0 })
         {
-            X509Certificate2Collection roots = config.SslCaCerts;
+            X509Certificate2Collection roots = connection.CaCerts;
             handler.ServerCertificateCustomValidationCallback =
                 (_, certificate, chain, errors) => ValidateAgainst(roots, certificate, chain, errors);
         }
 
         HttpClient client = new(handler, disposeHandler: false) { Timeout = NoTimeout };
 
-        return new Entry(client, new Uri(config.Host), handler, DateTime.UtcNow);
+        return new Entry(client, connection.Server, handler, DateTime.UtcNow);
     }
 
     /// <summary>

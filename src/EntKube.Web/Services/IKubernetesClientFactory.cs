@@ -27,6 +27,13 @@ public interface IKubernetesClientFactory
     Task DeleteManifestAsync(string kind, string name, string ns, string kubeconfig, CancellationToken ct = default);
 
     /// <summary>
+    /// The cluster's API server address and CA, read out of a kubeconfig — with nothing that
+    /// authenticates to it. See <c>IClusterClient.GetConnectionAsync</c> for why that distinction
+    /// is the point.
+    /// </summary>
+    EntKube.Web.Services.Clusters.ClusterConnection ReadConnection(string kubeconfig);
+
+    /// <summary>
     /// Sends one HTTP request to a Service in the cluster, through the API server's proxy
     /// endpoint, and returns what came back.
     ///

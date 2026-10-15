@@ -936,6 +936,26 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// answer rather than a failure.
     /// </summary>
     /// <summary>
+    /// Reads the API server address, CA roots and TLS-verification flag out of a kubeconfig.
+    ///
+    /// <para>What it deliberately does <b>not</b> return is the client certificate or token the
+    /// kubeconfig authenticates with. That omission is the entire value: the caller gets enough to
+    /// reach and verify the API server and nothing with which to act as EntKube on it.</para>
+    /// </summary>
+    public EntKube.Web.Services.Clusters.ClusterConnection ReadConnection(string kubeconfig)
+    {
+        using MemoryStream stream = new(Encoding.UTF8.GetBytes(kubeconfig));
+
+        k8s.KubernetesClientConfiguration config =
+            k8s.KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
+
+        return new EntKube.Web.Services.Clusters.ClusterConnection(
+            new Uri(config.Host),
+            config.SslCaCerts is { Count: > 0 } ? config.SslCaCerts : null,
+            config.SkipTlsVerify);
+    }
+
+    /// <summary>
     /// One HTTP request to an in-cluster Service, through the API server's proxy endpoint.
     ///
     /// <para>⚠️ <b>Authorization is not touched.</b> The request authenticates to the API SERVER,
