@@ -201,6 +201,21 @@ public class ModuleContractTests
     /// through the seam's new <c>ProxyServiceAsync</c>, nothing was left to hold a context for. One
     /// file moved three ratchets — this one, custody and the Catalog contract — which is what "the
     /// two ratchets have converged" was predicting.</para>
+    /// <para><b>Telemetry 5 → 4.</b> <c>LokiService</c>, and its own header comment had already
+    /// worked out why it could not move alone: <c>ResolveLokiInfoAsync</c> "loads the cluster WITH
+    /// its components and reads cluster.Kubeconfig off the row", so converting the storage read on
+    /// its own "would otherwise look like this service had been dealt with". The component list
+    /// came from <c>ICatalogApi</c> and the credential from the seam in one change, and the
+    /// <c>IDbContextFactory</c> parameter went with them — the second service (after
+    /// <c>TelemetryNodeClient</c>) whose whole claim on the shared context was one foreign read
+    /// plus a credential.</para>
+    ///
+    /// <para>⚠️ It also <b>moved nothing on <see cref="CatalogContractAdoptionTests"/></b>, and
+    /// that is a gap in <em>that</em> metric rather than a property of this file: it read Catalog's
+    /// table through <c>Include(c =&gt; c.Components)</c> on the cluster row, and the foreign-read
+    /// count matches <c>.ClusterComponents</c>. A navigation read is the same coupling by a
+    /// different spelling.</para>
+    ///
     /// <para><b>DataServices 12 → 8, and it needed no contract at all.</b> This module was recorded
     /// as "has not moved at all for exactly that reason — every one of its services reaches into
     /// Fleet, Catalog or Delivery". That was true of the module and <em>false of four of its
@@ -254,7 +269,7 @@ public class ModuleContractTests
     private static readonly Dictionary<Module, int> Baseline = new()
     {
         [Module.DataServices] = 2,
-        [Module.Telemetry] = 5,
+        [Module.Telemetry] = 4,
         [Module.Connectivity] = 7,
         [Module.Support] = 7,
         [Module.Catalog] = 6,

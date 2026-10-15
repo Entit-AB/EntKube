@@ -29,23 +29,26 @@ public class LokiConfig
 /// injects non-sensitive S3 values (region, bucket, endpoint) into HelmValues
 /// and stores credentials as vault secrets for injection at install time.
 /// </summary>
-// ⚠️ Still on ApplicationDbContext, for ResolveLokiInfoAsync alone: it loads the cluster WITH its
-// components and reads cluster.Kubeconfig off the row. That makes it a credential site, so it moves
-// with the custody work (IClusterClient + ICatalogApi) rather than here — converting the storage read
-// on its own would otherwise look like this service had been dealt with.
+// The note that used to sit here said ResolveLokiInfoAsync was the only thing keeping this service
+// on ApplicationDbContext — it loaded the cluster WITH its components and read cluster.Kubeconfig
+// off the row — and that it had to move as custody work rather than as a contract conversion,
+// because converting the storage read alone would have looked like the service was dealt with.
+// Both moved together: the component list comes from ICatalogApi and the credential from the seam,
+// and with them went the last use of ApplicationDbContext here — the context parameter itself is
+// gone, which is the shape to expect: a service whose only use of the shared context is one foreign
+// read plus a credential comes off it when both have somewhere to go.
 public class LokiService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
     IDataServicesApi storage,
-    KubernetesProxyClientPool clientPool,
     ILogger<LokiService> logger,
     VaultService vaultService,
     StorageService storageService,
-    ICatalogApi catalog)
+    ICatalogApi catalog,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess)
 {
     public async Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(
-        Guid clusterId, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        var (info, error) = await ResolveLokiInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveLokiInfoAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<string>>.Failure(error!);
 
         return await WithLokiAsync<List<string>>(info,
@@ -58,9 +61,9 @@ public class LokiService(
     }
 
     public async Task<KubernetesOperationResult<List<string>>> GetPodsAsync(
-        Guid clusterId, string namespaceName, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string namespaceName, CancellationToken ct = default)
     {
-        var (info, error) = await ResolveLokiInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveLokiInfoAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<string>>.Failure(error!);
 
         string query = string.IsNullOrEmpty(namespaceName)
@@ -82,9 +85,9 @@ public class LokiService(
     /// <c>container</c> label so multi-container pods (app + sidecars) can be split apart.
     /// </summary>
     public async Task<KubernetesOperationResult<List<string>>> GetContainersAsync(
-        Guid clusterId, string namespaceName, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string namespaceName, CancellationToken ct = default)
     {
-        var (info, error) = await ResolveLokiInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveLokiInfoAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<string>>.Failure(error!);
 
         string query = string.IsNullOrEmpty(namespaceName)
@@ -101,6 +104,7 @@ public class LokiService(
     }
 
     public async Task<KubernetesOperationResult<List<LokiLogStream>>> QueryRangeAsync(
+        Guid tenantId,
         Guid clusterId,
         string namespaceName,
         string? podName,
@@ -112,7 +116,7 @@ public class LokiService(
         CancellationToken ct = default)
     {
         return await QueryRangeMultiAsync(
-            clusterId, [namespaceName], podName, containerName, textFilter, from, to, limit, ct);
+            tenantId, clusterId, [namespaceName], podName, containerName, textFilter, from, to, limit, ct);
     }
 
     /// <summary>
@@ -122,6 +126,7 @@ public class LokiService(
     /// (which may live in different namespaces on the same cluster).
     /// </summary>
     public async Task<KubernetesOperationResult<List<LokiLogStream>>> QueryRangeMultiAsync(
+        Guid tenantId,
         Guid clusterId,
         IReadOnlyCollection<string> namespaces,
         string? podName,
@@ -135,7 +140,7 @@ public class LokiService(
         if (namespaces.Count == 0)
             return KubernetesOperationResult<List<LokiLogStream>>.Success([]);
 
-        var (info, error) = await ResolveLokiInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveLokiInfoAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<LokiLogStream>>.Failure(error!);
 
         string logQuery = BuildLogQL(namespaces, podName, containerName, textFilter);
@@ -154,9 +159,9 @@ public class LokiService(
             $"loki query {clusterId}", ct);
     }
 
-    public async Task<bool> IsAvailableAsync(Guid clusterId, CancellationToken ct = default)
+    public async Task<bool> IsAvailableAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        var (info, _) = await ResolveLokiInfoAsync(clusterId, ct);
+        var (info, _) = await ResolveLokiInfoAsync(tenantId, clusterId, ct);
         return info is not null;
     }
 
@@ -167,9 +172,9 @@ public class LokiService(
     /// level in LogQL would depend on Loki's detected_level being enabled.
     /// </summary>
     public async Task<KubernetesOperationResult<List<LogHistogramBucket>>> GetHistogramAsync(
-        Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int buckets = 48, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int buckets = 48, CancellationToken ct = default)
     {
-        var (info, error) = await ResolveLokiInfoAsync(clusterId, ct);
+        var (info, error) = await ResolveLokiInfoAsync(tenantId, clusterId, ct);
         if (info is null) return KubernetesOperationResult<List<LogHistogramBucket>>.Failure(error!);
 
         string logQL = BuildLogQL(filter.Namespaces, filter.Pod, filter.Container, filter.Text);
@@ -428,34 +433,44 @@ public class LokiService(
         return LogLevel.None;
     }
 
-    private sealed record ResolvedLokiInfo(string Kubeconfig, string ClusterName, LokiConfig Config);
+    /// <summary>
+    /// A reachable Loki: the cluster as this tenant, and where Loki answers on it. The record used
+    /// to carry a kubeconfig string, which is how a private helper became the reason this service
+    /// held a credential.
+    /// </summary>
+    private sealed record ResolvedLokiInfo(
+        EntKube.Web.Services.Clusters.IClusterClient Cluster, LokiConfig Config);
 
+    /// <summary>
+    /// The tenant-scoped resolution. The old one was <c>c.Id == clusterId</c> with no tenant
+    /// predicate, so a cluster id alone answered about any cluster in the installation — and
+    /// every caller of this service already had a tenant to pass (<c>LogQueryService</c> carries
+    /// one on all seven methods), which is what made this conversion a rename.
+    /// </summary>
     private async Task<(ResolvedLokiInfo? Info, string? Error)> ResolveLokiInfoAsync(
-        Guid clusterId, CancellationToken ct)
+        Guid tenantId, Guid clusterId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterAccess.ForAsync(tenantId, clusterId, ct);
 
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .Include(c => c.Components)
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+        if (cluster is null)
+            return (null, "That cluster is not this tenant's, or has no kubeconfig configured.");
 
-        if (cluster is null) return (null, "Cluster not found.");
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return (null, $"No kubeconfig configured for cluster '{cluster.Name}'.");
+        InstalledComponent? lokiComponent =
+            (await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct))
+            .FirstOrDefault(c =>
+                (c.HelmChartName ?? "").Contains("loki", StringComparison.OrdinalIgnoreCase) ||
+                c.Name.Contains("loki", StringComparison.OrdinalIgnoreCase));
 
-        ClusterComponent? lokiComponent = cluster.Components.FirstOrDefault(c =>
-            (c.HelmChartName ?? "").Contains("loki", StringComparison.OrdinalIgnoreCase) ||
-            c.Name.Contains("loki", StringComparison.OrdinalIgnoreCase));
+        if (lokiComponent is null)
+            return (null, $"No Loki component found on cluster '{cluster.ClusterName}'.");
+        if (lokiComponent.Status != EntKube.Contracts.Catalog.ComponentStatus.Installed)
+            return (null, $"Loki is not installed on cluster '{cluster.ClusterName}'.");
 
-        if (lokiComponent is null) return (null, $"No Loki component found on cluster '{cluster.Name}'.");
-        if (lokiComponent.Status != ComponentStatus.Installed)
-            return (null, $"Loki is not installed on cluster '{cluster.Name}'.");
-
-        LokiConfig config = BuildLokiConfig(lokiComponent);
-        return (new ResolvedLokiInfo(cluster.Kubeconfig, cluster.Name, config), null);
+        return (new ResolvedLokiInfo(cluster, BuildLokiConfig(lokiComponent)), null);
     }
 
-    private static LokiConfig BuildLokiConfig(ClusterComponent component)
+    private static LokiConfig BuildLokiConfig(InstalledComponent component)
     {
         string ns = component.Namespace ?? "monitoring";
         string releaseName = component.ReleaseName ?? component.Name;
@@ -483,9 +498,11 @@ public class LokiService(
     {
         try
         {
-            // Pooled per kubeconfig and never disposed here: building a client per query meant a fresh
-            // TLS handshake to the API server for every log page, histogram bucket and label lookup.
-            Kubernetes k8s = clientPool.Get(info.Kubeconfig);
+            // Pooled and never disposed here: building a client per query meant a fresh TLS
+            // handshake to the API server for every log page, histogram bucket and label lookup.
+            // The pool is the same one as before — reaching it no longer requires holding the
+            // credential it is keyed on.
+            Kubernetes k8s = info.Cluster.GetPooledSdkClient();
 
             string baseUrl = await BuildLokiProxyBaseAsync(k8s, info, ct);
             logger.LogDebug("Loki proxy base {BaseUrl}", baseUrl);
@@ -530,7 +547,7 @@ public class LokiService(
 
         throw new InvalidOperationException(
             $"No reachable Loki endpoint for service '{info.Config.ServiceName}' in namespace " +
-            $"'{ns}' on cluster '{info.ClusterName}'. The Loki pod may not be Ready yet.");
+            $"'{ns}' on cluster '{info.Cluster.ClusterName}'. The Loki pod may not be Ready yet.");
     }
 
     /// <summary>

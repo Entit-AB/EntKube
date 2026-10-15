@@ -574,7 +574,7 @@ else
         loading = true;
         try
         {
-            graph = await ConnectivityService.BuildGraphAsync(AppId, EnvironmentId);
+            graph = await ConnectivityService.BuildGraphAsync(TenantId, AppId, EnvironmentId);
             findings = await ConnectivityService.AnalyzeAsync(graph, AppId, EnvironmentId);
             rules = await ConnectivityService.GetRulesAsync(AppId, EnvironmentId);
             deps = await ConnectivityService.GetExternalDependenciesAsync(AppId, EnvironmentId);
@@ -674,7 +674,7 @@ else
         applying = true;
         try
         {
-            applyResults = await ConnectivityService.ApplyNetworkPoliciesAsync(AppId, EnvironmentId);
+            applyResults = await ConnectivityService.ApplyNetworkPoliciesAsync(TenantId, AppId, EnvironmentId);
             bool allOk = applyResults.All(r => r.Success);
             if (allOk) { Toast.Success("NetworkPolicies applied."); }
             else { Toast.Warning("Some targets failed — see results."); }

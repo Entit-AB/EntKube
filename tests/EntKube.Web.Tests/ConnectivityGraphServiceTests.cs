@@ -62,8 +62,13 @@ public class ConnectivityGraphServiceTests : IDisposable
         vault.InitializeVaultAsync(tenant.Id).GetAwaiter().GetResult();
         testDb.SeedKubeconfigAsync(vault, tenant.Id, clusterId, TestKubeconfig.Valid).GetAwaiter().GetResult();
 
+        // The real factory over the mocked kubectl wrapper: the service names a cluster by id and
+        // the seam resolves the credential, so the tenant check these tests rely on is the
+        // production one rather than a stub's.
         sut = new ConnectivityGraphService(
-            dbFactory, k8s.Object, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+            dbFactory,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             NullLogger<ConnectivityGraphService>.Instance);
     }
 
@@ -140,7 +145,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         AppDeployment dep = SeedDeployment();
         SeedServiceManifest(dep.Id, "billing-svc", 80, appProtocol: "http");
 
-        ConnectivityGraph graph = await sut.BuildGraphAsync(appId, envId);
+        ConnectivityGraph graph = await sut.BuildGraphAsync(tenantId, appId, envId);
 
         graph.ExposedPorts.Should().ContainSingle();
         ServicePortNode p = graph.ExposedPorts[0];
@@ -170,7 +175,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         });
         db.SaveChanges();
 
-        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(appId, envId);
+        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(tenantId, appId, envId);
 
         findings.Should().Contain(f =>
             f.Severity == FindingSeverity.Error &&
@@ -198,7 +203,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         });
         db.SaveChanges();
 
-        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(appId, envId);
+        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(tenantId, appId, envId);
 
         findings.Should().Contain(f =>
             f.Severity == FindingSeverity.Error &&
@@ -224,7 +229,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         });
         db.SaveChanges();
 
-        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(appId, envId);
+        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(tenantId, appId, envId);
 
         findings.Should().NotContain(f => f.Severity == FindingSeverity.Error);
     }
@@ -546,7 +551,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         });
         db.SaveChanges();
 
-        ConnectivityGraph graph = await sut.BuildGraphAsync(appId, envId);
+        ConnectivityGraph graph = await sut.BuildGraphAsync(tenantId, appId, envId);
 
         graph.InternalEgress.Should().Contain(e => e.PeerLabel == "PostgreSQL");
         graph.ExternalEgress.Should().NotContain(e => e.PeerLabel == "PostgreSQL");
@@ -570,7 +575,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         });
         db.SaveChanges();
 
-        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(appId, envId);
+        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(tenantId, appId, envId);
 
         findings.Should().NotContain(f => f.Category == "Broken dependency");
     }
@@ -650,7 +655,7 @@ public class ConnectivityGraphServiceTests : IDisposable
             }
             """);
 
-        ConnectivityGraph graph = await sut.BuildGraphAsync(appId, envId);
+        ConnectivityGraph graph = await sut.BuildGraphAsync(tenantId, appId, envId);
 
         ServicePortNode p = graph.ExposedPorts.Should().ContainSingle().Subject;
         p.ServiceName.Should().Be("billing-svc");
@@ -674,7 +679,7 @@ public class ConnectivityGraphServiceTests : IDisposable
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("dial tcp: i/o timeout"));
 
-        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(appId, envId);
+        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(tenantId, appId, envId);
 
         findings.Should().Contain(f =>
             f.Severity == FindingSeverity.Warning &&
@@ -690,10 +695,67 @@ public class ConnectivityGraphServiceTests : IDisposable
         SeedServiceManifest(dep.Id, "billing-svc", 80);
         SeedRoute(dep.Id, "billing-svc", 80);
 
-        await sut.BuildGraphAsync(appId, envId);
+        await sut.BuildGraphAsync(tenantId, appId, envId);
 
         k8s.Verify(f => f.GetJsonAsync("services", It.IsAny<string>(), It.IsAny<string>(),
             It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    /// <summary>
+    /// The graph's live half is read <em>as the asking tenant</em>. A stranger naming this app's
+    /// cluster reaches nothing, and the graph says the live lookup failed rather than reporting the
+    /// cluster has no Services — which would read as a fact about the cluster.
+    /// </summary>
+    [Fact]
+    public async Task BuildGraph_AnotherTenant_DoesNotReachTheCluster()
+    {
+        AppDeployment dep = SeedDeployment();
+        SeedRoute(dep.Id, "billing-svc", 80);
+
+        ConnectivityGraph graph = await sut.BuildGraphAsync(Guid.NewGuid(), appId, envId);
+
+        graph.LiveLookupFailed.Should().BeTrue();
+        graph.ExposedPorts.Should().NotContain(p => p.FromCluster);
+        k8s.Verify(f => f.GetJsonAsync("services", It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never,
+            "a tenant that does not own the cluster should not get as far as kubectl");
+    }
+
+    /// <summary>
+    /// Applying is a change, so the tenant matters more here than anywhere else in this file. It
+    /// used to be derived from the app and so was never a check at all.
+    /// </summary>
+    [Fact]
+    public async Task ApplyNetworkPolicies_AnotherTenant_AppliesNothing()
+    {
+        AppDeployment dep = SeedDeployment();
+        SeedServiceManifest(dep.Id, "billing-svc", 80);
+
+        List<(string Target, bool Success, string Output)> results =
+            await sut.ApplyNetworkPoliciesAsync(Guid.NewGuid(), appId, envId);
+
+        results.Should().NotBeEmpty();
+        results.Should().OnlyContain(r => !r.Success);
+        results.Should().OnlyContain(r => r.Output.Contains("not this tenant's"));
+        k8s.Verify(f => f.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    /// <summary>The owner, by contrast, applies — or the refusal above proves nothing.</summary>
+    [Fact]
+    public async Task ApplyNetworkPolicies_TheOwner_Applies()
+    {
+        AppDeployment dep = SeedDeployment();
+        SeedServiceManifest(dep.Id, "billing-svc", 80);
+
+        List<(string Target, bool Success, string Output)> results =
+            await sut.ApplyNetworkPoliciesAsync(tenantId, appId, envId);
+
+        results.Should().OnlyContain(r => r.Success);
+        results.Should().OnlyContain(r => r.Target == "prod-cluster/billing");
+        // The credential the service never saw is the one the cluster is reached with.
+        k8s.Verify(f => f.ApplyManifestAsync(It.IsAny<string>(), TestKubeconfig.Valid,
+            It.IsAny<CancellationToken>()), Times.Once);
     }
 
     public void Dispose()

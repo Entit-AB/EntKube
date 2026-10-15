@@ -25,14 +25,20 @@ namespace EntKube.Web.Services;
 /// </summary>
 public class ConnectivityGraphService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    IKubernetesClientFactory k8sFactory,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<ConnectivityGraphService> logger)
 {
     private static readonly IDeserializer YamlDeserializer =
         new DeserializerBuilder().IgnoreUnmatchedProperties().Build();
 
-    public async Task<ConnectivityGraph> BuildGraphAsync(Guid appId, Guid environmentId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose clusters this graph may be read from. An input, not derived from the app: the live
+    /// Service lookup below reaches a cluster, and the tenant that may do so is the caller's,
+    /// never one read back off the row being reached.
+    /// </param>
+    public async Task<ConnectivityGraph> BuildGraphAsync(
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -322,7 +328,7 @@ public class ConnectivityGraphService(
         // deployments and Git-synced trees all create Services that were never
         // stored as a DeploymentManifest row. Without this the graph would claim a
         // route has no backend while the Service is running perfectly well.
-        await MergeLiveServicePortsAsync(db, graph, deployments, routedServices, ports, ct);
+        await MergeLiveServicePortsAsync(tenantId, db, graph, deployments, routedServices, ports, ct);
 
         graph.ExposedPorts = ports.Values
             .OrderBy(p => p.ServiceName).ThenBy(p => p.Port)
@@ -340,6 +346,7 @@ public class ConnectivityGraphService(
     /// rather than throwing.
     /// </summary>
     private async Task MergeLiveServicePortsAsync(
+        Guid tenantId,
         ApplicationDbContext db,
         ConnectivityGraph graph,
         List<AppDeployment> deployments,
@@ -398,15 +405,13 @@ public class ConnectivityGraphService(
             return;
         }
 
-        List<Guid> clusterIds = lookups.Keys.Select(k => k.ClusterId).Distinct().ToList();
-        Dictionary<Guid, KubernetesCluster> clusters = await db.KubernetesClusters
-            .Where(c => clusterIds.Contains(c.Id))
-            .ToDictionaryAsync(c => c.Id, ct);
-
         foreach (((Guid clusterId, string ns), HashSet<string> wanted) in lookups)
         {
-            if (!clusters.TryGetValue(clusterId, out KubernetesCluster? cluster)
-                || string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            // Not this tenant's cluster, or no credential stored for it: either way the graph
+            // says the live half could not be read rather than claiming the Services are absent.
+            EntKube.Web.Services.Clusters.IClusterClient? cluster =
+                await clusterAccess.ForAsync(tenantId, clusterId, ct);
+            if (cluster is null)
             {
                 graph.LiveLookupFailed = true;
                 continue;
@@ -414,7 +419,7 @@ public class ConnectivityGraphService(
 
             try
             {
-                string json = await k8sFactory.GetJsonAsync("services", ns, cluster.Kubeconfig, ct: ct);
+                string json = await cluster.GetJsonAsync("services", ns, ct: ct);
                 foreach (ServicePortNode node in ParseLiveServicePorts(json, ns, wanted))
                 {
                     ports.TryAdd($"{node.Namespace}/{node.ServiceName}:{node.Port}/{node.Protocol}", node);
@@ -424,7 +429,7 @@ public class ConnectivityGraphService(
             {
                 graph.LiveLookupFailed = true;
                 logger.LogDebug(ex, "Could not read live Services in {Cluster}/{Namespace} for the connectivity graph",
-                    cluster.Name, ns);
+                    cluster.ClusterName, ns);
             }
         }
     }
@@ -521,9 +526,10 @@ public class ConnectivityGraphService(
     /// customer can act on <em>before</em> anything is applied. Pure prediction —
     /// no cluster access.
     /// </summary>
-    public async Task<List<ConnectivityFinding>> AnalyzeAsync(Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<List<ConnectivityFinding>> AnalyzeAsync(
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
-        ConnectivityGraph graph = await BuildGraphAsync(appId, environmentId, ct);
+        ConnectivityGraph graph = await BuildGraphAsync(tenantId, appId, environmentId, ct);
         return await AnalyzeAsync(graph, appId, environmentId, ct);
     }
 
@@ -810,7 +816,7 @@ public class ConnectivityGraphService(
     public async Task<List<ConnectivityPolicyPlan>> GenerateNetworkPoliciesAsync(
         Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
-        ConnectivityGraph graph = await BuildGraphAsync(appId, environmentId, ct);
+        ConnectivityGraph graph = await BuildGraphAsync(tenantId, appId, environmentId, ct);
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         App? app = await db.Apps.AsNoTracking().FirstOrDefaultAsync(a => a.Id == appId, ct);
@@ -1059,25 +1065,17 @@ public class ConnectivityGraphService(
     /// Apply the generated NetworkPolicy set to each (cluster, namespace) target
     /// for this app in the environment via kubectl. Returns one result per target.
     /// </summary>
+    /// <param name="tenantId">
+    /// Who is applying. This used to be <em>derived</em> from the app, as a deliberate
+    /// half-measure: the method took kubeconfigs off cluster rows below, and a tenant parameter
+    /// would have made those reads reachable in <c>CustodyTriageTests</c>'s sense — the note said
+    /// they "have to move onto the seam in the same change". They have, so the tenant is now what
+    /// it should always have been: an input from the page, checked against the cluster rather than
+    /// read back out of it.
+    /// </param>
     public async Task<List<(string Target, bool Success, string Output)>> ApplyNetworkPoliciesAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
-        // The tenant is DERIVED here, not taken as a parameter, and that is a deliberate
-        // half-measure: this method reads kubeconfigs off cluster rows further down, and giving it
-        // a tenant parameter makes those reads reachable in CustodyTriageTests's sense — they have
-        // to move onto the seam in the same change, which belongs with the custody work rather
-        // than with this one. So the app's own tenant is used to scope the Catalog lookup inside
-        // the generate step: a cross-row check (an app pointing at another tenant's cluster is
-        // caught) rather than an authorization one, and weaker than what the page above gets.
-        Guid tenantId;
-        using (ApplicationDbContext appDb = dbFactory.CreateDbContext())
-        {
-            tenantId = await appDb.Apps
-                .Where(a => a.Id == appId)
-                .Select(a => a.Customer.TenantId)
-                .FirstOrDefaultAsync(ct);
-        }
-
         List<ConnectivityPolicyPlan> plans =
             await GenerateNetworkPoliciesAsync(tenantId, appId, environmentId, ct);
         if (plans.Count == 0)
@@ -1085,37 +1083,31 @@ public class ConnectivityGraphService(
             return [("(no targets)", false, "No deployments found for this app in this environment.")];
         }
 
-        // The plans already carry their (ClusterId, Namespace); load just the clusters
-        // once (kubeconfig is materialized on load) rather than re-resolving targets.
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        List<Guid> clusterIds = plans.Select(p => p.ClusterId).Distinct().ToList();
-        Dictionary<Guid, KubernetesCluster> clusters = await db.KubernetesClusters
-            .Where(c => clusterIds.Contains(c.Id))
-            .ToDictionaryAsync(c => c.Id, ct);
-
+        // The plans already carry their (ClusterId, ClusterName, Namespace), so nothing here has
+        // to load a cluster row: each target is resolved as this tenant, through the seam.
         List<(string Target, bool Success, string Output)> results = [];
         foreach (ConnectivityPolicyPlan plan in plans)
         {
-            if (!clusters.TryGetValue(plan.ClusterId, out KubernetesCluster? cluster))
+            string target = $"{plan.ClusterName}/{plan.Namespace}";
+            EntKube.Web.Services.Clusters.IClusterClient? cluster =
+                await clusterAccess.ForAsync(tenantId, plan.ClusterId, ct);
+            if (cluster is null)
             {
-                continue;
-            }
-            string target = $"{cluster.Name}/{plan.Namespace}";
-            if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            {
-                results.Add((target, false, "Cluster has no kubeconfig configured."));
+                // Both refusals, named — the message used to assert the second one and was wrong
+                // whenever it was the first.
+                results.Add((target, false,
+                    "That cluster is not this tenant's, or has no kubeconfig configured."));
                 continue;
             }
             try
             {
-                // Reuse the shared kubectl wrapper (handles temp files, HOME/cache, throws on failure).
-                await k8sFactory.ApplyManifestAsync(plan.CombinedYaml, cluster.Kubeconfig, ct);
-                logger.LogInformation("Connectivity policies applied to {Cluster}/{Namespace}", cluster.Name, plan.Namespace);
+                await cluster.ApplyManifestAsync(plan.CombinedYaml, ct);
+                logger.LogInformation("Connectivity policies applied to {Cluster}/{Namespace}", plan.ClusterName, plan.Namespace);
                 results.Add((target, true, "applied"));
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "Failed to apply connectivity policies to {Cluster}/{Namespace}", cluster.Name, plan.Namespace);
+                logger.LogError(ex, "Failed to apply connectivity policies to {Cluster}/{Namespace}", plan.ClusterName, plan.Namespace);
                 results.Add((target, false, ex.Message));
             }
         }
