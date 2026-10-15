@@ -228,12 +228,24 @@ public class ModuleContractTests
     /// they want <c>IDeliveryApi</c>; two are the Mongo/Cnpg pair above; and
     /// <c>StorageService</c> with <c>StorageLinkClientFactory</c> hold credentials, so they move
     /// with the custody work.</para>
+    /// <para><b>Connectivity 8 → 7, and it came as a side effect.</b> <c>TailscaleService</c> was
+    /// converted for the credential and contract ratchets — its DTO handed a
+    /// <c>ClusterComponent</c> to a Razor page that read the kubeconfig off it six times — and once
+    /// its component read went to <c>ICatalogApi</c> and its cluster calls to the seam, it had no
+    /// reason left to take the shared context. Its constructor is now
+    /// <c>(IClusterClientFactory, ICatalogApi)</c> and holds no context at all.</para>
+    ///
+    /// <para>⚠️ Worth noticing that this ratchet moved without being aimed at, for the third time
+    /// (<c>LogQueryService</c>, <c>TelemetryNodeClient</c>, now this). The pattern is consistent
+    /// enough to predict: a service whose only use of the all-seeing context is one foreign read
+    /// and a credential comes off it the moment both have somewhere else to go. Which is an
+    /// argument for converting by <em>service</em> rather than by ratchet — the counts follow.</para>
     /// </summary>
     private static readonly Dictionary<Module, int> Baseline = new()
     {
         [Module.DataServices] = 8,
         [Module.Telemetry] = 5,
-        [Module.Connectivity] = 8,
+        [Module.Connectivity] = 7,
         [Module.Support] = 7,
         [Module.Catalog] = 6,
         [Module.Delivery] = 6,

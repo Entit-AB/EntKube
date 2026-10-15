@@ -437,7 +437,7 @@ public class ClusterCredentialCustodyTests
     /// so the id was the whole authorization. They take the asking tenant now, from the page that
     /// already had it.</para>
     /// </summary>
-    private const int BaselineOccurrences = 37;
+    private const int BaselineOccurrences = 31;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -468,6 +468,34 @@ public class ClusterCredentialCustodyTests
     /// <para>27. <c>NodeManagementService</c>.</para>
     ///
     /// <para>26. <c>ComponentScanService</c>.</para>
+    ///
+    /// <para>16. <c>TailscaleVpnTab.razor</c> — six occurrences in the <em>page</em>, and the
+    /// <b>DTO was the whole blocker</b>, exactly as this file recorded three batches ago.
+    ///
+    /// <para>Only one file left the count, not two, and the split is the point:
+    /// <c>TailscaleService</c> never touched <c>.Kubeconfig</c> itself — it held the
+    /// <em>contract</em> query and returned the entity — while all six credential reads were in the
+    /// page. One file's problem was measured by this ratchet and the other's by
+    /// <see cref="CatalogContractAdoptionTests"/>, and neither could move alone.</para>
+    ///
+    /// <para><c>TailscaleOperator</c> carried Catalog's <c>ClusterComponent</c>, and the page reached
+    /// through it for <c>Component.Cluster.Kubeconfig</c> <em>six times</em> — once per action — so
+    /// a Razor page was extracting a cluster credential from a DTO and handing it back to the
+    /// service that had just given it away. That is also why the service's component read could not
+    /// move to <c>ICatalogApi</c>: the contract carries no credential, so converting the query would
+    /// have broken the page. One change had to do both.</para>
+    ///
+    /// <para>The record carries ids now, the six methods take <c>(tenantId, clusterId)</c>, and a
+    /// private <c>AccessAsync</c> funnel resolves through <c>ForAsync</c> — so these calls are
+    /// <em>authorized</em> for the first time. They never were: the credential arrived already
+    /// resolved, so "is this the asking tenant's cluster" was a question nothing asked.</para>
+    ///
+    /// <para>⚠️ Its test had to change in a way worth noting. It seeded
+    /// <c>Kubeconfig = TestKubeconfig.Valid</c> on the cluster entity and passed the string in
+    /// directly, which worked only because nothing resolved anything. Through the seam it fails:
+    /// the plaintext column is gone and the credential lives in the vault, so the test now uses
+    /// <c>InterceptingTestDb</c> + <c>SeedKubeconfigAsync</c>. A test that sets a credential the
+    /// product no longer stores is a test that cannot exercise the resolution path.</para>
     ///
     /// <para>17. <c>JitProxyService</c> — the <b>second connection shape</b>, and the one that
     /// needed no argument at all.
@@ -573,7 +601,7 @@ public class ClusterCredentialCustodyTests
     /// seam's error contract is not the caller's, and a conversion that ignores that changes
     /// control flow silently.</para>
     /// </summary>
-    private const int BaselineFiles = 17;
+    private const int BaselineFiles = 16;
 
     private static (int Occurrences, int Files) Measure()
     {

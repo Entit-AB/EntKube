@@ -315,6 +315,21 @@ public class CatalogContractAdoptionTests
     /// reads <c>Component.Cluster.Kubeconfig</c> off it. <c>VeleroService</c> 1 remains the only
     /// one blocked by the contract itself, for the <c>CreatedAt</c> reason above.</para>
     ///
+    /// <para><b>4.</b> <c>TailscaleService</c> — the one this file has called blocked by its DTO
+    /// since the batch that first counted it, and the description was right: its record handed a
+    /// <c>ClusterComponent</c> to a Razor page that read <c>Component.Cluster.Kubeconfig</c> six
+    /// times, so moving the query to a contract that carries no credential would have broken the
+    /// page. The DTO carries ids now and the page asks the seam, so the query moved with it.</para>
+    ///
+    /// <para><b>The remaining 4 are all one blocker, and it is a seam SHAPE rather than a caller.</b>
+    /// <c>StorageService</c> 1 and <c>StorageLinkClientFactory</c> 2 resolve a kubeconfig in the
+    /// same expression as the component, to hand to <c>KubernetesS3Proxy</c> — which needs a
+    /// <em>credentialed channel</em> for the AWS SDK: many calls, arbitrary paths, binary bodies.
+    /// Neither <c>ProxyServiceAsync</c> (one request, string body — object bytes would be corrupted)
+    /// nor <c>GetConnectionAsync</c> (no credential, and here EntKube's own identity is what
+    /// authorizes the proxy call) expresses it. <c>VeleroService</c> 1 remains the
+    /// <c>CreatedAt</c> field request, which one consumer does not earn.</para>
+    ///
     /// <para><b>5.</b> <c>TelemetryNodeClient</c>'s query was the one described above as selecting
     /// "the kubeconfig in the same projection", and that was exactly why it was stuck: the file
     /// needed a <em>connection</em> to the cluster, not a command, and no seam verb expressed one.
@@ -373,7 +388,7 @@ public class CatalogContractAdoptionTests
     /// that is not yours, and an empty list is a 200 — "does not exist" and "has no components" are
     /// different answers.</para>
     /// </summary>
-    private const int BaselineQueries = 5;
+    private const int BaselineQueries = 4;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

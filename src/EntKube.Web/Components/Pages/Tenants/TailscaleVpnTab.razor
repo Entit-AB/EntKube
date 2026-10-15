@@ -470,8 +470,7 @@ else
         StateHasChanged();
         try
         {
-            string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
-            allServices = await TailscaleService.ListServicesAsync(kubeconfig);
+            allServices = await TailscaleService.ListServicesAsync(TenantId, operators[selectedOperatorIndex].ClusterId);
         }
         catch (Exception ex)
         {
@@ -489,8 +488,7 @@ else
         StateHasChanged();
         try
         {
-            string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
-            ingresses = await TailscaleService.ListIngressesAsync(kubeconfig);
+            ingresses = await TailscaleService.ListIngressesAsync(TenantId, operators[selectedOperatorIndex].ClusterId);
         }
         catch (Exception ex)
         {
@@ -526,9 +524,8 @@ else
         StateHasChanged();
         try
         {
-            string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
             string? hostname = string.IsNullOrWhiteSpace(exposeHostname) ? null : exposeHostname.Trim();
-            await TailscaleService.ExposeServiceAsync(svc.ServiceName, svc.Namespace, hostname, kubeconfig);
+            await TailscaleService.ExposeServiceAsync(svc.ServiceName, svc.Namespace, hostname, TenantId, operators[selectedOperatorIndex].ClusterId);
             await LoadServicesAsync();
         }
         catch (Exception ex)
@@ -548,8 +545,7 @@ else
         StateHasChanged();
         try
         {
-            string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
-            await TailscaleService.UnexposeServiceAsync(svc.ServiceName, svc.Namespace, kubeconfig);
+            await TailscaleService.UnexposeServiceAsync(svc.ServiceName, svc.Namespace, TenantId, operators[selectedOperatorIndex].ClusterId);
             await LoadServicesAsync();
         }
         catch (Exception ex)
@@ -571,11 +567,10 @@ else
         StateHasChanged();
         try
         {
-            string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
             string? hostname = string.IsNullOrWhiteSpace(ingressForm.Hostname) ? null : ingressForm.Hostname.Trim();
             await TailscaleService.CreateIngressAsync(
                 ingressForm.Name.Trim(), ingressForm.Namespace.Trim(),
-                ingressForm.ServiceName.Trim(), ingressForm.Port, hostname, kubeconfig);
+                ingressForm.ServiceName.Trim(), ingressForm.Port, hostname, TenantId, operators[selectedOperatorIndex].ClusterId);
 
             showCreateIngress = false;
             Toasts.Success($"Ingress '{ingressForm.Name.Trim()}' created.");
@@ -604,8 +599,7 @@ else
         StateHasChanged();
         try
         {
-            string kubeconfig = operators[selectedOperatorIndex].Component.Cluster.Kubeconfig ?? "";
-            await TailscaleService.DeleteIngressAsync(ing.Name, ing.Namespace, kubeconfig);
+            await TailscaleService.DeleteIngressAsync(ing.Name, ing.Namespace, TenantId, operators[selectedOperatorIndex].ClusterId);
             await LoadIngressesAsync();
         }
         catch (Exception ex)

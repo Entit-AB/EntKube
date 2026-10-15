@@ -7,7 +7,16 @@ namespace EntKube.Web.Services;
 
 // ── DTOs ──────────────────────────────────────────────────────────────────────
 
-public record TailscaleOperator(ClusterComponent Component, string ClusterName);
+/// <summary>
+/// A Tailscale operator install, as the VPN tab sees it.
+///
+/// <para>It used to carry Catalog's <c>ClusterComponent</c>, and the page reached through it for
+/// <c>Component.Cluster.Kubeconfig</c> six times — which is how a DTO handed to a Razor page became
+/// this service's reason for holding a credential, and the reason its component read could not move
+/// to <c>ICatalogApi</c>. Ids only now: the page passes them back and the seam resolves the
+/// credential.</para>
+/// </summary>
+public record TailscaleOperator(Guid ComponentId, Guid ClusterId, string ClusterName, string? Namespace);
 
 /// <summary>
 /// A Kubernetes service and its current Tailscale exposure state.
@@ -35,22 +44,35 @@ public record TailscaleIngress(
 // ── Service ───────────────────────────────────────────────────────────────────
 
 public class TailscaleService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
-    IKubernetesClientFactory k8sFactory)
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
+    EntKube.Contracts.Catalog.ICatalogApi catalog)
 {
+    /// <summary>
+    /// The cluster as this tenant, or a refusal. Every public method here goes through it, so a
+    /// cluster id the tenant does not own reaches nothing — which is new: the credential used to
+    /// arrive already resolved, from a DTO the page was holding.
+    /// </summary>
+    private async Task<EntKube.Web.Services.Clusters.IClusterClient> AccessAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct)
+        => await clusterAccess.ForAsync(tenantId, clusterId, ct)
+           ?? throw new InvalidOperationException(
+               "That cluster is not this tenant's, or has no kubeconfig configured.");
+
     // ── Operator discovery ────────────────────────────────────────────────────
 
     public async Task<List<TailscaleOperator>> GetOperatorsAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        List<ClusterComponent> components = await db.ClusterComponents
-            .Include(c => c.Cluster)
-            .Where(c => c.Cluster.TenantId == tenantId
-                     && (c.HelmChartName == "tailscale-operator" || c.Name == "tailscale-operator")
-                     && c.Status == ComponentStatus.Installed)
-            .ToListAsync(ct);
-        return components.Select(c => new TailscaleOperator(c, c.Cluster.Name)).ToList();
+        // Asked of Catalog. The predicate is unchanged and deliberately asymmetric — the chart name
+        // is upstream's, the component name is EntKube's own — which is why it stays in memory
+        // rather than becoming a contract method.
+        return
+        [
+            .. (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+                .Where(c => c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed
+                            && (c.HelmChartName == "tailscale-operator" || c.Name == "tailscale-operator"))
+                .Select(c => new TailscaleOperator(c.Id, c.ClusterId, c.ClusterName, c.Namespace)),
+        ];
     }
 
     // ── L3 — service annotation ───────────────────────────────────────────────
@@ -60,9 +82,9 @@ public class TailscaleService(
     /// Services with ClusterIP "None" (headless) are excluded.
     /// </summary>
     public async Task<List<TailscaleExposedService>> ListServicesAsync(
-        string kubeconfig, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        string json = await k8sFactory.GetJsonAllNamespacesAsync("services", kubeconfig, ct: ct);
+        string json = await (await AccessAsync(tenantId, clusterId, ct)).GetJsonAllNamespacesAsync("services", ct: ct);
         JsonNode? root = JsonNode.Parse(json);
         List<TailscaleExposedService> services = [];
 
@@ -105,14 +127,14 @@ public class TailscaleService(
     /// </summary>
     public async Task ExposeServiceAsync(
         string serviceName, string ns, string? hostname,
-        string kubeconfig, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         JsonObject annotations = new() { ["tailscale.com/expose"] = JsonValue.Create("true") };
         if (!string.IsNullOrWhiteSpace(hostname))
             annotations["tailscale.com/hostname"] = JsonValue.Create(hostname.Trim());
 
         string patch = JsonSerializer.Serialize(new { metadata = new { annotations } });
-        await k8sFactory.PatchJsonAsync("service", serviceName, ns, patch, kubeconfig, ct);
+        await (await AccessAsync(tenantId, clusterId, ct)).PatchJsonAsync("service", serviceName, ns, patch, ct);
     }
 
     /// <summary>
@@ -120,7 +142,7 @@ public class TailscaleService(
     /// The Tailscale Operator will delete the proxy device.
     /// </summary>
     public async Task UnexposeServiceAsync(
-        string serviceName, string ns, string kubeconfig, CancellationToken ct = default)
+        string serviceName, string ns, Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         const string patch = """
             {"metadata":{"annotations":{
@@ -130,7 +152,7 @@ public class TailscaleService(
                 "tailscale.com/dns-name":null
             }}}
             """;
-        await k8sFactory.PatchJsonAsync("service", serviceName, ns, patch, kubeconfig, ct);
+        await (await AccessAsync(tenantId, clusterId, ct)).PatchJsonAsync("service", serviceName, ns, patch, ct);
     }
 
     // ── L7 — Tailscale Ingress ────────────────────────────────────────────────
@@ -139,9 +161,10 @@ public class TailscaleService(
     /// Lists all Ingress resources with ingressClassName=tailscale across all namespaces.
     /// </summary>
     public async Task<List<TailscaleIngress>> ListIngressesAsync(
-        string kubeconfig, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        string json = await k8sFactory.GetJsonAllNamespacesAsync("ingresses", kubeconfig, ct: ct);
+        string json = await (await AccessAsync(tenantId, clusterId, ct))
+            .GetJsonAllNamespacesAsync("ingresses", ct: ct);
         JsonNode? root = JsonNode.Parse(json);
         List<TailscaleIngress> ingresses = [];
 
@@ -188,16 +211,16 @@ public class TailscaleService(
     /// </summary>
     public async Task CreateIngressAsync(
         string name, string ns, string serviceName, int servicePort,
-        string? hostname, string kubeconfig, CancellationToken ct = default)
+        string? hostname, Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         string manifest = BuildIngressManifest(name, ns, serviceName, servicePort, hostname);
-        await k8sFactory.ApplyManifestAsync(manifest, kubeconfig, ct);
+        await (await AccessAsync(tenantId, clusterId, ct)).ApplyManifestAsync(manifest, ct);
     }
 
     public async Task DeleteIngressAsync(
-        string name, string ns, string kubeconfig, CancellationToken ct = default)
+        string name, string ns, Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        await k8sFactory.DeleteManifestAsync("ingress", name, ns, kubeconfig);
+        await (await AccessAsync(tenantId, clusterId, ct)).DeleteManifestAsync("ingress", name, ns, ct);
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
