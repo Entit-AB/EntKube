@@ -549,7 +549,7 @@ shape the work turned out to have. Where it stands, against the figures this sec
 |---|---|---|
 | credential sites | 508 in 57 files | **22 in 13** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
-| foreign reads of `ClusterComponents` | 87 | **4 direct + 22 navigation** |
+| foreign reads of `ClusterComponents` | 87 | **4 direct + 49 navigation** |
 | foreign *writes* to it | 22 | **0** |
 | own-process kubectl/helm outside the gate (§5.4) | 49 | **1** |
 | component lookups escaping their tenant | 14 | **0** |
@@ -709,36 +709,48 @@ read Catalog's table through `Include(c => c.Components)` on the cluster row, an
 by a different spelling — it is a query against another module's table, it breaks the same way when
 that table moves, and the contract has to serve it either way.
 
-**22 navigation reads in 6 files**: `KubernetesOperationsService` 11, `AppL4RouteService` 3,
-`AppRouteService` 2, `IngressDashboardService` 2, `StorageService` 2, `DatabaseService` 2. The
-metric now counts them, with the same per-mention unit as the DbSet form and two narrow
-exclusions (the `EntKube.Web.Components` namespace, and `UpgradeReport.Components`, which is a
-DTO). So the ledger row reads **4 direct + 22 navigation**, and a new one in either spelling now
-fails the build.
+**49 navigation reads in 11 files**, in three spellings: `KubernetesOperationsService` 13,
+`ExternalRouteService` 11, `IngressDashboardService` 5, `KeycloakService` 5, `StorageService` 5,
+`AppL4RouteService` 3, `AppRouteService` 2, `DatabaseService` 2, and one each in
+`ExternalRouteHealthService`, `HeadscaleCertSyncService` and `VpnService`. The metric now counts
+them with the same per-mention unit as the DbSet form, and — this is the part that matters — it
+**derives the navigation names from the entity model** rather than listing them, so a twelfth
+entity gaining a link to Catalog's table is counted the day it is added. The ledger row reads
+**4 direct + 49 navigation**, and a new one in any spelling fails the build.
 
-⚠️ **The first measurement of this gap was itself wrong, and it had already been quoted.** It
-counted only the `Include`/`ThenInclude` form and reported *8 in 5 files*, missing every in-memory
-traversal of the loaded collection (eleven of the twenty-two) and both correlated subqueries; the
-figure 8 reached a commit message, a pull request and this document before the second measurement
-corrected it to 22. That is the third time in this programme that a count became an argument before
-it was checked — see §4.0.1.4's file-name/type-name bug — and the discipline it keeps earning is
-*measure twice, then quote*, not *quote, then verify*.
+⚠️ **Two measurements of this gap were wrong before this one, both in the same direction, and the
+first had already been quoted.** It counted only the `Include`/`ThenInclude` form of `.Components`
+and reported *8 in 5 files*, missing every in-memory traversal of the loaded collection; the figure
+8 reached a commit message, a pull request and this document. The correction to 22 was then itself
+one spelling of three — `Component` and `ClusterComponent` on ten other entities hold the other 27.
+That is the third time in this programme that a count became an argument before it was checked (see
+§4.0.1.4's file-name/type-name bug), and the rule it keeps earning is: **enumerate a metric's
+spellings before trusting its total**, and treat a conversion that moves a ratchet by zero as
+evidence about the ratchet.
 
-**Most of the 22 is one question asked six times.** Fifteen pass the loaded collection to one of
-`ExternalRouteService`'s three gateway resolvers — "which gateway does this cluster use?" — and
-those resolvers already take `IEnumerable<ICatalogApi`'s `IComponentNaming>`, so they are
-contract-shaped today and it is only their callers that feed them an EF navigation. **No new
-contract method is needed for any of the 22**, which is worth stating because the first guess was
-that this number was asking for one:
+**This is the gap the module contexts already documented, and it had no number.**
+`ModuleDbContext`'s own summary says it plainly: "the model still contains every entity, so a
+navigation property that already crosses a module boundary — there are 94 of those — can still be
+walked with `Include` from an entity the context does own. Starting a query from another module's
+table is prevented; following an existing foreign key out of your own is not." So the ratchet was
+counting **only the spelling the type system already prevents**, and none of the spelling the
+design explicitly still allows — which is why "foreign reads: 4" read as *Catalog is nearly done*
+while 49 crossings into its table remained. A ratchet aimed at what the compiler already catches
+measures the compiler, not the work.
 
-- the fifteen gateway sites want `GetComponentsForClusterAsync(tenantId, clusterId)`;
-- four (`DatabaseService` 2, `StorageService` 2) ask "which of this tenant's clusters have X
-  installed?" — `GetComponentsForTenantAsync(tenantId)` plus the name predicate in memory, which is
-  where an asymmetric predicate belongs anyway;
-- one is a *join through* Catalog's table to reach Connectivity's own rows
-  (`cluster.Components.SelectMany(c => c.ExternalRoutes)`), because `ExternalRoute` is keyed by
-  component id. That one is a real conversion rather than a swap: ask Catalog which components are
-  on the cluster, then query `ExternalRoutes` by those ids.
+⚠️ Note also what this does *not* mean: a navigation read **compiles and runs fine** on a module
+context, because the model is shared. It blocks the next phase, not this one. (I assumed the
+opposite for a few minutes — that `ConnectivityDbContext` not exposing `ClusterComponents` would
+make `cluster.Components` fail — and the base class's own doc says otherwise.)
+
+**No new contract method serves any of the 49.** Fifteen pass the loaded collection to one of
+`ExternalRouteService`'s gateway resolvers, and those already take `IComponentNaming` — the
+contract's own interface — so they are contract-shaped today and only their callers feed them an EF
+navigation. Four ask "which of this tenant's clusters have X installed?", which is
+`GetComponentsForTenantAsync` plus a name predicate in memory. The rest reach *through* Catalog's
+row into a foreign module's own table: `ExternalRoute`, `StorageLink`, `KeycloakComponentConfig` and
+`VpnLocalEndpoint` are each keyed by component id, so those are real conversions — ask Catalog which
+components are on the cluster, then query your own table by those ids.
 
 Tenant availability, which is what decides whether each can move: three of the four
 `KubernetesOperationsService` entry points already take one; its private
