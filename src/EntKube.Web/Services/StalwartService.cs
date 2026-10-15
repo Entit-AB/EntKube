@@ -255,7 +255,9 @@ public class StalwartService(
     /// Fills the LDAP connection details in from the linked EntKube-managed OpenLDAP directory.
     /// No-op when nothing is linked, or when the link points at a directory this tenant no longer has.
     /// </summary>
-    private static async Task ResolveOpenLdapLinkAsync(
+    // Not static any more: the component lookup below asks ICatalogApi, which is an instance
+    // dependency. The method was static because it only touched the context it was handed.
+    private async Task ResolveOpenLdapLinkAsync(
         ApplicationDbContext db, StalwartComponentConfig config, CancellationToken ct)
     {
         if (config.OpenLdapConfigId is not Guid ldapConfigId)
@@ -270,9 +272,15 @@ public class StalwartService(
             return;
         }
 
-        ClusterComponent? ldapComponent = ldap.ClusterComponentId is Guid id
-            ? await db.ClusterComponents.FirstOrDefaultAsync(c => c.Id == id, ct)
-            : null;
+        // Asked of Catalog, scoped to the mail config's tenant. That is a CROSS-ROW check rather
+        // than a tautological one — the tenant is on the Stalwart config and the component hangs
+        // off a different cluster row — and it is the same reasoning this file already applies to
+        // its seam call below: a config naming another tenant's directory resolves to nothing
+        // instead of quietly producing an LDAP URL pointing into it.
+        EntKube.Contracts.Catalog.InstalledComponent? ldapComponent =
+            ldap.ClusterComponentId is Guid id
+                ? await catalog.GetComponentAsync(config.TenantId, id, ct)
+                : null;
 
         string release = ldapComponent?.ReleaseName ?? ldapComponent?.Name ?? "openldap";
         string ldapNs = ldapComponent?.Namespace ?? "openldap";
@@ -1630,9 +1638,10 @@ public class StalwartService(
 
         OpenLdapComponentConfig? ldap = await db.OpenLdapComponentConfigs
             .FirstOrDefaultAsync(c => c.Id == ldapConfigId, ct);
-        ClusterComponent? ldapComponent = ldap?.ClusterComponentId is Guid id
-            ? await db.ClusterComponents.Include(c => c.Cluster).FirstOrDefaultAsync(c => c.Id == id, ct)
-            : null;
+        EntKube.Contracts.Catalog.InstalledComponent? ldapComponent =
+            ldap?.ClusterComponentId is Guid id
+                ? await catalog.GetComponentAsync(config.TenantId, id, ct)
+                : null;
 
         // No tenantId parameter here, but the config has one, and it belongs to a DIFFERENT row
         // than the cluster — so the seam compares the mail config's tenant against the directory

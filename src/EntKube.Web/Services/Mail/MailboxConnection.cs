@@ -48,8 +48,14 @@ public static class MailboxConnectionResolver
     /// public hostname even from inside its own cluster, and the in-cluster Service name is right for
     /// one that checks passwords itself.</para>
     /// </summary>
+    // ⚠️ Takes IComponentNaming rather than Catalog's entity. It reads exactly three fields —
+    // ReleaseName, Name and Namespace — and both the entity and ICatalogApi's InstalledComponent
+    // satisfy that interface, so a caller holding either can ask. The same move as the gateway
+    // resolvers in #172, and for the same reason: the resolver, not the caller, was what forced a
+    // Catalog entity to keep flowing through another module.
     public static MailboxConnection? Resolve(
-        StalwartComponentConfig config, ClusterComponent component, StalwartMailAccount account,
+        StalwartComponentConfig config, EntKube.Contracts.Catalog.IComponentNaming component,
+        StalwartMailAccount account,
         StalwartMailDomain domain)
     {
         if (!config.ImapEnabled)
@@ -98,7 +104,8 @@ public static class MailboxConnectionResolver
     /// through.</para>
     /// </summary>
     public static MailboxConnection? ResolveSubmission(
-        StalwartComponentConfig config, ClusterComponent component, StalwartMailAccount account,
+        StalwartComponentConfig config, EntKube.Contracts.Catalog.IComponentNaming component,
+        StalwartMailAccount account,
         StalwartMailDomain domain)
     {
         if (!config.SubmissionEnabled)

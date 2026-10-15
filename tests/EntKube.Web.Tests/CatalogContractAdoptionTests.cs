@@ -286,8 +286,40 @@ public class CatalogContractAdoptionTests
     /// <c>InstalledComponent</c> carries <c>InstalledAt</c>, not <c>CreatedAt</c>. Converting it
     /// would change which component is picked when a cluster has two. That is an argument for a
     /// field, not for a conversion, and nothing else asks for it yet.</para>
+    ///
+    /// <para><b>6 — and the four that moved were the four this file called "no tenant to pass".</b>
+    /// All four had one; it was simply never asked for. <c>StalwartService</c>'s two were in a
+    /// <c>private static</c> helper taking <c>(db, config)</c>, and the config row it was handed
+    /// carries <c>TenantId</c> — so the helper stopped being static and asks Catalog as that tenant.
+    /// <c>SupportMailboxService</c>'s read of a mail server was a hand-written predicate against the
+    /// mailbox's own tenant, which is <c>GetComponentAsync</c> exactly. That is the third time in
+    /// this file that "cannot be served" turned out to mean "nobody opened the caller".</para>
+    ///
+    /// <para>⚠️ <c>StorageService.BindStorageToComponentAsync</c> was the one that was not merely
+    /// tidying. It read <c>FindAsync(componentId)</c> with <b>no tenant at all</b>, and the
+    /// component's <c>Namespace</c> is what decides where the storage link's credentials are
+    /// projected as a Kubernetes Secret — so a component id from any tenant in the installation
+    /// resolved and chose the destination. The remedy is an ordering change as much as a
+    /// conversion: the link is loaded <em>first</em>, and its tenant is who the component is then
+    /// asked for. <c>StorageServiceTests</c> covers both halves, because a scoping that refused
+    /// everything would pass the negative case on its own.</para>
+    ///
+    /// <para><b>What the remaining 6 are</b>, and four of them are one thing. <c>StorageService</c>
+    /// 1, <c>StorageLinkClientFactory</c> 2 and <c>TelemetryNodeClient</c> 1 each resolve a
+    /// <em>kubeconfig in the same expression as the component</em> — two of them project
+    /// <c>c.Cluster</c> precisely so the materialization interceptor decrypts it, and the node
+    /// client selects <c>c.Cluster.Kubeconfig</c> into its projection. The contract carries no
+    /// credential by design, so converting any of them means moving the credential to
+    /// <c>IClusterClient</c> in the same change, and that is custody work with its own baseline.
+    /// <c>TailscaleService</c> 1 is still the DTO: its record hands the entity to a Razor page that
+    /// reads <c>Component.Cluster.Kubeconfig</c> off it. <c>VeleroService</c> 1 remains the only
+    /// one blocked by the contract itself, for the <c>CreatedAt</c> reason above.</para>
+    ///
+    /// <para>So 87 → 6, and every one of the six is now waiting on the credential seam rather than
+    /// on a tenant. The two ratchets have converged: this one cannot move again until
+    /// <see cref="ClusterCredentialCustodyTests"/> does.</para>
     /// </summary>
-    private const int BaselineQueries = 10;
+    private const int BaselineQueries = 6;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

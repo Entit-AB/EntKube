@@ -65,9 +65,16 @@ public class StorageServiceTests : IDisposable
         connection.Dispose();
     }
 
+    private int tenantsCreated;
+
+    /// <summary>
+    /// A tenant with one environment. The slug is numbered because <c>Tenants.Slug</c> is UNIQUE
+    /// and the cross-tenant tests need two of these.
+    /// </summary>
     private (Tenant tenant, Data.Environment env) CreateTenantWithEnvironment()
     {
-        Tenant tenant = new() { Id = Guid.NewGuid(), Name = "TestCo", Slug = "testco" };
+        int n = ++tenantsCreated;
+        Tenant tenant = new() { Id = Guid.NewGuid(), Name = $"TestCo {n}", Slug = $"testco-{n}" };
         db.Tenants.Add(tenant);
 
         Data.Environment env = new()
@@ -674,6 +681,113 @@ public class StorageServiceTests : IDisposable
         binding.AppDeploymentId.Should().BeNull();
         binding.ComponentId.Should().Be(component.Id);
         binding.KubernetesSecretName.Should().Be("loki-s3-credentials");
+    }
+
+    /// <summary>
+    /// A component belonging to somebody else does not get this tenant's storage credentials
+    /// synced into its namespace.
+    ///
+    /// <para>The component read behind this call used to be <c>FindAsync(componentId)</c> with no
+    /// tenant at all, so any component id in the installation resolved — and the component's
+    /// namespace is where the link's credentials are then written. Asked of Catalog with the
+    /// link's own tenant it resolves to nothing, so no sync is configured; the binding row is
+    /// still created, because that is the caller's own record and not a cluster-facing act.</para>
+    ///
+    /// <para>The credentials have to be in the vault for this to be observable at all: the
+    /// namespace only ever reaches the secrets, so with an empty vault the assertion would hold
+    /// against the bug as well. Hence <c>InitializeVaultAsync</c> + two secrets, exactly as
+    /// <c>BindStorageToDeploymentAsync_ConfiguresVaultSecretsForSync</c> does.</para>
+    /// </summary>
+    [Fact]
+    public async Task BindStorageToComponentAsync_DoesNotSyncIntoAnotherTenantsComponent()
+    {
+        (Tenant tenant, Data.Environment env) = CreateTenantWithEnvironment();
+        (Tenant stranger, Data.Environment strangerEnv) = CreateTenantWithEnvironment();
+
+        KubernetesCluster theirCluster = new()
+        {
+            Id = Guid.NewGuid(), TenantId = stranger.Id, EnvironmentId = strangerEnv.Id,
+            Name = "their-cluster", ApiServerUrl = "https://k8s.theirs.example.com",
+        };
+        db.KubernetesClusters.Add(theirCluster);
+
+        ClusterComponent theirComponent = new()
+        {
+            Id = Guid.NewGuid(), ClusterId = theirCluster.Id,
+            Name = "loki", ComponentType = "helm", Namespace = "their-monitoring",
+        };
+        db.ClusterComponents.Add(theirComponent);
+
+        StorageLink link = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenant.Id, EnvironmentId = env.Id,
+            Provider = StorageProvider.CleuraS3, Name = "Loki Chunks",
+            Endpoint = "https://s3-kna1.citycloud.com", BucketName = "loki-chunks", Region = "Kna1",
+        };
+        db.StorageLinks.Add(link);
+        await db.SaveChangesAsync();
+
+        await vaultService.InitializeVaultAsync(tenant.Id);
+        await vaultService.SetStorageLinkSecretAsync(tenant.Id, link.Id, "ACCESS_KEY", "AKIAEXAMPLE");
+        await vaultService.SetStorageLinkSecretAsync(tenant.Id, link.Id, "SECRET_KEY", "s3cr3t");
+
+        StorageBinding binding = await sut.BindStorageToComponentAsync(
+            link.Id, theirComponent.Id, "loki-s3-credentials");
+
+        binding.Should().NotBeNull("the binding row is this tenant's own record");
+
+        List<VaultSecret> secrets = await vaultService.GetStorageLinkSecretsAsync(tenant.Id, link.Id);
+        secrets.Should().HaveCount(2);
+        secrets.Should().AllSatisfy(s =>
+        {
+            s.SyncToKubernetes.Should().BeFalse(
+                "nothing of this tenant's may be projected into a namespace on a cluster that is "
+                + "not theirs — and the component's namespace is what decides where it lands");
+            s.KubernetesNamespace.Should().BeNull();
+        });
+    }
+
+    /// <summary>
+    /// The positive half of the pair above: the tenant's own component does get the sync, so a
+    /// scoping that refused everything would not pass both.
+    /// </summary>
+    [Fact]
+    public async Task BindStorageToComponentAsync_ConfiguresVaultSecretsForSync()
+    {
+        (Tenant tenant, Data.Environment env) = CreateTenantWithEnvironment();
+
+        KubernetesCluster cluster = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenant.Id, EnvironmentId = env.Id,
+            Name = "infra-cluster", ApiServerUrl = "https://k8s.infra.example.com",
+        };
+        db.KubernetesClusters.Add(cluster);
+
+        ClusterComponent component = new()
+        {
+            Id = Guid.NewGuid(), ClusterId = cluster.Id,
+            Name = "loki", ComponentType = "helm", Namespace = "monitoring",
+        };
+        db.ClusterComponents.Add(component);
+
+        StorageLink link = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenant.Id, EnvironmentId = env.Id,
+            Provider = StorageProvider.CleuraS3, Name = "Loki Chunks",
+            Endpoint = "https://s3-kna1.citycloud.com", BucketName = "loki-chunks", Region = "Kna1",
+        };
+        db.StorageLinks.Add(link);
+        await db.SaveChangesAsync();
+
+        await vaultService.InitializeVaultAsync(tenant.Id);
+        await vaultService.SetStorageLinkSecretAsync(tenant.Id, link.Id, "ACCESS_KEY", "AKIAEXAMPLE");
+
+        await sut.BindStorageToComponentAsync(link.Id, component.Id, "loki-s3-credentials");
+
+        List<VaultSecret> secrets = await vaultService.GetStorageLinkSecretsAsync(tenant.Id, link.Id);
+        secrets.Should().ContainSingle().Which.Should().BeEquivalentTo(
+            new { SyncToKubernetes = true, KubernetesSecretName = "loki-s3-credentials", KubernetesNamespace = "monitoring" },
+            o => o.ExcludingMissingMembers());
     }
 
     [Fact]
