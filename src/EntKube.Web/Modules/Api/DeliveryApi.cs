@@ -72,6 +72,64 @@ public sealed class DeliveryApi(IDbContextFactory<DeliveryDbContext> dbFactory) 
             .Select(ToDeployment).ToList();
     }
 
+    /// <summary>
+    /// The tenant's most recent watched releases. The predicate walks rollout → deployment → app →
+    /// customer, which is the reason the public API had been querying this table itself.
+    /// </summary>
+    public async Task<IReadOnlyList<RolloutSummary>> GetRolloutsAsync(
+        Guid tenantId, int limit = 100, CancellationToken ct = default)
+    {
+        await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        // Same shape as ToRow/ToDeployment below and for the same reason: the row carries the
+        // ENTITY enum and the mapping to the contract's copy happens in memory. Casting an enum
+        // inside the expression is what produced the Cost page's 22P02 — see
+        // project_enum_storage_casts / §4.0.1. This one is stored as an int rather than a string,
+        // so the cast would not throw; it would just make the next string-stored enum here a
+        // silent wrong answer, which is worse.
+        var rows = await db.DeploymentRollouts
+            .AsNoTracking()
+            .Where(r => r.Deployment.App.Customer.TenantId == tenantId)
+            .OrderByDescending(r => r.StartedAt)
+            .Take(Math.Clamp(limit, 1, 500))
+            .Select(r => new
+            {
+                r.Id,
+                AppName = r.Deployment.App.Name,
+                DeploymentName = r.Deployment.Name,
+                EnvironmentName = r.Deployment.Environment.Name,
+                ClusterName = r.Deployment.Cluster.Name,
+                r.Status,
+                r.StartedAt,
+                r.FinishedAt,
+                r.Verdict,
+                r.TriggeredBy,
+            })
+            .ToListAsync(ct);
+
+        return [.. rows.Select(r => new RolloutSummary(
+            r.Id, r.AppName, r.DeploymentName, r.EnvironmentName, r.ClusterName,
+            ToVerdictStatus(r.Status), r.StartedAt, r.FinishedAt, r.Verdict, r.TriggeredBy))];
+    }
+
+    /// <summary>
+    /// Delivery's rollout status as the contract's. Explicit rather than a cast: the two enums
+    /// agree today and <c>ApiRolloutStatusTests</c> keeps them agreeing, but the public API
+    /// serialises the name, so a silent renumbering must not become a silent relabelling.
+    /// </summary>
+    private static RolloutVerdictStatus ToVerdictStatus(Data.DeploymentRolloutStatus status)
+        => status switch
+        {
+            Data.DeploymentRolloutStatus.Watching => RolloutVerdictStatus.Watching,
+            Data.DeploymentRolloutStatus.Promoted => RolloutVerdictStatus.Promoted,
+            Data.DeploymentRolloutStatus.RolledBack => RolloutVerdictStatus.RolledBack,
+            Data.DeploymentRolloutStatus.Alerted => RolloutVerdictStatus.Alerted,
+            Data.DeploymentRolloutStatus.Inconclusive => RolloutVerdictStatus.Inconclusive,
+            Data.DeploymentRolloutStatus.RollbackFailed => RolloutVerdictStatus.RollbackFailed,
+            Data.DeploymentRolloutStatus.Superseded => RolloutVerdictStatus.Superseded,
+            _ => RolloutVerdictStatus.Watching,
+        };
+
     private static IQueryable<Data.App> ScopedApps(DeliveryDbContext db, Guid tenantId)
         => db.Apps.AsNoTracking().Where(a => a.Customer.TenantId == tenantId);
 

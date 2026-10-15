@@ -553,9 +553,26 @@ shape the work turned out to have. Where it stands, against the figures this sec
 | foreign *writes* to it | 22 | **0** |
 | own-process kubectl/helm outside the gate (§5.4) | 49 | **1** |
 | component lookups escaping their tenant | 14 | **0** |
+| direct module reads in the **public API** | 8 | **0** |
 
-Those are six ratchets, each with a banked baseline and a second test that fails when the
+Those are seven ratchets, each with a banked baseline and a second test that fails when the
 baseline carries slack, so none of them can drift back quietly.
+
+**The public-API row is the first to reach zero with nothing deliberately exempted**, and it is the
+row §1 argues matters first: every route the CLI, the MCP server and any future BFF go through now
+asks a module contract rather than the shared database. ⚠️ Zero there does *not* mean the API is
+finished — the routes are still 22 against ~250 services, which is the gap the agents need closed
+and a different measurement entirely.
+
+The last one was `GET /api/v1/rollouts`, which walked rollout → deployment → app → customer: four
+navigations of Delivery's own structure, written out by hand in the public API because
+`IDeliveryApi` had no method for rollouts. It has one now, with that route as its only consumer —
+the shape `IDataServicesApi` was added in. ⚠️ And it carried the hazard §4.0.1 already records: the
+route publishes `Status.ToString()`, so the string clients parse now comes from the *contract's*
+copy of the enum. `ApiRolloutStatusTests` pins the two together and pins the near-miss —
+`RolloutStatus` is a **different** enum belonging to a blueprint rollout, one word away from
+`DeploymentRolloutStatus`, and mapping one onto the other would publish a wrong verdict for every
+release.
 
 ⚠️ **The foreign-reads row was wrong for several batches, and the measurement was why.**
 `CatalogContractAdoptionTests` resolved a file's owning module by looking up its *file name* in a

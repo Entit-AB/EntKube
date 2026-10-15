@@ -63,6 +63,60 @@ public enum HealthStatus
 }
 
 /// <summary>
+/// Lifecycle of one watched release.
+///
+/// <para>Mirrors <c>Delivery.DeploymentRolloutStatus</c> member for member and in order. ⚠️ Not to
+/// be confused with <c>RolloutStatus</c>, which belongs to a blueprint rollout and has entirely
+/// different members — the two names sit one letter apart and mapping one onto the other would
+/// publish a wrong verdict for every release.</para>
+///
+/// <para>The public API serialises this by <em>name</em>, so a member renamed on either side
+/// changes the wire format. <c>ApiRolloutStatusTests</c> is what keeps the two in step.</para>
+/// </summary>
+public enum RolloutVerdictStatus
+{
+    /// <summary>Applied; inside the analysis window.</summary>
+    Watching,
+    /// <summary>Analysis passed. The release stands.</summary>
+    Promoted,
+    /// <summary>Analysis failed and the workload was rolled back.</summary>
+    RolledBack,
+    /// <summary>Analysis failed and the policy said to alert rather than roll back.</summary>
+    Alerted,
+    /// <summary>Nothing could be measured and the policy said to hold.</summary>
+    Inconclusive,
+    /// <summary>The rollback itself failed — needs a human now.</summary>
+    RollbackFailed,
+    /// <summary>Superseded by a newer apply before the window closed.</summary>
+    Superseded,
+}
+
+/// <summary>
+/// One watched release, as the public API and anything outside Delivery sees it.
+/// </summary>
+/// <param name="Id">The rollout's id.</param>
+/// <param name="AppName">The app the release belongs to.</param>
+/// <param name="DeploymentName">The deployment that was applied.</param>
+/// <param name="EnvironmentName">Which environment it went to.</param>
+/// <param name="ClusterName">Which cluster it landed on.</param>
+/// <param name="Status">Where the analysis window got to.</param>
+/// <param name="StartedAt">When the release was applied.</param>
+/// <param name="FinishedAt">When the window closed, or null while it is still open.</param>
+/// <param name="Verdict">The analyser's own sentence, when it reached one.</param>
+/// <param name="TriggeredBy">Who or what applied it.</param>
+public sealed record RolloutSummary(
+    Guid Id,
+    string AppName,
+    string DeploymentName,
+    string EnvironmentName,
+    string ClusterName,
+    RolloutVerdictStatus Status,
+    DateTime StartedAt,
+    DateTime? FinishedAt,
+    string? Verdict,
+    string? TriggeredBy);
+
+/// <summary>
 /// A customer application, as everyone outside Delivery sees it.
 /// </summary>
 /// <param name="Id">The app's id.</param>
@@ -159,6 +213,16 @@ public interface IDeliveryApi
     /// <summary>What one app has running in one environment — the most common question asked of this table.</summary>
     Task<IReadOnlyList<DeploymentSummary>> GetDeploymentsForAppEnvironmentAsync(
         Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default);
+
+    /// <summary>
+    /// The tenant's most recent watched releases, newest first.
+    ///
+    /// <para>A rollout reaches its tenant through deployment → app → customer, which is why the
+    /// public API was querying the table directly: the predicate is four navigations long and
+    /// there was nothing to ask. <paramref name="limit"/> is clamped by the implementation.</para>
+    /// </summary>
+    Task<IReadOnlyList<RolloutSummary>> GetRolloutsAsync(
+        Guid tenantId, int limit = 100, CancellationToken ct = default);
 
     /// <summary>Everything deployed to one cluster.</summary>
     Task<IReadOnlyList<DeploymentSummary>> GetDeploymentsForClusterAsync(
