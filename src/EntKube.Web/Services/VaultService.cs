@@ -2176,13 +2176,18 @@ public class VaultService(
     /// cluster" action, and before taking ownership so EntKube adopts the current live
     /// value (e.g. whatever ArgoCD/Flux last set) rather than a stale snapshot.
     /// </summary>
-    public async Task<ClusterRefreshResult> RefreshAppSecretFromClusterAsync(Guid secretId, CancellationToken ct = default)
+    public async Task<ClusterRefreshResult> RefreshAppSecretFromClusterAsync(
+        Guid tenantId, Guid secretId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
+        // Scoped by the ASKING tenant, not by the tenant on the row. It used to find the secret by
+        // id alone and then read `secret.Vault.TenantId` to resolve the cluster — a check, but one
+        // whose input came from the row being checked, so every caller was trusted to have picked a
+        // secret it was entitled to. Both pages that call this have a route TenantId; the sweep
+        // loops tenants.
         VaultSecret? secret = await db.Set<VaultSecret>()
-            .Include(s => s.Vault)
-            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+            .FirstOrDefaultAsync(s => s.Id == secretId && s.Vault.TenantId == tenantId, ct);
 
         if (secret is null
             || secret.KubernetesClusterId is null
@@ -2191,12 +2196,8 @@ public class VaultService(
             return ClusterRefreshResult.NoTarget;
         }
 
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .FirstOrDefaultAsync(c => c.Id == secret.KubernetesClusterId, ct);
-
-        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess = cluster is null
-            ? null
-            : await clusterClients.ForAsync(secret.Vault.TenantId, cluster.Id, ct);
+        EntKube.Web.Services.Clusters.IClusterClient? clusterAccess =
+            await clusterClients.ForAsync(tenantId, secret.KubernetesClusterId.Value, ct);
 
         if (clusterAccess is null)
         {
@@ -2374,23 +2375,38 @@ public class VaultService(
     }
 
     /// <summary>
-    /// Returns the IDs of app secrets that are "observed": Kubernetes sync is disabled
-    /// but a target cluster + Secret name are recorded — the state imported secrets land
-    /// in. The background refresher re-reads their live values so the vault copy tracks
-    /// whatever ArgoCD/Flux last set, until the operator takes ownership (enables sync).
+    /// Returns the IDs of <em>one tenant's</em> app secrets that are "observed": Kubernetes sync is
+    /// disabled but a target cluster + Secret name are recorded — the state imported secrets land
+    /// in. The background refresher re-reads their live values so the vault copy tracks whatever
+    /// ArgoCD/Flux last set, until the operator takes ownership (enables sync).
+    ///
+    /// <para>The tenant is a parameter because this fed a sweep that then acted <em>as</em> whatever
+    /// tenant each returned row named (docs/decomposition.md §4.0.1.2). Asking per tenant makes the
+    /// tenant an input, so the candidate list can only ever be the asking tenant's own.</para>
     /// </summary>
-    public async Task<List<Guid>> GetObservedAppSecretIdsAsync(CancellationToken ct = default)
+    public async Task<List<Guid>> GetObservedAppSecretIdsAsync(
+        Guid tenantId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
-        return await db.Set<VaultSecret>()
-            .Where(s => s.AppId != null
+        return await ObservedAppSecretsFor(db, tenantId).Select(s => s.Id).ToListAsync(ct);
+    }
+
+    /// <summary>
+    /// One tenant's observed app secrets.
+    ///
+    /// <para>Public and static so the scoping can be asserted without running the sweep: the
+    /// previous version selected every observed secret in the installation, and a test that only
+    /// counted what came back would pass against either. The tenant reaches a secret through its
+    /// vault, which is where it lives in the schema.</para>
+    /// </summary>
+    public static IQueryable<VaultSecret> ObservedAppSecretsFor(SecretsDbContext db, Guid tenantId)
+        => db.Set<VaultSecret>()
+            .Where(s => s.Vault.TenantId == tenantId
+                && s.AppId != null
                 && !s.SyncToKubernetes
                 && s.KubernetesClusterId != null
-                && s.KubernetesSecretName != null)
-            .Select(s => s.Id)
-            .ToListAsync(ct);
-    }
+                && s.KubernetesSecretName != null);
 
     /// <summary>
     /// Reads every key of a live Secret via kubectl and returns them base64-decoded,

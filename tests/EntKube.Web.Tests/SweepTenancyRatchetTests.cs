@@ -64,12 +64,14 @@ public class SweepTenancyRatchetTests
         "HeadscaleCertSyncService",
         "KeycloakBackupSchedulerService",
         "ExternalRouteHealthService",
+        "ObservedSecretRefreshService",
         "ResourceUsageCollectorService",
         "RolloutWatcherService",
         "SecretExpiryNotificationService",
         "SupportMailPoller",
         "SupplyChainScanService",
         "TelemetryAlertEvaluator",
+        "UptimeTrackingService",
     ];
 
     /// <summary>
@@ -100,16 +102,9 @@ public class SweepTenancyRatchetTests
     /// </summary>
     private static readonly Dictionary<string, string> NotYetTenantScoped = new(StringComparer.Ordinal)
     {
-        ["ObservedSecretRefreshService"] =
-            "VaultService.GetObservedAppSecretIdsAsync returns secret ids across the installation, "
-            + "and the refresh then reads each one from its cluster",
         ["JitGrantReaperService"] =
             "reaps expiring grants installation-wide and takes the tenant off the grant row; it also "
             + "holds three credential reads, so it converts with the custody work rather than before it",
-        ["UptimeTrackingService"] =
-            "snapshots every deployment's health and prunes old rows installation-wide. Nothing is "
-            + "authorized against the tenant here, so this one buys isolation rather than safety — "
-            + "a tenant's cycle that can fail on its own is what the worker extraction needs",
     };
 
     /// <summary>
@@ -126,7 +121,36 @@ public class SweepTenancyRatchetTests
     /// tenant — isolation for the worker extraction — and nothing about safety. Said here because
     /// a backlog that counts those two kinds the same invites the wrong one being done first.</para>
     /// </summary>
-    private const int BaselineNotYetTenantScoped = 3;
+    /// <para><b>1.</b> Two more left, and they are the two kinds again — which is why the pair is
+    /// worth describing rather than counting.</para>
+    ///
+    /// <para><c>ObservedSecretRefreshService</c> is the one that buys <b>safety</b>.
+    /// <c>GetObservedAppSecretIdsAsync</c> returned every observed secret in the installation, and
+    /// the refresh then read each one from the cluster <em>its own row named</em>, resolving the
+    /// credential with <c>secret.Vault.TenantId</c> — a check whose input came from the row being
+    /// checked. Both now take the tenant: the id list is scoped through the secret's vault
+    /// (<c>VaultService.ObservedAppSecretsFor</c>, public and static so the predicate is assertable
+    /// without running the sweep), and <c>RefreshAppSecretFromClusterAsync(tenantId, secretId)</c>
+    /// finds the secret only within that tenant before asking <c>ForAsync</c> for the cluster. A
+    /// secret whose <c>KubernetesClusterId</c> points outside its tenant now resolves to no cluster
+    /// at all instead of being read with that cluster's credential. Both pages that call it have a
+    /// route <c>TenantId</c>, so nothing had to be derived.</para>
+    ///
+    /// <para><c>UptimeTrackingService</c> buys <b>isolation</b> only, and is <em>half</em> converted
+    /// on purpose. The snapshot loop is per tenant now, so a tenant whose rows fail to write no
+    /// longer ends the cycle for everyone. <b>The retention prune is deliberately still
+    /// installation-wide</b>: it deletes by timestamp, names no tenant, decides nothing about one
+    /// and reaches no cluster, so scoping it would turn one <c>ExecuteDeleteAsync</c> into one per
+    /// tenant — each joining snapshot → deployment → app → customer to find a tenant it then
+    /// ignores. More work, no authorization gain.</para>
+    ///
+    /// <para>⚠️ <b><see cref="LoopsTenants"/> would have passed a half-conversion without noticing
+    /// it</b>, because it looks for <c>.Tenants</c> and <c>foreach</c> in the file — which this
+    /// class's own remarks already call a claim-checker rather than proof. The honest record of
+    /// what each conversion bought therefore has to live in this prose, and "it is in the
+    /// ActsAsEachTenant list" is not the same claim as "every query in it is tenant-scoped".</para>
+    /// </summary>
+    private const int BaselineNotYetTenantScoped = 1;
 
     // ──────────────────────────────────────────────────────────────────────────
 

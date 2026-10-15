@@ -26,6 +26,12 @@ namespace EntKube.Web.Tests;
 ///   hostname over HTTPS and writes history on the row it probed. That conversion buys a cycle per
 ///   tenant — isolation for the worker extraction — and is listed here as such.</item>
 /// </list>
+///
+/// <para>Two more joined them, and the same split holds. <c>ObservedSecretRefreshService</c> reads
+/// <b>live Kubernetes Secrets</b> with a cluster credential, so the tenant it acts as decides whose
+/// cluster is read — safety. <c>UptimeTrackingService</c> writes a health row per deployment and
+/// authorizes nothing — isolation. The predicates for both are asserted here; what the conversions
+/// bought is recorded in <see cref="SweepTenancyRatchetTests"/>.</para>
 /// </summary>
 public sealed class SweepBacklogTenancyTests : IDisposable
 {
@@ -162,6 +168,130 @@ public sealed class SweepBacklogTenancyTests : IDisposable
             });
             db.SaveChanges();
         }
+    }
+
+    /// <summary>
+    /// The observed set is the sweep's work list, and the sweep reaches a cluster for every entry
+    /// on it. Drawn installation-wide, the refresher read each secret from the cluster the row
+    /// named, with the credential resolved from that row's own tenant — so the work list was also
+    /// the authorization.
+    /// </summary>
+    [Fact]
+    public void The_observed_secret_set_is_drawn_per_tenant()
+    {
+        Guid oursSecret = SeedObservedSecret(ours, "ours-app-tls");
+        Guid theirsSecret = SeedObservedSecret(theirs, "theirs-app-tls");
+
+        using SecretsDbContext secrets = ((IDbContextFactory<SecretsDbContext>)factory).CreateDbContext();
+
+        VaultService.ObservedAppSecretsFor(secrets, ours).Select(s => s.Id)
+            .Should().Equal([oursSecret]);
+        VaultService.ObservedAppSecretsFor(secrets, theirs).Select(s => s.Id)
+            .Should().Equal([theirsSecret]);
+    }
+
+    /// <summary>
+    /// The sweep's own policy has to survive the tenant filter: a secret whose sync is ENABLED is
+    /// owned by EntKube and must not be refreshed from the cluster for anybody — refreshing it
+    /// would overwrite the vault copy with whatever is live, which is the opposite direction.
+    /// </summary>
+    [Fact]
+    public void An_owned_secret_is_not_observed_for_anybody()
+    {
+        Guid id = SeedObservedSecret(ours, "taken-over", syncEnabled: true);
+
+        using SecretsDbContext secrets = ((IDbContextFactory<SecretsDbContext>)factory).CreateDbContext();
+
+        VaultService.ObservedAppSecretsFor(secrets, ours).Select(s => s.Id)
+            .Should().NotContain(id, "enabling sync is how an operator takes ownership");
+    }
+
+    /// <summary>
+    /// Uptime snapshots authorize nothing, so this asserts the isolation rather than a boundary:
+    /// each tenant's cycle sees its own deployments, and tenancy reaches a deployment the long way
+    /// round — through its app's customer.
+    /// </summary>
+    [Fact]
+    public void An_uptime_sweep_snapshots_only_the_asking_tenants_deployments()
+    {
+        Guid oursDeployment = SeedDeployment(ours, "ours-api");
+        Guid theirsDeployment = SeedDeployment(theirs, "theirs-api");
+
+        UptimeTrackingService.DeploymentsFor(db, ours).Select(d => d.Id)
+            .Should().Equal([oursDeployment]);
+        UptimeTrackingService.DeploymentsFor(db, theirs).Select(d => d.Id)
+            .Should().Equal([theirsDeployment]);
+    }
+
+    private Guid SeedObservedSecret(Guid tenantId, string name, bool syncEnabled = false)
+    {
+        SecretVault vault = db.Set<SecretVault>().FirstOrDefault(v => v.TenantId == tenantId)
+            ?? AddVault(tenantId);
+
+        Guid customerId = Guid.NewGuid();
+        Guid appId = Guid.NewGuid();
+        Guid clusterId = Guid.NewGuid();
+        Guid envId = Guid.NewGuid();
+
+        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = name });
+        db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = name });
+        db.Environments.Add(new Data.Environment { Id = envId, TenantId = tenantId, Name = name });
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = clusterId, TenantId = tenantId, EnvironmentId = envId,
+            Name = name, ApiServerUrl = "https://k8s.example.com",
+        });
+
+        VaultSecret secret = new()
+        {
+            Id = Guid.NewGuid(), VaultId = vault.Id, Name = name,
+            EncryptedValue = [1], Nonce = [2],
+            AppId = appId,
+            SyncToKubernetes = syncEnabled,
+            KubernetesClusterId = clusterId,
+            KubernetesSecretName = name,
+            KubernetesNamespace = "prod",
+        };
+        db.Set<VaultSecret>().Add(secret);
+        db.SaveChanges();
+        return secret.Id;
+    }
+
+    private SecretVault AddVault(Guid tenantId)
+    {
+        SecretVault vault = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenantId,
+            EncryptedDataKey = [1], Nonce = [2],
+        };
+        db.Set<SecretVault>().Add(vault);
+        db.SaveChanges();
+        return vault;
+    }
+
+    private Guid SeedDeployment(Guid tenantId, string name)
+    {
+        Guid customerId = Guid.NewGuid();
+        Guid appId = Guid.NewGuid();
+        Guid envId = Guid.NewGuid();
+        Guid clusterId = Guid.NewGuid();
+        Guid deploymentId = Guid.NewGuid();
+
+        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = name });
+        db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = name });
+        db.Environments.Add(new Data.Environment { Id = envId, TenantId = tenantId, Name = name });
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = clusterId, TenantId = tenantId, EnvironmentId = envId,
+            Name = name, ApiServerUrl = "https://k8s.example.com",
+        });
+        db.AppDeployments.Add(new AppDeployment
+        {
+            Id = deploymentId, AppId = appId, Name = name,
+            EnvironmentId = envId, ClusterId = clusterId, Namespace = name,
+        });
+        db.SaveChanges();
+        return deploymentId;
     }
 
     private static SupportMailbox NewMailbox(Guid tenantId, string username) => new()

@@ -1,3 +1,4 @@
+using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
@@ -47,11 +48,61 @@ public class ObservedSecretRefreshService(
         using IServiceScope scope = scopeFactory.CreateScope();
         using IDisposable unattended = scope.DeclareUnattended("observed-secret-refresh");
         VaultService vaultService = scope.ServiceProvider.GetRequiredService<VaultService>();
+        var dbFactory = scope.ServiceProvider
+            .GetRequiredService<IDbContextFactory<EntKube.Web.Data.Modules.SecretsDbContext>>();
 
-        List<Guid> secretIds = await vaultService.GetObservedAppSecretIdsAsync(ct);
+        // One tenant at a time, outermost (docs/decomposition.md §4.0.1.2). This used to ask for
+        // every observed secret in the installation and then refresh each one from the cluster its
+        // own row named — so the tenant it acted as came from the row it was processing. That is
+        // the shape the sweep decision rejects: here the tenant is an input, and a secret whose
+        // KubernetesClusterId points outside its tenant now resolves to no cluster at all rather
+        // than being read with that cluster's credential.
+        List<Guid> tenants;
+        await using (EntKube.Web.Data.Modules.SecretsDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        {
+            tenants = await db.Tenants.Select(x => x.Id).ToListAsync(ct);
+        }
+
+        int updated = 0, total = 0;
+
+        foreach (Guid tenantId in tenants)
+        {
+            if (ct.IsCancellationRequested)
+            {
+                break;
+            }
+
+            // Per tenant, so one tenant's unreachable cluster cannot end the cycle for the rest —
+            // the isolation half of §4.0.1.2, and what the worker extraction needs.
+            try
+            {
+                (int tenantUpdated, int tenantTotal) =
+                    await RefreshForTenantAsync(vaultService, tenantId, ct);
+
+                updated += tenantUpdated;
+                total += tenantTotal;
+            }
+            catch (Exception ex) when (ex is not OperationCanceledException)
+            {
+                logger.LogWarning(ex, "Observed-secret refresh failed for tenant {TenantId}", tenantId);
+            }
+        }
+
+        if (updated > 0)
+        {
+            logger.LogInformation(
+                "ObservedSecretRefreshService: refreshed {Updated} of {Total} observed secret(s)",
+                updated, total);
+        }
+    }
+
+    private async Task<(int Updated, int Total)> RefreshForTenantAsync(
+        VaultService vaultService, Guid tenantId, CancellationToken ct)
+    {
+        List<Guid> secretIds = await vaultService.GetObservedAppSecretIdsAsync(tenantId, ct);
         if (secretIds.Count == 0)
         {
-            return;
+            return (0, 0);
         }
 
         int updated = 0;
@@ -66,7 +117,7 @@ public class ObservedSecretRefreshService(
             try
             {
                 // Counts only secrets whose live value differed and were rewritten.
-                if (await vaultService.RefreshAppSecretFromClusterAsync(id, ct)
+                if (await vaultService.RefreshAppSecretFromClusterAsync(tenantId, id, ct)
                     == VaultService.ClusterRefreshResult.Updated)
                 {
                     updated++;
@@ -80,11 +131,6 @@ public class ObservedSecretRefreshService(
             await Task.Delay(InterSecretDelay, ct);
         }
 
-        if (updated > 0)
-        {
-            logger.LogInformation(
-                "ObservedSecretRefreshService: refreshed {Updated} of {Total} observed secret(s)",
-                updated, secretIds.Count);
-        }
+        return (updated, secretIds.Count);
     }
 }
