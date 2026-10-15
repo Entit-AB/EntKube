@@ -294,9 +294,11 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // Component is NOT included: its one reader was StorageTab's "is this MinIO instance
+        // already registered?" check, which wanted the component's cluster id. The page asks
+        // ICatalogApi for that now, so this stops loading Catalog's rows through Secrets' own.
         IQueryable<StorageLink> query = db.StorageLinks
             .Include(s => s.Environment)
-            .Include(s => s.Component)
             .Where(s => s.TenantId == tenantId);
 
         if (environmentId.HasValue)

@@ -549,7 +549,7 @@ shape the work turned out to have. Where it stands, against the figures this sec
 |---|---|---|
 | credential sites | 508 in 57 files | **22 in 13** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
-| foreign reads of `ClusterComponents` | 87 | **4 direct + 4 navigation** |
+| foreign reads of `ClusterComponents` | 87 | **4 direct + 2 navigation** |
 | foreign *writes* to it | 22 | **0** |
 | own-process kubectl/helm outside the gate (§5.4) | 49 | **1** |
 | component lookups escaping their tenant | 14 | **0** |
@@ -728,7 +728,7 @@ That is the third time in this programme that a count became an argument before 
 spellings before trusting its total**, and treat a conversion that moves a ratchet by zero as
 evidence about the ratchet.
 
-**45 of the 49 are converted (2026-10-15), and no new contract method was needed for any of
+**47 of the 49 are converted (2026-10-15), and no new contract method was needed for any of
 them** — which was the prediction, so it is worth saying that it held. Eight files are at zero:
 `ExternalRouteService` (11), `IngressDashboardService` (5), `KeycloakService` (5),
 `AppL4RouteService` (3), `AppRouteService` (2), `DatabaseService` (2), `ExternalRouteHealthService`
@@ -772,14 +772,24 @@ null-checked it and *then* called `ForAsync(tenantId, clusterId)`, the same ques
 came from `FirstOrDefaultAsync(c => c.Id == clusterId)` with no tenant predicate, so a cluster id
 from elsewhere had its Gateway reconciled.
 
-**The four that remain are the two documented blockers, not work.** `StorageService` 3: two are
-`ResolveMinioKubeconfigAsync`, which hands a raw kubeconfig to the S3 proxy and waits on the
-**credentialed channel** seam shape described below; one is an `Include` kept alive by
-`StorageTab.razor` reading `l.Component?.ClusterId`. `VpnService` 1 is that same shape —
-`NetworkingTab.razor` reads `ep.Component.Name`. Both are the `TailscaleOperator` lesson: **the DTO
-is the blocker**, and the page has to stop receiving the entity graph before the service can stop
-loading it. Removing the `Include` first would leave the navigation null and the UI silently wrong,
-which is exactly why neither half moves alone.
+**The two that remain are one blocked method**, and that is the floor until a decision is made
+rather than work anyone can pick up: `StorageService.ResolveMinioKubeconfigAsync` walks
+`StorageLink → ClusterComponent → KubernetesCluster` to hand a *raw kubeconfig* to
+`KubernetesS3Proxy` for the AWS SDK. It sits on the custody ratchet and this one for the same
+reason — the **credentialed channel** seam shape below.
+
+The last two conversions were both a *page* holding the entity graph, and neither half could move
+alone, because removing the `Include` first leaves the navigation null and the UI silently wrong.
+`GetStorageLinksAsync`'s `Include(s => s.Component)` had exactly one reader in the product —
+`StorageTab`'s "is this MinIO instance already registered?" check, which wanted the component's
+*cluster id* — so the page builds that map from `ICatalogApi` now.
+
+⚠️ **`VpnService`'s looked like the same blocker and was dead code.** Nothing that loads a tunnel
+through `GetTunnelWithDetailsAsync` reads `Component` (both callers are the swanctl generators), and
+the page's component badge read it off `GetTunnelsForTenantAsync`'s tunnels, which never included
+it — so the badge had never rendered, on a field `ReconcileGatewayLinksAsync` does populate. **Check
+who actually consumes a navigation before concluding that a page blocks you**: this one cost a line
+to delete and fixed a feature on the way past.
 
 ⚠️ **The ratchet reads the source tree at test time, so it cannot be trusted while that tree is
 being edited.** A full run during this work reported one failure — the navigation count had dropped

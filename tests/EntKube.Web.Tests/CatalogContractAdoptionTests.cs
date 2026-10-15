@@ -421,22 +421,34 @@ public class CatalogContractAdoptionTests
     /// <c>ICatalogApi</c> has to serve. <c>LokiService</c> is what surfaced it: converting its
     /// component read to the contract moved this ratchet by <em>zero</em>.</para>
     ///
-    /// <para><b>4 now, from 49, and no new contract method was needed for any of it.</b> Nine
+    /// <para><b>2 now, from 49, and no new contract method was needed for any of it.</b> Eleven
     /// files are at zero: <c>KubernetesOperationsService</c> (13), <c>ExternalRouteService</c> (11),
     /// <c>IngressDashboardService</c> (5), <c>KeycloakService</c> (5), <c>AppL4RouteService</c> (3),
-    /// <c>AppRouteService</c> (2), <c>DatabaseService</c> (2), <c>ExternalRouteHealthService</c>
-    /// and <c>HeadscaleCertSyncService</c>.</para>
+    /// <c>AppRouteService</c> (2), <c>DatabaseService</c> (2), <c>StorageService</c> (1 of 3),
+    /// <c>VpnService</c>, <c>ExternalRouteHealthService</c> and <c>HeadscaleCertSyncService</c>.</para>
     ///
-    /// <para><b>The four that remain are the two documented blockers, not work.</b>
-    /// <c>StorageService</c> 3: two are <c>ResolveMinioKubeconfigAsync</c>, which hands a raw
-    /// kubeconfig to the S3 proxy and waits on the <b>credentialed channel</b> seam shape
-    /// (§4.0.1.5), and one is an <c>Include</c> kept alive by <c>StorageTab.razor</c> reading
-    /// <c>l.Component?.ClusterId</c>. <c>VpnService</c> 1 is that same shape —
-    /// <c>NetworkingTab.razor</c> reads <c>ep.Component.Name</c>. Both are the
-    /// <c>TailscaleOperator</c> lesson: <b>the DTO is the blocker</b>, and the page has to stop
-    /// receiving the entity graph before the service can stop loading it. Removing the
-    /// <c>Include</c> without fixing the page would leave the navigation null and the UI silently
-    /// wrong, which is why neither half moves alone.</para>
+    /// <para><b>The two that remain are one blocked method</b>, and this is the floor until a
+    /// decision is made rather than work anyone can pick up:
+    /// <c>StorageService.ResolveMinioKubeconfigAsync</c> walks
+    /// <c>StorageLink → ClusterComponent → KubernetesCluster</c> to hand a <em>raw kubeconfig</em>
+    /// to <c>KubernetesS3Proxy</c> for the AWS SDK. It is one of the sites waiting on the
+    /// <b>credentialed channel</b> seam shape (§4.0.1.5) — many calls, arbitrary object paths,
+    /// binary bodies — so it is on the custody ratchet and this one for the same reason.</para>
+    ///
+    /// <para>The last two conversions were both a <em>page</em> holding the entity graph, and
+    /// neither half could move alone: removing the <c>Include</c> first would leave the navigation
+    /// null and the UI silently wrong. <c>StorageService.GetStorageLinksAsync</c>'s
+    /// <c>Include(s =&gt; s.Component)</c> had exactly one reader in the whole product —
+    /// <c>StorageTab</c>'s "is this MinIO instance already registered?" check, which wanted the
+    /// component's <em>cluster id</em> — so the page builds that map from <c>ICatalogApi</c> now.</para>
+    ///
+    /// <para>⚠️ <c>VpnService</c>'s looked like the same blocker and was <b>dead code</b>. Nothing
+    /// that loads a tunnel through <c>GetTunnelWithDetailsAsync</c> reads <c>Component</c> — both
+    /// callers are the swanctl generators — and the page's component badge read it off
+    /// <c>GetTunnelsForTenantAsync</c>'s tunnels, which never included it. So the badge had never
+    /// rendered, on a field <c>ReconcileGatewayLinksAsync</c> does populate. <b>Check who actually
+    /// consumes a navigation before concluding that a page blocks you</b>; this one cost a line to
+    /// delete and fixed a feature on the way past.</para>
     ///
     /// <para><c>KubernetesOperationsService</c> was the last large holding and the clearest case of
     /// the <b>half-moved</b> shape: it already asked <c>GetComponentsForClusterAsync</c> in three
@@ -519,7 +531,7 @@ public class CatalogContractAdoptionTests
     /// spellings before trusting its total</b>, and a conversion that moves a ratchet by zero is
     /// evidence about the ratchet rather than about the conversion.</para>
     /// </summary>
-    private const int BaselineNavigation = 4;
+    private const int BaselineNavigation = 2;
 
     [Fact]
     public void No_new_service_reaches_past_the_catalog_contract()

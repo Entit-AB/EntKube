@@ -1,6 +1,7 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject StorageService StorageService
+@inject EntKube.Contracts.Catalog.ICatalogApi Catalog
 @inject StorageBrowserService BrowserService
 @inject TenantService TenantService
 @inject ToastService Toasts
@@ -784,6 +785,14 @@
 
     // External storage links
     private List<StorageLink> storageLinks = [];
+
+    /// <summary>
+    /// Which cluster each of the tenant's components runs on. A StorageLink carries a ComponentId
+    /// and no cluster of its own, and this page needs the cluster to tell whether a discovered
+    /// MinIO instance is already registered. It used to read <c>l.Component.ClusterId</c> through
+    /// an EF navigation the service had to Include for this one predicate.
+    /// </summary>
+    private Dictionary<Guid, Guid> clusterByComponent = [];
     private List<Data.Environment> environments = [];
 
     // OpenStack connections
@@ -894,6 +903,11 @@
 
         minioAvailable = minioTask.Result;
         storageLinks = linksTask.Result;
+
+        // Loaded once per page load rather than per refresh: a new link points at a component that
+        // already exists, so registering one cannot invalidate this map.
+        clusterByComponent = (await Catalog.GetComponentsForTenantAsync(TenantId))
+            .ToDictionary(c => c.Id, c => c.ClusterId);
 
         if (minioAvailable)
         {
@@ -1413,7 +1427,9 @@
     private bool IsMinioRegistered(MinioBucketInfo instance) =>
         storageLinks.Any(l =>
             l.Provider == StorageProvider.MinIO &&
-            l.Component?.ClusterId == instance.ClusterId &&
+            l.ComponentId is Guid componentId
+            && clusterByComponent.TryGetValue(componentId, out Guid linkCluster)
+            && linkCluster == instance.ClusterId &&
             string.Equals(l.Endpoint, instance.Endpoint, StringComparison.OrdinalIgnoreCase));
 
     // ── Refresh + Helpers ──
