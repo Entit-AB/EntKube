@@ -72,10 +72,11 @@ public class OpenStackComputeService(OpenStackHttpFactory httpFactory, ILogger<O
         await AddIngressRuleAsync(network, session, sgId, 22, ct);
         await AddIngressRuleAsync(network, session, sgId, 6443, ct);
 
-        // 3. Resolve image + boot the server.
+        // 3. Resolve image + flavor, then boot the server.
         string imageId = await ResolveImageIdAsync(session, config.BootstrapImageName, ct);
+        string flavorId = await ResolveFlavorIdAsync(session, config.BootstrapFlavor, ct);
         string serverId = await CreateServerAsync(
-            compute, session, name, imageId, config.BootstrapFlavor,
+            compute, session, name, imageId, flavorId,
             config.BootstrapNetworkId, keypairName, sgId, cloudInitUserData, ct);
 
         logger.LogInformation("Bootstrap VM {ServerId} created; waiting for ACTIVE", serverId);
@@ -128,17 +129,21 @@ public class OpenStackComputeService(OpenStackHttpFactory httpFactory, ILogger<O
     }
 
     private async Task<string> CreateServerAsync(
-        string compute, KeystoneSession session, string name, string imageId, string flavor,
+        string compute, KeystoneSession session, string name, string imageId, string flavorId,
         string networkId, string keypairName, string securityGroupId, string cloudInit, CancellationToken ct)
     {
-        // Nova accepts a flavorRef by name or id; we pass the configured flavor name.
+        // ⚠️ flavorRef is an ID, not a name. The comment here used to say Nova accepts either and
+        // passed the configured name straight through, which fails with a 400 that reads as if the
+        // flavor did not exist at all: `Flavor 4C-8GB-100GB could not be found.` It existed — the
+        // picker lists what Nova itself reports — it just is not addressable by name here. Resolved
+        // by ResolveFlavorIdAsync, the same way imageRef has always been.
         object body = new
         {
             server = new
             {
                 name,
                 imageRef = imageId,
-                flavorRef = flavor,
+                flavorRef = flavorId,
                 key_name = keypairName,
                 networks = new[] { new { uuid = networkId } },
                 security_groups = new[] { new { name } },
@@ -173,6 +178,50 @@ public class OpenStackComputeService(OpenStackHttpFactory httpFactory, ILogger<O
             return img.GetProperty("id").GetString()!;
         }
         throw new InvalidOperationException($"OpenStack image '{imageName}' not found in the project.");
+    }
+
+    /// <summary>
+    /// The flavor id for a configured flavor, which may be given as either an id or a name.
+    ///
+    /// <para>Accepts both because the picker stores the <em>name</em> (that is what an operator
+    /// recognises, and what Cluster API's own <c>flavor</c> field takes), while Nova's
+    /// <c>flavorRef</c> only resolves ids. A value that is already an id is passed through, so a
+    /// hand-edited configuration keeps working.</para>
+    ///
+    /// <para>The failure names what is available, because the OpenStack error for this does not:
+    /// "could not be found" reads as though the flavor is missing from the project, when the real
+    /// cause is usually a flavor from a different region — Cleura's differ per region — or a stale
+    /// saved configuration.</para>
+    /// </summary>
+    private async Task<string> ResolveFlavorIdAsync(
+        KeystoneSession session, string flavor, CancellationToken ct)
+        => ResolveFlavorId(await ListFlavorsAsync(session, ct), flavor);
+
+    /// <summary>
+    /// The matching decision, split from the fetch for the same reason as
+    /// <c>KubernetesClientFactory.BuildDeleteArguments</c>: every test on this path reaches
+    /// OpenStack through a fake, so a rule written inline is a rule no test ever runs.
+    /// </summary>
+    public static string ResolveFlavorId(IReadOnlyList<OpenStackFlavor> flavors, string flavor)
+    {
+        // Id first, then name. Both orders work for well-formed data; this one also does the right
+        // thing in the pathological case where one flavor's NAME equals another's id.
+        OpenStackFlavor? match =
+            flavors.FirstOrDefault(f => string.Equals(f.Id, flavor, StringComparison.Ordinal))
+            ?? flavors.FirstOrDefault(f => string.Equals(f.Name, flavor, StringComparison.OrdinalIgnoreCase));
+
+        if (match is not null)
+        {
+            return match.Id;
+        }
+
+        string available = flavors.Count == 0
+            ? "none are visible to this project"
+            : string.Join(", ", flavors.OrderBy(f => f.Name, StringComparer.OrdinalIgnoreCase)
+                .Select(f => f.Name).Take(25));
+
+        throw new InvalidOperationException(
+            $"OpenStack flavor '{flavor}' is not available in this region. Available: {available}.");
     }
 
     // ──────── Neutron ────────

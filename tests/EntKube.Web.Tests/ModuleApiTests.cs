@@ -75,6 +75,12 @@ public class ModuleApiTests : IDisposable
         {
             Id = deploymentId, AppId = appId, Name = $"{label}-deploy",
             EnvironmentId = environmentId, ClusterId = clusterId, Namespace = label,
+            // Deliberately NOT the zero member of any of the three. These are persisted as text,
+            // and a projection that casts them to int reads 0 on SQLite and throws on PostgreSQL —
+            // so seeding the default would hide both failures. See Delivery_carries_the_enums.
+            Type = Data.DeploymentType.HelmChart,
+            SyncStatus = Data.SyncStatus.OutOfSync,
+            HealthStatus = Data.HealthStatus.Degraded,
         });
         db.StorageLinks.Add(new StorageLink
         {
@@ -273,6 +279,54 @@ public class ModuleApiTests : IDisposable
             ((int)(StorageProviderKind)(int)p).Should().Be((int)p,
                 $"{p} must keep its ordinal, because the projection casts rather than switches");
         }
+    }
+
+    /// <summary>
+    /// The three enums a deployment carries survive the trip through the contract.
+    ///
+    /// <para><b>This is the test that was missing, and the bug it would have caught was live.</b>
+    /// <c>AppDeployment.Type</c>, <c>SyncStatus</c> and <c>HealthStatus</c> are persisted as text
+    /// (<c>HasConversion&lt;string&gt;()</c>), and <c>DeliveryApi</c>'s projection cast them with
+    /// <c>(ContractDeploymentType)(int)d.Type</c> <em>inside an <c>Expression</c></em> — so the cast
+    /// ran in SQL as <c>CAST("Type" AS integer)</c>. PostgreSQL refuses outright
+    /// (<c>22P02: invalid input syntax for type integer: "HelmChart"</c>, which is how the cost
+    /// report failed); <b>SQLite returns 0</b>, so the old tests saw <c>Manual</c> with status 0 and
+    /// passed.</para>
+    ///
+    /// <para>So asserting the <em>values</em> is what matters here, not that the call succeeds. A
+    /// test that only checked for an exception would still pass on SQLite against the bug.</para>
+    /// </summary>
+    [Fact]
+    public async Task Delivery_carries_the_enums_rather_than_casting_them_in_sql()
+    {
+        DeploymentSummary ours = (await Delivery.GetDeploymentAsync(ourTenant, ourDeployment))
+            .Should().NotBeNull().And.Subject.As<DeploymentSummary>();
+
+        ours.Type.Should().Be(EntKube.Contracts.Delivery.DeploymentType.HelmChart);
+        ours.SyncStatus.Should().Be(EntKube.Contracts.Delivery.SyncStatus.OutOfSync);
+        ours.HealthStatus.Should().Be(EntKube.Contracts.Delivery.HealthStatus.Degraded);
+
+        // Every query path shares one projection, so a regression in any of them shows up here.
+        (await Delivery.GetDeploymentsForTenantAsync(ourTenant)).Should().ContainSingle()
+            .Which.Type.Should().Be(EntKube.Contracts.Delivery.DeploymentType.HelmChart);
+        (await Delivery.GetDeploymentsForClusterAsync(ourTenant, ourCluster)).Should().ContainSingle()
+            .Which.HealthStatus.Should().Be(EntKube.Contracts.Delivery.HealthStatus.Degraded);
+    }
+
+    /// <summary>
+    /// The ordinal mapping above is only sound while the entity and contract enums agree member for
+    /// member. Three pairs, one test — a member added to one side alone silently re-labels a
+    /// deployment, and a mis-labelled health status is the kind of thing an operator acts on.
+    /// </summary>
+    [Fact]
+    public void The_delivery_enums_agree_member_for_member()
+    {
+        Enum.GetNames<EntKube.Contracts.Delivery.DeploymentType>()
+            .Should().Equal(Enum.GetNames<Data.DeploymentType>());
+        Enum.GetNames<EntKube.Contracts.Delivery.SyncStatus>()
+            .Should().Equal(Enum.GetNames<Data.SyncStatus>());
+        Enum.GetNames<EntKube.Contracts.Delivery.HealthStatus>()
+            .Should().Equal(Enum.GetNames<Data.HealthStatus>());
     }
 
     /// <summary>

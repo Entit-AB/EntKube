@@ -1,12 +1,41 @@
 namespace EntKube.Contracts.Delivery;
 
 /// <summary>How a deployment is delivered.</summary>
+/// <summary>
+/// How a deployment is defined.
+///
+/// <para><b>These mirror Delivery's own members exactly, in order, on purpose.</b> The first
+/// version of this enum was a coarser vocabulary — <c>Yaml, Helm, Git, Manual</c> — and the
+/// implementation mapped onto it with <c>(DeploymentType)(int)d.Type</c>. Nothing lined up: the
+/// entity's <c>Manual</c> is 0 and arrived as <c>Yaml</c>, its <c>HelmChart</c> arrived as
+/// <c>Git</c>, and <c>GitHelm</c> and <c>GitAppOfApps</c> had no member to land on at all, so they
+/// produced an enum value outside the declared range. It went unnoticed because this contract had
+/// no consumer that read the field.</para>
+///
+/// <para>A coarser public vocabulary would have been defensible, but it has to be an explicit
+/// mapping rather than a cast, and collapsing <c>GitHelm</c> into either "Helm" or "Git" discards
+/// something true. Mirroring is the only version that cannot invent a value, and
+/// <c>ModuleApiTests</c> keeps the two declarations in step.</para>
+/// </summary>
 public enum DeploymentType
 {
-    Yaml,
-    Helm,
-    Git,
+    /// <summary>Built from a form; the platform generates the manifests.</summary>
     Manual,
+
+    /// <summary>Raw YAML manifests supplied by the operator.</summary>
+    Yaml,
+
+    /// <summary>A Helm chart from a repository.</summary>
+    HelmChart,
+
+    /// <summary>Raw YAML manifests sourced from a git repository.</summary>
+    GitYaml,
+
+    /// <summary>A Helm chart sourced from a git repository.</summary>
+    GitHelm,
+
+    /// <summary>An app-of-apps tree sourced from a git repository.</summary>
+    GitAppOfApps,
 }
 
 /// <summary>Whether what is running matches what was asked for.</summary>
@@ -19,7 +48,10 @@ public enum SyncStatus
     Failed,
 }
 
-/// <summary>Whether what is running is well.</summary>
+/// <summary>
+/// Whether what is running is well. Mirrors Delivery's members in order — <c>Suspended</c> was
+/// missing here, so a suspended deployment had no member to map onto.
+/// </summary>
 public enum HealthStatus
 {
     Unknown,
@@ -27,6 +59,7 @@ public enum HealthStatus
     Progressing,
     Degraded,
     Missing,
+    Suspended,
 }
 
 /// <summary>
