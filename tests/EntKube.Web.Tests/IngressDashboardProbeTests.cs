@@ -53,6 +53,7 @@ public class IngressDashboardProbeTests : IDisposable
 
         sut = new IngressDashboardService(
             testDb.Factory,
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             new ClusterClientFactory(testDb.Factory, k8s.Object),
             // Constructed rather than null: the traffic path asks it per route, and a null here
             // would be a landmine for the first test that produces one.

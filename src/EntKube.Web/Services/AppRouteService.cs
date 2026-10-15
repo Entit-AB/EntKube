@@ -57,6 +57,7 @@ public class AppDeploymentRouteRequest
 /// </summary>
 public class AppRouteService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<AppRouteService> logger)
 {
     public async Task<List<AppRoute>> GetRoutesForAppAsync(Guid appId, CancellationToken ct = default)
@@ -214,8 +215,14 @@ public class AppRouteService(
         logger.LogInformation("App route {RouteId} deleted", routeId);
     }
 
+    /// <param name="tenantId">
+    /// Whose cluster's gateway to resolve. An input rather than a hop through
+    /// <c>deployment.Cluster.Components</c>, which is how this method used to reach Catalog's
+    /// table from Delivery's own row.
+    /// </param>
     public async Task<AppDeploymentRoute> AddDeploymentRouteAsync(
-        Guid appRouteId, Guid deploymentId, AppDeploymentRouteRequest request, CancellationToken ct = default)
+        Guid tenantId, Guid appRouteId, Guid deploymentId, AppDeploymentRouteRequest request,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -224,7 +231,6 @@ public class AppRouteService(
 
         AppDeployment deployment = await db.AppDeployments
             .Include(d => d.Cluster)
-                .ThenInclude(c => c.Components)
             .FirstOrDefaultAsync(d => d.Id == deploymentId, ct)
             ?? throw new InvalidOperationException("Deployment not found.");
 
@@ -239,8 +245,8 @@ public class AppRouteService(
             throw new InvalidOperationException(
                 $"Path prefix '{pathPrefix}' is already in use on this hostname. Choose a different path.");
 
-        (string gatewayName, string gatewayNamespace) =
-            ExternalRouteService.ResolveGateway(deployment.Cluster.Components);
+        (string gatewayName, string gatewayNamespace) = ExternalRouteService.ResolveGateway(
+            await catalog.GetComponentsForClusterAsync(tenantId, deployment.ClusterId, ct));
 
         AppDeploymentRoute dr = new()
         {

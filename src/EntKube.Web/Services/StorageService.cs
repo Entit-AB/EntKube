@@ -90,12 +90,22 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         // Find clusters with MinIO installed.
 
-        List<KubernetesCluster> clusters = await db.KubernetesClusters
-            .Include(k => k.Environment)
-            .Include(k => k.Components)
-            .Where(k => k.TenantId == tenantId
-                && k.Components.Any(c => (c.Name == "minio" || c.Name == "minio-operator") && c.Status == ComponentStatus.Installed))
-            .ToListAsync(ct);
+        // Which clusters run MinIO is Catalog's answer, not an EXISTS into its table. The two
+        // names are the operator's and the chart's, so that half stays in memory.
+        HashSet<Guid> minioClusterIds =
+        [
+            .. (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+                .Where(c => (c.Name == "minio" || c.Name == "minio-operator")
+                    && c.Status == EntKube.Contracts.Catalog.ComponentStatus.Installed)
+                .Select(c => c.ClusterId),
+        ];
+
+        List<KubernetesCluster> clusters = minioClusterIds.Count == 0
+            ? []
+            : await db.KubernetesClusters
+                .Include(k => k.Environment)
+                .Where(k => k.TenantId == tenantId && minioClusterIds.Contains(k.Id))
+                .ToListAsync(ct);
 
         List<MinioBucketInfo> results = [];
 

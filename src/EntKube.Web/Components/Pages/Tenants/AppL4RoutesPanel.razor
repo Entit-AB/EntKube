@@ -365,7 +365,7 @@
         addError = null;
         try
         {
-            await L4RouteService.AddRouteAsync(App.Id, newDeploymentId, new AppL4RouteRequest
+            await L4RouteService.AddRouteAsync(TenantId, App.Id, newDeploymentId, new AppL4RouteRequest
             {
                 Protocol = newProtocol,
                 ExternalPort = newExternalPort,

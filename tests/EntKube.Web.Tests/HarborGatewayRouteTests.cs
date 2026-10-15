@@ -18,6 +18,17 @@ namespace EntKube.Web.Tests;
 /// </summary>
 public class HarborGatewayRouteTests
 {
+
+    /// <summary>
+    /// The generator takes the component explicitly now — it used to reach through
+    /// <c>route.Component</c>, which was a read of Catalog's table from Connectivity's own row.
+    /// A test legitimately holds the entity graph, so it passes the same object it built.
+    /// </summary>
+    private static string HttpRouteYaml(ExternalRoute route)
+        => ExternalRouteService.GenerateHttpRouteYaml(route, route.Component);
+
+    private static IEnumerable<string> BackendServiceNames(ExternalRoute route)
+        => ExternalRouteService.BackendServiceNames(route, route.Component);
     private static CatalogEntry Harbor =>
         ComponentCatalog.GetByKey("harbor") ?? throw new InvalidOperationException("harbor entry is gone");
 
@@ -115,7 +126,7 @@ public class HarborGatewayRouteTests
     [Fact]
     public void The_route_sends_the_api_and_registry_paths_to_core_and_the_rest_to_the_portal()
     {
-        string yaml = ExternalRouteService.GenerateHttpRouteYaml(HarborRoute());
+        string yaml = HttpRouteYaml(HarborRoute());
 
         yaml.Should().Contain("name: harbor-core");
         yaml.Should().Contain("name: harbor-portal");
@@ -136,7 +147,7 @@ public class HarborGatewayRouteTests
     [Fact]
     public void The_route_never_points_at_the_nginx_service_the_chart_no_longer_installs()
     {
-        string yaml = ExternalRouteService.GenerateHttpRouteYaml(HarborRoute());
+        string yaml = HttpRouteYaml(HarborRoute());
 
         yaml.Should().NotContain("name: harbor\n");
         yaml.Should().NotContain("- name: harbor\n");
@@ -149,7 +160,7 @@ public class HarborGatewayRouteTests
     [Fact]
     public void A_release_not_named_after_the_chart_routes_to_its_own_services()
     {
-        string yaml = ExternalRouteService.GenerateHttpRouteYaml(HarborRoute(releaseName: "registry"));
+        string yaml = HttpRouteYaml(HarborRoute(releaseName: "registry"));
 
         yaml.Should().Contain("name: registry-harbor-core");
         yaml.Should().Contain("name: registry-harbor-portal");
@@ -162,7 +173,7 @@ public class HarborGatewayRouteTests
     [Fact]
     public void Every_rule_carries_the_same_policy_a_single_backend_route_would()
     {
-        string yaml = ExternalRouteService.GenerateHttpRouteYaml(HarborRoute());
+        string yaml = HttpRouteYaml(HarborRoute());
 
         yaml.Split($"request: {ExternalRouteService.RegistryRequestTimeoutSeconds}s")
             .Should().HaveCount(3);
@@ -177,7 +188,7 @@ public class HarborGatewayRouteTests
     [Fact]
     public void An_explicit_path_prefix_keeps_the_single_backend_it_asked_for()
     {
-        string yaml = ExternalRouteService.GenerateHttpRouteYaml(
+        string yaml = HttpRouteYaml(
             HarborRoute(pathPrefix: "/registry"));
 
         yaml.Should().Contain("value: /registry");
@@ -197,7 +208,7 @@ public class HarborGatewayRouteTests
         route.Component.ReleaseName = "kube-prometheus-stack";
         route.ServiceName = "kube-prometheus-stack-grafana";
 
-        string yaml = ExternalRouteService.GenerateHttpRouteYaml(route);
+        string yaml = HttpRouteYaml(route);
 
         yaml.Should().Contain("name: kube-prometheus-stack-grafana");
         yaml.Split("backendRefs:").Should().HaveCount(2);
@@ -230,7 +241,7 @@ public class HarborGatewayRouteTests
     [Fact]
     public void Both_halves_of_the_hostname_are_reported_as_backends()
     {
-        ExternalRouteService.BackendServiceNames(HarborRoute())
+        BackendServiceNames(HarborRoute())
             .Should().BeEquivalentTo(["harbor-core", "harbor-portal"]);
     }
 }

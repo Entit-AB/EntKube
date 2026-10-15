@@ -21,6 +21,14 @@ namespace EntKube.Web.Tests;
 /// </summary>
 public class AppRouteHostnameOwnershipTests
 {
+
+    /// <summary>
+    /// The generator takes the component explicitly now — it used to reach through
+    /// <c>route.Component</c>, which was a read of Catalog's table from Connectivity's own row.
+    /// A test legitimately holds the entity graph, so it passes the same object it built.
+    /// </summary>
+    private static string HttpRouteYaml(ExternalRoute route)
+        => ExternalRouteService.GenerateHttpRouteYaml(route, route.Component);
     // ── Helpers ──
 
     /// <summary>An AppRoute claiming a hostname. Its rules do not matter here, only the claim.</summary>
@@ -175,7 +183,7 @@ public class AppRouteHostnameOwnershipTests
         ];
 
         string appRouteYaml = AppRouteService.GenerateHttpRouteYaml(appRoute, deploymentRoutes);
-        string externalRouteYaml = ExternalRouteService.GenerateHttpRouteYaml(
+        string externalRouteYaml = HttpRouteYaml(
             ExternalRouteFor(hostname));
 
         const string sharedName = "name: flow-sto2-entit-eu-route";

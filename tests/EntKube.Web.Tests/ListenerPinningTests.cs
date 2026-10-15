@@ -20,6 +20,14 @@ namespace EntKube.Web.Tests;
 /// </summary>
 public class ListenerPinningTests
 {
+
+    /// <summary>
+    /// The generator takes the component explicitly now — it used to reach through
+    /// <c>route.Component</c>, which was a read of Catalog's table from Connectivity's own row.
+    /// A test legitimately holds the entity graph, so it passes the same object it built.
+    /// </summary>
+    private static string HttpRouteYaml(ExternalRoute route)
+        => ExternalRouteService.GenerateHttpRouteYaml(route, route.Component);
     private static readonly IDeserializer Yaml = new DeserializerBuilder().Build();
 
     private static Dictionary<object, object> Parse(string yaml) =>
@@ -81,7 +89,7 @@ public class ListenerPinningTests
     [Fact]
     public void An_external_route_attaches_only_to_its_own_https_listener()
     {
-        string yaml = ExternalRouteService.GenerateHttpRouteYaml(External());
+        string yaml = HttpRouteYaml(External());
 
         SectionNames(yaml).Should().Equal("shop-example-com");
     }
@@ -104,7 +112,7 @@ public class ListenerPinningTests
 
         foreach (string yaml in new[]
         {
-            ExternalRouteService.GenerateHttpRouteYaml(External()),
+            HttpRouteYaml(External()),
             AppRouteService.GenerateHttpRouteYaml(route, [Deployment(route)]),
         })
         {
@@ -132,7 +140,7 @@ public class ListenerPinningTests
             .Select(l => l.Trim()["- name: ".Length..])
             .ToList();
 
-        SectionNames(ExternalRouteService.GenerateHttpRouteYaml(external))
+        SectionNames(HttpRouteYaml(external))
             .Should().BeSubsetOf(listeners);
         SectionNames(AppRouteService.GenerateHttpRouteYaml(app, [Deployment(app)]))
             .Should().BeSubsetOf(listeners);
@@ -181,7 +189,7 @@ public class ListenerPinningTests
 
         foreach (string yaml in new[]
         {
-            ExternalRouteService.GenerateHttpRouteYaml(External()),
+            HttpRouteYaml(External()),
             AppRouteService.GenerateHttpRouteYaml(route, [Deployment(route)]),
         })
         {

@@ -23,6 +23,7 @@ namespace EntKube.Web.Services;
 /// </summary>
 public partial class IngressDashboardService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     PrometheusService prometheus,
     ILogger<IngressDashboardService> logger)
@@ -40,19 +41,33 @@ public partial class IngressDashboardService(
 
         // Only clusters whose kubeconfig is actually stored can be queried live.
         List<KubernetesCluster> clusters = await db.KubernetesClusters
-            .Include(c => c.Components)
             .Where(c => c.TenantId == tenantId && c.KubeconfigSecretId != null)
             .ToListAsync(ct);
+
+        // The components come from Catalog rather than from an Include on the cluster row. One
+        // answer serves three things below: the gateway class per cluster, which routes are this
+        // tenant's, and the cluster name an orphan is reported against — the last two used to walk
+        // ExternalRoute -> ClusterComponent -> KubernetesCluster, and the contract's DTO carries
+        // ClusterName already.
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> components =
+            await catalog.GetComponentsForTenantAsync(tenantId, ct);
+
+        Dictionary<Guid, List<EntKube.Contracts.Catalog.InstalledComponent>> componentsByCluster =
+            components.GroupBy(c => c.ClusterId).ToDictionary(g => g.Key, g => g.ToList());
+        Dictionary<Guid, string> clusterNameByComponent =
+            components.ToDictionary(c => c.Id, c => c.ClusterName);
 
         Dictionary<Guid, string> envNames = await db.Environments
             .Where(e => e.TenantId == tenantId)
             .ToDictionaryAsync(e => e.Id, e => e.Name, ct);
 
         // Stored routes EntKube itself created — used to flag unmanaged/orphaned drift.
-        List<ExternalRoute> stored = await db.ExternalRoutes
-            .Include(r => r.Component).ThenInclude(c => c.Cluster)
-            .Where(r => r.Component.Cluster.TenantId == tenantId)
-            .ToListAsync(ct);
+        List<Guid> componentIds = [.. components.Select(c => c.Id)];
+        List<ExternalRoute> stored = componentIds.Count == 0
+            ? []
+            : await db.ExternalRoutes
+                .Where(r => componentIds.Contains(r.ComponentId))
+                .ToListAsync(ct);
         HashSet<string> managedHosts = stored
             .Select(r => r.Hostname.Trim().ToLowerInvariant())
             .Where(h => h.Length > 0)
@@ -72,7 +87,8 @@ public partial class IngressDashboardService(
                 continue;
             }
 
-            string gatewayClass = ExternalRouteService.ResolveGatewayClass(cluster.Components);
+            string gatewayClass = ExternalRouteService.ResolveGatewayClass(
+                componentsByCluster.GetValueOrDefault(cluster.Id, []));
             string envName = envNames.GetValueOrDefault(cluster.EnvironmentId, "—");
 
             try
@@ -101,7 +117,7 @@ public partial class IngressDashboardService(
             .Where(r => !string.IsNullOrWhiteSpace(r.Hostname)
                 && !liveHosts.Contains(r.Hostname.Trim().ToLowerInvariant()))
             .Select(r => new OrphanedRoute(r.Hostname, r.ServiceName ?? "—",
-                r.Component?.Cluster?.Name ?? "—"))
+                clusterNameByComponent.GetValueOrDefault(r.ComponentId, "—")))
             .DistinctBy(o => o.Hostname)
             .ToList();
 

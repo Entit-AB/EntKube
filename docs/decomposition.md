@@ -549,7 +549,7 @@ shape the work turned out to have. Where it stands, against the figures this sec
 |---|---|---|
 | credential sites | 508 in 57 files | **22 in 13** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
-| foreign reads of `ClusterComponents` | 87 | **4 direct + 49 navigation** |
+| foreign reads of `ClusterComponents` | 87 | **4 direct + 17 navigation** |
 | foreign *writes* to it | 22 | **0** |
 | own-process kubectl/helm outside the gate (§5.4) | 49 | **1** |
 | component lookups escaping their tenant | 14 | **0** |
@@ -727,6 +727,55 @@ That is the third time in this programme that a count became an argument before 
 §4.0.1.4's file-name/type-name bug), and the rule it keeps earning is: **enumerate a metric's
 spellings before trusting its total**, and treat a conversion that moves a ratchet by zero as
 evidence about the ratchet.
+
+**32 of the 49 are converted (2026-10-15), and no new contract method was needed for any of
+them** — which was the prediction, so it is worth saying that it held. Eight files are at zero:
+`ExternalRouteService` (11), `IngressDashboardService` (5), `KeycloakService` (5),
+`AppL4RouteService` (3), `AppRouteService` (2), `DatabaseService` (2), `ExternalRouteHealthService`
+and `HeadscaleCertSyncService`.
+
+`ExternalRouteService` is the one worth reading. Its eleven were six public static YAML generators
+and two split-backend helpers reading `route.Component` for a namespace, a name, a chart name and a
+release name — *exactly* `IComponentNaming`'s four members. They take that interface now, so the
+contract's DTO and the entity both satisfy them with no conversion, and the two async loaders
+resolve the component through `GetComponentAsync(tenantId, …)`. **An interface the contract already
+published turned out to be the whole conversion**, which is the inverse of the #138 lesson: there,
+four contracts had no consumers; here, a consumer-shaped interface was sitting unused by the people
+who needed it most.
+
+⚠️ **Two of the conversions closed real holes that nobody was looking for.**
+`DeploymentImportService.ImportAsync` opened with `Guid tenantId = cluster.TenantId;` — a label, not
+a check, so whatever cluster row arrived was imported into its own tenant and every tenant-scoped
+call beneath it compared that row to itself. And `KeycloakService` took the component off the row
+the theme pointed at, so a theme naming another tenant's component deployed a theme onto it; the
+contract's lookup is tenant-first, so that now resolves to nothing. Both were found by *threading
+the tenant*, not by auditing for missing checks — which is the argument for doing these conversions
+rather than only measuring them.
+
+Three of the fourteen in the first pass were reads that had already been **half** moved, and that
+pattern is worth watching for: `HeadscaleCertSyncService` asked Catalog for its component ids and
+then joined back into Catalog's table for `r.Component.ClusterId`, a field the contract answer in
+its hand already carried; `IngressDashboardService` walked `ExternalRoute → ClusterComponent →
+KubernetesCluster` for a cluster *name* that `InstalledComponent` also carries; and
+`ExternalRouteHealthService`'s `RoutesFor` reached its tenant through two navigations. A service
+that asks the contract and *then* follows a navigation has not finished converting — it has added a
+round trip.
+
+**What the remaining 17 are, and why each is still there.** `KubernetesOperationsService` 13 is
+ordinary work and the last large holding. `StorageService` 3: two are `ResolveMinioKubeconfigAsync`,
+which hands a raw kubeconfig to the S3 proxy and is blocked on the **credentialed channel** seam
+shape described below, and one is an `Include` kept alive by `StorageTab.razor` reading
+`l.Component?.ClusterId`. `VpnService` 1 is the same shape — `NetworkingTab.razor` reads
+`ep.Component.Name`. Those last two are the `TailscaleOperator` lesson again: **the DTO is the
+blocker**, and the page has to stop receiving the entity graph before the service can stop loading
+it.
+
+⚠️ **The ratchet reads the source tree at test time, so it cannot be trusted while that tree is
+being edited.** A full run during this work reported one failure — the navigation count had dropped
+below the banked figure because conversions landed while the suite was running — and an earlier
+disrupted run reported green on 3,983 of 4,005 tests in 30 minutes. Neither is a result. Any
+source-reading ratchet makes the suite non-hermetic with respect to the working tree: finish the
+edits, then run it.
 
 **This is the gap the module contexts already documented, and it had no number.**
 `ModuleDbContext`'s own summary says it plainly: "the model still contains every entity, so a

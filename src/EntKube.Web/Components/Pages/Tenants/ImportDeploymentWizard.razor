@@ -695,7 +695,7 @@
                 PerformedBy = "import-wizard"
             };
 
-            result = await ImportService.ImportAsync(cluster!, request);
+            result = await ImportService.ImportAsync(TenantId, cluster!, request);
             step = Step.Done;
         }
         catch (Exception ex)

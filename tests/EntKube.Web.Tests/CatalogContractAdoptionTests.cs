@@ -421,11 +421,61 @@ public class CatalogContractAdoptionTests
     /// <c>ICatalogApi</c> has to serve. <c>LokiService</c> is what surfaced it: converting its
     /// component read to the contract moved this ratchet by <em>zero</em>.</para>
     ///
-    /// <para><b>What they are:</b> <c>KubernetesOperationsService</c> 13,
-    /// <c>ExternalRouteService</c> 11, <c>IngressDashboardService</c> 5, <c>KeycloakService</c> 5,
-    /// <c>StorageService</c> 5, <c>AppL4RouteService</c> 3, <c>AppRouteService</c> 2,
-    /// <c>DatabaseService</c> 2, and one each in <c>ExternalRouteHealthService</c>,
-    /// <c>HeadscaleCertSyncService</c> and <c>VpnService</c>.</para>
+    /// <para><b>17 now, from 49, and no new contract method was needed for any of it.</b> Eight
+    /// files are at zero: <c>ExternalRouteService</c> (11), <c>IngressDashboardService</c> (5),
+    /// <c>KeycloakService</c> (5), <c>AppL4RouteService</c> (3), <c>AppRouteService</c> (2),
+    /// <c>DatabaseService</c> (2), <c>ExternalRouteHealthService</c> and
+    /// <c>HeadscaleCertSyncService</c>.</para>
+    ///
+    /// <para><b>What the 17 are, and why each is still here:</b>
+    /// <c>KubernetesOperationsService</c> 13 — ordinary work, the last large holding;
+    /// <c>StorageService</c> 3 — two are <c>ResolveMinioKubeconfigAsync</c>, which returns a raw
+    /// kubeconfig for the S3 proxy and is blocked on the <b>credentialed channel</b> seam shape
+    /// (see §4.0.1.5), and the third is <c>Include(s =&gt; s.Component)</c> kept alive by
+    /// <c>StorageTab.razor</c> reading <c>l.Component?.ClusterId</c>; <c>VpnService</c> 1 — the
+    /// same shape, <c>NetworkingTab.razor</c> reading <c>ep.Component.Name</c>. Those last two are
+    /// the <c>TailscaleOperator</c> lesson again: <b>the DTO is the blocker</b>, and the page has
+    /// to stop receiving the entity graph before the service can stop loading it.</para>
+    ///
+    /// <para><c>ExternalRouteService</c> was the interesting one. Its eleven were six public static
+    /// YAML generators plus the two split-backend helpers reading <c>route.Component</c> for a
+    /// namespace, a name, a chart name and a release name — <em>exactly</em>
+    /// <see cref="EntKube.Contracts.Catalog.IComponentNaming"/>'s four members, so they take that
+    /// interface now and both the contract's DTO and the entity satisfy it. Its two async loaders
+    /// take a tenant and resolve the component through <c>GetComponentAsync</c>: a route carries no
+    /// tenant of its own, and the <c>Include</c> they used to do asked nobody's permission.</para>
+    ///
+    /// <para><c>KeycloakService</c>'s five were two <c>ThenInclude</c> chains walking
+    /// <c>KeycloakTheme → KeycloakComponentConfig → ClusterComponent → KubernetesCluster</c>. The
+    /// theme's config is Identity's own row; the rest was Catalog's and Fleet's. Converting it
+    /// closed a real hole: the component came off the row the theme pointed at, so a theme naming
+    /// another tenant's component deployed a theme onto it. Catalog's lookup is tenant-first, so
+    /// that now resolves to nothing.</para>
+    ///
+    /// <para>Three of those conversions were not swaps and are worth naming, because each was a
+    /// read that had already been *half* moved:</para>
+    /// <list type="bullet">
+    ///   <item><c>HeadscaleCertSyncService</c> asked Catalog for its component ids and then did
+    ///   <c>.Select(r =&gt; r.Component.ClusterId)</c> — a JOIN back into Catalog's table for a
+    ///   field the contract answer it already held carries.</item>
+    ///   <item><c>ExternalRouteHealthService.RoutesFor</c> was
+    ///   <c>Where(r =&gt; r.Component.Cluster.TenantId == tenantId)</c>: a correct predicate, and a
+    ///   two-hop read out of Connectivity's own table into Catalog's and then Fleet's. The tenant
+    ///   check is not weaker — it has moved into Catalog's tenant-first lookup, which is the one
+    ///   place that answers "whose components are these?".</item>
+    ///   <item><c>IngressDashboardService</c> walked <c>ExternalRoute → ClusterComponent →
+    ///   KubernetesCluster</c> for a cluster <em>name</em> that <c>InstalledComponent</c> already
+    ///   carries. One contract call now serves the gateway class per cluster, which routes are this
+    ///   tenant's, and that name.</item>
+    /// </list>
+    ///
+    /// <para><c>AppRouteService.AddDeploymentRouteAsync</c> and
+    /// <c>AppL4RouteService.AddRouteAsync</c> took the tenant as a parameter instead, from the three
+    /// pages that already had one — and that surfaced a real authorization hole in a third caller:
+    /// <c>DeploymentImportService.ImportAsync</c> opened with <c>Guid tenantId = cluster.TenantId;</c>,
+    /// a label rather than a check, so whatever cluster row arrived was imported into its own
+    /// tenant and every tenant-scoped call beneath it compared that row to itself. It takes a
+    /// tenant now and refuses the mismatch; see <c>DeploymentImportTenancyTests</c>.</para>
     ///
     /// <para><b>No new contract method serves any of them</b>, which is worth saying because the
     /// first guess was that this number was asking for one. Fifteen pass the loaded collection to
@@ -456,7 +506,7 @@ public class CatalogContractAdoptionTests
     /// spellings before trusting its total</b>, and a conversion that moves a ratchet by zero is
     /// evidence about the ratchet rather than about the conversion.</para>
     /// </summary>
-    private const int BaselineNavigation = 49;
+    private const int BaselineNavigation = 17;
 
     [Fact]
     public void No_new_service_reaches_past_the_catalog_contract()
