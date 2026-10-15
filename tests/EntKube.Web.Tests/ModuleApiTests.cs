@@ -233,6 +233,11 @@ public class ModuleApiTests : IDisposable
         // without reaching for Delivery's Environments table. A contract field nothing asserts is a
         // contract field that silently stops being projected.
         ours.EnvironmentName.Should().Be("ours-env");
+
+        // Same bargain, same reason to assert it: ClusterName is here so the four callers that
+        // display it — three service tabs and the public API's /deployments route — do not each
+        // make a Fleet call for one string.
+        ours.ClusterName.Should().Be("ours-cluster");
         (await Delivery.GetDeploymentsForClusterAsync(ourTenant, theirCluster)).Should().BeEmpty();
     }
 

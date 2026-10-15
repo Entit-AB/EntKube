@@ -101,6 +101,13 @@ public sealed record AppSummary(
 /// and how an interface stays unused.
 /// </param>
 /// <param name="ClusterId">Which cluster.</param>
+/// <param name="ClusterName">
+/// That cluster's name, beside its id for the same reason <paramref name="EnvironmentName"/> is:
+/// to save a second lookup. Four callers wanted it — three service tabs and the public API's
+/// /deployments route, which was resolving it through a separate Fleet call. One caller would not
+/// have earned a field here; a DTO that grows for one route's convenience is how a contract turns
+/// back into a second name for the database.
+/// </param>
 /// <param name="Name">The deployment's name.</param>
 /// <param name="Type">How it is delivered.</param>
 /// <param name="Namespace">Where it lands.</param>
@@ -117,6 +124,7 @@ public sealed record DeploymentSummary(
     Guid EnvironmentId,
     string EnvironmentName,
     Guid ClusterId,
+    string ClusterName,
     string Name,
     DeploymentType Type,
     string? Namespace,

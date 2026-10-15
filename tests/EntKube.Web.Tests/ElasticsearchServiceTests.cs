@@ -45,6 +45,7 @@ public class ElasticsearchServiceTests : IDisposable
             testDb.Factory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
             vault, audit, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory),
             NullLogger<ElasticsearchService>.Instance);
     }
 

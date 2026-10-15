@@ -2,6 +2,7 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -170,11 +171,12 @@ public sealed record ElasticsearchRemoteRef(
 /// re-runnable — applying twice is a no-op.</para>
 /// </summary>
 public class ElasticsearchService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DataServicesDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     VaultService vaultService,
     AuditService auditService,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
+    EntKube.Contracts.Delivery.IDeliveryApi delivery,
     ILogger<ElasticsearchService> logger)
 {
     /// <summary>
@@ -215,7 +217,7 @@ public class ElasticsearchService(
     public async Task<List<ElasticsearchCluster>> GetClustersAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster).ThenInclude(k => k.Environment)
             .Where(c => c.TenantId == tenantId)
@@ -226,7 +228,7 @@ public class ElasticsearchService(
     public async Task<ElasticsearchCluster?> GetClusterAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
             .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
@@ -236,7 +238,7 @@ public class ElasticsearchService(
     public async Task<ElasticsearchOperatorStatus> GetOperatorStatusAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         // Asked of Catalog rather than of its table. The predicate is unchanged and
         // applied here: these alias lists are not symmetrical across Name,
@@ -318,7 +320,7 @@ public class ElasticsearchService(
         // Scoped by the asking tenant, not by the id alone. This read used to take the tenant off
         // the row it had just fetched by id and hand it back to the seam — a predicate comparing a
         // row to itself, which cannot fail. See VacuousTenantCheckTests.
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         KubernetesCluster? k8sCluster = await db.KubernetesClusters
             .FirstOrDefaultAsync(c => c.Id == kubernetesClusterId && c.TenantId == tenantId, ct);
 
@@ -421,7 +423,7 @@ public class ElasticsearchService(
         bool acknowledgeCapacity = false,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         if (await db.ElasticsearchClusters.AnyAsync(
                 c => c.KubernetesClusterId == cluster.KubernetesClusterId
@@ -479,7 +481,7 @@ public class ElasticsearchService(
         bool acknowledgeCapacity = false,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -529,7 +531,7 @@ public class ElasticsearchService(
     /// </summary>
     public async Task DeleteClusterAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -602,7 +604,7 @@ public class ElasticsearchService(
     public async Task<ElasticsearchClusterDetail?> GetClusterDetailAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster? cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -669,7 +671,7 @@ public class ElasticsearchService(
     public async Task ReconcileStatusAsync(
         Guid clusterId, bool ready, string? health, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         ElasticsearchCluster? tracked = await db.ElasticsearchClusters.FindAsync([clusterId], ct);
         if (tracked is null) return;
 
@@ -709,13 +711,13 @@ public class ElasticsearchService(
     /// One tenant's Elasticsearch clusters that a status poll should look at. Public and static so
     /// the scoping is assertable without a cluster; see <c>ReconcileSweepTenancyTests</c>.
     /// </summary>
-    public static IQueryable<ElasticsearchCluster> ReconcilableFor(ApplicationDbContext db, Guid tenantId)
+    public static IQueryable<ElasticsearchCluster> ReconcilableFor(DataServicesDbContext db, Guid tenantId)
         => db.ElasticsearchClusters
             .Where(c => c.TenantId == tenantId && c.Status != ElasticsearchClusterStatus.Failed);
 
     public async Task ReconcileAllAsync(CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         DateTime now = DateTime.UtcNow;
 
@@ -774,7 +776,7 @@ public class ElasticsearchService(
     public async Task<string?> GetElasticPasswordAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         ElasticsearchCluster? cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
             .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
@@ -790,7 +792,7 @@ public class ElasticsearchService(
     public async Task<List<ElasticsearchIlmPolicy>> GetPoliciesAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.ElasticsearchIlmPolicies
             .Where(p => p.TenantId == tenantId && p.ElasticsearchClusterId == clusterId)
             .OrderBy(p => p.Name)
@@ -800,7 +802,7 @@ public class ElasticsearchService(
     public async Task<ElasticsearchIlmPolicy> CreatePolicyAsync(
         ElasticsearchIlmPolicy policy, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .FirstOrDefaultAsync(c => c.Id == policy.ElasticsearchClusterId && c.TenantId == policy.TenantId, ct)
@@ -824,7 +826,7 @@ public class ElasticsearchService(
     public async Task UpdatePolicyAsync(
         ElasticsearchIlmPolicy edited, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchIlmPolicy policy = await db.ElasticsearchIlmPolicies
             .FirstOrDefaultAsync(p => p.Id == edited.Id && p.TenantId == edited.TenantId, ct)
@@ -859,7 +861,7 @@ public class ElasticsearchService(
     public async Task DeletePolicyAsync(
         Guid tenantId, Guid policyId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchIlmPolicy policy = await db.ElasticsearchIlmPolicies
             .Include(p => p.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
@@ -899,7 +901,7 @@ public class ElasticsearchService(
     public async Task ApplyPoliciesAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -969,7 +971,7 @@ public class ElasticsearchService(
     public async Task<List<ElasticsearchDataView>> GetDataViewsAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.ElasticsearchDataViews
             .Where(v => v.TenantId == tenantId && v.ElasticsearchClusterId == clusterId)
             .OrderBy(v => v.SpaceId).ThenBy(v => v.Title)
@@ -984,7 +986,7 @@ public class ElasticsearchService(
         Guid tenantId, Guid clusterId, string? spaceId, string title, string? name, string timeFieldName,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -1032,7 +1034,7 @@ public class ElasticsearchService(
     /// <summary>Re-applies a data view, e.g. after the space or the cluster was rebuilt.</summary>
     public async Task ApplyDataViewAsync(Guid tenantId, Guid dataViewId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchDataView view = await db.ElasticsearchDataViews
             .Include(v => v.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
@@ -1044,7 +1046,7 @@ public class ElasticsearchService(
 
     public async Task DeleteDataViewAsync(Guid tenantId, Guid dataViewId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchDataView view = await db.ElasticsearchDataViews
             .Include(v => v.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
@@ -1075,7 +1077,7 @@ public class ElasticsearchService(
     }
 
     private async Task ApplyDataViewInternalAsync(
-        ApplicationDbContext db, ElasticsearchCluster cluster, ElasticsearchDataView view, CancellationToken ct)
+        DataServicesDbContext db, ElasticsearchCluster cluster, ElasticsearchDataView view, CancellationToken ct)
     {
         Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
         string configMap = SnapshotConfigMapName(cluster, $"dataview-{view.Id:N}");
@@ -1105,7 +1107,7 @@ public class ElasticsearchService(
     public async Task<List<ElasticsearchIngestPipeline>> GetPipelinesAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.ElasticsearchIngestPipelines
             .Where(p => p.TenantId == tenantId && p.ElasticsearchClusterId == clusterId)
             .OrderBy(p => p.Name)
@@ -1115,7 +1117,7 @@ public class ElasticsearchService(
     public async Task<ElasticsearchIngestPipeline> SavePipelineAsync(
         ElasticsearchIngestPipeline pipeline, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -1183,7 +1185,7 @@ public class ElasticsearchService(
     /// </summary>
     public async Task DeletePipelineAsync(Guid tenantId, Guid pipelineId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchIngestPipeline pipeline = await db.ElasticsearchIngestPipelines
             .Include(p => p.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
@@ -1234,7 +1236,7 @@ public class ElasticsearchService(
     public async Task<string> SimulatePipelineAsync(
         Guid tenantId, Guid pipelineId, string sampleDocumentJson, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchIngestPipeline pipeline = await db.ElasticsearchIngestPipelines
             .Include(p => p.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
@@ -1332,7 +1334,7 @@ public class ElasticsearchService(
     public async Task<List<ElasticsearchRemoteLink>> GetRemoteLinksAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.ElasticsearchRemoteLinks
             .Include(l => l.RemoteCluster)
             .Where(l => l.TenantId == tenantId && l.LocalClusterId == clusterId)
@@ -1353,7 +1355,7 @@ public class ElasticsearchService(
         Guid tenantId, Guid localClusterId, Guid remoteClusterId, string alias, string searchPatterns,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster local = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -1417,7 +1419,7 @@ public class ElasticsearchService(
     /// </summary>
     public async Task DeleteRemoteLinkAsync(Guid tenantId, Guid linkId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchRemoteLink link = await db.ElasticsearchRemoteLinks
             .Include(l => l.LocalCluster).ThenInclude(c => c.KubernetesCluster)
@@ -1437,7 +1439,7 @@ public class ElasticsearchService(
     public async Task<List<ElasticsearchCluster>> GetRemoteCandidatesAsync(
         Guid tenantId, Guid localClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster? local = await db.ElasticsearchClusters
             .FirstOrDefaultAsync(c => c.Id == localClusterId && c.TenantId == tenantId, ct);
@@ -1486,7 +1488,7 @@ public class ElasticsearchService(
 
     /// <summary>Re-applies one cluster's CR with everything currently true of it.</summary>
     private async Task ApplyClusterAsync(
-        ApplicationDbContext db, ElasticsearchCluster cluster,
+        DataServicesDbContext db, ElasticsearchCluster cluster,
         Clusters.IClusterClient client, CancellationToken ct)
     {
         await client.ApplyManifestAsync(
@@ -1498,7 +1500,7 @@ public class ElasticsearchService(
     }
 
     private static async Task<List<ElasticsearchRemoteRef>> ResolveRemotesAsync(
-        ApplicationDbContext db, ElasticsearchCluster cluster, CancellationToken ct)
+        DataServicesDbContext db, ElasticsearchCluster cluster, CancellationToken ct)
     {
         List<ElasticsearchRemoteLink> links = await db.ElasticsearchRemoteLinks
             .Include(l => l.RemoteCluster)
@@ -1511,7 +1513,7 @@ public class ElasticsearchService(
     }
 
     private static Task<bool> IsSearchedRemotelyAsync(
-        ApplicationDbContext db, ElasticsearchCluster cluster, CancellationToken ct) =>
+        DataServicesDbContext db, ElasticsearchCluster cluster, CancellationToken ct) =>
         db.ElasticsearchRemoteLinks.AnyAsync(l => l.RemoteClusterId == cluster.Id, ct);
 
     // ── Kibana spaces ──────────────────────────────────────────────────────────
@@ -1519,7 +1521,7 @@ public class ElasticsearchService(
     public async Task<List<ElasticsearchKibanaSpace>> GetSpacesAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.ElasticsearchKibanaSpaces
             .Where(s => s.TenantId == tenantId && s.ElasticsearchClusterId == clusterId)
             .OrderBy(s => s.Name)
@@ -1535,7 +1537,7 @@ public class ElasticsearchService(
         Guid tenantId, Guid clusterId, string spaceId, string name, string? description,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -1595,7 +1597,7 @@ public class ElasticsearchService(
     /// <summary>Re-applies a space to Kibana, e.g. after the cluster was rebuilt.</summary>
     public async Task ApplySpaceAsync(Guid tenantId, Guid spaceId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchKibanaSpace space = await db.ElasticsearchKibanaSpaces
             .Include(s => s.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
@@ -1630,7 +1632,7 @@ public class ElasticsearchService(
     public async Task DeleteSpaceAsync(
         Guid tenantId, Guid spaceId, string performedBy, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchKibanaSpace space = await db.ElasticsearchKibanaSpaces
             .Include(s => s.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
@@ -1800,7 +1802,7 @@ public class ElasticsearchService(
     public async Task<string> EnableMonitoringAsync(
         Guid tenantId, Guid clusterId, bool indexMetrics, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -1846,7 +1848,7 @@ public class ElasticsearchService(
     /// <summary>Removes the exporter and its account.</summary>
     public async Task DisableMonitoringAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -1944,7 +1946,7 @@ public class ElasticsearchService(
     public async Task<ElasticsearchUpgradePlan> PlanUpgradeAsync(
         Guid tenantId, Guid clusterId, string targetVersion, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
@@ -2069,7 +2071,7 @@ public class ElasticsearchService(
         Guid tenantId, Guid clusterId, string targetVersion, string performedBy,
         bool acceptBlockers = false, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -2236,7 +2238,7 @@ public class ElasticsearchService(
     public async Task<ElasticsearchInsight> GetInsightAsync(
         Guid tenantId, Guid clusterId, bool includeIndices = true, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -2279,7 +2281,7 @@ public class ElasticsearchService(
     /// </summary>
     public async Task RefreshInsightAsync(Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster? cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -2463,7 +2465,7 @@ public class ElasticsearchService(
     public async Task<List<ElasticsearchUser>> GetUsersAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.ElasticsearchUsers
             .Where(u => u.TenantId == tenantId && u.ElasticsearchClusterId == clusterId)
             .OrderBy(u => u.Username)
@@ -2488,7 +2490,7 @@ public class ElasticsearchService(
         string? kibanaSpaceId = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -2555,7 +2557,7 @@ public class ElasticsearchService(
     /// <summary>Re-applies a user and its role, e.g. after the cluster was rebuilt.</summary>
     public async Task ApplyUserAsync(Guid tenantId, Guid userId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchUser user = await db.ElasticsearchUsers
             .Include(u => u.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
@@ -2591,7 +2593,7 @@ public class ElasticsearchService(
         ElasticsearchKibanaAccess kibanaAccess, string? kibanaSpaceId = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchUser user = await db.ElasticsearchUsers
             .FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId, ct)
@@ -2620,7 +2622,7 @@ public class ElasticsearchService(
     public async Task<string> ResetPasswordAsync(
         Guid tenantId, Guid userId, string performedBy, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchUser user = await db.ElasticsearchUsers
             .Include(u => u.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
@@ -2691,7 +2693,7 @@ public class ElasticsearchService(
     public async Task<string?> GetUserPasswordAsync(
         Guid tenantId, Guid userId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchUser? user = await db.ElasticsearchUsers
             .Include(u => u.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
@@ -2711,7 +2713,7 @@ public class ElasticsearchService(
     /// </summary>
     public async Task DeleteUserAsync(Guid tenantId, Guid userId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchUser user = await db.ElasticsearchUsers
             .Include(u => u.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
@@ -2752,7 +2754,7 @@ public class ElasticsearchService(
     public async Task<List<ElasticsearchBinding>> GetBindingsAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.ElasticsearchBindings
             .Include(b => b.AppDeployment).ThenInclude(d => d.App).ThenInclude(a => a.Customer)
             .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
@@ -2762,23 +2764,25 @@ public class ElasticsearchService(
             .ToListAsync(ct);
     }
 
-    public async Task<List<AppDeployment>> GetTenantDeploymentsAsync(
+    /// <summary>
+    /// The tenant's deployments, for the binding pickers.
+    ///
+    /// <para>Asked of Delivery. All four service tabs had this same query written out — the
+    /// tenant's deployments with app, customer and cluster included — and it was the only thing
+    /// keeping this service on the all-seeing context. <c>DeploymentSummary</c> now carries
+    /// <c>ClusterName</c> beside <c>ClusterId</c>, which is what the pickers display.</para>
+    /// </summary>
+    public async Task<List<EntKube.Contracts.Delivery.DeploymentSummary>> GetTenantDeploymentsAsync(
         Guid tenantId, CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        return await db.AppDeployments
-            .Include(d => d.App).ThenInclude(a => a.Customer)
-            .Include(d => d.Cluster)
-            .Where(d => d.App.Customer.TenantId == tenantId)
-            .OrderBy(d => d.App.Name).ThenBy(d => d.Name)
-            .ToListAsync(ct);
-    }
+        => [.. (await delivery.GetDeploymentsForTenantAsync(tenantId, ct))
+            .OrderBy(d => d.AppName, StringComparer.Ordinal)
+            .ThenBy(d => d.Name, StringComparer.Ordinal)];
 
     public async Task<ElasticsearchBinding> CreateBindingAsync(
         Guid tenantId, Guid clusterId, Guid appDeploymentId, Guid userId, string secretName,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         if (!await db.ElasticsearchUsers.AnyAsync(
                 u => u.Id == userId && u.ElasticsearchClusterId == clusterId && u.TenantId == tenantId, ct))
@@ -2810,7 +2814,7 @@ public class ElasticsearchService(
     /// </summary>
     public async Task SyncBindingAsync(Guid tenantId, Guid bindingId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchBinding binding = await db.ElasticsearchBindings
             .Include(b => b.ElasticsearchCluster).ThenInclude(c => c.KubernetesCluster)
@@ -2855,7 +2859,7 @@ public class ElasticsearchService(
     /// <summary>Removes a binding and the Secret it put in the application's namespace.</summary>
     public async Task DeleteBindingAsync(Guid tenantId, Guid bindingId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchBinding binding = await db.ElasticsearchBindings
             .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
@@ -2925,7 +2929,7 @@ public class ElasticsearchService(
         int maxCount,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -2999,7 +3003,7 @@ public class ElasticsearchService(
     /// </summary>
     public async Task DisableSnapshotsAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -3030,7 +3034,7 @@ public class ElasticsearchService(
     /// <summary>Takes a snapshot now, off-schedule, and waits for the policy to accept it.</summary>
     public async Task RunSnapshotNowAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -3067,7 +3071,7 @@ public class ElasticsearchService(
     /// </summary>
     public async Task RefreshSnapshotStatusAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -3133,7 +3137,7 @@ public class ElasticsearchService(
     public async Task<List<ElasticsearchSnapshotInfo>> ListSnapshotsAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -3186,7 +3190,7 @@ public class ElasticsearchService(
         string performedBy,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
@@ -3349,7 +3353,7 @@ public class ElasticsearchService(
     /// failing every apply from then on.
     /// </summary>
     private async Task<ElasticsearchS3Settings?> ResolveS3Async(
-        ApplicationDbContext db, ElasticsearchCluster cluster, CancellationToken ct)
+        DataServicesDbContext db, ElasticsearchCluster cluster, CancellationToken ct)
     {
         if (!cluster.SnapshotsEnabled || cluster.SnapshotStorageLinkId is not Guid linkId) return null;
 

@@ -228,22 +228,32 @@ public class ModuleContractTests
     /// they want <c>IDeliveryApi</c>; two are the Mongo/Cnpg pair above; and
     /// <c>StorageService</c> with <c>StorageLinkClientFactory</c> hold credentials, so they move
     /// with the custody work.</para>
-    /// <para><b>Connectivity 8 → 7, and it came as a side effect.</b> <c>TailscaleService</c> was
-    /// converted for the credential and contract ratchets — its DTO handed a
-    /// <c>ClusterComponent</c> to a Razor page that read the kubeconfig off it six times — and once
-    /// its component read went to <c>ICatalogApi</c> and its cluster calls to the seam, it had no
-    /// reason left to take the shared context. Its constructor is now
-    /// <c>(IClusterClientFactory, ICatalogApi)</c> and holds no context at all.</para>
+    /// <para><b>DataServices 8 → 2, and what is left is only what credentials keep.</b>
+    /// <c>MongoService</c> and <c>CnpgService</c> moved the moment #230 took their
+    /// <c>db.VaultSecrets</c> delete out — the narrower context had refused to compile them, which
+    /// is what found the missing tenant predicate behind it. The other four
+    /// (<c>Elasticsearch</c>, <c>Kafka</c>, <c>RabbitMQ</c>, <c>Redis</c>) each had the same query
+    /// written out by hand — the tenant's deployments with app, customer and cluster included — and
+    /// it was the only thing keeping them on the shared context.</para>
     ///
-    /// <para>⚠️ Worth noticing that this ratchet moved without being aimed at, for the third time
-    /// (<c>LogQueryService</c>, <c>TelemetryNodeClient</c>, now this). The pattern is consistent
-    /// enough to predict: a service whose only use of the all-seeing context is one foreign read
-    /// and a credential comes off it the moment both have somewhere else to go. Which is an
-    /// argument for converting by <em>service</em> rather than by ratchet — the counts follow.</para>
+    /// <para><c>DeploymentSummary</c> gained <c>ClusterName</c> for it, and that is worth being
+    /// explicit about because the rule cuts both ways: <b>four</b> callers wanted it (three service
+    /// tabs and the public API's <c>/deployments</c> route, which had been resolving it through a
+    /// separate Fleet call that is now deleted), so it earns a place beside <c>ClusterId</c> for
+    /// the same reason <c>EnvironmentName</c> did. <c>CustomerName</c> had <b>one</b> caller and did
+    /// not get one — <c>MessagingTab</c> resolves it from Delivery's own app list instead. A DTO
+    /// that grows for a single consumer is how a contract turns back into a second name for the
+    /// database.</para>
+    ///
+    /// <para>The two that remain, <c>StorageService</c> and <c>StorageLinkClientFactory</c>, hold
+    /// cluster credentials, so they move with the custody work rather than before it. This module
+    /// went from the largest block on this ratchet to the smallest in three changes, and none of
+    /// them needed a new contract — only an existing one, a field with four readers, and a delete
+    /// put back where it belonged.</para>
     /// </summary>
     private static readonly Dictionary<Module, int> Baseline = new()
     {
-        [Module.DataServices] = 8,
+        [Module.DataServices] = 2,
         [Module.Telemetry] = 5,
         [Module.Connectivity] = 7,
         [Module.Support] = 7,
