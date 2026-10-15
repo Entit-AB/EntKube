@@ -38,6 +38,37 @@ public sealed class FleetApi(IDbContextFactory<FleetDbContext> dbFactory) : IFle
         return await Scoped(db, tenantId).Where(c => clusterIds.Contains(c.Id)).Select(ToContract).ToListAsync(ct);
     }
 
+    public async Task<bool> IsInMaintenanceAsync(
+        Guid tenantId, Guid clusterId, DateTime at, CancellationToken ct = default)
+    {
+        await using FleetDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        // The predicate its four callers each wrote out, including the null-cluster clause that
+        // makes a window cover everything the tenant has.
+        return await db.MaintenanceWindows
+            .AsNoTracking()
+            .AnyAsync(w => w.TenantId == tenantId
+                && w.StartsAt <= at
+                && w.EndsAt >= at
+                && (w.ClusterId == null || w.ClusterId == clusterId), ct);
+    }
+
+    public async Task<IReadOnlyList<MaintenanceWindowSummary>> GetActiveMaintenanceWindowsAsync(
+        Guid tenantId, DateTime at, CancellationToken ct = default)
+    {
+        await using FleetDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        return await db.MaintenanceWindows
+            .AsNoTracking()
+            .Where(w => w.TenantId == tenantId && w.StartsAt <= at && w.EndsAt >= at)
+            .OrderBy(w => w.StartsAt)
+            .Select(ToWindow)
+            .ToListAsync(ct);
+    }
+
+    private static readonly Expression<Func<Data.MaintenanceWindow, MaintenanceWindowSummary>> ToWindow =
+        w => new MaintenanceWindowSummary(w.Id, w.ClusterId, w.StartsAt, w.EndsAt);
+
     private static IQueryable<Data.KubernetesCluster> Scoped(FleetDbContext db, Guid tenantId)
         => db.KubernetesClusters.AsNoTracking().Where(c => c.TenantId == tenantId);
 
@@ -50,5 +81,10 @@ public sealed class FleetApi(IDbContextFactory<FleetDbContext> dbFactory) : IFle
             c.Environment.Name,
             c.Name,
             c.ApiServerUrl,
+            // ⚠️ The (int) cast is safe HERE and only here: ProvisioningStatus has no
+            // HasConversion, so the column really is an integer. Copying this onto a
+            // string-stored enum is what produced the Cost page's 22P02 — Postgres is asked to
+            // CAST('HelmChart' AS integer) while SQLite silently answers 0. Project the entity
+            // enum and map in memory instead; see DeliveryApi.ToRow.
             (ClusterProvisioningStatus)(int)c.ProvisioningStatus);
 }

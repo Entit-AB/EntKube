@@ -179,6 +179,7 @@ public class AlertSyncService(
         var notificationService = scope.ServiceProvider.GetRequiredService<NotificationService>();
         var stormSuppression = scope.ServiceProvider.GetRequiredService<StormSuppressionService>();
         var alertTickets = scope.ServiceProvider.GetRequiredService<Tickets.AlertTicketBridge>();
+        var fleet = scope.ServiceProvider.GetRequiredService<EntKube.Contracts.Fleet.IFleetApi>();
 
         // Fetch current alerts from Alertmanager
         KubernetesOperationResult<List<AlertInfo>> alertsResult =
@@ -328,11 +329,9 @@ public class AlertSyncService(
         if (channels.Count == 0) return;
 
         // Skip notifications while a maintenance window is active for this cluster/tenant
-        bool inMaintenance = await db.MaintenanceWindows.AnyAsync(w =>
-            w.TenantId == tenantId
-            && w.StartsAt <= now
-            && w.EndsAt >= now
-            && (w.ClusterId == null || w.ClusterId == clusterId), ct);
+        // Fleet's table, asked of Fleet. The predicate was written out here, in the dispatcher
+        // and in the evaluator — the same question three times.
+        bool inMaintenance = await fleet.IsInMaintenanceAsync(tenantId, clusterId, now, ct);
 
         if (inMaintenance)
         {
