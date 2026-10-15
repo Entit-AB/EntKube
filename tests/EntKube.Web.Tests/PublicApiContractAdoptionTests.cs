@@ -32,10 +32,12 @@ namespace EntKube.Web.Tests;
 ///     neither of which a per-module <em>read</em> contract can serve — and eight more are in Razor
 ///     pages, which are not modules. Notification-provider config is deliberately left out: that
 ///     row carries an SMTP password, and a contract method would publish it to every module.</item>
-///   <item><c>db.DeploymentRollouts</c> — Delivery owns rollouts but <c>IDeliveryApi</c> has no
-///     method for them. One method with one consumer is exactly how <c>IDataServicesApi</c> was
-///     added, so this is a small addition rather than a blocked one — just not the same idea as
-///     this change.</item>
+///   <item><s><c>db.DeploymentRollouts</c></s> — <b>done, and this file is at zero.</b> Delivery
+///     owned rollouts and <c>IDeliveryApi</c> had no method for them;
+///     <c>GetRolloutsAsync(tenantId, limit)</c> is that method, with this route as its one
+///     consumer — the same shape as <c>IDataServicesApi</c>'s addition. The predicate it replaces
+///     walked rollout → deployment → app → customer, four navigations of Delivery's own structure
+///     written out by hand in the public API.</item>
 /// </list>
 ///
 /// <para>⚠️ A route that needs a field no DTO carries is <em>not</em> a reason to keep the query.
@@ -50,10 +52,26 @@ public class PublicApiContractAdoptionTests
     private const string Web = "../../../../../src/EntKube.Web";
 
     /// <summary>
-    /// Direct module-table reads left in the public API. Was 8.
-    /// See this class's remarks for what the two are and why.
+    /// Direct module-table reads left in the public API: <b>zero</b>, from 8.
+    ///
+    /// <para>Every route the CLI, the MCP server and any future BFF go through now asks a module
+    /// contract rather than the shared database. That is the row this programme exists to close
+    /// first — see <c>docs/decomposition.md</c> §1, "the API is the product" — and it is the first
+    /// of the ledger's rows to reach zero with nothing deliberately exempted.</para>
+    ///
+    /// <para>⚠️ Zero here does <b>not</b> mean the API is finished: it means no route reaches past
+    /// a contract. The routes themselves are still 22 against ~250 services, which is the gap the
+    /// agents need closed and a different measurement entirely.</para>
+    ///
+    /// <para>One hazard came with the last conversion, and it is the same one the Cost page shipped
+    /// (§4.0.1, <c>project-enum-storage-casts</c>): the route publishes
+    /// <c>Status.ToString()</c>, so the string clients parse now comes from the contract's copy of
+    /// the enum. <c>ApiRolloutStatusTests</c> pins the two together, and pins the near-miss —
+    /// <c>RolloutStatus</c> is a <em>different</em> enum belonging to a blueprint rollout, one word
+    /// away from <c>DeploymentRolloutStatus</c>, and mapping one onto the other would publish a
+    /// wrong verdict for every release.</para>
     /// </summary>
-    private const int BaselineDirectReads = 1;
+    private const int BaselineDirectReads = 0;
 
     [Fact]
     public void The_public_api_asks_the_contracts()

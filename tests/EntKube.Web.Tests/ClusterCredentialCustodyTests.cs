@@ -496,51 +496,52 @@ public class ClusterCredentialCustodyTests
     /// to every tile".</para>
     /// </summary>
     /// <summary>
-    /// <b>19 in 11 files</b>, and <b>no ordinary conversion work is left</b> — the first time that
-    /// has been true since this test was written.
+    /// <b>18 in 10 files</b>, and the remaining list is now almost entirely things that are
+    /// supposed to hold a credential or are waiting on one decision.
     ///
-    /// <para><c>DeploymentImportService</c> is at zero. <c>ImportAsync</c> already took a tenant and
-    /// refused a cluster that was not that tenant's; the <em>scan</em> feeding it still read the
-    /// credential off whatever row the page passed in, so a preview — namespaces, workloads,
-    /// secrets, PVCs — could be built for a cluster the caller does not own. Half a feature
-    /// authorized is the shape worth watching for: the write was fixed two changes ago and the read
-    /// that precedes it was not.</para>
+    /// <para><c>RemediationService</c> is at zero, and it was the worst-placed missing check this
+    /// programme has found. The method <b>deletes pods and restarts Deployments, StatefulSets and
+    /// DaemonSets</b>, and it loaded its cluster with <c>FirstOrDefaultAsync(c =&gt; c.Id ==
+    /// clusterId)</c> — no tenant predicate anywhere in the file — so the id <em>was</em> the
+    /// authorization. Its one caller is the alerts page, which has always had a tenant. It built
+    /// its own <c>Kubernetes</c> client from the kubeconfig off the row; it asks the seam for one
+    /// now. ⚠️ Its gate exemption is deliberate and unchanged (<c>docs/decomposition.md</c>
+    /// §5.4.1: remediation is the one flow that must act without asking), which is worth saying
+    /// out loud in a conversion like this — moving the credential does not gate the calls, and
+    /// pretending otherwise would be the kind of claim this file exists to stop.</para>
     ///
-    /// <para>⚠️ <c>KubernetesOperationsService</c>'s last site was <b>also an ungated delete</b>.
-    /// <c>DeletePrunedResourceAsync</c> wrote the kubeconfig to a temp file and ran its own
-    /// <c>kubectl delete</c>, so every resource dropped from a manifest set — which is what pruning
-    /// is — was deleted with nobody asked and nothing recorded.
-    /// <see cref="ClusterChangeGateCoverageTests"/> cannot see it, and says so about this very
-    /// file: a file that acknowledges <em>anywhere</em> scores zero there. That is the <b>second</b>
-    /// delete path this blind spot has hidden (the first was Kyverno's <c>delete clusterpolicy</c>),
-    /// so the way to find the next one is to grep for own-process <c>kubectl</c> inside the files
-    /// that metric <em>excludes</em>, rather than trusting its total.</para>
+    /// <para><c>TenantService</c> is at zero too, by <b>deleting a line</b>. Registration stored
+    /// the kubeconfig in the vault and then did <c>cluster.Kubeconfig = kubeconfig</c> to "reflect
+    /// the just-persisted values on the returned entity" — handing the plaintext back to callers
+    /// that never asked: all three read only <c>Name</c> and <c>Id</c>. Anything that needs it
+    /// later gets it from the vault through the materialization interceptor.</para>
     ///
-    /// <para>Three things were checked before routing that delete through the seam, each of which
-    /// would have changed behaviour silently: <c>--ignore-not-found</c> survives (the seam's
-    /// <c>BuildDeleteArguments</c> passes it, so a resource already gone still counts as pruned);
-    /// the seam <b>throws</b> where the old helper returned false, and its caller counts failures
-    /// and carries on pruning, so the conversion catches; and the gate's delete preview returns
-    /// <c>NoChange()</c> for an object it cannot read, <em>by design</em> — "mirrors
-    /// --ignore-not-found" — which is correct for a prune and the opposite of the node-drain bug
-    /// where <c>NoChange</c> meant "apply the destructive thing without asking".</para>
+    /// <para>⚠️ <b>One of the sites was never a credential site at all.</b> <c>Program.cs</c>'s
+    /// single occurrence was the log line "Dropped legacy plaintext
+    /// KubernetesClusters.Kubeconfig column after vault migration." — prose about the column this
+    /// programme removed, counted as a place the credential lives, and enough to keep a whole file
+    /// on the list. <see cref="InsideStringLiteral"/> is the fix, and it is a <em>counting</em>
+    /// rule rather than a named exemption on purpose: an exemption would claim <c>Program.cs</c>
+    /// may hold a credential, when what is true is that a sentence mentioning one is not one. This
+    /// test already skipped comments for the same reason; a string literal is that mistake in a
+    /// different wrapper.</para>
     ///
-    /// <para><b>What the 19 are.</b> Supposed to hold a credential:
-    /// <c>KubeconfigMaterializationInterceptor</c> 2, <c>ClusterClient</c> 2,
-    /// <c>ClusterChangeGate</c> 2. A kubeconfig EntKube <em>mints</em> rather than a cluster's:
-    /// <c>JitAccessService</c> 1, <c>PortalJitAccessPanel.razor</c> 1. Waiting on the
-    /// <b>credentialed channel</b> seam shape: <c>StorageLinkClientFactory</c> 3,
-    /// <c>StorageService</c> 2, <c>OpenStackKeystoneClient</c> 2. And three that another open change
-    /// removes: <c>RemediationService</c> 2 and <c>TenantService</c> 1, plus <c>Program.cs</c>'s log
-    /// line, which was never a credential site at all.</para>
+    /// <para><b>What the 18 are.</b> Supposed to hold one: <c>KubeconfigMaterializationInterceptor</c>
+    /// 2, <c>ClusterClient</c> 2, <c>ClusterChangeGate</c> 2. A kubeconfig EntKube <em>mints</em>
+    /// rather than a cluster's: <c>JitAccessService</c> 1, <c>PortalJitAccessPanel.razor</c> 1
+    /// (counted anyway, and correctly — a generated kubeconfig carrying a live token is also a
+    /// place it can be logged). Waiting on the <b>credentialed channel</b> seam shape:
+    /// <c>StorageLinkClientFactory</c> 3 and <c>StorageService</c> 2 (the S3 proxy), and —
+    /// <b>reclassified on inspection</b> — <c>OpenStackKeystoneClient</c> 2, whose kubeconfig is
+    /// handed to <c>ClusterEgressTunnel.GetLocalPortAsync</c>, the <c>kubectl port-forward</c> that
+    /// is the same blocker. Ordinary work left: <c>DeploymentImportService</c> 2 and
+    /// <c>KubernetesOperationsService</c> 1.</para>
     ///
-    /// <para>⚠️ <b>That overlap means this constant has no correct merge.</b> The other change banks
-    /// 18 against a tree where these three are still present; this one banks 19 against a tree where
-    /// those three still are. Whichever lands second must <b>re-measure</b> — expected 15 in 8 —
-    /// rather than keeping either number, which is the rule
-    /// <c>feedback_clean_merge_is_not_a_working_merge</c> exists for.</para>
+    /// <para>So the floor is <b>6</b> — the seam and its gate — with 5 more released by one
+    /// decision and 3 of ordinary work left. Checking where a credential <em>goes</em> is what
+    /// reclassified Keystone's two: they read like any other caller and are not.</para>
     /// </summary>
-    private const int BaselineOccurrences = 19;
+    private const int BaselineOccurrences = 18;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -704,7 +705,7 @@ public class ClusterCredentialCustodyTests
     /// seam's error contract is not the caller's, and a conversion that ignores that changes
     /// control flow silently.</para>
     /// </summary>
-    private const int BaselineFiles = 11;
+    private const int BaselineFiles = 10;
 
     private static (int Occurrences, int Files) Measure()
     {
@@ -758,10 +759,47 @@ public class ClusterCredentialCustodyTests
                 continue;
             }
 
-            n += Credential.Matches(line).Count;
+            foreach (System.Text.RegularExpressions.Match m in Credential.Matches(line))
+            {
+                if (!InsideStringLiteral(line, m.Index)) n++;
+            }
         }
 
         return n;
+    }
+
+    /// <summary>
+    /// Whether a match sits inside a string literal, by counting unescaped quotes before it.
+    ///
+    /// <para><b>Why this is here.</b> <c>Program.cs</c>'s only "credential read" was the log line
+    /// <c>"Dropped legacy plaintext KubernetesClusters.Kubeconfig column after vault migration."</c>
+    /// — prose about the column this programme <em>removed</em>, counted as a place the credential
+    /// lives. The earlier version of this test already learned to skip comments for exactly that
+    /// reason (<see cref="The_cluster_credential_does_not_spread_any_further"/>'s note); a string
+    /// literal is the same mistake in a different wrapper, and it had put a whole file on the list.
+    /// </para>
+    ///
+    /// <para>Deliberately a counting rule rather than a named exemption: an exemption would claim
+    /// that <c>Program.cs</c> may hold a credential, which is not what is true — what is true is
+    /// that a sentence mentioning one is not one.</para>
+    ///
+    /// <para><b>Where it is imprecise, and in which direction.</b> It counts quotes on one line, so
+    /// a match on an interior line of a multi-line raw string — which carries no quotes of its own
+    /// — would still be counted as code. That is an <em>over</em>-count, which is the right way for
+    /// a security metric to be wrong, and no such line exists today (checked: nothing in
+    /// <c>src/EntKube.Web</c> mentions the property inside a raw string).</para>
+    /// </summary>
+    private static bool InsideStringLiteral(string line, int index)
+    {
+        bool inside = false;
+
+        for (int i = 0; i < index && i < line.Length; i++)
+        {
+            if (line[i] == '\\') { i++; continue; }
+            if (line[i] == '"') inside = !inside;
+        }
+
+        return inside;
     }
 
     /// <summary>

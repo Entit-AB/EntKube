@@ -92,8 +92,15 @@ public class CustodyTriageTests
     /// <b>not</b> done in the same change as a conversion: the custody number would then move for
     /// two reasons at once, and a number that moves for two reasons is the thing this file keeps
     /// learning not to publish.</para>
+    /// <para><b>3.</b> <c>TenantService</c>'s site is gone, and it is worth recording what it
+    /// actually was: registration stored the kubeconfig in the vault and then assigned
+    /// <c>cluster.Kubeconfig = kubeconfig</c> "to reflect the just-persisted values on the returned
+    /// entity". It sat in a method with a tenant in scope, so this metric classified it as
+    /// reachable and convertible — and the conversion was to <b>delete the line</b>, because all
+    /// three callers read only <c>Name</c> and <c>Id</c>. A reachable site is not always a
+    /// conversion; sometimes it is a credential being handed to people who never asked.</para>
     /// </summary>
-    private const int BaselineReachable = 4;
+    private const int BaselineReachable = 3;
 
     [Fact]
     public void The_sites_that_could_already_ask_the_seam_do_not_multiply()

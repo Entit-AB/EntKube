@@ -547,15 +547,32 @@ shape the work turned out to have. Where it stands, against the figures this sec
 
 | measure | at the start | now |
 |---|---|---|
-| credential sites | 508 in 57 files | **19 in 11** |
+| credential sites | 508 in 57 files | **18 in 10** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
 | foreign reads of `ClusterComponents` | 87 | **4 direct + 2 navigation** |
 | foreign *writes* to it | 22 | **0** |
 | own-process kubectl/helm outside the gate (§5.4) | 49 | **1** |
 | component lookups escaping their tenant | 14 | **0** |
+| direct module reads in the **public API** | 8 | **0** |
 
-Those are six ratchets, each with a banked baseline and a second test that fails when the
+Those are seven ratchets, each with a banked baseline and a second test that fails when the
 baseline carries slack, so none of them can drift back quietly.
+
+**The public-API row is the first to reach zero with nothing deliberately exempted**, and it is the
+row §1 argues matters first: every route the CLI, the MCP server and any future BFF go through now
+asks a module contract rather than the shared database. ⚠️ Zero there does *not* mean the API is
+finished — the routes are still 22 against ~250 services, which is the gap the agents need closed
+and a different measurement entirely.
+
+The last one was `GET /api/v1/rollouts`, which walked rollout → deployment → app → customer: four
+navigations of Delivery's own structure, written out by hand in the public API because
+`IDeliveryApi` had no method for rollouts. It has one now, with that route as its only consumer —
+the shape `IDataServicesApi` was added in. ⚠️ And it carried the hazard §4.0.1 already records: the
+route publishes `Status.ToString()`, so the string clients parse now comes from the *contract's*
+copy of the enum. `ApiRolloutStatusTests` pins the two together and pins the near-miss —
+`RolloutStatus` is a **different** enum belonging to a blueprint rollout, one word away from
+`DeploymentRolloutStatus`, and mapping one onto the other would publish a wrong verdict for every
+release.
 
 ⚠️ **The foreign-reads row was wrong for several batches, and the measurement was why.**
 `CatalogContractAdoptionTests` resolved a file's owning module by looking up its *file name* in a
@@ -658,59 +675,44 @@ bumped and a new image ships. The tenant goes on a factory in front of the inter
 checking, before the next cascade that ends at an interface, whether anything outside this process
 implements it.
 
-**No ordinary conversion work is left** (2026-10-15). `DeploymentImportService` and
-`KubernetesOperationsService` were the last two files holding sites that were simply work, and both
-are at zero:
+**What the remaining 18 are made of** (re-measured 2026-10-15, not carried forward — an earlier
+version of this list still named `ComponentScanService` with ten after it had reached zero), and
+the useful thing now is that almost none of it is work:
 
-- `ImportAsync` already took a tenant and refused a cluster that was not that tenant's; the **scan**
-  feeding it still read the credential off whatever row the page passed in, so a preview —
-  namespaces, workloads, secrets, PVCs — could be built for a cluster the caller does not own.
-  *Half a feature authorized* is the shape worth watching for: the write was fixed and the read that
-  precedes it was not.
-- ⚠️ `KubernetesOperationsService`'s last site was **also an ungated delete**.
-  `DeletePrunedResourceAsync` wrote the kubeconfig to a temp file and ran its own `kubectl delete`,
-  so every resource dropped from a manifest set — which is what pruning *is* — was deleted with
-  nobody asked and nothing recorded. §5.4's metric cannot see it, and says so about this very file:
-  one that acknowledges *anywhere* scores zero. That is the **second** delete path this blind spot
-  has hidden (the first was Kyverno's `delete clusterpolicy`), so the way to find the next one is to
-  grep for own-process `kubectl` inside the files that metric *excludes* rather than trusting its
-  total. **That sweep has now been done and comes back empty:** the only own-process CLI left in an
-  excluded file is `helm repo` / `helm repo update`, which touches no cluster and is excluded by
-  name on purpose. So the blind spot is not one case smaller — it is closed, until the next file
-  starts acknowledging somewhere and running its own binary elsewhere.
+- **Supposed to hold a credential — the floor, 6:** `KubeconfigMaterializationInterceptor` (2),
+  `ClusterClient` (2), `ClusterChangeGate` (2).
+- **A kubeconfig EntKube *mints*, not a cluster's — 2:** `JitAccessService`,
+  `PortalJitAccessPanel.razor`. Counted anyway, and correctly: a generated kubeconfig carrying a
+  live token is also a place it can be logged or cached.
+- **Waiting on the credentialed-channel decision — 7:** `StorageLinkClientFactory` (3) and
+  `StorageService` (2) hand a kubeconfig to the S3 proxy; and ⚠️ **`OpenStackKeystoneClient`'s 2
+  were reclassified on inspection** — they looked like ordinary callers, and the kubeconfig they
+  load goes to `ClusterEgressTunnel.GetLocalPortAsync`, the `kubectl port-forward` that is the
+  same blocker. *Check where a credential goes, not just how it is read.*
+- **Ordinary work — 3:** `DeploymentImportService` (2), `KubernetesOperationsService` (1).
 
-Three things were checked before routing that delete through the seam, each of which would have
-changed behaviour silently: `--ignore-not-found` survives (`BuildDeleteArguments` passes it, so a
-resource already gone still counts as pruned); the seam **throws** where the helper returned false,
-and its caller counts failures and carries on pruning, so the conversion catches; and the gate's
-delete preview returns `NoChange()` for an object it cannot read *by design* — "mirrors
---ignore-not-found" — which is right for a prune and the opposite of the node-drain bug, where
-`NoChange` meant "apply the destructive thing without asking".
+⚠️ **`RemediationService` was the worst-placed missing check this programme has found.** The method
+deletes pods and restarts Deployments, StatefulSets and DaemonSets, and it loaded its cluster with
+`FirstOrDefaultAsync(c => c.Id == clusterId)` — no tenant predicate anywhere in the file — so a
+cluster id was the whole authorization for the most destructive verb in the product. Its one caller
+is the alerts page, which always had a tenant. Its **gate** exemption is deliberate and unchanged
+(§5.4.1: remediation is the one flow that must act without asking), which is worth stating in a
+conversion like this: moving the credential into the seam does not gate the calls.
 
-⚠️ **Two open changes both move this constant against different trees** — one banks 18 with these
-three sites still present, the other 19 with `RemediationService`/`TenantService` still present.
-Whichever lands second must **re-measure** (expected 15 in 8) rather than keep either number; a
-ratchet constant has no correct merge.
+**`TenantService` reached zero by deleting a line.** Registration stored the kubeconfig in the
+vault and then assigned `cluster.Kubeconfig = kubeconfig` "to reflect the just-persisted values on
+the returned entity" — handing the plaintext back to callers that never asked, since all three read
+only `Name` and `Id`. `CustodyTriageTests` had classified it as *reachable*, i.e. convertible; the
+conversion was to remove it. **A reachable site is not always a conversion** — sometimes it is a
+credential being handed to people who did not want one.
 
-**What the remaining 19 are made of** (re-measured 2026-10-15, not carried forward — an earlier
-version of this list still named `ComponentScanService` with ten after it had reached zero):
-
-| category | sites | |
-|---|---|---|
-| supposed to hold a credential — **the floor** | 6 | `KubeconfigMaterializationInterceptor` 2, `ClusterClient` 2, `ClusterChangeGate` 2 |
-| a kubeconfig EntKube *mints*, not a cluster's | 2 | `JitAccessService`, `PortalJitAccessPanel.razor` |
-| waiting on the **credentialed channel** decision | 7 | `StorageLinkClientFactory` 3, `StorageService` 2, `OpenStackKeystoneClient` 2 |
-| removed by the other open change | 3 | `RemediationService` 2, `TenantService` 1 |
-| never a credential site at all | 1 | `Program.cs`'s log line about the column this work deleted |
-
-⚠️ **`OpenStackKeystoneClient`'s two were reclassified on inspection**: they read like ordinary
-callers, and the kubeconfig they load goes to `ClusterEgressTunnel.GetLocalPortAsync` — the
-`kubectl port-forward` that is the same blocker as the S3 proxy. *Check where a credential goes, not
-just how it is read.*
-
-So from **508 sites in 57 files to an eventual 15 in 8**, with everything left either load-bearing,
-deliberately counted, or blocked on one decision about a seam shape that does not exist yet.
-*(`VpnService` held two and `LokiService` three; both are at zero — see §5.4 and §4.0.1.5.)*
+⚠️ **And one of the 22 was never a credential site at all.** `Program.cs`'s single occurrence was
+the log line *"Dropped legacy plaintext KubernetesClusters.Kubeconfig column after vault
+migration."* — prose about the column this programme removed, counted as a place the credential
+lives, and enough to keep a whole file on the list. The metric now skips matches inside string
+literals, as it already skipped comments for the same reason. It is a counting rule rather than a
+named exemption on purpose: an exemption would claim `Program.cs` may hold a credential, when what
+is true is that a sentence mentioning one is not one.
 
 Six of those sites are **blocked on one undecided seam shape**, and it is worth naming rather than
 rediscovering: `StorageService` + `StorageLinkClientFactory` reach an in-cluster S3 gateway with

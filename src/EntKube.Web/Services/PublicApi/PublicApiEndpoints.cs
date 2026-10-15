@@ -628,32 +628,29 @@ public static class PublicApiEndpoints
         }).RequireApiScope(ApiScopes.OpsRead);
 
         api.MapGet("/rollouts", async (
-            HttpContext ctx, IDbContextFactory<ApplicationDbContext> dbFactory, CancellationToken ct) =>
+            HttpContext ctx, EntKube.Contracts.Delivery.IDeliveryApi delivery, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
-            await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-            var rollouts = await db.DeploymentRollouts
-                .AsNoTracking()
-                .Where(r => r.Deployment.App.Customer.TenantId == tenantId)
-                .OrderByDescending(r => r.StartedAt)
-                .Take(100)
-                .Select(r => new
-                {
-                    id = r.Id,
-                    app = r.Deployment.App.Name,
-                    deployment = r.Deployment.Name,
-                    environment = r.Deployment.Environment.Name,
-                    cluster = r.Deployment.Cluster.Name,
-                    status = r.Status.ToString(),
-                    startedAt = r.StartedAt,
-                    finishedAt = r.FinishedAt,
-                    verdict = r.Verdict,
-                    triggeredBy = r.TriggeredBy,
-                })
-                .ToListAsync(ct);
+            // The last direct module query in this file. It walked rollout -> deployment -> app ->
+            // customer to reach its tenant, which is Delivery's own predicate and now Delivery's
+            // own method. The published field names are unchanged.
+            IReadOnlyList<EntKube.Contracts.Delivery.RolloutSummary> rollouts =
+                await delivery.GetRolloutsAsync(tenantId, limit: 100, ct);
 
-            return Results.Ok(rollouts);
+            return Results.Ok(rollouts.Select(r => new
+            {
+                id = r.Id,
+                app = r.AppName,
+                deployment = r.DeploymentName,
+                environment = r.EnvironmentName,
+                cluster = r.ClusterName,
+                status = r.Status.ToString(),
+                startedAt = r.StartedAt,
+                finishedAt = r.FinishedAt,
+                verdict = r.Verdict,
+                triggeredBy = r.TriggeredBy,
+            }));
         }).RequireApiScope(ApiScopes.OpsRead);
 
         api.MapGet("/disaster-recovery", (HttpContext ctx, DrScanCache cache) =>
