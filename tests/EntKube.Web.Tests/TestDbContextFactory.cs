@@ -96,7 +96,7 @@ public static class TestServices
                 new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
                 new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory)),
             tokens,
-            new EntKubeTelemetryService(testDb.Factory, vaultService, tokens,
+            new EntKubeTelemetryService(new EntKube.Web.Modules.Api.DataServicesApi(testDb.Factory), vaultService, tokens,
                 new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), config),
             config,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory),
@@ -115,7 +115,7 @@ public static class TestServices
         IngestTokenService tokens = new(config);
         return new ComponentLifecycleService(
             dbFactory, vaultService, BuildKeycloak(dbFactory, vaultService),
-            tokens, new EntKubeTelemetryService(dbFactory, vaultService, tokens,
+            tokens, new EntKubeTelemetryService(new EntKube.Web.Modules.Api.DataServicesApi(dbFactory), vaultService, tokens,
                 new EntKube.Web.Modules.Api.CatalogApi(dbFactory), config), config,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(
                 dbFactory, new Mock<IKubernetesClientFactory>().Object),

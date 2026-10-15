@@ -103,6 +103,7 @@ public static partial class ModuleMap
         [typeof(TrustBundleService)] = Module.Catalog,
 
         // ---- DataServices ----------------------------------------------------------
+        [typeof(Api.DataServicesApi)] = Module.DataServices,
         [typeof(CnpgService)] = Module.DataServices,
         [typeof(DatabaseService)] = Module.DataServices,
         [typeof(DockerRegistryService)] = Module.DataServices,

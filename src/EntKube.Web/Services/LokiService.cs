@@ -2,6 +2,8 @@ using System.Globalization;
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using IDataServicesApi = EntKube.Contracts.DataServices.IDataServicesApi;
+using StorageLinkSummary = EntKube.Contracts.DataServices.StorageLinkSummary;
 using ICatalogApi = EntKube.Contracts.Catalog.ICatalogApi;
 using InstalledComponent = EntKube.Contracts.Catalog.InstalledComponent;
 using k8s;
@@ -27,8 +29,13 @@ public class LokiConfig
 /// injects non-sensitive S3 values (region, bucket, endpoint) into HelmValues
 /// and stores credentials as vault secrets for injection at install time.
 /// </summary>
+// ⚠️ Still on ApplicationDbContext, for ResolveLokiInfoAsync alone: it loads the cluster WITH its
+// components and reads cluster.Kubeconfig off the row. That makes it a credential site, so it moves
+// with the custody work (IClusterClient + ICatalogApi) rather than here — converting the storage read
+// on its own would otherwise look like this service had been dealt with.
 public class LokiService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDataServicesApi storage,
     KubernetesProxyClientPool clientPool,
     ILogger<LokiService> logger,
     VaultService vaultService,
@@ -227,14 +234,11 @@ public class LokiService(
     public async Task WriteStorageHelmValuesAsync(
         Guid tenantId, Guid clusterComponentId, Guid storageLinkId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-
         InstalledComponent component =
             await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
-        StorageLink link = await db.StorageLinks
-            .FirstOrDefaultAsync(s => s.Id == storageLinkId && s.TenantId == tenantId, ct)
+        StorageLinkSummary link = await storage.GetStorageLinkAsync(tenantId, storageLinkId, ct)
             ?? throw new InvalidOperationException("Storage link not found.");
 
         string region = link.Region ?? "us-east-1";

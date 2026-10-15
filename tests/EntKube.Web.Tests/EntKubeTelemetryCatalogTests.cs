@@ -239,7 +239,7 @@ public class EntKubeTelemetryCatalogTests
         TestDbContextFactory factory = new(connection);
         IConfiguration config = TestServices.TestConfiguration("https://entkube.example.com");
         VaultService vault = new(factory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess);
-        EntKubeTelemetryService sut = new(factory, vault, new IngestTokenService(config),
+        EntKubeTelemetryService sut = new(new EntKube.Web.Modules.Api.DataServicesApi(factory), vault, new IngestTokenService(config),
                 new EntKube.Web.Modules.Api.CatalogApi(factory), config);
 
         component.Cluster = db.KubernetesClusters.First(c => c.Id == clusterId);
@@ -279,7 +279,7 @@ public class EntKubeTelemetryCatalogTests
         TestDbContextFactory factory = new(connection);
         IConfiguration config = TestServices.TestConfiguration("https://entkube.example.com");
         VaultService vault = new(factory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess);
-        EntKubeTelemetryService sut = new(factory, vault, new IngestTokenService(config),
+        EntKubeTelemetryService sut = new(new EntKube.Web.Modules.Api.DataServicesApi(factory), vault, new IngestTokenService(config),
                 new EntKube.Web.Modules.Api.CatalogApi(factory), config);
 
         // Persisted, because healing stores the query token as a vault secret and that row has a
@@ -432,7 +432,7 @@ public class EntKubeTelemetryCatalogTests
         TestDbContextFactory factory = new(connection);
         IConfiguration config = TestServices.TestConfiguration("https://entkube.example.com");
         VaultService vault = new(factory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess);
-        EntKubeTelemetryService sut = new(factory, vault, new IngestTokenService(config),
+        EntKubeTelemetryService sut = new(new EntKube.Web.Modules.Api.DataServicesApi(factory), vault, new IngestTokenService(config),
                 new EntKube.Web.Modules.Api.CatalogApi(factory), config);
 
         (await sut.GetInClusterIndexerUrlAsync(tenantId, clusterId))
@@ -542,7 +542,7 @@ public class EntKubeTelemetryCatalogTests
         VaultService vault = new(factory, new VaultEncryptionService(TestRootKey), TestServices.NoClusterAccess);
         querier.Cluster = db.KubernetesClusters.First(c => c.Id == clusterId);
 
-        return (new EntKubeTelemetryService(factory, vault, new IngestTokenService(config),
+        return (new EntKubeTelemetryService(new EntKube.Web.Modules.Api.DataServicesApi(factory), vault, new IngestTokenService(config),
                 new EntKube.Web.Modules.Api.CatalogApi(factory), config), querier, tenantId);
     }
 

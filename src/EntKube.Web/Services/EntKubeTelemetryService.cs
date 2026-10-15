@@ -1,5 +1,7 @@
 using System.Security.Cryptography;
 using EntKube.Web.Data;
+using IDataServicesApi = EntKube.Contracts.DataServices.IDataServicesApi;
+using StorageLinkSummary = EntKube.Contracts.DataServices.StorageLinkSummary;
 using ICatalogApi = EntKube.Contracts.Catalog.ICatalogApi;
 using InstalledComponent = EntKube.Contracts.Catalog.InstalledComponent;
 using EntKube.Web.Services.Telemetry;
@@ -23,7 +25,7 @@ namespace EntKube.Web.Services;
 /// the management plane reading from them — computes the same value without it being copied anywhere.
 /// </summary>
 public class EntKubeTelemetryService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDataServicesApi storage,
     VaultService vaultService,
     IngestTokenService ingestTokens,
     ICatalogApi catalog,
@@ -73,8 +75,6 @@ public class EntKubeTelemetryService(
     public async Task ConfigureIdentityAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-
         InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
@@ -155,13 +155,10 @@ public class EntKubeTelemetryService(
     public async Task WriteStorageHelmValuesAsync(
         Guid tenantId, Guid clusterComponentId, Guid storageLinkId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-
         InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
-        StorageLink link = await db.StorageLinks
-            .FirstOrDefaultAsync(s => s.Id == storageLinkId && s.TenantId == tenantId, ct)
+        StorageLinkSummary link = await storage.GetStorageLinkAsync(tenantId, storageLinkId, ct)
             ?? throw new InvalidOperationException("Storage link not found.");
 
         string region = link.Region ?? "us-east-1";

@@ -846,8 +846,8 @@ Nothing moves. The monolith becomes modular.
    configured at all. All 165 table names are now stated in the model, so renaming a C#
    property can no longer rename a production table.
 2. One `IXxxApi` interface per module — the module's whole contract, in `EntKube.Contracts`.
-   ◐ **Four of twelve written** (Advisor, Catalog, Fleet, Delivery), and the lesson from
-   using the first one is that **writing more of them is not the next job**.
+   ◐ **Five of twelve written** (Advisor, Catalog, Fleet, Delivery, DataServices), and the
+   lesson from using the first one is that **writing more of them is not the next job**.
 
    All four were registered in DI and unit-tested, and **nothing in production called any of
    them.** An interface with no consumers decomposes nothing; it only looks like progress. So
@@ -866,6 +866,20 @@ Nothing moves. The monolith becomes modular.
    Both are fixed, with `MergeHelmValuesAsync`/`SetHelmValuesAsync` covering all 22 writes
    (14 merge form values, 4 replace outright, 4 paired configuration writes — two operations,
    not 22). Tempo, Mimir and Loki are the first real consumers.
+
+   **The fifth one was written the other way round, from its callers backwards.**
+   `IDataServicesApi` has exactly one method, because exactly one question was being asked
+   from outside the module: four Telemetry services — Loki, Mimir, Tempo and EntKube's own
+   node — each held `ApplicationDbContext` for the *same* hand-written query, "this tenant's
+   storage link, by id", and each read three fields off it to build object-store chart values.
+   No list method, no find-by-name, nothing for symmetry. Three of the four came off the
+   all-seeing context the same day it was written, which is the measurement the first four
+   contracts could not produce for months.
+
+   It also records a schema fact worth keeping visible: `StorageLinkSummary` carries the
+   *whole* row, where `ClusterSummary` deliberately omits the kubeconfig — because a storage
+   link's access keys live in the vault and not on the entity. That is true of the schema, not
+   of contracts, so `ModuleApiTests` asserts it rather than trusting it.
 
    **How to pick the next contract: by adoptable call sites, not by reader count.** Identity
    looks like the biggest prize — 43 foreign services touch its tables, `Customer` 57 times.
