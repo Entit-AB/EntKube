@@ -74,6 +74,10 @@ internal static class TelemetryServices
         services.AddHostedService<AlertEscalationService>();
         services.AddHostedService<UptimeTrackingService>();
 
+        // The module's contract — what everyone else is allowed to know about it.
+        services.AddScoped<EntKube.Contracts.Telemetry.ITelemetryApi,
+            EntKube.Web.Modules.Api.TelemetryApi>();
+
         return services;
     }
 }

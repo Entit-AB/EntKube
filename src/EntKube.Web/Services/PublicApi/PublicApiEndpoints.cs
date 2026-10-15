@@ -284,27 +284,20 @@ public static class PublicApiEndpoints
         }).RequireApiScope(ApiScopes.OpsRead);
 
         api.MapGet("/incidents", async (
-            HttpContext ctx, IDbContextFactory<ApplicationDbContext> dbFactory,
+            HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry,
             bool? open, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
-            await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-            // Incidents carry no TenantId of their own — they belong to a cluster, and the
-            // cluster belongs to the tenant. Filtering through the cluster is what keeps
-            // this query tenant-safe.
-            IQueryable<AlertIncident> query = db.AlertIncidents
-                .AsNoTracking()
-                .Where(i => i.Cluster.TenantId == tenantId);
+            // Asked of Telemetry. Incidents carry no TenantId of their own — they belong to a
+            // cluster, and the cluster belongs to the tenant — so the filter goes through the
+            // cluster, and the contract does that once rather than this route getting it right
+            // again. The JSON is unchanged, status included, whose names ModuleApiTests pins
+            // across the two enum declarations.
+            IReadOnlyList<EntKube.Contracts.Telemetry.IncidentSummary> incidents =
+                await telemetry.GetIncidentsAsync(tenantId, openOnly: open == true, limit: 200, ct);
 
-            if (open == true)
-            {
-                query = query.Where(i => i.Status != IncidentStatus.Resolved);
-            }
-
-            var incidents = await query
-                .OrderByDescending(i => i.StartsAt)
-                .Take(200)
+            return Results.Ok(incidents
                 .Select(i => new
                 {
                     id = i.Id,
@@ -312,15 +305,13 @@ public static class PublicApiEndpoints
                     summary = i.Summary,
                     severity = i.Severity,
                     status = i.Status.ToString(),
-                    cluster = i.Cluster.Name,
+                    cluster = i.ClusterName,
                     startsAt = i.StartsAt,
                     resolvedAt = i.ResolvedAt,
                     acknowledgedBy = i.AcknowledgedBy,
                     runbookUrl = i.RunbookUrl,
                 })
-                .ToListAsync(ct);
-
-            return Results.Ok(incidents);
+                .ToList());
         }).RequireApiScope(ApiScopes.OpsRead);
 
         api.MapGet("/upgrades", async (

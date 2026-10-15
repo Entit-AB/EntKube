@@ -1,6 +1,7 @@
 using EntKube.Contracts.Catalog;
 using EntKube.Contracts.DataServices;
 using EntKube.Contracts.Delivery;
+using EntKube.Contracts.Telemetry;
 using EntKube.Contracts.Fleet;
 using EntKube.Web.Data;
 using EntKube.Web.Modules.Api;
@@ -101,6 +102,7 @@ public class ModuleApiTests : IDisposable
     private IFleetApi Fleet => new FleetApi(factory);
     private IDeliveryApi Delivery => new DeliveryApi(factory);
     private IDataServicesApi DataServices => new DataServicesApi(factory);
+    private ITelemetryApi Telemetry => new TelemetryApi(factory);
 
     [Fact]
     public async Task Catalog_answers_for_the_asking_tenant_and_refuses_the_neighbour()
@@ -332,6 +334,83 @@ public class ModuleApiTests : IDisposable
             .Should().Equal(Enum.GetNames<Data.SyncStatus>());
         Enum.GetNames<EntKube.Contracts.Delivery.HealthStatus>()
             .Should().Equal(Enum.GetNames<Data.HealthStatus>());
+    }
+
+    /// <summary>
+    /// Telemetry answers for the asking tenant — and an incident carries no tenant of its own, so
+    /// this is the long way round again: the filter goes through the incident's cluster.
+    /// </summary>
+    [Fact]
+    public async Task Telemetry_answers_for_the_asking_tenant_and_refuses_the_neighbour()
+    {
+        Guid ourIncident = await SeedIncidentAsync(ourCluster, "DiskFull", Data.IncidentStatus.Active);
+        await SeedIncidentAsync(theirCluster, "TheirAlert", Data.IncidentStatus.Active);
+
+        IncidentSummary ours = (await Telemetry.GetIncidentsAsync(ourTenant)).Should()
+            .ContainSingle("an incident belongs to the tenant that owns its cluster").Subject;
+
+        ours.Id.Should().Be(ourIncident);
+        ours.AlertName.Should().Be("DiskFull");
+        ours.ClusterName.Should().Be("ours-cluster", "the name is inline to save a second lookup");
+    }
+
+    /// <summary>
+    /// <c>openOnly</c> is the filter the public API exposes as <c>?open=true</c>, and "resolved" is
+    /// the state it excludes — not "acknowledged", which is still open as far as an operator is
+    /// concerned.
+    /// </summary>
+    [Fact]
+    public async Task Telemetry_open_only_excludes_resolved_but_keeps_acknowledged()
+    {
+        await SeedIncidentAsync(ourCluster, "Acked", Data.IncidentStatus.Acknowledged);
+        await SeedIncidentAsync(ourCluster, "Gone", Data.IncidentStatus.Resolved);
+
+        (await Telemetry.GetIncidentsAsync(ourTenant, openOnly: true))
+            .Select(i => i.AlertName).Should().Equal(["Acked"]);
+
+        (await Telemetry.GetIncidentsAsync(ourTenant)).Should().HaveCount(2);
+    }
+
+    /// <summary>
+    /// <c>AlertIncident.Status</c> is persisted as TEXT, so a cast inside the projection would
+    /// become <c>CAST("Status" AS integer)</c> — which PostgreSQL rejects and SQLite answers with
+    /// 0. That is the bug that took the cost report down (#223), and it passed its unit tests the
+    /// whole time because nothing asserted the value. This asserts the value.
+    /// </summary>
+    [Fact]
+    public async Task Telemetry_carries_the_status_rather_than_casting_it_in_sql()
+    {
+        await SeedIncidentAsync(ourCluster, "Acked", Data.IncidentStatus.Acknowledged);
+
+        (await Telemetry.GetIncidentsAsync(ourTenant)).Should().ContainSingle()
+            .Which.Status.Should().Be(EntKube.Contracts.Telemetry.IncidentStatus.Acknowledged);
+    }
+
+    /// <summary>The ordinal mapping above is sound only while the two declarations agree.</summary>
+    [Fact]
+    public void The_incident_status_enums_agree_member_for_member()
+        => Enum.GetNames<EntKube.Contracts.Telemetry.IncidentStatus>()
+            .Should().Equal(Enum.GetNames<Data.IncidentStatus>(),
+                "the public API publishes these names, so the two drifting apart changes a "
+                + "published JSON contract");
+
+    private async Task<Guid> SeedIncidentAsync(Guid clusterId, string alert, Data.IncidentStatus status)
+    {
+        AlertIncident incident = new()
+        {
+            Id = Guid.NewGuid(),
+            ClusterId = clusterId,
+            Fingerprint = Guid.NewGuid().ToString("N"),
+            AlertName = alert,
+            Severity = "critical",
+            Summary = $"{alert} fired",
+            Status = status,
+            StartsAt = DateTime.UtcNow.AddMinutes(-5),
+            ResolvedAt = status == Data.IncidentStatus.Resolved ? DateTime.UtcNow : null,
+        };
+        db.Set<AlertIncident>().Add(incident);
+        await db.SaveChangesAsync();
+        return incident.Id;
     }
 
     /// <summary>
