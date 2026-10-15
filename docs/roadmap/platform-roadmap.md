@@ -33,7 +33,7 @@ are sequenced by value rather than dependency.
 
 ## Verification status
 
-Unit tests: **3917**, all passing. A clean checkout builds, and the app now starts
+Unit tests: **3944**, all passing. A clean checkout builds, and the app now starts
 from a plain `dotnet ef database update` (neither was true at the start — see
 `docs/migrations-defect.md`).
 
@@ -196,6 +196,25 @@ existing governance UI, 40 unit tests.
 - `mutateDigest: true` means what is admitted is exactly what was verified, so a
   mutable tag cannot be repointed after verification.
 - SBOM retrieval is **not** implemented — see below.
+
+⚠️ **This feature points outward, and that was a blind spot.** It answers "is what our
+customers run vulnerable" and says nothing about EntKube's own dependency chain — where
+**four advisories sat unread for months**: two ASP.NET Core remote-code-execution issues
+(GHSA-g27p-qf6j-c96c, GHSA-qjpx-jqm5-h2c4), a SQLite one (GHSA-2m69-gcr7-jv3q) and a Pkcs
+denial of service (GHSA-846f-f764-76mx). Every one printed `NU1903` in *every build log*
+the whole time.
+
+That is this feature's own rule turned against the product: **an unscanned image is not a
+clean image**, and by the same token a warning nobody reads is not a clean build. Fixed by
+pinning (all four), and the control is now the build itself — `NU1903` is in
+`WarningsAsErrors`, so a high or critical advisory fails the build rather than decorating
+it, with `VulnerabilityGuardTests` asserting the guard is still there. `NU1902` (moderate)
+stays a warning deliberately: a moderate with no published fix would make the repository
+unbuildable until upstream ships, which is how a security control becomes a reason to
+switch the security control off.
+
+Worth stating because the gap was not a missing feature — it was a feature aimed in only
+one direction, and nothing measured the other.
 
 ### 2. Public API, tokens, CLI, MCP server  ◐
 
