@@ -321,9 +321,9 @@
                                                     <label class="form-label small mb-1">App Deployment</label>
                                                     <InputSelect class="form-select form-select-sm" @bind-Value="bindingForm.DeploymentId">
                                                         <option value="">Select deployment...</option>
-                                                        @foreach (AppDeployment dep in BindingDeploymentOptions)
+                                                        @foreach (EntKube.Contracts.Delivery.DeploymentSummary dep in BindingDeploymentOptions)
                                                         {
-                                                            <option value="@dep.Id">@dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
+                                                            <option value="@dep.Id">@dep.AppName / @dep.Name (@dep.ClusterName)</option>
                                                         }
                                                     </InputSelect>
                                                     <ValidationMessage For="() => bindingForm.DeploymentId" class="text-danger small" />
@@ -485,12 +485,12 @@
 
     // ── Bindings ──
     private Dictionary<Guid, List<CacheBinding>> allBindings = [];
-    private List<AppDeployment> allDeployments = [];
+    private List<EntKube.Contracts.Delivery.DeploymentSummary> allDeployments = [];
 
     // Deployments offered by the binding form's picker. When the tab is scoped to an
     // environment, only deployments in that environment are eligible; otherwise the full
     // list (unchanged tenant-wide behaviour).
-    private List<AppDeployment> BindingDeploymentOptions =>
+    private List<EntKube.Contracts.Delivery.DeploymentSummary> BindingDeploymentOptions =>
         EnvironmentId is Guid envId
             ? allDeployments.Where(d => d.EnvironmentId == envId).ToList()
             : allDeployments;
@@ -530,7 +530,7 @@
         Task<List<RedisCluster>> clustersTask = RedisService.GetClustersAsync(TenantId);
         Task<List<KubernetesCluster>> k8sTask = TenantService.GetClustersAsync(TenantId);
         Task<RedisOperatorStatus> operatorTask = RedisService.GetOperatorStatusAsync(TenantId);
-        Task<List<AppDeployment>> deploymentsTask = RedisService.GetTenantDeploymentsAsync(TenantId);
+        Task<List<EntKube.Contracts.Delivery.DeploymentSummary>> deploymentsTask = RedisService.GetTenantDeploymentsAsync(TenantId);
 
         await Task.WhenAll(clustersTask, k8sTask, operatorTask, deploymentsTask);
 
@@ -667,7 +667,7 @@
         bindingForm = new AddBindingForm();
 
         // When scoped to an environment with exactly one eligible deployment, preselect it.
-        List<AppDeployment> options = BindingDeploymentOptions;
+        List<EntKube.Contracts.Delivery.DeploymentSummary> options = BindingDeploymentOptions;
         if (EnvironmentId is not null && options.Count == 1)
             bindingForm.DeploymentId = options[0].Id;
 

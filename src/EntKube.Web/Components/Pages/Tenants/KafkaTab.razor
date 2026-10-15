@@ -383,9 +383,9 @@
                                             <label class="form-label small mb-1">App Deployment</label>
                                             <select class="form-select form-select-sm" @bind="bindingDeploymentId">
                                                 <option value="@Guid.Empty">Select deployment...</option>
-                                                @foreach (AppDeployment dep in BindingDeploymentOptions)
+                                                @foreach (EntKube.Contracts.Delivery.DeploymentSummary dep in BindingDeploymentOptions)
                                                 {
-                                                    <option value="@dep.Id">@dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
+                                                    <option value="@dep.Id">@dep.AppName / @dep.Name (@dep.ClusterName)</option>
                                                 }
                                             </select>
                                         </div>
@@ -536,12 +536,12 @@
 
     // Ids of the environment's Kubernetes clusters (only populated when EnvironmentId is set).
     private HashSet<Guid>? envClusterIds;
-    private List<AppDeployment> allDeployments = [];
+    private List<EntKube.Contracts.Delivery.DeploymentSummary> allDeployments = [];
 
     // Deployments offered by the app-binding form's picker. When the tab is scoped to an
     // environment, only deployments in that environment are eligible; otherwise the full
     // list (unchanged tenant-wide behaviour).
-    private List<AppDeployment> BindingDeploymentOptions =>
+    private List<EntKube.Contracts.Delivery.DeploymentSummary> BindingDeploymentOptions =>
         EnvironmentId is Guid envId
             ? allDeployments.Where(d => d.EnvironmentId == envId).ToList()
             : allDeployments;
@@ -639,7 +639,7 @@
         Task<List<KafkaCluster>> clustersTask = KafkaService.GetClustersAsync(TenantId);
         Task<List<KubernetesCluster>> k8sTask = TenantService.GetClustersAsync(TenantId);
         Task<KafkaOperatorStatus> operatorTask = KafkaService.GetOperatorStatusAsync(TenantId);
-        Task<List<AppDeployment>> depTask = KafkaService.GetTenantDeploymentsAsync(TenantId);
+        Task<List<EntKube.Contracts.Delivery.DeploymentSummary>> depTask = KafkaService.GetTenantDeploymentsAsync(TenantId);
 
         await Task.WhenAll(clustersTask, k8sTask, operatorTask, depTask);
 
@@ -851,7 +851,7 @@
     {
         addBindingClusterId = cluster.Id;
         // When scoped to an environment with exactly one eligible deployment, preselect it.
-        List<AppDeployment> options = BindingDeploymentOptions;
+        List<EntKube.Contracts.Delivery.DeploymentSummary> options = BindingDeploymentOptions;
         bindingDeploymentId = EnvironmentId is not null && options.Count == 1
             ? options[0].Id
             : Guid.Empty;

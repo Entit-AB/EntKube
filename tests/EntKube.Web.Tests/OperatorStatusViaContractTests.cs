@@ -96,6 +96,7 @@ public class OperatorStatusViaContractTests : IDisposable
     private ElasticsearchService Elastic() =>
         new(testDb.Factory, Clusters(), testDb.CreateVaultService(),
             new AuditService(testDb.Factory), Catalog(),
+            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory),
             NullLogger<ElasticsearchService>.Instance);
 
     [Theory]

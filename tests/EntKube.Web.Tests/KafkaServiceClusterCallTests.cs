@@ -57,7 +57,8 @@ public class KafkaServiceClusterCallTests : IDisposable
         sut = new KafkaService(
             testDb.Factory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
-            vault, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory));
+            vault, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory));
     }
 
     public void Dispose()

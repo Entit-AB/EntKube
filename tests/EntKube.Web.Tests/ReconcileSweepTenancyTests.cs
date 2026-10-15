@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
@@ -32,6 +33,14 @@ public sealed class ReconcileSweepTenancyTests : IDisposable
     private readonly SqliteConnection connection;
     private readonly TestDbContextFactory factory;
     private readonly ApplicationDbContext db;
+
+    /// <summary>
+    /// The reconcile predicates take DataServices' own context now, so the assertions ask through
+    /// it. Seeding still goes through ApplicationDbContext — one database, two views of it, which
+    /// is the whole point of the module contexts.
+    /// </summary>
+    private DataServicesDbContext Scoped =>
+        ((IDbContextFactory<DataServicesDbContext>)factory).CreateDbContext();
 
     private readonly Guid ours = Guid.NewGuid();
     private readonly Guid theirs = Guid.NewGuid();
@@ -78,8 +87,8 @@ public sealed class ReconcileSweepTenancyTests : IDisposable
         db.RabbitMQClusters.Add(NewRabbit(theirs, theirK8s, "theirs-broker", RabbitMQClusterStatus.Running));
         db.SaveChanges();
 
-        RabbitMQService.ReconcilableFor(db, ours).Select(c => c.Name).Should().Equal(["ours-broker"]);
-        RabbitMQService.ReconcilableFor(db, theirs).Select(c => c.Name).Should().Equal(["theirs-broker"]);
+        RabbitMQService.ReconcilableFor(Scoped, ours).Select(c => c.Name).Should().Equal(["ours-broker"]);
+        RabbitMQService.ReconcilableFor(Scoped, theirs).Select(c => c.Name).Should().Equal(["theirs-broker"]);
     }
 
     /// <summary>
@@ -94,7 +103,7 @@ public sealed class ReconcileSweepTenancyTests : IDisposable
         db.RabbitMQClusters.Add(NewRabbit(ours, ourK8s, "deleting", RabbitMQClusterStatus.Deleting));
         db.SaveChanges();
 
-        RabbitMQService.ReconcilableFor(db, ours).Select(c => c.Name).Should().Equal(["failed"]);
+        RabbitMQService.ReconcilableFor(Scoped, ours).Select(c => c.Name).Should().Equal(["failed"]);
     }
 
     [Fact]
@@ -105,8 +114,8 @@ public sealed class ReconcileSweepTenancyTests : IDisposable
         db.KafkaClusters.Add(NewKafka(theirs, theirK8s, "theirs-events", KafkaClusterStatus.Running));
         db.SaveChanges();
 
-        KafkaService.ReconcilableFor(db, ours).Select(c => c.Name).Should().Equal(["ours-events"]);
-        KafkaService.ReconcilableFor(db, theirs).Select(c => c.Name).Should().Equal(["theirs-events"]);
+        KafkaService.ReconcilableFor(Scoped, ours).Select(c => c.Name).Should().Equal(["ours-events"]);
+        KafkaService.ReconcilableFor(Scoped, theirs).Select(c => c.Name).Should().Equal(["theirs-events"]);
     }
 
     [Fact]
@@ -117,8 +126,8 @@ public sealed class ReconcileSweepTenancyTests : IDisposable
         db.ElasticsearchClusters.Add(NewElastic(theirs, theirK8s, "theirs-search", ElasticsearchClusterStatus.Running));
         db.SaveChanges();
 
-        ElasticsearchService.ReconcilableFor(db, ours).Select(c => c.Name).Should().Equal(["ours-search"]);
-        ElasticsearchService.ReconcilableFor(db, theirs).Select(c => c.Name).Should().Equal(["theirs-search"]);
+        ElasticsearchService.ReconcilableFor(Scoped, ours).Select(c => c.Name).Should().Equal(["ours-search"]);
+        ElasticsearchService.ReconcilableFor(Scoped, theirs).Select(c => c.Name).Should().Equal(["theirs-search"]);
     }
 
     /// <summary>

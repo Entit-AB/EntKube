@@ -2,6 +2,7 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @inject RabbitMQService RabbitMQService
+@inject EntKube.Contracts.Delivery.IDeliveryApi Delivery
 @inject StorageService StorageService
 @inject TenantService TenantService
 @inject ToastService Toasts
@@ -773,9 +774,9 @@
                                                         <label class="form-label small">App Deployment</label>
                                                         <InputSelect class="form-select form-select-sm" @bind-Value="appLinkModel.DeploymentId">
                                                             <option value="">Select deployment...</option>
-                                                            @foreach (AppDeployment dep in AppLinkDeploymentOptions)
+                                                            @foreach (EntKube.Contracts.Delivery.DeploymentSummary dep in AppLinkDeploymentOptions)
                                                             {
-                                                                <option value="@dep.Id">@dep.App.Customer.Name / @dep.App.Name / @dep.Name (@dep.Cluster.Name)</option>
+                                                                <option value="@dep.Id">@CustomerNameFor(dep) / @dep.AppName / @dep.Name (@dep.ClusterName)</option>
                                                             }
                                                         </InputSelect>
                                                         <ValidationMessage For="() => appLinkModel.DeploymentId" class="text-danger small" />
@@ -1249,12 +1250,21 @@
     private List<KubernetesCluster> K8sClusterOptions =>
         EnvironmentId.HasValue ? allK8sClusters.Where(k => _envClusterIds.Contains(k.Id)).ToList() : allK8sClusters;
     private List<StorageLink> storageLinks = [];
-    private List<AppDeployment> allDeployments = [];
+    private List<EntKube.Contracts.Delivery.DeploymentSummary> allDeployments = [];
+
+    // The customer's name is the one thing this picker needs that DeploymentSummary does not carry,
+    // and deliberately so: a single caller does not earn a field on a shared DTO (ClusterName, next
+    // to it, had four). Resolved from Delivery's own app list in the same load, which is one call
+    // rather than a field every other consumer would carry for nothing.
+    private Dictionary<Guid, string> customerNamesByApp = [];
+
+    private string CustomerNameFor(EntKube.Contracts.Delivery.DeploymentSummary dep)
+        => customerNamesByApp.GetValueOrDefault(dep.AppId, "");
 
     // Deployments offered by the app-link form's picker. When the tab is scoped to an
     // environment, only deployments in that environment are eligible; otherwise the full
     // list (unchanged tenant-wide behaviour).
-    private List<AppDeployment> AppLinkDeploymentOptions =>
+    private List<EntKube.Contracts.Delivery.DeploymentSummary> AppLinkDeploymentOptions =>
         EnvironmentId is Guid envId
             ? allDeployments.Where(d => d.EnvironmentId == envId).ToList()
             : allDeployments;
@@ -1384,14 +1394,16 @@
         Task<List<KubernetesCluster>> k8sTask = TenantService.GetClustersAsync(TenantId);
         Task<List<StorageLink>> storageTask = StorageService.GetStorageLinksAsync(TenantId);
         Task<RabbitMQOperatorStatus> operatorTask = RabbitMQService.GetOperatorStatusAsync(TenantId);
-        Task<List<AppDeployment>> deploymentsTask = RabbitMQService.GetTenantDeploymentsAsync(TenantId);
+        Task<List<EntKube.Contracts.Delivery.DeploymentSummary>> deploymentsTask = RabbitMQService.GetTenantDeploymentsAsync(TenantId);
+        Task<IReadOnlyList<EntKube.Contracts.Delivery.AppSummary>> appsTask = Delivery.GetAppsAsync(TenantId);
 
-        await Task.WhenAll(clustersTask, k8sTask, storageTask, operatorTask, deploymentsTask);
+        await Task.WhenAll(clustersTask, k8sTask, storageTask, operatorTask, deploymentsTask, appsTask);
 
         clusters = clustersTask.Result;
         allK8sClusters = k8sTask.Result;
         storageLinks = storageTask.Result;
         allDeployments = deploymentsTask.Result;
+        customerNamesByApp = appsTask.Result.ToDictionary(a => a.Id, a => a.CustomerName);
 
         // Env scoping: restrict the visible RabbitMQ clusters to those whose
         // Kubernetes cluster is in the scoped environment. Null = unchanged.
@@ -1866,7 +1878,7 @@
         appLinkModel.Exchange = exchangeName ?? "";
         appLinkModel.SecretName = "rabbitmq";
         // When scoped to an environment with exactly one eligible deployment, preselect it.
-        List<AppDeployment> options = AppLinkDeploymentOptions;
+        List<EntKube.Contracts.Delivery.DeploymentSummary> options = AppLinkDeploymentOptions;
         appLinkModel.DeploymentId = EnvironmentId is not null && options.Count == 1
             ? options[0].Id
             : null;

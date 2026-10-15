@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -50,10 +51,11 @@ public sealed record RedisEndpointOption(
 /// credentials panel so engineers can wire up applications.
 /// </summary>
 public class RedisService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DataServicesDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     VaultService vaultService,
-    EntKube.Contracts.Catalog.ICatalogApi catalog)
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
+    EntKube.Contracts.Delivery.IDeliveryApi delivery)
 {
     private const int RedisPort = 6379;
 
@@ -62,7 +64,7 @@ public class RedisService(
     public async Task<List<RedisCluster>> GetClustersAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.RedisClusters
             .Include(c => c.KubernetesCluster).ThenInclude(k => k.Environment)
@@ -89,7 +91,7 @@ public class RedisService(
     public async Task<List<RedisEndpointOption>> DiscoverEndpointsAsync(
         Guid tenantId, Guid kubernetesClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KubernetesCluster? cluster = await db.KubernetesClusters
             .FirstOrDefaultAsync(c => c.Id == kubernetesClusterId, ct);
@@ -155,7 +157,7 @@ public class RedisService(
         string host = endpoint.Split(':')[0].Trim();
         if (host.Length == 0) return null;
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         List<RedisCluster> managed = await db.RedisClusters
             .Where(c => c.KubernetesClusterId == kubernetesClusterId)
@@ -385,7 +387,7 @@ public class RedisService(
     public async Task<RedisOperatorStatus> GetOperatorStatusAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         // Asked of Catalog rather than of its table. The predicate is unchanged and
         // applied here: these alias lists are not symmetrical across Name,
@@ -418,7 +420,7 @@ public class RedisService(
         bool persistenceEnabled,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         if (await db.RedisClusters.AnyAsync(
                 c => c.KubernetesClusterId == kubernetesClusterId
@@ -480,7 +482,7 @@ public class RedisService(
             cluster.LastError = ex.Message;
         }
 
-        using ApplicationDbContext db2 = dbFactory.CreateDbContext();
+        using DataServicesDbContext db2 = dbFactory.CreateDbContext();
         db2.RedisClusters.Update(cluster);
         await db2.SaveChangesAsync(ct);
 
@@ -489,7 +491,7 @@ public class RedisService(
 
     public async Task DeleteClusterAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RedisCluster cluster = await db.RedisClusters
             .Include(c => c.KubernetesCluster)
@@ -536,22 +538,24 @@ public class RedisService(
 
     // ── App bindings (CacheBinding) ───────────────────────────────────────────
 
-    public async Task<List<AppDeployment>> GetTenantDeploymentsAsync(
+    /// <summary>
+    /// The tenant's deployments, for the binding pickers.
+    ///
+    /// <para>Asked of Delivery. All four service tabs had this same query written out — the
+    /// tenant's deployments with app, customer and cluster included — and it was the only thing
+    /// keeping this service on the all-seeing context. <c>DeploymentSummary</c> now carries
+    /// <c>ClusterName</c> beside <c>ClusterId</c>, which is what the pickers display.</para>
+    /// </summary>
+    public async Task<List<EntKube.Contracts.Delivery.DeploymentSummary>> GetTenantDeploymentsAsync(
         Guid tenantId, CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        return await db.AppDeployments
-            .Include(d => d.App).ThenInclude(a => a.Customer)
-            .Include(d => d.Cluster)
-            .Where(d => d.App.Customer.TenantId == tenantId)
-            .OrderBy(d => d.App.Name).ThenBy(d => d.Name)
-            .ToListAsync(ct);
-    }
+        => [.. (await delivery.GetDeploymentsForTenantAsync(tenantId, ct))
+            .OrderBy(d => d.AppName, StringComparer.Ordinal)
+            .ThenBy(d => d.Name, StringComparer.Ordinal)];
 
     public async Task<List<CacheBinding>> GetCacheBindingsAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.CacheBindings
             .Include(b => b.AppDeployment).ThenInclude(d => d.App).ThenInclude(a => a.Customer)
             .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
@@ -563,7 +567,7 @@ public class RedisService(
     public async Task<List<CacheBinding>> GetCacheBindingsForDeploymentAsync(
         Guid appDeploymentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.CacheBindings
             .Include(b => b.RedisCluster).ThenInclude(c => c.KubernetesCluster)
             .Where(b => b.AppDeploymentId == appDeploymentId)
@@ -575,7 +579,7 @@ public class RedisService(
         Guid tenantId, Guid clusterId, Guid appDeploymentId,
         string k8sSecretName, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CacheBinding binding = new()
         {
@@ -598,7 +602,7 @@ public class RedisService(
     public async Task DeleteCacheBindingAsync(
         Guid tenantId, Guid bindingId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CacheBinding binding = await db.CacheBindings
             .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
@@ -625,7 +629,7 @@ public class RedisService(
     public async Task SyncCacheBindingAsync(
         Guid tenantId, Guid bindingId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CacheBinding binding = await db.CacheBindings
             .Include(b => b.RedisCluster).ThenInclude(c => c.KubernetesCluster)
@@ -668,7 +672,7 @@ public class RedisService(
         await appCluster.ApplyManifestAsync(secretManifest, ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
-        using ApplicationDbContext db2 = dbFactory.CreateDbContext();
+        using DataServicesDbContext db2 = dbFactory.CreateDbContext();
         db2.CacheBindings.Update(binding);
         await db2.SaveChangesAsync(ct);
     }
@@ -681,7 +685,7 @@ public class RedisService(
     public async Task<RedisClusterDetail?> GetClusterDetailAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RedisCluster? cluster = await db.RedisClusters
             .Include(c => c.KubernetesCluster)
@@ -829,7 +833,7 @@ public class RedisService(
         if (newStatus == cluster.Status)
             return;
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         RedisCluster? tracked = await db.RedisClusters.FindAsync([cluster.Id], ct);
         if (tracked is not null && tracked.Status != newStatus)
         {

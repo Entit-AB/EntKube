@@ -39,7 +39,8 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         sut = new RabbitMQService(
             testDb.Factory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
-            vaultService, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory));
+            vaultService, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory));
     }
 
     public void Dispose()
