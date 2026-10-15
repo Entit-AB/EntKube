@@ -418,11 +418,22 @@ public class ElasticsearchService(
     /// a cluster with an autoscaler that has not grown yet; a mistake everywhere else, which is why
     /// it has to be said explicitly.
     /// </param>
+    /// <param name="tenantId">
+    /// Who is creating it. This method took only the entity, so the tenant arrived as data on the
+    /// row the caller had built — and the seam call below then compared the target cluster to
+    /// <em>its own</em> tenant, which asks nothing. The page has always had a tenant.
+    /// </param>
     public async Task<ElasticsearchCluster> CreateClusterAsync(
+        Guid tenantId,
         ElasticsearchCluster cluster,
         bool acknowledgeCapacity = false,
         CancellationToken ct = default)
     {
+        if (cluster.TenantId != tenantId)
+        {
+            throw new InvalidOperationException("That Elasticsearch cluster is not this tenant's.");
+        }
+
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         if (await db.ElasticsearchClusters.AnyAsync(
@@ -453,7 +464,7 @@ public class ElasticsearchService(
             KubernetesCluster k8sCluster = await db.KubernetesClusters
                 .FirstAsync(c => c.Id == cluster.KubernetesClusterId, ct);
             Clusters.IClusterClient client =
-                await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct);
+                await ClusterFor(tenantId, k8sCluster.Id, ct);
 
             await client.EnsureNamespaceAsync(cluster.Namespace, ct);
             await ApplyClusterAsync(db, cluster, client, ct);

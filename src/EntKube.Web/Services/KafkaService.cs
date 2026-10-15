@@ -149,7 +149,11 @@ public class KafkaService(
         {
             KubernetesCluster k8sCluster = await db.KubernetesClusters
                 .FirstAsync(c => c.Id == kubernetesClusterId, ct);
-            Clusters.IClusterClient client = await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct);
+            // The ASKING tenant, not the row's own. This read the cluster by id with no tenant
+            // predicate and then handed that row's tenant to the seam, so the check compared the
+            // row to itself — while `tenantId`, which the vault writes in this same method already
+            // use, sat in scope. A foreign cluster id provisioned onto another tenant's cluster.
+            Clusters.IClusterClient client = await ClusterFor(tenantId, k8sCluster.Id, ct);
 
             await vaultService.SetKafkaClusterSecretAsync(
                 tenantId, cluster.Id, "KAFKA_BOOTSTRAP_SERVERS", cluster.BootstrapAddress, ct);

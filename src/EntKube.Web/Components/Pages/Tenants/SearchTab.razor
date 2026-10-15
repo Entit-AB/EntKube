@@ -2118,7 +2118,7 @@
             {
                 entity.TenantId = TenantId;
                 entity.KubernetesClusterId = form.K8sClusterId;
-                await Search.CreateClusterAsync(entity, form.Acknowledge);
+                await Search.CreateClusterAsync(TenantId, entity, form.Acknowledge);
                 Toasts.Success($"Creating \"{entity.Name}\" — the operator takes a few minutes to form the cluster.");
             }
 
