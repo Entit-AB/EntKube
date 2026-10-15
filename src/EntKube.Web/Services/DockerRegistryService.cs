@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -16,7 +17,7 @@ namespace EntKube.Web.Services;
 /// in imagePullSecrets without ever seeing the raw password in plain text.
 /// </summary>
 public class DockerRegistryService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DataServicesDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     VaultEncryptionService encryption)
 {
@@ -58,7 +59,7 @@ public class DockerRegistryService(
             Email = string.IsNullOrWhiteSpace(email) ? null : email.Trim()
         };
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         db.Set<DockerRegistryCredential>().Add(cred);
         await db.SaveChangesAsync(ct);
         return cred;
@@ -80,7 +81,7 @@ public class DockerRegistryService(
         Guid? environmentId = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         IQueryable<DockerRegistryCredential> query = db.Set<DockerRegistryCredential>()
             .Include(c => c.KubernetesCluster)
@@ -106,7 +107,7 @@ public class DockerRegistryService(
         Guid? environmentId,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>().FindAsync([credentialId], ct);
         if (cred is null || cred.AppId is null)
             return;
@@ -124,7 +125,7 @@ public class DockerRegistryService(
         Guid credentialId,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>()
             .Include(c => c.Vault)
@@ -146,7 +147,7 @@ public class DockerRegistryService(
         string? newEmail,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>()
             .Include(c => c.Vault)
@@ -175,7 +176,7 @@ public class DockerRegistryService(
     /// <summary>Deletes a credential by ID. Returns false if not found.</summary>
     public async Task<bool> DeleteAsync(Guid credentialId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>().FindAsync([credentialId], ct);
         if (cred is null) return false;
         db.Set<DockerRegistryCredential>().Remove(cred);
@@ -195,7 +196,7 @@ public class DockerRegistryService(
         string @namespace,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>().FindAsync([credentialId], ct);
         if (cred is null) return;
 
@@ -229,7 +230,7 @@ public class DockerRegistryService(
         Guid credentialId,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>()
             .Include(c => c.Vault)
@@ -360,7 +361,7 @@ public class DockerRegistryService(
 
     private async Task<SecretVault> GetVaultAsync(Guid tenantId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.Set<SecretVault>().FirstAsync(v => v.TenantId == tenantId, ct);
     }
 

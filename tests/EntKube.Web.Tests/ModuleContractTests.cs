@@ -201,10 +201,37 @@ public class ModuleContractTests
     /// through the seam's new <c>ProxyServiceAsync</c>, nothing was left to hold a context for. One
     /// file moved three ratchets — this one, custody and the Catalog contract — which is what "the
     /// two ratchets have converged" was predicting.</para>
+    /// <para><b>DataServices 12 → 8, and it needed no contract at all.</b> This module was recorded
+    /// as "has not moved at all for exactly that reason — every one of its services reaches into
+    /// Fleet, Catalog or Delivery". That was true of the module and <em>false of four of its
+    /// services</em>: <c>DatabaseService</c>, <c>DockerRegistryService</c>, <c>OpenLdapService</c>
+    /// and <c>HarborService</c> read only their own tables plus a hub, and
+    /// <c>DataServicesDbContext</c> has exposed <c>App</c>, <c>Customer</c> and
+    /// <c>KubernetesCluster</c> read-only all along. The blocker was a claim about the module, never
+    /// checked per service.</para>
+    ///
+    /// <para><b>What the narrower context then refused is the useful part.</b> <c>MongoService</c>
+    /// and <c>CnpgService</c> would not compile on it: they read and <em>delete</em>
+    /// <c>db.VaultSecrets</c>, which belongs to Secrets. That is the boundary doing its job — and
+    /// <c>VaultService</c> already owns the pattern for it
+    /// (<c>DeleteRabbitMQClusterSecretAsync</c>), so these two simply never used the door.</para>
+    ///
+    /// <para>⚠️ Converting them is <b>not</b> a context swap, which is why they are not in this
+    /// batch. <c>CnpgService.DeleteDatabaseSecretsAsync(Guid tenantId, Guid databaseId, …)</c> takes
+    /// a tenant and <em>never uses it</em> — it deletes every vault secret matching the database id,
+    /// so a database id from elsewhere deletes that tenant's secrets. Mongo's equivalent has no
+    /// tenant in scope at all. Those want the three missing <c>VaultService</c> methods, scoped the
+    /// way the RabbitMQ one is, and a tenant threaded to the Mongo callers — a separate change with
+    /// a separate reason.</para>
+    ///
+    /// <para>The remaining 8 split: four read <c>AppDeployments</c> (Delivery's, and not a hub) so
+    /// they want <c>IDeliveryApi</c>; two are the Mongo/Cnpg pair above; and
+    /// <c>StorageService</c> with <c>StorageLinkClientFactory</c> hold credentials, so they move
+    /// with the custody work.</para>
     /// </summary>
     private static readonly Dictionary<Module, int> Baseline = new()
     {
-        [Module.DataServices] = 12,
+        [Module.DataServices] = 8,
         [Module.Telemetry] = 5,
         [Module.Connectivity] = 8,
         [Module.Support] = 7,

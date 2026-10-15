@@ -4,6 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using ICatalogApi = EntKube.Contracts.Catalog.ICatalogApi;
 using InstalledComponent = EntKube.Contracts.Catalog.InstalledComponent;
 using Microsoft.EntityFrameworkCore;
@@ -211,7 +212,7 @@ public class HarborWebhookInfo
 /// - Vault: admin password stored as component vault secret HARBOR_ADMIN_PASSWORD.
 /// </summary>
 public class HarborService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DataServicesDbContext> dbFactory,
     VaultService vaultService,
     StorageService storageService,
     RedisService redisService,
@@ -256,7 +257,7 @@ public class HarborService(
         string? redisPassword = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
@@ -354,7 +355,7 @@ public class HarborService(
         string? registryUrl,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
@@ -413,7 +414,7 @@ public class HarborService(
         Guid cnpgDatabaseId,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
@@ -459,7 +460,7 @@ public class HarborService(
         Guid storageLinkId,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
@@ -523,7 +524,7 @@ public class HarborService(
     public async Task<string?> DescribeDatabaseSchemaConflictAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         HarborComponentConfig? config = await db.HarborComponentConfigs
             .Include(c => c.CnpgDatabase)
@@ -582,7 +583,7 @@ public class HarborService(
     public async Task<string?> DescribeRedisConflictAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         InstalledComponent? component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
 
@@ -708,7 +709,7 @@ public class HarborService(
         string? redisPassword,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
@@ -805,7 +806,7 @@ public class HarborService(
     public async Task<HarborComponentConfig?> GetConfigForComponentAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.HarborComponentConfigs
             .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId
@@ -815,7 +816,7 @@ public class HarborService(
     public async Task<List<HarborComponentConfig>> GetConfigsForClusterAsync(
         Guid tenantId, Guid kubernetesClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         // The component ids on that cluster, from Catalog. This was a correlated subquery
         // against its table — which also means the cluster was never checked against this
@@ -838,7 +839,7 @@ public class HarborService(
     public async Task<List<CnpgDatabase>> GetDatabasesForClusterAsync(
         Guid tenantId, Guid kubernetesClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.CnpgDatabases
             .Include(d => d.CnpgCluster)
@@ -858,7 +859,7 @@ public class HarborService(
     public async Task<List<DetectedHarbor>> GetDetectedHarborInstancesAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         // Asked of Catalog. Failed installs are included on purpose — a Harbor that failed to
         // come up is exactly what an operator opens this tab to look at.
@@ -1747,7 +1748,7 @@ public class HarborService(
     public async Task<List<HarborProject>> GetTrackedProjectsAsync(
         Guid tenantId, Guid harborComponentConfigId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.HarborProjects
             .Include(p => p.LinkedApp).ThenInclude(a => a!.Customer)
@@ -1765,7 +1766,7 @@ public class HarborService(
         Guid tenantId, Guid harborComponentConfigId,
         string projectName, Guid appId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         HarborProject? existing = await db.HarborProjects
             .FirstOrDefaultAsync(p => p.HarborComponentConfigId == harborComponentConfigId
@@ -1792,7 +1793,7 @@ public class HarborService(
     public async Task UnlinkProjectFromAppAsync(
         Guid tenantId, Guid projectId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         HarborProject? project = await db.HarborProjects
             .FirstOrDefaultAsync(p => p.Id == projectId && p.TenantId == tenantId);
@@ -1810,7 +1811,7 @@ public class HarborService(
     public async Task<HarborProject?> GetProjectForAppAsync(
         Guid tenantId, Guid appId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.HarborProjects
             .Include(p => p.HarborComponentConfig)

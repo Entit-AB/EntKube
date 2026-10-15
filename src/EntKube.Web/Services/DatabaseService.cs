@@ -1,5 +1,6 @@
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using k8s;
 using k8s.Models;
 using Microsoft.EntityFrameworkCore;
@@ -27,7 +28,7 @@ public class DatabaseOperatorStatus
 /// - MongoDB Community Operator: MongoDBCommunity CRD (mongodbcommunity.mongodb.com/v1)
 /// </summary>
 public class DatabaseService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DataServicesDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     EntKube.Contracts.Catalog.ICatalogApi catalog)
 {
@@ -40,7 +41,7 @@ public class DatabaseService(
     public async Task<DatabaseOperatorStatus> GetOperatorStatusAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         // Find all clusters belonging to this tenant that have the relevant components installed.
 
@@ -81,7 +82,7 @@ public class DatabaseService(
     public async Task<List<KubernetesCluster>> GetCnpgEnabledClustersAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.KubernetesClusters
             .Include(k => k.Environment)
@@ -101,7 +102,7 @@ public class DatabaseService(
     public async Task<List<KubernetesCluster>> GetMongoEnabledClustersAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.KubernetesClusters
             .Include(k => k.Environment)
@@ -122,7 +123,7 @@ public class DatabaseService(
     public async Task<List<KubernetesCluster>> GetAllClustersAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.KubernetesClusters
             .Include(k => k.Environment)

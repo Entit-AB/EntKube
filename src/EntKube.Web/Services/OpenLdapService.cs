@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -24,7 +25,7 @@ namespace EntKube.Web.Services;
 /// seed-LDIF generation, and UI are chart-agnostic.
 /// </summary>
 public class OpenLdapService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DataServicesDbContext> dbFactory,
     VaultService vaultService,
     IKubernetesClientFactory k8sFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
@@ -70,7 +71,7 @@ public class OpenLdapService(
     public async Task<List<OpenLdapInstance>> GetInstancesAsync(
         Guid tenantId, Guid? environmentId = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         // "Every installation of one catalog key across the tenant" is exactly what the
         // contract's find-by-key is for. The environment filter and the ordering move in-memory
@@ -100,14 +101,14 @@ public class OpenLdapService(
     public async Task<OpenLdapComponentConfig?> GetConfigForComponentAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.OpenLdapComponentConfigs
             .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId && c.TenantId == tenantId, ct);
     }
 
     public async Task<OpenLdapComponentConfig?> GetConfigAsync(Guid configId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.OpenLdapComponentConfigs
             .Include(c => c.OrganizationalUnits)
             .Include(c => c.Users)
@@ -131,7 +132,7 @@ public class OpenLdapService(
         string? configPassword,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         EntKube.Contracts.Catalog.InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
@@ -199,7 +200,7 @@ public class OpenLdapService(
     {
         OpenLdapComponentConfig? config;
         string release;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (DataServicesDbContext db = dbFactory.CreateDbContext())
         {
             config = await db.OpenLdapComponentConfigs
                 .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId && c.TenantId == tenantId, ct);
@@ -389,7 +390,7 @@ public class OpenLdapService(
     public async Task RefreshHelmValuesIfConfiguredAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         OpenLdapComponentConfig? config = await db.OpenLdapComponentConfigs
             .Include(c => c.OrganizationalUnits)
@@ -438,7 +439,7 @@ public class OpenLdapService(
     public async Task ApplyTlsCertificateIfNeededAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         OpenLdapComponentConfig? config = await db.OpenLdapComponentConfigs
             .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId && c.TenantId == tenantId, ct);
@@ -544,7 +545,7 @@ public class OpenLdapService(
 
     public async Task<OpenLdapOrganizationalUnit> AddOuAsync(Guid configId, string name, string? description, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         OpenLdapOrganizationalUnit ou = new()
         {
             Id = Guid.NewGuid(), ConfigId = configId, Name = name.Trim().ToLowerInvariant(), Description = description,
@@ -556,13 +557,13 @@ public class OpenLdapService(
 
     public async Task DeleteOuAsync(Guid ouId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         await db.OpenLdapOrganizationalUnits.Where(o => o.Id == ouId).ExecuteDeleteAsync(ct);
     }
 
     public async Task<OpenLdapUser> AddUserAsync(OpenLdapUser user, string? password, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         user.Id = user.Id == Guid.Empty ? Guid.NewGuid() : user.Id;
         user.Uid = user.Uid.Trim();
         if (!string.IsNullOrEmpty(password))
@@ -576,7 +577,7 @@ public class OpenLdapService(
 
     public async Task UpdateUserAsync(OpenLdapUser user, string? newPassword, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         OpenLdapUser existing = await db.OpenLdapUsers.FirstAsync(u => u.Id == user.Id, ct);
         existing.OrganizationalUnitId = user.OrganizationalUnitId;
         existing.Cn = user.Cn;
@@ -599,7 +600,7 @@ public class OpenLdapService(
 
     public async Task DeleteUserAsync(Guid userId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         // Remove memberships first — the join's user FK is Restrict (no cascade) to keep
         // SQL Server happy with a single cascade path through the group.
         await db.OpenLdapGroupMembers.Where(m => m.UserId == userId).ExecuteDeleteAsync(ct);
@@ -608,7 +609,7 @@ public class OpenLdapService(
 
     public async Task<OpenLdapGroup> AddGroupAsync(OpenLdapGroup group, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         group.Id = group.Id == Guid.Empty ? Guid.NewGuid() : group.Id;
         group.Cn = group.Cn.Trim();
         db.OpenLdapGroups.Add(group);
@@ -618,13 +619,13 @@ public class OpenLdapService(
 
     public async Task DeleteGroupAsync(Guid groupId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         await db.OpenLdapGroups.Where(g => g.Id == groupId).ExecuteDeleteAsync(ct);
     }
 
     public async Task SetGroupMembersAsync(Guid groupId, IEnumerable<Guid> userIds, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         await db.OpenLdapGroupMembers.Where(m => m.GroupId == groupId).ExecuteDeleteAsync(ct);
         foreach (Guid uid in userIds.Distinct())
         {
