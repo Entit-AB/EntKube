@@ -317,7 +317,7 @@ public class KyvernoPolicyService(
         // enabled" is exactly when a previously applied ClusterPolicy has to be removed.
         foreach (KubernetesCluster cluster in targets.Select(t => t.Cluster).DistinctBy(c => c.Id))
         {
-            (bool cpOk, string cpOutput) = await ReconcileClusterRbacPolicyAsync(cluster, ct);
+            (bool cpOk, string cpOutput) = await ReconcileClusterRbacPolicyAsync(tenantId, cluster.Id, ct);
             if (!string.IsNullOrWhiteSpace(cpOutput))
                 results.Add(($"{cluster.Name} (cluster RBAC)", cpOk, cpOutput));
         }
@@ -336,7 +336,7 @@ public class KyvernoPolicyService(
 
         foreach (var (cluster, ns) in targets)
         {
-            (bool ok, string output) = await ApplyToNamespaceAsync(policies, cluster, ns, ct);
+            (bool ok, string output) = await ApplyToNamespaceAsync(policies, tenantId, cluster.Id, ns, ct);
             results.Add(($"{cluster.Name}/{ns}", ok, output));
         }
         return results;
@@ -433,87 +433,52 @@ public class KyvernoPolicyService(
     /// does not cover.
     /// </summary>
     public async Task<(bool Success, string Output)> ReconcileClusterRbacPolicyAsync(
-        KubernetesCluster cluster, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return (false, "Cluster has no kubeconfig configured.");
+        // ForAsync answers "no" both for a cluster that is not this tenant's and for one with no
+        // credential stored, which is the two checks this method used to make separately — the
+        // second as `cluster.Kubeconfig` being blank, the first not at all.
+        EntKube.Web.Services.Clusters.IClusterClient? access =
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
+
+        if (access is null)
+            return (false, "Cluster has no kubeconfig configured, or is not this tenant's.");
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        KyvernoValidationFailureAction? mode = await ResolveClusterRbacModeAsync(db, cluster.Id, ct);
+        KyvernoValidationFailureAction? mode = await ResolveClusterRbacModeAsync(db, clusterId, ct);
         List<string> appNamespaces = mode is null
             ? []
-            : await ResolveClusterAppNamespacesAsync(db, cluster.Id, ct);
+            : await ResolveClusterAppNamespacesAsync(db, clusterId, ct);
 
         string? yaml = mode is null
             ? null
             : BuildClusterRbacPolicy(appNamespaces,
                 mode == KyvernoValidationFailureAction.Enforce ? "Enforce" : "Audit");
 
-        if (yaml is null)
-        {
-            // Disabled, or nothing left to protect. Either way the object must go — leaving it
-            // would keep enforcing a namespace list that no longer reflects the cluster.
-            return await RunKubectlAsync(cluster,
-                $"delete clusterpolicy {ClusterRbacPolicyName} --ignore-not-found", ct);
-        }
-
-        await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
-        {
-            Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
-            Kubeconfig = cluster.Kubeconfig,
-            ClusterLabel = cluster.Name,
-            Summary = $"Apply cluster RBAC policy covering {appNamespaces.Count} app namespace(s)",
-            Manifest = yaml,
-        }, ct);
-
-        string manifestPath = Path.Combine(Path.GetTempPath(), $"entkube-kyverno-cp-{Guid.NewGuid():N}.yaml");
+        // The seam throws on a non-zero exit where this method has always returned (false, output),
+        // and the difference is load-bearing: its caller logs a failed reconcile and goes on to
+        // apply the namespace policies. Letting the exception out would skip that second step, so
+        // the tuple contract is kept here rather than pushed onto the caller.
         try
         {
-            await SecretFile.WriteAsync(manifestPath, yaml, ct);
-            return await RunKubectlAsync(cluster, $"apply -f {manifestPath}", ct);
-        }
-        finally
-        {
-            if (File.Exists(manifestPath)) File.Delete(manifestPath);
-        }
-    }
-
-    /// <summary>Runs one kubectl command against a cluster with its kubeconfig in a temp file.</summary>
-    private async Task<(bool Success, string Output)> RunKubectlAsync(
-        KubernetesCluster cluster, string args, CancellationToken ct)
-    {
-        string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-kyverno-{Guid.NewGuid():N}.kubeconfig");
-        try
-        {
-            await SecretFile.WriteAsync(kubeconfigPath, cluster.Kubeconfig, ct);
-
-            System.Diagnostics.ProcessStartInfo psi = new("kubectl", $"{args} --kubeconfig {kubeconfigPath}")
+            if (yaml is null)
             {
-                RedirectStandardOutput = true,
-                RedirectStandardError  = true,
-                UseShellExecute        = false,
-                CreateNoWindow         = true
-            };
+                // Disabled, or nothing left to protect. Either way the object must go — leaving it
+                // would keep enforcing a namespace list that no longer reflects the cluster.
+                // DeleteManifestAsync carries --ignore-not-found, as this call always has.
+                await access.DeleteManifestAsync("clusterpolicy", ClusterRbacPolicyName, "", ct);
+                return (true, $"Removed {ClusterRbacPolicyName}.");
+            }
 
-            using System.Diagnostics.Process proc = new() { StartInfo = psi };
-            StringBuilder output = new();
-            proc.OutputDataReceived += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-            proc.ErrorDataReceived  += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-            proc.Start();
-            proc.BeginOutputReadLine();
-            proc.BeginErrorReadLine();
-            await proc.WaitForExitAsync(ct);
-
-            bool ok = proc.ExitCode == 0;
-            if (!ok)
-                logger.LogWarning("kubectl {Args} failed on {Cluster}: {Output}", args, cluster.Name, output);
-
-            return (ok, output.ToString().TrimEnd());
+            // No explicit gate call any more: the seam raises the acknowledgment on the way
+            // through, with the same verb and manifest, and supplies the credential itself.
+            string output = await access.ApplyManifestAsync(yaml, ct);
+            return (true, output);
         }
-        finally
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            if (File.Exists(kubeconfigPath)) File.Delete(kubeconfigPath);
+            return (false, ex.Message);
         }
     }
 
@@ -792,64 +757,44 @@ public class KyvernoPolicyService(
         return null;
     }
 
-    /// <summary>Applies the Kyverno Policy YAML for all policies to a single namespace via kubectl.</summary>
+    /// <summary>
+    /// Applies the Kyverno Policy YAML for all policies to a single namespace.
+    ///
+    /// <para>Takes the tenant and the cluster id rather than a <c>KubernetesCluster</c>: it used to
+    /// read the credential off the row it was handed, which meant any caller holding a cluster
+    /// entity could aim this at any cluster in the installation. The shape mirrors
+    /// <c>KedaScalerService.ApplyToNamespaceAsync</c>, which was converted first and is the
+    /// precedent for this one.</para>
+    /// </summary>
     public async Task<(bool Success, string Output)> ApplyToNamespaceAsync(
-        List<KyvernoPolicy> policies, KubernetesCluster cluster, string ns, CancellationToken ct = default)
+        List<KyvernoPolicy> policies, Guid tenantId, Guid clusterId, string ns,
+        CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return (false, "Cluster has no kubeconfig configured.");
+        EntKube.Web.Services.Clusters.IClusterClient? access =
+            await clusterClients.ForAsync(tenantId, clusterId, ct);
+
+        if (access is null)
+            return (false, "Cluster has no kubeconfig configured, or is not this tenant's.");
 
         string yaml = BuildManifest(policies, ns);
         if (string.IsNullOrWhiteSpace(yaml))
             return (false, "No policies generated (check configuration).");
 
-        await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
-        {
-            Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
-            Kubeconfig = cluster.Kubeconfig,
-            ClusterLabel = cluster.Name,
-            Namespace = ns,
-            Summary = $"Apply Kyverno policies to {ns}",
-            Manifest = yaml,
-        }, ct);
-
-        string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-kyverno-{Guid.NewGuid():N}.kubeconfig");
-        string manifestPath   = Path.Combine(Path.GetTempPath(), $"entkube-kyverno-{Guid.NewGuid():N}.yaml");
+        // Same tuple-preserving catch as ReconcileClusterRbacPolicyAsync, and the same reason: the
+        // caller treats a failure here as a logged warning on an otherwise successful deploy.
         try
         {
-            await SecretFile.WriteAsync(kubeconfigPath, cluster.Kubeconfig, ct);
-            await SecretFile.WriteAsync(manifestPath, yaml, ct);
+            string output = await access.ApplyManifestInNamespaceAsync(
+                yaml, ns, $"Apply Kyverno policies to {ns}", ct);
 
-            System.Diagnostics.ProcessStartInfo psi = new("kubectl",
-                $"apply -f {manifestPath} --kubeconfig {kubeconfigPath}")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError  = true,
-                UseShellExecute        = false,
-                CreateNoWindow         = true
-            };
-
-            using System.Diagnostics.Process proc = new() { StartInfo = psi };
-            StringBuilder output = new();
-            proc.OutputDataReceived += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-            proc.ErrorDataReceived  += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-            proc.Start();
-            proc.BeginOutputReadLine();
-            proc.BeginErrorReadLine();
-            await proc.WaitForExitAsync(ct);
-
-            bool ok = proc.ExitCode == 0;
-            if (ok)
-                logger.LogInformation("Kyverno policies applied to {Cluster}/{Namespace}", cluster.Name, ns);
-            else
-                logger.LogWarning("Kyverno apply failed for {Cluster}/{Namespace}: {Output}", cluster.Name, ns, output);
-
-            return (ok, output.ToString().TrimEnd());
+            logger.LogInformation("Kyverno policies applied to {ClusterId}/{Namespace}", clusterId, ns);
+            return (true, output.TrimEnd());
         }
-        finally
+        catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            if (File.Exists(kubeconfigPath)) File.Delete(kubeconfigPath);
-            if (File.Exists(manifestPath))   File.Delete(manifestPath);
+            logger.LogWarning("Kyverno apply failed for {ClusterId}/{Namespace}: {Output}",
+                clusterId, ns, ex.Message);
+            return (false, ex.Message);
         }
     }
 
