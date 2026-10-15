@@ -37,7 +37,7 @@ public class PlannedChangeSeamTests
         using IDisposable registration = gate.RegisterSink(sink);
 
         IClusterClient client = new ClusterClient(
-            new KubernetesClientFactory(gate), Guid.NewGuid(), "prod-eu", TestKubeconfig.Valid);
+            new KubernetesClientFactory(gate, new KubernetesProxyClientPool(Microsoft.Extensions.Logging.Abstractions.NullLogger<KubernetesProxyClientPool>.Instance)), Guid.NewGuid(), "prod-eu", TestKubeconfig.Valid);
 
         Func<Task> act = () => client.AcknowledgeAsync(new PlannedChange
         {
@@ -207,7 +207,7 @@ public class PlannedChangeSeamTests
         RecordingSink sink = new();
         using IDisposable registration = gate.RegisterSink(sink);
 
-        KubernetesClientFactory factory = new(gate);
+        KubernetesClientFactory factory = new(gate, new KubernetesProxyClientPool(Microsoft.Extensions.Logging.Abstractions.NullLogger<KubernetesProxyClientPool>.Instance));
 
         Func<Task> act = () => factory.ApplyManifestFromUrlAsync(
             "https://example.test/operator.yaml", TestKubeconfig.Valid);
@@ -251,7 +251,7 @@ public class PlannedChangeSeamTests
         RecordingSink sink = new();
         using IDisposable registration = gate.RegisterSink(sink);
 
-        Func<Task> act = () => new KubernetesClientFactory(gate)
+        Func<Task> act = () => new KubernetesClientFactory(gate, new KubernetesProxyClientPool(Microsoft.Extensions.Logging.Abstractions.NullLogger<KubernetesProxyClientPool>.Instance))
             .DrainNodeAsync("node-3", TestKubeconfig.Valid);
 
         await act.Should().ThrowAsync<OperationCanceledException>();
@@ -286,7 +286,7 @@ public class PlannedChangeSeamTests
         RecordingSink sink = new();
         using IDisposable registration = gate.RegisterSink(sink);
 
-        Func<Task> act = () => new KubernetesClientFactory(gate)
+        Func<Task> act = () => new KubernetesClientFactory(gate, new KubernetesProxyClientPool(Microsoft.Extensions.Logging.Abstractions.NullLogger<KubernetesProxyClientPool>.Instance))
             .CreateJobFromCronJobAsync("nightly-manual-1", "nightly", "billing-ns", TestKubeconfig.Valid);
 
         await act.Should().ThrowAsync<OperationCanceledException>();

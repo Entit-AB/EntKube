@@ -46,9 +46,7 @@ public interface ITelemetryBackends
 /// One per signal, keyed by (tenant, cluster), is shared by every wrapper this router hands out.</para>
 /// </summary>
 public sealed class TelemetryBackendRouter(
-    NodeLogBackend inClusterLogs,
     SegmentLogService localLogs,
-    NodeTraceService inClusterTraces,
     SegmentTraceService localTraces,
     TelemetryNodeClient nodes,
     EntKubeTelemetryService telemetry,
@@ -62,12 +60,15 @@ public sealed class TelemetryBackendRouter(
     private readonly ConcurrentDictionary<Guid, ILogBackend> logs = new();
     private readonly ConcurrentDictionary<Guid, ITraceQueryService> traces = new();
 
+    // The node-backed halves are constructed per tenant too, because they now ask the node AS a
+    // tenant. They were injected as shared singletons, which is what made the tenant impossible to
+    // supply without this change.
     public ILogBackend LogsFor(Guid tenantId) => logs.GetOrAdd(tenantId, t =>
-        new ClusterRoutedLogBackend(t, inClusterLogs, localLogs, nodes, telemetry, logRoutes,
+        new ClusterRoutedLogBackend(t, new NodeLogBackend(t, nodes), localLogs, nodes, telemetry, logRoutes,
             loggers.CreateLogger<ClusterRoutedLogBackend>()));
 
     public ITraceQueryService TracesFor(Guid tenantId) => traces.GetOrAdd(tenantId, t =>
-        new ClusterRoutedTraceService(t, inClusterTraces, localTraces, nodes, telemetry, traceRoutes,
+        new ClusterRoutedTraceService(t, new NodeTraceService(t, nodes), localTraces, nodes, telemetry, traceRoutes,
             loggers.CreateLogger<ClusterRoutedTraceService>()));
 }
 
@@ -103,7 +104,7 @@ public sealed class ClusterRoutedLogBackend(
 
     private async Task<ILogBackend> RouteAsync(Guid clusterId, CancellationToken ct)
         => await routes.UseInClusterAsync(tenantId, clusterId,
-            () => nodes.IsAvailableAsync(clusterId, ct),
+            () => nodes.IsAvailableAsync(tenantId, clusterId, ct),
             () => inCluster.HasDataAsync(clusterId, ct),
             () => telemetry.ManagementPlaneStillReceivesAsync(tenantId, clusterId, ct),
             logger, ct) ? inCluster : local;
@@ -153,7 +154,7 @@ public sealed class ClusterRoutedTraceService(
 {
     private async Task<ITraceQueryService> RouteAsync(Guid clusterId, CancellationToken ct)
         => await routes.UseInClusterAsync(tenantId, clusterId,
-            () => nodes.IsAvailableAsync(clusterId, ct),
+            () => nodes.IsAvailableAsync(tenantId, clusterId, ct),
             () => inCluster.HasDataAsync(clusterId, ct),
             () => telemetry.ManagementPlaneStillReceivesAsync(tenantId, clusterId, ct),
             logger, ct) ? inCluster : local;

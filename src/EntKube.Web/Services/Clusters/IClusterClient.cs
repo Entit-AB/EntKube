@@ -26,6 +26,25 @@ public interface IClusterClient
     Task DeleteManifestAsync(string kind, string name, string ns, CancellationToken ct = default);
 
     /// <summary>
+    /// Sends one HTTP request to a Service in this cluster, through the API server's proxy.
+    ///
+    /// <para><b>Why this shape, and not "give me a client".</b> The three callers that needed it
+    /// were holding a kubeconfig in order to build an authenticated <c>Kubernetes</c> client and
+    /// address its proxy endpoint. Handing out such a client would have moved the credential out of
+    /// their hands — improving the custody count — while granting exactly the same authority:
+    /// arbitrary access to the API server. That is a number improving without the substance
+    /// changing, which this programme has had to retract twice.</para>
+    ///
+    /// <para>So the capability is the narrow one actually in use: reach <em>this named Service, on
+    /// this port</em>. The credential never leaves the seam, and what the caller can do with the
+    /// answer is bounded by the Service it named.</para>
+    /// </summary>
+    Task<ServiceProxyResponse> ProxyServiceAsync(
+        string ns, string service, int port, HttpMethod method, string path,
+        object? body = null, IReadOnlyDictionary<string, string>? headers = null,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// A short-lived token bound to a ServiceAccount in this cluster. The credential that asks for
     /// it stays inside the seam; what comes back is scoped to the ServiceAccount and expires on the
     /// cluster's own terms.

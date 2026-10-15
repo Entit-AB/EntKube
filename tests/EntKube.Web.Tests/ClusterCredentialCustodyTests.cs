@@ -437,7 +437,7 @@ public class ClusterCredentialCustodyTests
     /// so the id was the whole authorization. They take the asking tenant now, from the page that
     /// already had it.</para>
     /// </summary>
-    private const int BaselineOccurrences = 43;
+    private const int BaselineOccurrences = 38;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -468,6 +468,36 @@ public class ClusterCredentialCustodyTests
     /// <para>27. <c>NodeManagementService</c>.</para>
     ///
     /// <para>26. <c>ComponentScanService</c>.</para>
+    ///
+    /// <para>18. <c>TelemetryNodeClient</c> — five occurrences, and the one conversion that needed
+    /// the seam to learn a <b>new shape</b> rather than a new verb.
+    ///
+    /// <para>It held the kubeconfig to build an authenticated <c>Kubernetes</c> client, take its
+    /// <c>BaseUri</c>, and address the API server's <c>/proxy</c> endpoint for a Service — a
+    /// <em>connection</em>, not a command, which is why every previous batch left it alone. Three
+    /// services wanted the same thing (this one, <c>JitProxyService</c> and
+    /// <c>ClusterEgressTunnel</c>), so the shared blocker was worth fixing rather than routing
+    /// around a fourth time.</para>
+    ///
+    /// <para>⚠️ <b>The obvious version of that verb would have been a lie.</b> Handing out a
+    /// configured <c>Kubernetes</c> client takes the credential out of the caller's hands — the
+    /// count improves — while granting exactly the same authority: arbitrary API-server access. The
+    /// capability is therefore the narrow one actually in use,
+    /// <c>ProxyServiceAsync(ns, service, port, …)</c>: reach <em>this named Service</em>. What the
+    /// caller can do is bounded by the Service it named, and the credential never leaves the
+    /// seam.</para>
+    ///
+    /// <para>Two things came with it. The endpoint memo was keyed by cluster id, and resolving is
+    /// now tenant-scoped — so the key gained the tenant, because a tenant who may not see the
+    /// cluster resolves "no node" and a cluster-only key would serve that to the owner, whose
+    /// telemetry would then read an empty management-plane store. (Third time that trap has been
+    /// hit; see <c>LogQueryService</c>.) And the query token was minted from
+    /// <c>component.TenantId</c> — read off the row — which is now the asking tenant.</para>
+    ///
+    /// <para>The <c>NodeApi</c> wire surface is untouched: <c>ILogBackend</c> is implemented inside
+    /// the shipped node, so the tenant arrives on <c>NodeLogBackend</c>'s <em>constructor</em> and
+    /// the router builds one per tenant — the #199 pattern, and the reason those two stopped being
+    /// DI singletons.</para>
     ///
     /// <para>18. The <b>JIT feature</b> — <c>KubernetesJitProvisioner</c>,
     /// <c>JitGrantReaperService</c> and the one read in <c>JitProxyService</c>'s resolve path — nine
@@ -522,7 +552,7 @@ public class ClusterCredentialCustodyTests
     /// seam's error contract is not the caller's, and a conversion that ignores that changes
     /// control flow silently.</para>
     /// </summary>
-    private const int BaselineFiles = 19;
+    private const int BaselineFiles = 18;
 
     private static (int Occurrences, int Files) Measure()
     {

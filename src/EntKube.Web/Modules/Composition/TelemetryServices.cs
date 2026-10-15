@@ -43,8 +43,9 @@ internal static class TelemetryServices
         services.AddScoped<TelemetryNodeClient>();
         services.AddScoped<SegmentLogService>();
         services.AddScoped<SegmentTraceService>();
-        services.AddScoped<NodeLogBackend>();
-        services.AddScoped<NodeTraceService>();
+        // NodeLogBackend and NodeTraceService are no longer registered: they take the tenant they
+        // ask the node as, so TelemetryBackendRouter constructs one of each per tenant. A DI
+        // registration would have to invent a tenant, which is the thing being removed.
         services.AddScoped<ITelemetryBackends, TelemetryBackendRouter>();
         services.AddScoped<IRumQueryService, SegmentRumService>();
         services.AddScoped<IMetricsQuery, PromMetricsService>();

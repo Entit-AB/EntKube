@@ -315,6 +315,13 @@ public class CatalogContractAdoptionTests
     /// reads <c>Component.Cluster.Kubeconfig</c> off it. <c>VeleroService</c> 1 remains the only
     /// one blocked by the contract itself, for the <c>CreatedAt</c> reason above.</para>
     ///
+    /// <para><b>5.</b> <c>TelemetryNodeClient</c>'s query was the one described above as selecting
+    /// "the kubeconfig in the same projection", and that was exactly why it was stuck: the file
+    /// needed a <em>connection</em> to the cluster, not a command, and no seam verb expressed one.
+    /// Adding <c>ProxyServiceAsync</c> — reach this named Service, credential staying inside the
+    /// seam — unblocked the contract query and five credential sites together. The prediction that
+    /// these two ratchets would move as one held.</para>
+    ///
     /// <para>So 87 → 6, and every one of the six is now waiting on the credential seam rather than
     /// on a tenant. The two ratchets have converged: this one cannot move again until
     /// <see cref="ClusterCredentialCustodyTests"/> does.</para>
@@ -366,7 +373,7 @@ public class CatalogContractAdoptionTests
     /// that is not yours, and an empty list is a 200 — "does not exist" and "has no components" are
     /// different answers.</para>
     /// </summary>
-    private const int BaselineQueries = 6;
+    private const int BaselineQueries = 5;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

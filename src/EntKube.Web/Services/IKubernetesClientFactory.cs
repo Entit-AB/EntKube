@@ -27,6 +27,20 @@ public interface IKubernetesClientFactory
     Task DeleteManifestAsync(string kind, string name, string ns, string kubeconfig, CancellationToken ct = default);
 
     /// <summary>
+    /// Sends one HTTP request to a Service in the cluster, through the API server's proxy
+    /// endpoint, and returns what came back.
+    ///
+    /// <para>This is the verb that lets a caller talk to something running <em>in</em> a cluster
+    /// without holding the cluster's credential. Three services needed it and none could be
+    /// converted without it — the telemetry node client, the JIT proxy and the egress tunnel all
+    /// wanted a connection rather than a command.</para>
+    /// </summary>
+    Task<ServiceProxyResponse> ProxyServiceAsync(
+        string ns, string service, int port, HttpMethod method, string path, string kubeconfig,
+        object? body = null, IReadOnlyDictionary<string, string>? headers = null,
+        CancellationToken ct = default);
+
+    /// <summary>
     /// A short-lived token bound to a ServiceAccount, with the expiry the API server actually
     /// granted. See the implementation for why the requested window is not trusted.
     /// </summary>
@@ -336,3 +350,16 @@ public interface IKubernetesClientFactory
 /// which can be sooner than was asked for.
 /// </summary>
 public sealed record ServiceAccountToken(string Token, DateTime? ExpiresAt);
+
+/// <summary>
+/// What a proxied request to an in-cluster Service came back with.
+///
+/// <para><paramref name="Status"/> is carried rather than thrown on, because a request that
+/// travels through the API server's proxy can be refused at either end and the two need different
+/// fixes — the API server means the cluster credential was not accepted, the Service means its own
+/// credential was not. A caller that only saw an exception could not tell them apart.</para>
+/// </summary>
+public sealed record ServiceProxyResponse(int Status, string? ReasonPhrase, string Body)
+{
+    public bool Success => Status is >= 200 and < 300;
+}

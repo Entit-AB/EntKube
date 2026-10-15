@@ -194,7 +194,7 @@ public class ManifestSetDeleteTests : IDisposable
         RecordingSink sink = new();
         using IDisposable registration = gate.RegisterSink(sink);
 
-        KubernetesClientFactory factory = new(gate);
+        KubernetesClientFactory factory = new(gate, new KubernetesProxyClientPool(Microsoft.Extensions.Logging.Abstractions.NullLogger<KubernetesProxyClientPool>.Instance));
 
         Func<Task> act = () => factory.DeleteManifestSetAsync(TwoDocuments, TestKubeconfig.Valid);
 
