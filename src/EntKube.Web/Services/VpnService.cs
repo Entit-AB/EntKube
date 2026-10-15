@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 using System.Text;
 using System.Text.Json;
@@ -17,7 +18,12 @@ namespace EntKube.Web.Services;
 ///                 enabling encrypted pod-to-pod and service cross-cluster connectivity.
 /// </summary>
 public class VpnService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    // Connectivity's own context, not the all-seeing one: this service reads and writes
+    // VpnTunnels, VpnLocalEndpoints and VpnRemoteEndpoints and nothing else, so a query against
+    // another module's table no longer compiles here. The cluster and component it needs come
+    // from the seam and ICatalogApi, which is what made the swap possible — see
+    // docs/decomposition.md §4.0.1 for why those two had to move first.
+    IDbContextFactory<ConnectivityDbContext> dbFactory,
     VaultService vaultService,
     ComponentLifecycleService lifecycleService,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
@@ -29,7 +35,7 @@ public class VpnService(
         Guid tenantId, string name, VpnTunnelType type, string? description = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         VpnTunnel tunnel = new()
         {
@@ -48,7 +54,7 @@ public class VpnService(
 
     public async Task<VpnTunnel?> GetTunnelWithDetailsAsync(Guid tunnelId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         // The component navigation used to be included here and was read by nobody: both callers
         // are the swanctl generators, which want endpoint roles and remote peers. The page's
         // component badge reads it off GetTunnelsForTenantAsync's tunnels, which never included it
@@ -61,7 +67,7 @@ public class VpnService(
 
     public async Task<List<VpnTunnel>> GetTunnelsForTenantAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         return await db.VpnTunnels
             .Where(t => t.TenantId == tenantId)
             .Include(t => t.LocalEndpoints).ThenInclude(e => e.Cluster)
@@ -75,7 +81,7 @@ public class VpnService(
         int dpdDelay, int dpdTimeout, int ikeLifetime = 86400, int childLifetime = 3600,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         VpnTunnel tunnel = await db.VpnTunnels.FindAsync([tunnelId], ct)
             ?? throw new InvalidOperationException($"Tunnel {tunnelId} not found.");
 
@@ -91,7 +97,7 @@ public class VpnService(
 
     public async Task UpdateTunnelStatusAsync(Guid tunnelId, VpnTunnelStatus status, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         VpnTunnel tunnel = await db.VpnTunnels.FindAsync([tunnelId], ct)
             ?? throw new InvalidOperationException($"Tunnel {tunnelId} not found.");
         tunnel.Status = status;
@@ -100,7 +106,7 @@ public class VpnService(
 
     public async Task DeleteTunnelAsync(Guid tunnelId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         VpnTunnel tunnel = await db.VpnTunnels.FindAsync([tunnelId], ct)
             ?? throw new InvalidOperationException($"Tunnel {tunnelId} not found.");
         db.VpnTunnels.Remove(tunnel);
@@ -113,7 +119,7 @@ public class VpnService(
         Guid tunnelId, Guid clusterId, string[] subnets, VpnEndpointRole role,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         VpnLocalEndpoint ep = new()
         {
             Id = Guid.NewGuid(),
@@ -131,7 +137,7 @@ public class VpnService(
     public async Task UpdateLocalEndpointAsync(
         Guid endpointId, string[] subnets, string? publicIp, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         VpnLocalEndpoint ep = await db.VpnLocalEndpoints.FindAsync([endpointId], ct)
             ?? throw new InvalidOperationException($"Local endpoint {endpointId} not found.");
         ep.Subnets = JsonSerializer.Serialize(subnets);
@@ -141,7 +147,7 @@ public class VpnService(
 
     public async Task LinkComponentAsync(Guid endpointId, Guid componentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         VpnLocalEndpoint ep = await db.VpnLocalEndpoints.FindAsync([endpointId], ct)
             ?? throw new InvalidOperationException($"Local endpoint {endpointId} not found.");
         ep.ComponentId = componentId;
@@ -151,7 +157,7 @@ public class VpnService(
 
     public async Task RemoveLocalEndpointAsync(Guid endpointId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         VpnLocalEndpoint ep = await db.VpnLocalEndpoints.FindAsync([endpointId], ct)
             ?? throw new InvalidOperationException($"Local endpoint {endpointId} not found.");
         db.VpnLocalEndpoints.Remove(ep);
@@ -166,7 +172,7 @@ public class VpnService(
         string? localId = null, string? remoteId = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         VpnRemoteEndpoint ep = new()
         {
@@ -192,7 +198,7 @@ public class VpnService(
     public async Task UpdateRemoteEndpointAsync(
         Guid endpointId, string publicIp, string[] subnets, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         VpnRemoteEndpoint ep = await db.VpnRemoteEndpoints.FindAsync([endpointId], ct)
             ?? throw new InvalidOperationException($"Remote endpoint {endpointId} not found.");
         ep.PublicIp = publicIp;
@@ -207,7 +213,7 @@ public class VpnService(
 
     public async Task RemoveRemoteEndpointAsync(Guid endpointId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         VpnRemoteEndpoint ep = await db.VpnRemoteEndpoints.FindAsync([endpointId], ct)
             ?? throw new InvalidOperationException($"Remote endpoint {endpointId} not found.");
         db.VpnRemoteEndpoints.Remove(ep);
@@ -309,7 +315,7 @@ public class VpnService(
     public async Task<HelmExecutionResult> SyncConfigToClusterAsync(
         Guid localEndpointId, Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         VpnLocalEndpoint ep = await db.VpnLocalEndpoints
             .Include(e => e.Cluster)
@@ -608,7 +614,7 @@ public class VpnService(
     /// </summary>
     public async Task ReconcileGatewayLinksAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         List<VpnLocalEndpoint> unlinked = await db.VpnLocalEndpoints
             .Where(e => e.ComponentId == null && e.Tunnel.TenantId == tenantId)

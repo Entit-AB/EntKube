@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -52,7 +53,10 @@ public class ExternalRouteRequest
 /// regenerate manifests, and tear down routes when components are uninstalled.
 /// </summary>
 public class ExternalRouteService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    // Connectivity's own context: this service touches ExternalRoutes, AppRoutes and
+    // ExternalRouteHealthHistories, all its module's own. Its component reads moved to
+    // ICatalogApi first, which is what made the swap possible.
+    IDbContextFactory<ConnectivityDbContext> dbFactory,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<ExternalRouteService> logger)
 {
@@ -72,7 +76,7 @@ public class ExternalRouteService(
     public async Task<ExternalRoute> AddRouteAsync(
         Guid tenantId, Guid componentId, ExternalRouteRequest request, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         // Load the component to fill in defaults.
 
@@ -188,7 +192,7 @@ public class ExternalRouteService(
     public async Task<List<ExternalRoute>> GetRoutesAsync(
         Guid componentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         return await db.ExternalRoutes
             .Where(r => r.ComponentId == componentId)
@@ -212,7 +216,7 @@ public class ExternalRouteService(
     public async Task<IReadOnlySet<string>> ShadowedHostnamesAsync(
         Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         // The cluster this component belongs to — an AppRoute only shadows a route on the same
         // cluster, since that is where the two would collide.
@@ -259,7 +263,7 @@ public class ExternalRouteService(
             throw new InvalidOperationException("Request timeout cannot be negative. Use 0 for no timeout.");
         }
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         ExternalRoute route = await db.ExternalRoutes
             .FirstOrDefaultAsync(r => r.Id == routeId, ct)
@@ -293,7 +297,7 @@ public class ExternalRouteService(
                 "Affinity cookie lifetime cannot be negative. Leave it empty for a session cookie.");
         }
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         ExternalRoute route = await db.ExternalRoutes
             .FirstOrDefaultAsync(r => r.Id == routeId, ct)
@@ -328,7 +332,7 @@ public class ExternalRouteService(
     /// </summary>
     public async Task DeleteRouteAsync(Guid routeId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         ExternalRoute route = await db.ExternalRoutes
             .FirstOrDefaultAsync(r => r.Id == routeId, ct)
@@ -382,7 +386,7 @@ public class ExternalRouteService(
     private async Task<(ExternalRoute Route, EntKube.Contracts.Catalog.InstalledComponent? Component)>
         LoadRouteAsync(Guid tenantId, Guid routeId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         ExternalRoute route = await db.ExternalRoutes
             .FirstOrDefaultAsync(r => r.Id == routeId, ct)
@@ -1449,7 +1453,7 @@ public class ExternalRouteService(
     public async Task<RouteUptimeSummary> GetRouteUptimeAsync(
         Guid routeId, int windowDays = 7, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         DateTime from = DateTime.UtcNow.AddDays(-windowDays);
 
         List<ExternalRouteHealthHistory> history = await db.ExternalRouteHealthHistories

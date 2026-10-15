@@ -216,6 +216,29 @@ public class ModuleContractTests
     /// count matches <c>.ClusterComponents</c>. A navigation read is the same coupling by a
     /// different spelling.</para>
     ///
+    /// <para><b>Connectivity 7 → 4</b>, and all three went off the same way the earlier ones did:
+    /// their Catalog reads moved to <c>ICatalogApi</c> and their credential to the seam first, and
+    /// then there was nothing left to hold the shared context for. <c>VpnService</c> touches only
+    /// <c>VpnTunnels</c>/<c>VpnLocalEndpoints</c>/<c>VpnRemoteEndpoints</c>;
+    /// <c>ExternalRouteService</c> only <c>ExternalRoutes</c>, <c>AppRoutes</c> and
+    /// <c>ExternalRouteHealthHistories</c> — all its module's own.</para>
+    ///
+    /// <para>⚠️ <c>HeadscaleService</c> is the one worth reading. What kept it on the all-seeing
+    /// context was <b>five identical blocks that loaded the cluster row to read back
+    /// <c>cluster.TenantId</c></b> — the tenant the caller had already passed in, and which the
+    /// tenant-first <c>GetComponentsForClusterAsync</c> call two lines above has already proved the
+    /// cluster belongs to. So the query was both redundant and a derived tenant where an input was
+    /// in scope. Deleting the five removed the module's last foreign table, five round trips, and
+    /// the pattern <c>VacuousTenantCheckTests</c> exists to stop — in a shape that test cannot see,
+    /// because the derived tenant was passed to the <em>vault</em> rather than to
+    /// <c>ForAsync</c>.</para>
+    ///
+    /// <para>The three that remain are blocked on contracts rather than on tidying:
+    /// <c>ConnectivityGraphService</c> reads <c>AppDeployments</c>, <c>AppEnvironments</c>,
+    /// <c>MessagingBindings</c> and <c>StorageBindings</c> — three other modules;
+    /// <c>AppRouteService</c> and <c>AppL4RouteService</c> read <c>AppDeployments</c> and
+    /// <c>AppDeploymentRoutes</c>, which <c>ConnectivityDbContext</c> does not expose.</para>
+    ///
     /// <para><b>DataServices 12 → 8, and it needed no contract at all.</b> This module was recorded
     /// as "has not moved at all for exactly that reason — every one of its services reaches into
     /// Fleet, Catalog or Delivery". That was true of the module and <em>false of four of its
@@ -270,7 +293,7 @@ public class ModuleContractTests
     {
         [Module.DataServices] = 2,
         [Module.Telemetry] = 4,
-        [Module.Connectivity] = 7,
+        [Module.Connectivity] = 4,
         [Module.Support] = 7,
         [Module.Catalog] = 6,
         [Module.Delivery] = 6,
