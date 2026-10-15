@@ -541,7 +541,31 @@ public class ClusterCredentialCustodyTests
     /// decision and 3 of ordinary work left. Checking where a credential <em>goes</em> is what
     /// reclassified Keystone's two: they read like any other caller and are not.</para>
     /// </summary>
-    private const int BaselineOccurrences = 18;
+    /// <summary>
+    /// <b>15 in 8 files — re-measured after two changes merged, not taken from either of them.</b>
+    ///
+    /// <para>⚠️ <c>#236</c> banked 18 against a tree where <c>DeploymentImportService</c>'s two
+    /// sites and <c>KubernetesOperationsService</c>'s one were still present; <c>#238</c> banked 19
+    /// against a tree where <c>RemediationService</c>'s two and <c>TenantService</c>'s one still
+    /// were. Both PRs said in so many words that whichever landed second had to re-measure. The
+    /// merge instead kept one side's constant and took both sides' conversions, so <c>main</c>
+    /// carried <b>three sites of slack</b> and the slack test was failing on it.</para>
+    ///
+    /// <para>This is what <c>feedback_clean_merge_is_not_a_working_merge</c> is about, in its
+    /// sharpest form: <b>a ratchet constant has no correct merge.</b> Neither side's number
+    /// describes the merged tree, git cannot know that, and a textual resolution of two
+    /// single-line changes looks completely clean. The only safe resolution is to measure the
+    /// result.</para>
+    ///
+    /// <para><b>The floor is reached.</b> 6 of the 15 are the seam and its gate
+    /// (<c>KubeconfigMaterializationInterceptor</c> 2, <c>ClusterClient</c> 2,
+    /// <c>ClusterChangeGate</c> 2); 2 are a kubeconfig EntKube <em>mints</em> rather than a
+    /// cluster's (<c>JitAccessService</c>, <c>PortalJitAccessPanel.razor</c>); and 7 wait on the
+    /// credentialed-channel seam shape (<c>StorageLinkClientFactory</c> 3, <c>StorageService</c> 2,
+    /// <c>OpenStackKeystoneClient</c> 2). From 508 sites in 57 files, with no ordinary conversion
+    /// work left.</para>
+    /// </summary>
+    private const int BaselineOccurrences = 15;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -705,7 +729,7 @@ public class ClusterCredentialCustodyTests
     /// seam's error contract is not the caller's, and a conversion that ignores that changes
     /// control flow silently.</para>
     /// </summary>
-    private const int BaselineFiles = 10;
+    private const int BaselineFiles = 8;
 
     private static (int Occurrences, int Files) Measure()
     {
