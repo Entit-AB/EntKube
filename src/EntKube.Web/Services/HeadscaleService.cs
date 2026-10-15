@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -42,7 +43,11 @@ public record HeadscaleRoute(
 // ── Service ───────────────────────────────────────────────────────────────────
 
 public class HeadscaleService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    // Connectivity's own context. What kept this service on the all-seeing one was five blocks
+    // that loaded the cluster row to read back `cluster.TenantId` — the tenant the caller had
+    // already passed in, and which the tenant-first catalog lookup above has already proved the
+    // cluster belongs to. Deleting them removed five queries and the last foreign table.
+    IDbContextFactory<ConnectivityDbContext> dbFactory,
     IKubernetesClientFactory k8sFactory,
     VaultService vaultService,
     ExternalRouteService externalRouteService,
@@ -78,40 +83,28 @@ public class HeadscaleService(
     {
         EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
         if (comp is null) return null;
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        KubernetesCluster cluster = await db.KubernetesClusters
-            .FirstAsync(c => c.Id == clusterId, ct);
-        return await vaultService.GetComponentSecretValueAsync(cluster.TenantId, comp.Id, "server-url", ct);
+        return await vaultService.GetComponentSecretValueAsync(tenantId, comp.Id, "server-url", ct);
     }
 
     public async Task<string?> GetClusterIssuerAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
         if (comp is null) return null;
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        KubernetesCluster cluster = await db.KubernetesClusters
-            .FirstAsync(c => c.Id == clusterId, ct);
-        return await vaultService.GetComponentSecretValueAsync(cluster.TenantId, comp.Id, "cluster-issuer", ct);
+        return await vaultService.GetComponentSecretValueAsync(tenantId, comp.Id, "cluster-issuer", ct);
     }
 
     public async Task<string?> GetApiKeyAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
         if (comp is null) return null;
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        KubernetesCluster cluster = await db.KubernetesClusters
-            .FirstAsync(c => c.Id == clusterId, ct);
-        return await vaultService.GetComponentSecretValueAsync(cluster.TenantId, comp.Id, "api-key", ct);
+        return await vaultService.GetComponentSecretValueAsync(tenantId, comp.Id, "api-key", ct);
     }
 
     public async Task SaveApiKeyAsync(Guid tenantId, Guid clusterId, string apiKey, CancellationToken ct = default)
     {
         EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
         if (comp is null) throw new InvalidOperationException("Headscale component not found.");
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        KubernetesCluster cluster = await db.KubernetesClusters
-            .FirstAsync(c => c.Id == clusterId, ct);
-        await vaultService.SetComponentSecretAsync(cluster.TenantId, comp.Id, "api-key", apiKey, ct);
+        await vaultService.SetComponentSecretAsync(tenantId, comp.Id, "api-key", apiKey, ct);
     }
 
     // ── Bootstrap: generate API key via kubectl exec ──────────────────────────
@@ -379,7 +372,7 @@ public class HeadscaleService(
         Guid tenantId, Guid componentId, string serverUrl, string clusterIssuer,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         bool hasRoute = await db.ExternalRoutes.AnyAsync(r => r.ComponentId == componentId, ct);
         if (hasRoute) return;
@@ -607,7 +600,7 @@ public class HeadscaleService(
 
         // 5. Switch ExternalRoute to Passthrough so the Gateway gets a TLS listener + TLSRoute.
         //    Delete the old HTTPRoute first to avoid a name conflict (same name, different kind).
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         ExternalRoute? route = await db.ExternalRoutes
             .FirstOrDefaultAsync(r => r.ComponentId == comp.Id, ct);
 
@@ -672,7 +665,7 @@ public class HeadscaleService(
         EntKube.Web.Services.Clusters.IClusterClient? cluster = comp is null ? null : await clusterClients.ForAsync(tenantId, clusterId, ct);
         if (cluster is null) return;
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
         bool isPassthrough = await db.ExternalRoutes
             .AnyAsync(r => r.ComponentId == comp.Id && r.TlsMode == TlsMode.Passthrough, ct);
         if (!isPassthrough) return;
@@ -888,11 +881,8 @@ public class HeadscaleService(
         EntKube.Contracts.Catalog.InstalledComponent? comp = await GetComponentAsync(tenantId, clusterId, ct);
         if (comp is not null)
         {
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
-            KubernetesCluster cluster = await db.KubernetesClusters
-                .FirstAsync(c => c.Id == clusterId, ct);
             await vaultService.SetComponentSecretAsync(
-                cluster.TenantId, comp.Id, "infra-preauth-key", preauth.Key, ct);
+                tenantId, comp.Id, "infra-preauth-key", preauth.Key, ct);
         }
 
         // Sync to cluster as K8s secret.
