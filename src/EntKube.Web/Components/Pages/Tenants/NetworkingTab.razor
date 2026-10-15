@@ -945,15 +945,14 @@
 
         if (!Guid.TryParse(selectedGatewayClusterId, out Guid clusterId)) return;
 
-        KubernetesCluster? cluster = availableClusters.FirstOrDefault(c => c.Id == clusterId);
-        if (cluster is null) return;
-
         detectingCidrs = true;
         StateHasChanged();
 
         try
         {
-            (string? pod, string? svc) = await VpnService.DetectClusterCidrsAsync(cluster);
+            // The id, not the row: the seam checks it is this tenant's cluster, which the
+            // local FirstOrDefault only approximated.
+            (string? pod, string? svc) = await VpnService.DetectClusterCidrsAsync(TenantId, clusterId);
             if (!string.IsNullOrWhiteSpace(pod)) { gatewayPodCidr = pod; podCidrDetected = true; }
             if (!string.IsNullOrWhiteSpace(svc)) { gatewayServiceCidr = svc; serviceCidrDetected = true; }
         }

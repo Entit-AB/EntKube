@@ -458,7 +458,25 @@ public class ClusterCredentialCustodyTests
     /// removed a query rather than needing a DTO field — the inverse of the <c>VeleroService</c>
     /// case still parked for want of one.</para>
     /// </summary>
-    private const int BaselineOccurrences = 27;
+    /// <summary>
+    /// <b>25 in 14 files.</b> <c>VpnService</c> is at zero, and it is the one file that was on two
+    /// of these ratchets at once — see <see cref="ClusterChangeGateCoverageTests"/>, where it was
+    /// one of the last two own-process CLI entries.
+    ///
+    /// <para>Its CIDR detection took the <c>KubernetesCluster</c> row, wrote the credential to a
+    /// temp file and ran <c>kubectl get … -o jsonpath=…</c> six times against it. None of those
+    /// six needed a verb the seam lacks: the seam has no jsonpath, so the objects are fetched
+    /// whole and parsed in C#. That removed a round trip rather than adding one — sources 5 and 6
+    /// read two fields out of the <em>same</em> node list and fetched it twice.</para>
+    ///
+    /// <para>The caller is a page that already had a <c>TenantId</c>, and it was passing a cluster
+    /// entity it had found with a local <c>FirstOrDefault</c> over the clusters it happened to be
+    /// showing. It passes the id now, so the ownership check is the seam's rather than the page's
+    /// rendering state — the same substitution as <c>TailscaleVpnTab.razor</c>'s, and worth
+    /// noticing because "the page only lists this tenant's clusters" reads like a check and is
+    /// not one.</para>
+    /// </summary>
+    private const int BaselineOccurrences = 25;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -622,7 +640,7 @@ public class ClusterCredentialCustodyTests
     /// seam's error contract is not the caller's, and a conversion that ignores that changes
     /// control flow silently.</para>
     /// </summary>
-    private const int BaselineFiles = 15;
+    private const int BaselineFiles = 14;
 
     private static (int Occurrences, int Files) Measure()
     {

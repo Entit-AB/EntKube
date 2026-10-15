@@ -547,11 +547,11 @@ shape the work turned out to have. Where it stands, against the figures this sec
 
 | measure | at the start | now |
 |---|---|---|
-| credential sites | 508 in 57 files | **27 in 15** |
+| credential sites | 508 in 57 files | **25 in 14** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
 | foreign reads of `ClusterComponents` | 87 | **6** |
 | foreign *writes* to it | 22 | **0** |
-| own-process kubectl/helm outside the gate (§5.4) | 49 | **2** |
+| own-process kubectl/helm outside the gate (§5.4) | 49 | **1** |
 | component lookups escaping their tenant | 14 | **0** |
 
 Those are six ratchets, each with a banked baseline and a second test that fails when the
@@ -658,12 +658,13 @@ bumped and a new image ships. The tenant goes on a factory in front of the inter
 checking, before the next cascade that ends at an interface, whether anything outside this process
 implements it.
 
-**What the remaining 27 are made of** (re-measured 2026-10-15, not carried forward — an earlier
+**What the remaining 25 are made of** (re-measured 2026-10-15, not carried forward — an earlier
 version of this list still named `ComponentScanService` with ten after it had reached zero).
-Nine files hold conversions that are ordinary work: `StorageLinkClientFactory` (3), `LokiService`
-(3), `VpnService` (2), `StorageService` (2), `RemediationService` (2), `OpenStackKeystoneClient`
-(2), `DeploymentImportService` (2), and single reads in `TenantService`,
-`KubernetesOperationsService`, `JitAccessService` and `PortalJitAccessPanel.razor`.
+Eight files hold conversions that are ordinary work: `StorageLinkClientFactory` (3), `LokiService`
+(3), `StorageService` (2), `RemediationService` (2), `OpenStackKeystoneClient` (2),
+`DeploymentImportService` (2), and single reads in `TenantService`,
+`KubernetesOperationsService`, `JitAccessService` and `PortalJitAccessPanel.razor`. *(`VpnService`
+held two and is at zero — see §5.4.)*
 
 Six of those sites are **blocked on one undecided seam shape**, and it is worth naming rather than
 rediscovering: `StorageService` + `StorageLinkClientFactory` reach an in-cluster S3 gateway with
@@ -774,11 +775,14 @@ touch a cluster at all and are excluded by name; the rest needed verbs and param
 small to add, not operations that could not exist (§4.0.1.4). `DockerRegistryService` is converted — it
 applied a Namespace+Secret manifest, and the seam has had `EnsureNamespaceAsync` and
 `ReplaceSecretAsync` all along, so a registry password was being written into a namespace with
-nobody asked and nothing recorded. What remains is two invocations the seam already expresses —
-`ReleaseVolumeGuard` and `VpnService`, a scale and a read — each in a file that also holds
-credential reads, so they move the custody baseline too and are worth doing as custody work rather
-than as gate work. The third, `ClusterEgressTunnel`'s `kubectl port-forward`, is the one genuine
-gap in the seam's vocabulary:
+nobody asked and nothing recorded. `ReleaseVolumeGuard` and `VpnService` are converted too, and both confirm that these are
+custody work rather than gate work: each also held credential reads, and both ratchets moved in
+one change. `VpnService` is worth a note because the metric counted it **once** and it was six
+invocations — one private runner called from six places, all `kubectl get … -o jsonpath=…`. The
+seam has no jsonpath and should not: the objects are fetched whole and parsed in C#, which also
+turned two fetches of the node list into one. Nothing there needed gating, because all six are
+reads; what they escaped was the authorization. **One left**: `ClusterEgressTunnel`'s
+`kubectl port-forward`, which is the one genuine gap in the seam's vocabulary —
 every verb on it is one-shot, and a port-forward is a long-lived process that must stay alive for
 as long as the tunnel is used. It is also the only entry that changes nothing — a tunnel is
 neither a read nor a change but a channel.

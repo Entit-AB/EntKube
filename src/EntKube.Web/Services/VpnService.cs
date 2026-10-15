@@ -1,6 +1,5 @@
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -21,7 +20,8 @@ public class VpnService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vaultService,
     ComponentLifecycleService lifecycleService,
-    EntKube.Contracts.Catalog.ICatalogApi catalog)
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess)
 {
     // ── Tunnel CRUD ─────────────────────────────────────────────────────────────
 
@@ -326,130 +326,222 @@ public class VpnService(
     // ── CIDR auto-detection ──────────────────────────────────────────────────────
 
     /// <summary>
-    /// Tries to detect the pod and service CIDRs for a cluster by querying its
-    /// Kubernetes API. Uses kubeadm-config and node specs as sources.
-    /// Returns null values for either CIDR if detection fails — the operator
-    /// can always fill them in manually.
+    /// Tries to detect the pod and service CIDRs for a cluster by reading its
+    /// control-plane configuration. Six sources in order of authority; a cluster that
+    /// answers none of them returns nulls, because the operator can always type them in.
+    ///
+    /// <para>This used to take the <c>KubernetesCluster</c> row, read the credential off it,
+    /// write it to a temp file and spawn <c>kubectl</c> six times with
+    /// <c>--kubeconfig=</c>. It takes <c>(tenantId, clusterId)</c> now and asks the seam, so
+    /// the reads are authorized and go through the factory the gate watches. The jsonpath
+    /// expressions went with it: the full objects are parsed here instead, which is why
+    /// sources 5 and 6 are one read of the node list rather than two.</para>
     /// </summary>
     public async Task<(string? PodCidr, string? ServiceCidr)> DetectClusterCidrsAsync(
-        KubernetesCluster cluster, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        EntKube.Web.Services.Clusters.IClusterClient? cluster =
+            await clusterAccess.ForAsync(tenantId, clusterId, ct);
+        if (cluster is null)
+        {
+            // Not this tenant's cluster, or no credential stored. Detection is best-effort
+            // either way, and the fields stay blank for the operator to fill in.
             return (null, null);
+        }
 
-        string tempKubeconfig = Path.GetTempFileName();
+        string? podCidr = null;
+        string? serviceCidr = null;
+
+        // ── Source 1: kube-controller-manager static pod command (most authoritative) ──
+        // The --cluster-cidr flag is the actual configured pod CIDR, not a per-node value.
         try
         {
-            await File.WriteAllTextAsync(tempKubeconfig, cluster.Kubeconfig, ct);
+            string json = await cluster.GetJsonAsync("pods", "kube-system", "component=kube-controller-manager", ct);
+            podCidr = ReadFlagFromPodCommand(json, "--cluster-cidr");
+        }
+        catch { }
 
-            string? podCidr = null;
-            string? serviceCidr = null;
+        // ── Source 2: kube-apiserver static pod command for service CIDR ──
+        try
+        {
+            string json = await cluster.GetJsonAsync("pods", "kube-system", "component=kube-apiserver", ct);
+            serviceCidr = ReadFlagFromPodCommand(json, "--service-cluster-ip-range");
+        }
+        catch { }
 
-            // ── Source 1: kube-controller-manager static pod command (most authoritative) ──
-            // The --cluster-cidr flag is the actual configured pod CIDR, not a per-node value.
+        // ── Source 3: kubeadm-config ConfigMap (kubeadm clusters) ──
+        // Contains explicit networking.podSubnet and networking.serviceSubnet.
+        if (podCidr is null || serviceCidr is null)
+        {
             try
             {
-                string args = await RunKubectlOutputAsync(
-                    $"get pod -n kube-system -l component=kube-controller-manager -o jsonpath={{.items[0].spec.containers[0].command}} --kubeconfig={tempKubeconfig}", ct);
-                if (!string.IsNullOrWhiteSpace(args))
+                HelmExecutionResult cm = await cluster.GetResourceJsonAsync("cm", "kubeadm-config", "kube-system", ct);
+                string? yaml = ReadConfigMapKey(cm.Output, "ClusterConfiguration");
+                if (!string.IsNullOrWhiteSpace(yaml))
                 {
-                    Match m = Regex.Match(args, @"--cluster-cidr[=""'\s]+([0-9a-f.:/ ,]+?)(?:[""'\s]|$)");
-                    if (m.Success) podCidr = m.Groups[1].Value.Trim('"', '\'', ' ', ',');
+                    if (podCidr is null)
+                    {
+                        Match m = Regex.Match(yaml, @"podSubnet:\s*([0-9a-f.:/ ]+)");
+                        if (m.Success) podCidr = m.Groups[1].Value.Trim();
+                    }
+                    if (serviceCidr is null)
+                    {
+                        Match m = Regex.Match(yaml, @"serviceSubnet:\s*([0-9a-f.:/ ]+)");
+                        if (m.Success) serviceCidr = m.Groups[1].Value.Trim();
+                    }
                 }
             }
             catch { }
+        }
 
-            // ── Source 2: kube-apiserver static pod command for service CIDR ──
+        // ── Source 4: kube-proxy ConfigMap clusterCIDR (fallback for pod CIDR) ──
+        if (podCidr is null)
+        {
             try
             {
-                string args = await RunKubectlOutputAsync(
-                    $"get pod -n kube-system -l component=kube-apiserver -o jsonpath={{.items[0].spec.containers[0].command}} --kubeconfig={tempKubeconfig}", ct);
-                if (!string.IsNullOrWhiteSpace(args))
-                {
-                    Match m = Regex.Match(args, @"--service-cluster-ip-range[=""'\s]+([0-9a-f.:/ ,]+?)(?:[""'\s]|$)");
-                    if (m.Success) serviceCidr = m.Groups[1].Value.Trim('"', '\'', ' ', ',');
-                }
+                HelmExecutionResult cm = await cluster.GetResourceJsonAsync("cm", "kube-proxy", "kube-system", ct);
+                string? conf = ReadConfigMapKey(cm.Output, "config.conf");
+                Match m = Regex.Match(conf ?? "", @"clusterCIDR:\s*([0-9a-f.:/ ,]+)");
+                if (m.Success) podCidr = m.Groups[1].Value.Trim();
             }
             catch { }
+        }
 
-            // ── Source 3: kubeadm-config ConfigMap (kubeadm clusters) ──
-            // Contains explicit networking.podSubnet and networking.serviceSubnet.
-            if (podCidr is null || serviceCidr is null)
+        // ── Sources 5 and 6: the node list, read once ──
+        // 5 computes the minimum covering CIDR across all node spec.podCIDR values; 6 reads
+        // k3s's server args, which it encodes in an annotation on each node. Both are in the
+        // same object, and the jsonpath version fetched it twice.
+        if (podCidr is null || serviceCidr is null)
+        {
+            try
             {
+                string json = await cluster.GetJsonAsync("nodes", "", ct: ct);
+                (string? fromNodes, string? k3sService) = ReadCidrsFromNodes(json);
+                podCidr ??= fromNodes;
+                serviceCidr ??= k3sService;
+            }
+            catch { }
+        }
+
+        return (podCidr, serviceCidr);
+    }
+
+    /// <summary>
+    /// One flag's value out of the first pod's first container command in a
+    /// <c>kubectl get pods -o json</c> payload.
+    ///
+    /// <para>Both spellings are accepted — <c>--flag=value</c> as one argument, and
+    /// <c>--flag</c> followed by its value as the next — because the static pod manifests
+    /// use the first and nothing stops a cluster using the second. The jsonpath version
+    /// regexed the whole command array as one string, which is why it needed quote and
+    /// whitespace classes in the pattern.</para>
+    /// </summary>
+    public static string? ReadFlagFromPodCommand(string json, string flag)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+
+        System.Text.Json.Nodes.JsonNode? root = System.Text.Json.Nodes.JsonNode.Parse(json);
+
+        // FirstOrDefault, not [0]: indexing a present-but-EMPTY JsonArray throws, and a
+        // selector that matches no pod is exactly the normal case here.
+        System.Text.Json.Nodes.JsonNode? pod =
+            (root?["items"] as System.Text.Json.Nodes.JsonArray)?.FirstOrDefault();
+        System.Text.Json.Nodes.JsonNode? container =
+            (pod?["spec"]?["containers"] as System.Text.Json.Nodes.JsonArray)?.FirstOrDefault();
+        if (container?["command"] is not System.Text.Json.Nodes.JsonArray command) return null;
+
+        return ReadFlag([.. command.Select(a => a?.GetValue<string>() ?? "")], flag);
+    }
+
+    /// <summary>
+    /// One flag's value out of an argument list, accepting both <c>--flag=value</c> as a single
+    /// argument and <c>--flag</c> followed by its value as the next.
+    /// </summary>
+    private static string? ReadFlag(IReadOnlyList<string> args, string flag)
+    {
+        for (int i = 0; i < args.Count; i++)
+        {
+            if (args[i].StartsWith($"{flag}=", StringComparison.Ordinal))
+            {
+                string value = args[i][(flag.Length + 1)..].Trim('"', '\'', ' ', ',');
+                return string.IsNullOrWhiteSpace(value) ? null : value;
+            }
+            if (args[i] == flag && i + 1 < args.Count)
+            {
+                string value = args[i + 1].Trim('"', '\'', ' ', ',');
+                return string.IsNullOrWhiteSpace(value) ? null : value;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>One key of a ConfigMap's <c>data</c>, from the object as JSON.</summary>
+    public static string? ReadConfigMapKey(string json, string key)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return null;
+        return System.Text.Json.Nodes.JsonNode.Parse(json)?["data"]?[key]?.GetValue<string>();
+    }
+
+    /// <summary>
+    /// What the node list says about the two CIDRs: the supernet of every assigned
+    /// <c>spec.podCIDR</c>, and k3s's <c>--service-cidr</c> out of its node annotations.
+    /// </summary>
+    public static (string? PodCidr, string? ServiceCidr) ReadCidrsFromNodes(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json)) return (null, null);
+
+        if (System.Text.Json.Nodes.JsonNode.Parse(json)?["items"]
+            is not System.Text.Json.Nodes.JsonArray items)
+        {
+            return (null, null);
+        }
+
+        List<string> nodeCidrs = [.. items
+            .Select(n => n?["spec"]?["podCIDR"]?.GetValue<string>())
+            .Where(c => !string.IsNullOrWhiteSpace(c))
+            .Select(c => c!)];
+
+        string? podCidr = nodeCidrs.Count > 0 ? ComputeIpv4Supernet([.. nodeCidrs]) : null;
+
+        // k3s stores its server args as a JSON-encoded array inside an annotation value, so each
+        // annotation that looks like one is parsed and read as an argument list.
+        //
+        // ⚠️ The previous version regexed the whole annotations object's serialized text with
+        // `--service-cidr[=\s"\\]+`, and that character class cannot match the standard spelling:
+        // in `["server","--service-cidr","10.43.0.0/16"]` the separator between flag and value is
+        // `","`, and a comma is not in the class. It could only ever have matched the `=` form.
+        // Parsing the array reads both, and the regex stays as a fallback for an annotation that
+        // is not JSON — widened to allow the separators a JSON string actually contains.
+        string? serviceCidr = null;
+        System.Text.Json.Nodes.JsonNode? annotations = items.FirstOrDefault()?["metadata"]?["annotations"];
+        if (annotations is System.Text.Json.Nodes.JsonObject map)
+        {
+            foreach ((string _, System.Text.Json.Nodes.JsonNode? value) in map)
+            {
+                string text = value?.GetValue<string>() ?? "";
+                if (!text.TrimStart().StartsWith('[')) continue;
+
                 try
                 {
-                    string yaml = await RunKubectlOutputAsync(
-                        $"get cm kubeadm-config -n kube-system -o jsonpath={{.data.ClusterConfiguration}} --kubeconfig={tempKubeconfig}", ct);
-                    if (!string.IsNullOrWhiteSpace(yaml))
+                    if (System.Text.Json.Nodes.JsonNode.Parse(text) is System.Text.Json.Nodes.JsonArray argv)
                     {
-                        if (podCidr is null)
-                        {
-                            Match m = Regex.Match(yaml, @"podSubnet:\s*([0-9a-f.:/ ]+)");
-                            if (m.Success) podCidr = m.Groups[1].Value.Trim();
-                        }
-                        if (serviceCidr is null)
-                        {
-                            Match m = Regex.Match(yaml, @"serviceSubnet:\s*([0-9a-f.:/ ]+)");
-                            if (m.Success) serviceCidr = m.Groups[1].Value.Trim();
-                        }
+                        serviceCidr = ReadFlag(
+                            [.. argv.Select(a => a?.GetValue<string>() ?? "")], "--service-cidr");
+                        if (serviceCidr is not null) break;
                     }
                 }
-                catch { }
+                catch (JsonException) { }
             }
 
-            // ── Source 4: kube-proxy ConfigMap clusterCIDR (fallback for pod CIDR) ──
-            if (podCidr is null)
-            {
-                try
-                {
-                    string conf = await RunKubectlOutputAsync(
-                        $"get cm kube-proxy -n kube-system -o jsonpath={{.data.config\\.conf}} --kubeconfig={tempKubeconfig}", ct);
-                    Match m = Regex.Match(conf, @"clusterCIDR:\s*([0-9a-f.:/ ,]+)");
-                    if (m.Success) podCidr = m.Groups[1].Value.Trim();
-                }
-                catch { }
-            }
-
-            // ── Source 5: compute supernet from all node spec.podCIDR values ──
-            // This gives the minimum covering CIDR across all current nodes.
-            // Note: the computed supernet may be narrower than the configured cluster CIDR
-            // if not all nodes have been assigned subnets yet, but it's better than
-            // returning a single /24 that only covers one node.
-            if (podCidr is null)
-            {
-                try
-                {
-                    string raw = await RunKubectlOutputAsync(
-                        $"get nodes -o jsonpath={{.items[*].spec.podCIDR}} --kubeconfig={tempKubeconfig}", ct);
-                    if (!string.IsNullOrWhiteSpace(raw))
-                    {
-                        string[] nodeCidrs = raw.Split(' ', StringSplitOptions.RemoveEmptyEntries);
-                        podCidr = ComputeIpv4Supernet(nodeCidrs);
-                    }
-                }
-                catch { }
-            }
-
-            // ── Source 6: k3s node annotation (k3s encodes its args on each node) ──
             if (serviceCidr is null)
             {
-                try
-                {
-                    string raw = await RunKubectlOutputAsync(
-                        $"get nodes -o jsonpath={{.items[0].metadata.annotations}} --kubeconfig={tempKubeconfig}", ct);
-                    // k3s stores server args as a JSON-encoded string in an annotation
-                    Match m = Regex.Match(raw, @"--service-cidr[=\s""\\]+([0-9./]+)");
-                    if (m.Success) serviceCidr = m.Groups[1].Value;
-                }
-                catch { }
+                Match m = Regex.Match(map.ToJsonString(), @"--service-cidr[=\s"",\\]+([0-9./]+)");
+                if (m.Success) serviceCidr = m.Groups[1].Value;
             }
+        }
 
-            return (podCidr, serviceCidr);
-        }
-        finally
-        {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
-        }
+        return (podCidr, serviceCidr);
     }
 
     /// <summary>
@@ -567,26 +659,6 @@ public class VpnService(
 
     private static string SanitizeConnectionName(string name)
         => Regex.Replace(name.ToLowerInvariant(), "[^a-z0-9]", "-");
-
-    private static async Task<string> RunKubectlOutputAsync(string arguments, CancellationToken ct)
-    {
-        using Process process = new()
-        {
-            StartInfo = new ProcessStartInfo
-            {
-                FileName = "kubectl",
-                Arguments = arguments,
-                RedirectStandardOutput = true,
-                RedirectStandardError = true,
-                UseShellExecute = false,
-                CreateNoWindow = true
-            }
-        };
-        process.Start();
-        Task<string> outTask = process.StandardOutput.ReadToEndAsync(ct);
-        await process.WaitForExitAsync(ct);
-        return await outTask;
-    }
 
     private static string BuildSyncManifest(string swanctlConf, string secretsB64)
     {
