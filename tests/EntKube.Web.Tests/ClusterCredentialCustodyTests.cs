@@ -437,7 +437,28 @@ public class ClusterCredentialCustodyTests
     /// so the id was the whole authorization. They take the asking tenant now, from the page that
     /// already had it.</para>
     /// </summary>
-    private const int BaselineOccurrences = 31;
+    /// <summary>
+    /// <b>27 in 15 files.</b> <c>ConnectivityGraphService</c> is at zero, and it is the file whose
+    /// own comment named the condition for moving it.
+    ///
+    /// <para><c>ApplyNetworkPoliciesAsync</c> <em>derived</em> its tenant from the app rather than
+    /// taking one, and said why in a comment: a tenant parameter "makes those reads reachable in
+    /// CustodyTriageTests's sense — they have to move onto the seam in the same change". That is
+    /// the dependency this programme keeps meeting from the other side, written down in advance for
+    /// once. Both halves moved together: the tenant is now an input from the page that always had
+    /// it, and neither the apply nor the live Service lookup loads a cluster row at all.</para>
+    ///
+    /// <para>The apply kept a message this seam has now corrected twice: it loaded the cluster,
+    /// found a blank kubeconfig and reported "Cluster has no kubeconfig configured." — an assertion
+    /// about the second refusal that was wrong whenever it was the first. <c>ForAsync</c> returns
+    /// null for either, so the target now says both.</para>
+    ///
+    /// <para>Nothing had to be threaded through to achieve it: the <c>ConnectivityPolicyPlan</c>
+    /// rows already carried <c>ClusterName</c> beside <c>ClusterId</c>, so removing the row load
+    /// removed a query rather than needing a DTO field — the inverse of the <c>VeleroService</c>
+    /// case still parked for want of one.</para>
+    /// </summary>
+    private const int BaselineOccurrences = 27;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -601,7 +622,7 @@ public class ClusterCredentialCustodyTests
     /// seam's error contract is not the caller's, and a conversion that ignores that changes
     /// control flow silently.</para>
     /// </summary>
-    private const int BaselineFiles = 16;
+    private const int BaselineFiles = 15;
 
     private static (int Occurrences, int Files) Measure()
     {

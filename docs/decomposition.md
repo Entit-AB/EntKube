@@ -547,7 +547,7 @@ shape the work turned out to have. Where it stands, against the figures this sec
 
 | measure | at the start | now |
 |---|---|---|
-| credential sites | 508 in 57 files | **58 in 22** |
+| credential sites | 508 in 57 files | **27 in 15** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
 | foreign reads of `ClusterComponents` | 87 | **6** |
 | foreign *writes* to it | 22 | **0** |
@@ -658,14 +658,25 @@ bumped and a new image ships. The tenant goes on a factory in front of the inter
 checking, before the next cascade that ends at an interface, whether anything outside this process
 implements it.
 
-**What the remaining 82 are made of.** No decision blocks them any more. Re-measured
-rather than carried forward — the previous version of this list still named `ComponentScanService`
-with ten after it had reached zero: `KubernetesOperationsService` (11 on `main`, 1 with #198),
-`AppGovernanceService` (8), `TailscaleVpnTab.razor` (6 — a page reading a credential off a DTO,
-which needs the DTO changed first), `KyvernoPolicyService` (6), `KubernetesJitProvisioner` (6),
-`TelemetryNodeClient` (5), `ConnectivityGraphService` (4), then a tail of threes and below. The six ungated CLI invocations are in five files and are
-the same kind of problem: `ClusterEgressTunnel`, `DockerRegistryService`, `DriftDetectionService`,
-`ReleaseVolumeGuard` (2) and `VpnService`.
+**What the remaining 27 are made of** (re-measured 2026-10-15, not carried forward — an earlier
+version of this list still named `ComponentScanService` with ten after it had reached zero).
+Nine files hold conversions that are ordinary work: `StorageLinkClientFactory` (3), `LokiService`
+(3), `VpnService` (2), `StorageService` (2), `RemediationService` (2), `OpenStackKeystoneClient`
+(2), `DeploymentImportService` (2), and single reads in `TenantService`,
+`KubernetesOperationsService`, `JitAccessService` and `PortalJitAccessPanel.razor`.
+
+Six of those sites are **blocked on one undecided seam shape**, and it is worth naming rather than
+rediscovering: `StorageService` + `StorageLinkClientFactory` reach an in-cluster S3 gateway with
+the AWS SDK through `KubernetesS3Proxy` — many calls, arbitrary object paths, binary bodies — and
+`ClusterEgressTunnel` needs `kubectl port-forward`, a process that must outlive the call. Neither
+is a command (`ApplyManifestAsync`-shaped) nor a bounded request (`ProxyServiceAsync`-shaped) nor a
+description (`GetConnectionAsync`-shaped). A verb that hands back a configured client would serve
+all three while granting the same authority — the failure mode §4.0.1.4 records twice — so this is
+a decision, not an oversight.
+
+The rest are the seam and its infrastructure, and are *supposed* to hold a credential:
+`KubeconfigMaterializationInterceptor` (2), `ClusterClient` (2), `ClusterChangeGate` (2) and one
+line of `Program.cs`.
 
 ## 5. The agent model
 
