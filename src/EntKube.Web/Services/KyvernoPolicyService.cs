@@ -39,7 +39,9 @@ public class KyvernoDiscoveryResult
 /// them to every app namespace the tenant owns in a given environment.
 /// </summary>
 public class KyvernoPolicyService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    // Delivery's own context: KyvernoPolicies, AppDeployments, AppEnvironments and Apps are all
+    // Delivery's, and KubernetesClusters is the read-only hub.
+    IDbContextFactory<EntKube.Web.Data.Modules.DeliveryDbContext> dbFactory,
     IKubernetesClientFactory k8s,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
@@ -51,7 +53,7 @@ public class KyvernoPolicyService(
     public async Task<List<KyvernoPolicy>> GetPoliciesAsync(
         Guid tenantId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
         return await db.KyvernoPolicies
             .Where(p => p.TenantId == tenantId && p.EnvironmentId == environmentId)
             .OrderBy(p => p.PolicyType)
@@ -70,7 +72,7 @@ public class KyvernoPolicyService(
         string? configuration = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         KyvernoPolicy? existing = await db.KyvernoPolicies
             .FirstOrDefaultAsync(p => p.TenantId == tenantId
@@ -109,7 +111,7 @@ public class KyvernoPolicyService(
         string? configuration,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
         KyvernoPolicy policy = await db.KyvernoPolicies.FindAsync([id], ct)
             ?? throw new InvalidOperationException($"Kyverno policy {id} not found.");
         policy.ValidationFailureAction = mode;
@@ -127,7 +129,7 @@ public class KyvernoPolicyService(
         string customYaml,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
         KyvernoPolicy policy = new()
         {
             Id = Guid.NewGuid(),
@@ -146,7 +148,7 @@ public class KyvernoPolicyService(
     /// <summary>Disables (deletes) a policy by ID.</summary>
     public async Task<bool> DeletePolicyAsync(Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
         KyvernoPolicy? policy = await db.KyvernoPolicies.FindAsync([id], ct);
         if (policy is null) return false;
         db.KyvernoPolicies.Remove(policy);
@@ -158,7 +160,7 @@ public class KyvernoPolicyService(
     public async Task CopyFromEnvironmentAsync(
         Guid tenantId, Guid sourceEnvId, Guid targetEnvId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         List<KyvernoPolicy> source = await db.KyvernoPolicies
             .Where(p => p.TenantId == tenantId && p.EnvironmentId == sourceEnvId)
@@ -197,7 +199,7 @@ public class KyvernoPolicyService(
     public async Task<bool> IsKyvernoAvailableAsync(
         Guid tenantId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         List<Guid> clusterIds = await db.KubernetesClusters
             .Where(c => c.TenantId == tenantId && c.EnvironmentId == environmentId)
@@ -229,7 +231,7 @@ public class KyvernoPolicyService(
     public async Task<List<KyvernoClusterPolicyInfo>> GetClusterPoliciesAsync(
         Guid tenantId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         List<KubernetesCluster> clusters = await db.KubernetesClusters
             .Where(c => c.TenantId == tenantId && c.EnvironmentId == environmentId && c.KubeconfigSecretId != null)
@@ -304,7 +306,7 @@ public class KyvernoPolicyService(
     public async Task<List<(string Target, bool Success, string Output)>> ApplyToEnvironmentAsync(
         Guid tenantId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         List<KyvernoPolicy> policies = await GetPoliciesAsync(tenantId, environmentId, ct);
 
@@ -352,7 +354,7 @@ public class KyvernoPolicyService(
     /// from cluster-wide data.
     /// </summary>
     public static async Task<List<string>> ResolveClusterAppNamespacesAsync(
-        ApplicationDbContext db, Guid clusterId, CancellationToken ct)
+        EntKube.Web.Data.Modules.DeliveryDbContext db, Guid clusterId, CancellationToken ct)
     {
         var deployments = await db.AppDeployments
             .Where(d => d.ClusterId == clusterId)
@@ -389,7 +391,7 @@ public class KyvernoPolicyService(
     /// the two would flip it back and forth on every deploy.
     /// </summary>
     public static async Task<KyvernoValidationFailureAction?> ResolveClusterRbacModeAsync(
-        ApplicationDbContext db, Guid clusterId, CancellationToken ct)
+        EntKube.Web.Data.Modules.DeliveryDbContext db, Guid clusterId, CancellationToken ct)
     {
         var scopes = await db.AppDeployments
             .Where(d => d.ClusterId == clusterId)
@@ -444,7 +446,7 @@ public class KyvernoPolicyService(
         if (access is null)
             return (false, "Cluster has no kubeconfig configured, or is not this tenant's.");
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         KyvernoValidationFailureAction? mode = await ResolveClusterRbacModeAsync(db, clusterId, ct);
         List<string> appNamespaces = mode is null
@@ -488,7 +490,7 @@ public class KyvernoPolicyService(
     /// Uses the governance-locked AppEnvironment namespace when present.
     /// </summary>
     private static async Task<List<(KubernetesCluster Cluster, string Namespace)>> ResolveTargetsAsync(
-        ApplicationDbContext db, Guid tenantId, Guid environmentId, CancellationToken ct)
+        EntKube.Web.Data.Modules.DeliveryDbContext db, Guid tenantId, Guid environmentId, CancellationToken ct)
     {
         // Collect all app IDs for this tenant (App → Customer → Tenant).
         List<Guid> appIds = await db.Apps
@@ -542,7 +544,7 @@ public class KyvernoPolicyService(
         Guid tenantId, Guid environmentId, CancellationToken ct = default)
     {
         KyvernoDiscoveryResult result = new();
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         List<(KubernetesCluster Cluster, string Namespace)> targets =
             await ResolveTargetsAsync(db, tenantId, environmentId, ct);

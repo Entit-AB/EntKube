@@ -547,7 +547,7 @@ shape the work turned out to have. Where it stands, against the figures this sec
 
 | measure | at the start | now |
 |---|---|---|
-| credential sites | 508 in 57 files | **18 in 10** |
+| credential sites | 508 in 57 files | **15 in 8** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
 | foreign reads of `ClusterComponents` | 87 | **4 direct + 2 navigation** |
 | foreign *writes* to it | 22 | **0** |
@@ -675,9 +675,53 @@ bumped and a new image ships. The tenant goes on a factory in front of the inter
 checking, before the next cascade that ends at an interface, whether anything outside this process
 implements it.
 
-**What the remaining 18 are made of** (re-measured 2026-10-15, not carried forward — an earlier
-version of this list still named `ComponentScanService` with ten after it had reached zero), and
-the useful thing now is that almost none of it is work:
+**No ordinary conversion work is left** (2026-10-15). `DeploymentImportService` and
+`KubernetesOperationsService` were the last two files holding sites that were simply work, and both
+are at zero:
+
+- `ImportAsync` already took a tenant and refused a cluster that was not that tenant's; the **scan**
+  feeding it still read the credential off whatever row the page passed in, so a preview —
+  namespaces, workloads, secrets, PVCs — could be built for a cluster the caller does not own.
+  *Half a feature authorized* is the shape worth watching for: the write was fixed and the read that
+  precedes it was not.
+- ⚠️ `KubernetesOperationsService`'s last site was **also an ungated delete**.
+  `DeletePrunedResourceAsync` wrote the kubeconfig to a temp file and ran its own `kubectl delete`,
+  so every resource dropped from a manifest set — which is what pruning *is* — was deleted with
+  nobody asked and nothing recorded. §5.4's metric cannot see it, and says so about this very file:
+  one that acknowledges *anywhere* scores zero. That is the **second** delete path this blind spot
+  has hidden (the first was Kyverno's `delete clusterpolicy`), so the way to find the next one is to
+  grep for own-process `kubectl` inside the files that metric *excludes* rather than trusting its
+  total. **That sweep has now been done and comes back empty:** the only own-process CLI left in an
+  excluded file is `helm repo` / `helm repo update`, which touches no cluster and is excluded by
+  name on purpose. So the blind spot is not one case smaller — it is closed, until the next file
+  starts acknowledging somewhere and running its own binary elsewhere.
+
+Three things were checked before routing that delete through the seam, each of which would have
+changed behaviour silently: `--ignore-not-found` survives (`BuildDeleteArguments` passes it, so a
+resource already gone still counts as pruned); the seam **throws** where the helper returned false,
+and its caller counts failures and carries on pruning, so the conversion catches; and the gate's
+delete preview returns `NoChange()` for an object it cannot read *by design* — "mirrors
+--ignore-not-found" — which is right for a prune and the opposite of the node-drain bug, where
+`NoChange` meant "apply the destructive thing without asking".
+
+⚠️ **Two open changes both move this constant against different trees** — one banks 18 with these
+three sites still present, the other 19 with `RemediationService`/`TenantService` still present.
+Whichever lands second must **re-measure** (expected 15 in 8) rather than keep either number; a
+ratchet constant has no correct merge.
+
+⚠️ **And the merge of those two changes is itself the lesson.** Each PR said that whichever landed
+second had to re-measure, because one banked 18 against a tree where the other's three sites were
+still present and vice versa. The merge instead kept one side's constant and took both sides'
+conversions, so `main` carried **three sites of slack with its slack test failing**, *and silently
+dropped the paragraph above* — the ungated-delete finding and the sweep result — in favour of the
+other side's version of the same section. Both were restored by re-measuring and re-reading, not by
+re-resolving the diff. **A ratchet constant has no correct merge, and neither does a prose section
+two branches both rewrote**: git cannot know which number describes the merged tree, and a textual
+resolution of two single-line changes looks completely clean.
+
+**What the remaining 15 are made of** (re-measured 2026-10-15 after that merge, not carried forward
+from either branch — an earlier version of this list still named `ComponentScanService` with ten
+after it had reached zero), and the useful thing now is that **none of it is work**:
 
 - **Supposed to hold a credential — the floor, 6:** `KubeconfigMaterializationInterceptor` (2),
   `ClusterClient` (2), `ClusterChangeGate` (2).
@@ -689,7 +733,6 @@ the useful thing now is that almost none of it is work:
   were reclassified on inspection** — they looked like ordinary callers, and the kubeconfig they
   load goes to `ClusterEgressTunnel.GetLocalPortAsync`, the `kubectl port-forward` that is the
   same blocker. *Check where a credential goes, not just how it is read.*
-- **Ordinary work — 3:** `DeploymentImportService` (2), `KubernetesOperationsService` (1).
 
 ⚠️ **`RemediationService` was the worst-placed missing check this programme has found.** The method
 deletes pods and restarts Deployments, StatefulSets and DaemonSets, and it loaded its cluster with

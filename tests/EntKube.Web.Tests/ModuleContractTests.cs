@@ -216,6 +216,27 @@ public class ModuleContractTests
     /// count matches <c>.ClusterComponents</c>. A navigation read is the same coupling by a
     /// different spelling.</para>
     ///
+    /// <para><b>Delivery 6 → 3</b>, and all three were already eligible — nobody had looked.
+    /// <c>KedaScalerService</c> and <c>KyvernoPolicyService</c> touch only Delivery's own tables
+    /// plus the read-only cluster hub, so the swap was the context type and six private helper
+    /// signatures that named <c>ApplicationDbContext</c> explicitly. ⚠️ Those helpers are the part
+    /// a table census misses: every table was eligible and the file still would not compile, which
+    /// is worth knowing before trusting any measurement of "could swap today".</para>
+    ///
+    /// <para><c>GitOperationsService</c> took the context and <b>never used it</b> — the compiler
+    /// had been saying so for some time (<c>CS9113: Parameter 'dbFactory' is unread</c>). Deleting
+    /// the parameter moved this ratchet. A service counted as holding the god context while not
+    /// holding a database at all is the cheapest possible entry on this list, and it sat there
+    /// because the count was read and the warning was not.</para>
+    ///
+    /// <para>The three that remain each touch another module's table in a way no <em>read</em>
+    /// contract removes: <c>AppGovernanceService</c> does CRUD on Connectivity's
+    /// <c>AppNetworkPolicies</c> and reads five DataServices tables for its picker lists;
+    /// <c>PortalServiceScopeService</c> reads three binding tables, all set-valued restatements of
+    /// methods DataServices already owns per deployment; and <c>DeploymentImportService</c> inserts
+    /// a <c>DatabaseBinding</c> with <c>SyncEnabled = false</c>, which the owner-side twin cannot
+    /// express because it defaults that to true.</para>
+    ///
     /// <para><b>Connectivity 7 → 4</b>, and all three went off the same way the earlier ones did:
     /// their Catalog reads moved to <c>ICatalogApi</c> and their credential to the seam first, and
     /// then there was nothing left to hold the shared context for. <c>VpnService</c> touches only
@@ -296,7 +317,7 @@ public class ModuleContractTests
         [Module.Connectivity] = 4,
         [Module.Support] = 7,
         [Module.Catalog] = 6,
-        [Module.Delivery] = 6,
+        [Module.Delivery] = 3,
         [Module.Identity] = 4,
         [Module.Fleet] = 2,
         [Module.Mail] = 2,

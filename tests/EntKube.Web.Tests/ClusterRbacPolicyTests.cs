@@ -31,7 +31,15 @@ public class ClusterRbacPolicyTests : IDisposable
 
         db = new ApplicationDbContext(options);
         db.Database.EnsureCreated();
+
+        // One database, two views. The resolver below takes Delivery's context now that the
+        // service does, so the test seeds through ApplicationDbContext and asserts through
+        // DeliveryDbContext — the pattern the ReconcilableFor predicates already use.
+        delivery = ((IDbContextFactory<EntKube.Web.Data.Modules.DeliveryDbContext>)
+            new TestDbContextFactory(connection)).CreateDbContext();
     }
+
+    private readonly EntKube.Web.Data.Modules.DeliveryDbContext delivery;
 
     // ── Manifest ──────────────────────────────────────────────────────────────
 
@@ -149,7 +157,7 @@ public class ClusterRbacPolicyTests : IDisposable
         await db.SaveChangesAsync();
 
         List<string> namespaces = await KyvernoPolicyService.ResolveClusterAppNamespacesAsync(
-            db, clusterId, default);
+            delivery, clusterId, default);
 
         namespaces.Should().BeEquivalentTo(["acme-billing", "globex-api"]);
     }
@@ -163,7 +171,7 @@ public class ClusterRbacPolicyTests : IDisposable
         await db.SaveChangesAsync();
 
         List<string> namespaces = await KyvernoPolicyService.ResolveClusterAppNamespacesAsync(
-            db, clusterId, default);
+            delivery, clusterId, default);
 
         namespaces.Should().BeEquivalentTo(["acme-billing"]);
     }
@@ -181,7 +189,7 @@ public class ClusterRbacPolicyTests : IDisposable
         await db.SaveChangesAsync();
 
         List<string> namespaces = await KyvernoPolicyService.ResolveClusterAppNamespacesAsync(
-            db, clusterId, default);
+            delivery, clusterId, default);
 
         namespaces.Should().BeEquivalentTo(["locked-ns"]);
     }
@@ -193,7 +201,7 @@ public class ClusterRbacPolicyTests : IDisposable
         Seed(clusterId, "tenant-a", "acme-billing");
         await db.SaveChangesAsync();
 
-        (await KyvernoPolicyService.ResolveClusterRbacModeAsync(db, clusterId, default))
+        (await KyvernoPolicyService.ResolveClusterRbacModeAsync(delivery, clusterId, default))
             .Should().BeNull();
     }
 
@@ -212,7 +220,7 @@ public class ClusterRbacPolicyTests : IDisposable
             KyvernoValidationFailureAction.Enforce));
         await db.SaveChangesAsync();
 
-        (await KyvernoPolicyService.ResolveClusterRbacModeAsync(db, clusterId, default))
+        (await KyvernoPolicyService.ResolveClusterRbacModeAsync(delivery, clusterId, default))
             .Should().Be(KyvernoValidationFailureAction.Enforce);
     }
 
@@ -230,7 +238,7 @@ public class ClusterRbacPolicyTests : IDisposable
             KyvernoValidationFailureAction.Enforce));
         await db.SaveChangesAsync();
 
-        (await KyvernoPolicyService.ResolveClusterRbacModeAsync(db, clusterId, default))
+        (await KyvernoPolicyService.ResolveClusterRbacModeAsync(delivery, clusterId, default))
             .Should().BeNull();
 
         _ = tenantA; _ = envB;

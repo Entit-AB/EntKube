@@ -18,7 +18,6 @@ namespace EntKube.Web.Services;
 /// connections with a changed fingerprint are rejected.
 /// </summary>
 public class GitOperationsService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vault,
     ILogger<GitOperationsService> logger)
 {
