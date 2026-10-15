@@ -421,21 +421,34 @@ public class CatalogContractAdoptionTests
     /// <c>ICatalogApi</c> has to serve. <c>LokiService</c> is what surfaced it: converting its
     /// component read to the contract moved this ratchet by <em>zero</em>.</para>
     ///
-    /// <para><b>17 now, from 49, and no new contract method was needed for any of it.</b> Eight
-    /// files are at zero: <c>ExternalRouteService</c> (11), <c>IngressDashboardService</c> (5),
-    /// <c>KeycloakService</c> (5), <c>AppL4RouteService</c> (3), <c>AppRouteService</c> (2),
-    /// <c>DatabaseService</c> (2), <c>ExternalRouteHealthService</c> and
-    /// <c>HeadscaleCertSyncService</c>.</para>
+    /// <para><b>4 now, from 49, and no new contract method was needed for any of it.</b> Nine
+    /// files are at zero: <c>KubernetesOperationsService</c> (13), <c>ExternalRouteService</c> (11),
+    /// <c>IngressDashboardService</c> (5), <c>KeycloakService</c> (5), <c>AppL4RouteService</c> (3),
+    /// <c>AppRouteService</c> (2), <c>DatabaseService</c> (2), <c>ExternalRouteHealthService</c>
+    /// and <c>HeadscaleCertSyncService</c>.</para>
     ///
-    /// <para><b>What the 17 are, and why each is still here:</b>
-    /// <c>KubernetesOperationsService</c> 13 — ordinary work, the last large holding;
-    /// <c>StorageService</c> 3 — two are <c>ResolveMinioKubeconfigAsync</c>, which returns a raw
-    /// kubeconfig for the S3 proxy and is blocked on the <b>credentialed channel</b> seam shape
-    /// (see §4.0.1.5), and the third is <c>Include(s =&gt; s.Component)</c> kept alive by
-    /// <c>StorageTab.razor</c> reading <c>l.Component?.ClusterId</c>; <c>VpnService</c> 1 — the
-    /// same shape, <c>NetworkingTab.razor</c> reading <c>ep.Component.Name</c>. Those last two are
-    /// the <c>TailscaleOperator</c> lesson again: <b>the DTO is the blocker</b>, and the page has
-    /// to stop receiving the entity graph before the service can stop loading it.</para>
+    /// <para><b>The four that remain are the two documented blockers, not work.</b>
+    /// <c>StorageService</c> 3: two are <c>ResolveMinioKubeconfigAsync</c>, which hands a raw
+    /// kubeconfig to the S3 proxy and waits on the <b>credentialed channel</b> seam shape
+    /// (§4.0.1.5), and one is an <c>Include</c> kept alive by <c>StorageTab.razor</c> reading
+    /// <c>l.Component?.ClusterId</c>. <c>VpnService</c> 1 is that same shape —
+    /// <c>NetworkingTab.razor</c> reads <c>ep.Component.Name</c>. Both are the
+    /// <c>TailscaleOperator</c> lesson: <b>the DTO is the blocker</b>, and the page has to stop
+    /// receiving the entity graph before the service can stop loading it. Removing the
+    /// <c>Include</c> without fixing the page would leave the navigation null and the UI silently
+    /// wrong, which is why neither half moves alone.</para>
+    ///
+    /// <para><c>KubernetesOperationsService</c> was the last large holding and the clearest case of
+    /// the <b>half-moved</b> shape: it already asked <c>GetComponentsForClusterAsync</c> in three
+    /// methods while four others walked <c>cluster.Components</c>, and two of those carried comments
+    /// explaining that the cluster row was read "for its COMPONENTS" — the exact read the contract
+    /// exists to serve. Converting it removed more than it moved: <c>GetL4EndpointAddressAsync</c>
+    /// loaded the row tenant-scoped, null-checked it, and <em>then</em> called
+    /// <c>ForAsync(tenantId, clusterId)</c> — the same question twice — and
+    /// <c>ApplyGatewayForClusterAsync</c>'s <c>r.Component = c</c> mutated the navigation purely to
+    /// feed one line in <c>LabelRouteNamespacesAsync</c>. It also gained a tenant check it never
+    /// had: its "Cluster not found." came from <c>FirstOrDefaultAsync(c =&gt; c.Id == clusterId)</c>
+    /// with no tenant predicate, so a cluster id from elsewhere had its Gateway reconciled.</para>
     ///
     /// <para><c>ExternalRouteService</c> was the interesting one. Its eleven were six public static
     /// YAML generators plus the two split-backend helpers reading <c>route.Component</c> for a
@@ -506,7 +519,7 @@ public class CatalogContractAdoptionTests
     /// spellings before trusting its total</b>, and a conversion that moves a ratchet by zero is
     /// evidence about the ratchet rather than about the conversion.</para>
     /// </summary>
-    private const int BaselineNavigation = 17;
+    private const int BaselineNavigation = 4;
 
     [Fact]
     public void No_new_service_reaches_past_the_catalog_contract()

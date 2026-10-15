@@ -549,7 +549,7 @@ shape the work turned out to have. Where it stands, against the figures this sec
 |---|---|---|
 | credential sites | 508 in 57 files | **22 in 13** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
-| foreign reads of `ClusterComponents` | 87 | **4 direct + 17 navigation** |
+| foreign reads of `ClusterComponents` | 87 | **4 direct + 4 navigation** |
 | foreign *writes* to it | 22 | **0** |
 | own-process kubectl/helm outside the gate (§5.4) | 49 | **1** |
 | component lookups escaping their tenant | 14 | **0** |
@@ -728,7 +728,7 @@ That is the third time in this programme that a count became an argument before 
 spellings before trusting its total**, and treat a conversion that moves a ratchet by zero as
 evidence about the ratchet.
 
-**32 of the 49 are converted (2026-10-15), and no new contract method was needed for any of
+**45 of the 49 are converted (2026-10-15), and no new contract method was needed for any of
 them** — which was the prediction, so it is worth saying that it held. Eight files are at zero:
 `ExternalRouteService` (11), `IngressDashboardService` (5), `KeycloakService` (5),
 `AppL4RouteService` (3), `AppRouteService` (2), `DatabaseService` (2), `ExternalRouteHealthService`
@@ -761,14 +761,25 @@ KubernetesCluster` for a cluster *name* that `InstalledComponent` also carries; 
 that asks the contract and *then* follows a navigation has not finished converting — it has added a
 round trip.
 
-**What the remaining 17 are, and why each is still there.** `KubernetesOperationsService` 13 is
-ordinary work and the last large holding. `StorageService` 3: two are `ResolveMinioKubeconfigAsync`,
-which hands a raw kubeconfig to the S3 proxy and is blocked on the **credentialed channel** seam
-shape described below, and one is an `Include` kept alive by `StorageTab.razor` reading
-`l.Component?.ClusterId`. `VpnService` 1 is the same shape — `NetworkingTab.razor` reads
-`ep.Component.Name`. Those last two are the `TailscaleOperator` lesson again: **the DTO is the
-blocker**, and the page has to stop receiving the entity graph before the service can stop loading
-it.
+`KubernetesOperationsService` (13) was the last large holding and the clearest case of the
+**half-moved** shape: it already asked `GetComponentsForClusterAsync` in three methods while four
+others walked `cluster.Components`, and two of those carried comments explaining that the cluster
+row was read "for its COMPONENTS" — the exact read the contract exists to serve. Converting it
+**removed more than it moved**: `GetL4EndpointAddressAsync` loaded the row tenant-scoped,
+null-checked it and *then* called `ForAsync(tenantId, clusterId)`, the same question twice; and
+`ApplyGatewayForClusterAsync`'s `r.Component = c` mutated the navigation purely to feed one line in
+`LabelRouteNamespacesAsync`. It also gained a tenant check it never had — its "Cluster not found."
+came from `FirstOrDefaultAsync(c => c.Id == clusterId)` with no tenant predicate, so a cluster id
+from elsewhere had its Gateway reconciled.
+
+**The four that remain are the two documented blockers, not work.** `StorageService` 3: two are
+`ResolveMinioKubeconfigAsync`, which hands a raw kubeconfig to the S3 proxy and waits on the
+**credentialed channel** seam shape described below; one is an `Include` kept alive by
+`StorageTab.razor` reading `l.Component?.ClusterId`. `VpnService` 1 is that same shape —
+`NetworkingTab.razor` reads `ep.Component.Name`. Both are the `TailscaleOperator` lesson: **the DTO
+is the blocker**, and the page has to stop receiving the entity graph before the service can stop
+loading it. Removing the `Include` first would leave the navigation null and the UI silently wrong,
+which is exactly why neither half moves alone.
 
 ⚠️ **The ratchet reads the source tree at test time, so it cannot be trusted while that tree is
 being edited.** A full run during this work reported one failure — the navigation count had dropped
