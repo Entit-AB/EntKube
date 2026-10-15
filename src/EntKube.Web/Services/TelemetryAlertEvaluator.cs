@@ -55,10 +55,18 @@ public sealed class TelemetryAlertEvaluator(
         // Active maintenance windows: hold incident state for covered (tenant, cluster) rather than
         // advancing it in the DB and dropping the notification in the dispatcher — otherwise an alert that
         // fires (or clears) during a window is recorded but never notified, even after the window ends.
-        List<MaintenanceWindow> windows = await db.MaintenanceWindows
-            .Where(w => w.StartsAt <= now && w.EndsAt >= now).ToListAsync(ct);
+        //
+        // Asked of Fleet, per tenant, INSIDE the loop below rather than once for everybody up here.
+        // The old query read every tenant's windows and filtered afterwards, which is the
+        // flattening §4.0.1.2 warns about: the sweep establishes a tenant and then consults a
+        // structure built across all of them. It costs one query per tenant with enabled rules.
+        EntKube.Contracts.Fleet.IFleetApi fleet =
+            scope.ServiceProvider.GetRequiredService<EntKube.Contracts.Fleet.IFleetApi>();
+        Dictionary<Guid, IReadOnlyList<EntKube.Contracts.Fleet.MaintenanceWindowSummary>> windowsByTenant = [];
+
         bool InMaintenance(Guid tenant, Guid cluster) =>
-            windows.Any(w => w.TenantId == tenant && (w.ClusterId == null || w.ClusterId == cluster));
+            windowsByTenant.TryGetValue(tenant, out var ws)
+            && ws.Any(w => w.ClusterId == null || w.ClusterId == cluster);
 
         // Accumulate firing/resolved incidents per (tenant, cluster) to dispatch after the single save.
         Dictionary<(Guid Tenant, Guid Cluster), (List<AlertIncident> Firing, List<AlertIncident> Resolved)> byCluster = [];
@@ -76,6 +84,9 @@ public sealed class TelemetryAlertEvaluator(
             List<TelemetryAlertRule> rules = await db.TelemetryAlertRules
                 .Where(r => r.IsEnabled && r.TenantId == tenantId).ToListAsync(ct);
             if (rules.Count == 0) continue;
+
+            // After the rules check, so a tenant with nothing enabled costs no extra query.
+            windowsByTenant[tenantId] = await fleet.GetActiveMaintenanceWindowsAsync(tenantId, now, ct);
 
             ITraceQueryService trace = backends.TracesFor(tenantId);
             ILogBackend log = backends.LogsFor(tenantId);

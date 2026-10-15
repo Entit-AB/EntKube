@@ -28,6 +28,30 @@ namespace EntKube.Web.Tests;
 /// <see cref="CustodyTriageTests"/> describes, taken at the one place it is visible in a single
 /// expression instead of a call graph.</para>
 ///
+/// <para>⚠️ <b>This test reported zero while thirteen sites carried the pattern, and the reason is
+/// worth more than the sites.</b> It only inspected lines containing <c>ForAsync(</c> — and six
+/// services wrap the seam in a one-line forwarder of their own
+/// (<c>ClusterFor(Guid tenantId, Guid clusterId, …) =&gt; await clusters.ForAsync(…) ?? throw …</c>)
+/// so they can attach their own refusal message. One level of indirection hid the pattern
+/// completely: <c>MongoService</c> 5, <c>RegisteredPostgresService</c> 5, <c>RabbitMQService</c> 2,
+/// <c>ElasticsearchService</c> 1, plus the four create/register paths found first by hand.</para>
+///
+/// <para>The forwarder's name is now <b>derived per file</b> (see <see cref="Forwarder"/>) rather
+/// than listed, for the same reason <c>CatalogContractAdoptionTests</c> derives its navigation
+/// names from the entity model: a list only ever covers the spelling whoever wrote it had seen.
+/// That is the fourth ratchet in this programme found to be counting one spelling of the thing it
+/// names — a DbSet but not a navigation, a credential read but not a log line about one, a call but
+/// not the wrapper around it.</para>
+///
+/// <para><b>What the thirteen were worth, which differs by site.</b> In most of them the row had
+/// itself been loaded tenant-scoped, so the check was redundant rather than unsound. In the
+/// create/register paths — Mongo, Kafka, RabbitMQ, Postgres and Elasticsearch — the target cluster
+/// was loaded <em>by id with no tenant predicate</em>, so a foreign cluster id would provision a
+/// managed database or broker onto another tenant's cluster while the vault secrets were written
+/// under the caller's own tenant. <c>ElasticsearchService.CreateClusterAsync</c> took no tenant at
+/// all, only the entity the caller had built, so the tenant arrived as data; it takes one now and
+/// refuses a mismatch.</para>
+///
 /// <para><b>Three kinds of first argument.</b></para>
 /// <list type="bullet">
 ///   <item><b>Independent</b> — a <c>tenantId</c> parameter, so it came from the caller, which is
@@ -198,6 +222,29 @@ public class VacuousTenantCheckTests
     private static readonly Regex Call = new(
         @"ForAsync\(\s*([A-Za-z_][\w\.]*)\s*,\s*([A-Za-z_][\w\.]*)\s*[,)]", RegexOptions.Compiled);
 
+    /// <summary>
+    /// A private one-line forwarder onto the seam:
+    /// <c>private async Task&lt;IClusterClient&gt; ClusterFor(Guid tenantId, Guid clusterId, …)
+    /// =&gt; await clusters.ForAsync(tenantId, clusterId, ct) ?? throw …</c>
+    ///
+    /// <para><b>Why this is here.</b> Six services wrap <c>ForAsync</c> in exactly that shape to
+    /// attach their own refusal message, and this test only looked at lines containing
+    /// <c>ForAsync(</c> — so <b>one level of indirection hid the pattern completely</b>. It
+    /// reported zero while four create/register paths passed a cluster row's own tenant through a
+    /// wrapper: `ClusterFor(k8sCluster.TenantId, k8sCluster.Id)`, the row checked against itself,
+    /// in methods that had the asking tenant in scope. A foreign cluster id provisioned a managed
+    /// database or broker onto another tenant's cluster.</para>
+    ///
+    /// <para>The wrapper's name is <em>derived per file</em> rather than listed, for the same
+    /// reason the Catalog ratchet now derives its navigation names: a list only ever covers the
+    /// spelling whoever wrote it had seen. A wrapper counts only when its two <c>Guid</c>
+    /// parameters reach <c>ForAsync</c> in that order, so a helper that does something else with
+    /// them is not mistaken for one.</para>
+    /// </summary>
+    private static readonly Regex Forwarder = new(
+        @"(?:private|internal)\s+(?:static\s+)?(?:async\s+)?Task<[^>]*IClusterClient[^>]*>\s+(\w+)\s*\(\s*Guid\s+(\w+)\s*,\s*Guid\s+(\w+)",
+        RegexOptions.Compiled);
+
     /// <summary>A method declaration, which is where a tenant local's scope begins.</summary>
     private static readonly Regex Declaration = new(
         @"^\s+(?:public|private|internal|protected)\s+(?:static\s+)?(?:async\s+)?[\w<>?,\.\s\[\]\(\)]+?\s\w+\(",
@@ -237,6 +284,19 @@ public class VacuousTenantCheckTests
             // many words that the check below it is vacuous.
             string[] lines = [.. text.Split('\n').Select(l => LineComment.Replace(l, ""))];
 
+            // Which names in this file forward straight into the seam. Matched on the body
+            // rather than the signature alone: the two Guids have to reach ForAsync in order.
+            HashSet<string> forwarders = [];
+            foreach (Match w in Forwarder.Matches(text))
+            {
+                string body = Whitespace.Replace(
+                    text[(w.Index + w.Length)..Math.Min(text.Length, w.Index + w.Length + 400)], " ");
+                if (body.Contains($"ForAsync({w.Groups[2].Value}, {w.Groups[3].Value}", StringComparison.Ordinal))
+                {
+                    forwarders.Add(w.Groups[1].Value);
+                }
+            }
+
             Dictionary<string, string> locals = [];
 
             for (int i = 0; i < lines.Length; i++)
@@ -251,7 +311,14 @@ public class VacuousTenantCheckTests
                 foreach (Match a in TenantLocal.Matches(lines[i]))
                     locals[a.Groups[1].Value] = a.Groups[2].Value;
 
-                if (!lines[i].Contains("ForAsync(", StringComparison.Ordinal))
+                // A call to one of this file's forwarders is a call to the seam. Its own
+                // declaration line is not a call site, so the name has to be followed by an
+                // argument that is not a `Guid` parameter.
+                bool viaWrapper = forwarders.Any(w =>
+                    lines[i].Contains($"{w}(", StringComparison.Ordinal)
+                    && !Forwarder.IsMatch(lines[i]));
+
+                if (!lines[i].Contains("ForAsync(", StringComparison.Ordinal) && !viaWrapper)
                     continue;
 
                 // The call usually wraps, because the result is a long nullable type.
@@ -259,6 +326,18 @@ public class VacuousTenantCheckTests
                     string.Join(' ', lines.Skip(i).Take(3)), " ");
 
                 Match m = Call.Match(window);
+
+                if (!m.Success && viaWrapper)
+                {
+                    foreach (string w in forwarders)
+                    {
+                        Match viaCall = Regex.Match(
+                            window,
+                            $@"\b{Regex.Escape(w)}\(\s*([A-Za-z_][\w\.]*)\s*,\s*([A-Za-z_][\w\.]*)\s*[,)]");
+                        if (viaCall.Success) { m = viaCall; break; }
+                    }
+                }
+
                 if (!m.Success)
                     continue;
 

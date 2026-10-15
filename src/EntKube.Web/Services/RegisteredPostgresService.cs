@@ -79,7 +79,9 @@ public class RegisteredPostgresService(
         {
             await TestConnectionCoreAsync(
                 adminPodName, ns, adminUsername, adminPassword,
-                await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct), ct);
+                // The asking tenant, not the row's own: this is a registration path, so the
+                // cluster id arrives from the caller and checking it against itself asked nothing.
+                await ClusterFor(tenantId, k8sCluster.Id, ct), ct);
         }
 
         RegisteredPostgresInstance instance = new()
@@ -132,7 +134,7 @@ public class RegisteredPostgresService(
         // Run SQL that outputs one database name per line, excluding system templates.
         const string sql = "SELECT datname FROM pg_database WHERE datname NOT IN ('template0','template1') ORDER BY datname;";
 
-        string output = await (await ClusterFor(cluster.TenantId, cluster.Id, ct)).ExecuteSqlOnPodWithOutputAsync(
+        string output = await (await ClusterFor(tenantId, cluster.Id, ct)).ExecuteSqlOnPodWithOutputAsync(
             instance.AdminPodName, instance.Namespace, sql,
             instance.AdminUsername, adminPassword, ct);
 
@@ -225,7 +227,7 @@ public class RegisteredPostgresService(
             CREATE DATABASE "{databaseName}" OWNER "{owner}";
             """;
 
-        await (await ClusterFor(cluster.TenantId, cluster.Id, ct)).ExecuteSqlOnPodAsync(
+        await (await ClusterFor(tenantId, cluster.Id, ct)).ExecuteSqlOnPodAsync(
             instance.AdminPodName, instance.Namespace, sql,
             instance.AdminUsername, adminPassword, ct);
 
@@ -308,7 +310,7 @@ public class RegisteredPostgresService(
                 DROP ROLE IF EXISTS "{database.Owner}";
                 """;
 
-            await (await ClusterFor(cluster.TenantId, cluster.Id, ct)).ExecuteSqlOnPodAsync(
+            await (await ClusterFor(tenantId, cluster.Id, ct)).ExecuteSqlOnPodAsync(
                 instance.AdminPodName, instance.Namespace, sql,
                 instance.AdminUsername, adminPassword, ct);
         }
@@ -321,7 +323,7 @@ public class RegisteredPostgresService(
         // Delete K8s secrets from the instance namespace and bound app namespaces.
 
         string primarySecretName = $"{instance.ServiceName}-{database.Name}-credentials";
-        Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.Id, ct);
+        Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.Id, ct);
 
         try
         {
@@ -494,7 +496,7 @@ public class RegisteredPostgresService(
 
         string newPassword = GeneratePassword();
 
-        await (await ClusterFor(cluster.TenantId, cluster.Id, ct)).ExecuteSqlOnPodAsync(
+        await (await ClusterFor(tenantId, cluster.Id, ct)).ExecuteSqlOnPodAsync(
             instance.AdminPodName, instance.Namespace,
             $"ALTER ROLE \"{database.Owner}\" PASSWORD '{newPassword}';",
              instance.AdminUsername, adminPassword, ct);

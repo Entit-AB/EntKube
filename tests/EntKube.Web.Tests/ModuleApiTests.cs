@@ -444,4 +444,117 @@ public class ModuleApiTests : IDisposable
                                    || n.Contains("Secret", StringComparison.OrdinalIgnoreCase)
                                    || n.Contains("Token", StringComparison.OrdinalIgnoreCase));
     }
+
+    // ── Fleet: maintenance windows ───────────────────────────────────────────
+
+    /// <summary>
+    /// The clause all four callers wrote by hand: a window with no cluster covers every cluster
+    /// the tenant has. Getting this wrong suppresses nothing, or suppresses everything.
+    /// </summary>
+    [Fact]
+    public async Task A_tenant_wide_window_covers_every_cluster()
+    {
+        DateTime at = new(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
+        SeedWindow(ourTenant, clusterId: null, at.AddHours(-1), at.AddHours(1));
+
+        (await Fleet.IsInMaintenanceAsync(ourTenant, ourCluster, at)).Should().BeTrue();
+    }
+
+    [Fact]
+    public async Task A_cluster_window_covers_only_that_cluster()
+    {
+        DateTime at = new(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
+        Guid otherCluster = SeedExtraCluster(ourTenant, "second");
+        SeedWindow(ourTenant, ourCluster, at.AddHours(-1), at.AddHours(1));
+
+        (await Fleet.IsInMaintenanceAsync(ourTenant, ourCluster, at)).Should().BeTrue();
+        (await Fleet.IsInMaintenanceAsync(ourTenant, otherCluster, at)).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// A stranger's window must not silence this tenant's alerts, and — the direction that would
+    /// be missed — this tenant's window must not silence a stranger's.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_window_does_not_suppress()
+    {
+        DateTime at = new(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
+        SeedWindow(theirTenant, clusterId: null, at.AddHours(-1), at.AddHours(1));
+
+        (await Fleet.IsInMaintenanceAsync(ourTenant, ourCluster, at)).Should().BeFalse();
+        (await Fleet.IsInMaintenanceAsync(theirTenant, theirCluster, at)).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The edges are inclusive, as the original predicates were (<c>&lt;=</c> / <c>&gt;=</c>).
+    /// A window is an interval an operator typed, so the minute they wrote has to be inside it.
+    /// </summary>
+    [Fact]
+    public async Task The_window_edges_are_inside_it()
+    {
+        DateTime starts = new(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
+        DateTime ends = starts.AddHours(2);
+        SeedWindow(ourTenant, ourCluster, starts, ends);
+
+        (await Fleet.IsInMaintenanceAsync(ourTenant, ourCluster, starts)).Should().BeTrue();
+        (await Fleet.IsInMaintenanceAsync(ourTenant, ourCluster, ends)).Should().BeTrue();
+        (await Fleet.IsInMaintenanceAsync(ourTenant, ourCluster, starts.AddSeconds(-1)))
+            .Should().BeFalse();
+        (await Fleet.IsInMaintenanceAsync(ourTenant, ourCluster, ends.AddSeconds(1)))
+            .Should().BeFalse();
+    }
+
+    /// <summary>
+    /// The listing the alert evaluator holds for a pass: this tenant's active windows only, with
+    /// in start order, and nobody else's.
+    /// </summary>
+    [Fact]
+    public async Task Active_windows_are_listed_for_one_tenant_with_the_cluster_name()
+    {
+        DateTime at = new(2026, 10, 15, 12, 0, 0, DateTimeKind.Utc);
+        SeedWindow(ourTenant, ourCluster, at.AddHours(-1), at.AddHours(1));
+        SeedWindow(ourTenant, clusterId: null, at.AddMinutes(-30), at.AddHours(3));
+        SeedWindow(ourTenant, ourCluster, at.AddDays(-5), at.AddDays(-4));   // closed
+        SeedWindow(theirTenant, theirCluster, at.AddHours(-1), at.AddHours(1));
+
+        IReadOnlyList<EntKube.Contracts.Fleet.MaintenanceWindowSummary> windows =
+            await Fleet.GetActiveMaintenanceWindowsAsync(ourTenant, at);
+
+        windows.Should().HaveCount(2, "the closed one and the other tenant's are both excluded");
+        windows.Should().ContainSingle(w => w.ClusterId == ourCluster);
+        windows.Should().ContainSingle(w => w.ClusterId == null,
+            "a tenant-wide window carries no cluster id, which is what the evaluator tests");
+        windows.Select(w => w.StartsAt).Should().BeInAscendingOrder();
+    }
+
+    private Guid SeedExtraCluster(Guid tenantId, string label)
+    {
+        Guid environmentId = Guid.NewGuid(), clusterId = Guid.NewGuid();
+
+        db.Environments.Add(new Data.Environment { Id = environmentId, TenantId = tenantId, Name = label });
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = clusterId, TenantId = tenantId, EnvironmentId = environmentId,
+            Name = $"{label}-cluster", ApiServerUrl = $"https://{label}.example",
+        });
+        db.SaveChanges();
+
+        return clusterId;
+    }
+
+    private void SeedWindow(Guid tenantId, Guid? clusterId, DateTime startsAt, DateTime endsAt)
+    {
+        db.MaintenanceWindows.Add(new MaintenanceWindow
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            ClusterId = clusterId,
+            StartsAt = startsAt,
+            EndsAt = endsAt,
+            Title = "patching",
+            CreatedBy = "alice",
+        });
+        db.SaveChanges();
+    }
+
 }

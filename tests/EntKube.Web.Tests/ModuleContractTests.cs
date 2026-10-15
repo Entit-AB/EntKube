@@ -216,26 +216,30 @@ public class ModuleContractTests
     /// count matches <c>.ClusterComponents</c>. A navigation read is the same coupling by a
     /// different spelling.</para>
     ///
-    /// <para><b>Delivery 6 → 3</b>, and all three were already eligible — nobody had looked.
-    /// <c>KedaScalerService</c> and <c>KyvernoPolicyService</c> touch only Delivery's own tables
-    /// plus the read-only cluster hub, so the swap was the context type and six private helper
-    /// signatures that named <c>ApplicationDbContext</c> explicitly. ⚠️ Those helpers are the part
-    /// a table census misses: every table was eligible and the file still would not compile, which
-    /// is worth knowing before trusting any measurement of "could swap today".</para>
+    /// <para><b>Telemetry 4 → 3</b>, and the question that moved it was being asked four times.
+    /// <c>MaintenanceWindow</c> is <em>Fleet's</em> entity, and four services outside Fleet read it
+    /// directly — Telemetry's alert sync, its incident dispatcher, its rule evaluator and its
+    /// incident service — three of them with the identical predicate, including the
+    /// <c>ClusterId == null</c> clause that makes a window tenant-wide. A table read in four places
+    /// with one meaning is the shape that belongs behind a method, so <c>IFleetApi</c> gained
+    /// <c>IsInMaintenanceAsync</c> and (for the sweep that tests many clusters against one instant)
+    /// <c>GetActiveMaintenanceWindowsAsync</c>. <c>IncidentDispatcher</c>'s only other table is
+    /// Telemetry's own <c>NotificationChannels</c>, so it came off the shared context with
+    /// them.</para>
     ///
-    /// <para><c>GitOperationsService</c> took the context and <b>never used it</b> — the compiler
-    /// had been saying so for some time (<c>CS9113: Parameter 'dbFactory' is unread</c>). Deleting
-    /// the parameter moved this ratchet. A service counted as holding the god context while not
-    /// holding a database at all is the cheapest possible entry on this list, and it sat there
-    /// because the count was read and the warning was not.</para>
+    /// <para>⚠️ The evaluator's version had to change shape, not just source. It loaded
+    /// <em>every</em> tenant's active windows before its tenant loop and filtered afterwards —
+    /// not a leak, but the flattening §4.0.1.2 warns about, where a sweep establishes a tenant and
+    /// then consults a structure built across all of them. It asks per tenant inside the loop now,
+    /// after the enabled-rules check so a tenant with nothing to evaluate costs no query. That is
+    /// one query per active tenant instead of one in total, and worth saying out loud rather than
+    /// hiding in a diff.</para>
     ///
-    /// <para>The three that remain each touch another module's table in a way no <em>read</em>
-    /// contract removes: <c>AppGovernanceService</c> does CRUD on Connectivity's
-    /// <c>AppNetworkPolicies</c> and reads five DataServices tables for its picker lists;
-    /// <c>PortalServiceScopeService</c> reads three binding tables, all set-valued restatements of
-    /// methods DataServices already owns per deployment; and <c>DeploymentImportService</c> inserts
-    /// a <c>DatabaseBinding</c> with <c>SyncEnabled = false</c>, which the owner-side twin cannot
-    /// express because it defaults that to true.</para>
+    /// <para>⚠️ The first draft of <c>MaintenanceWindowSummary</c> carried a cluster name and a
+    /// description <b>for nobody</b> — the three suppression callers need only the answer and the
+    /// evaluator needs only the cluster id. It carries four fields because four are read; the page
+    /// that renders windows still reads the entity and brings what it displays when it moves. Same
+    /// rule that refused <c>DeploymentSummary.CustomerName</c>.</para>
     ///
     /// <para><b>Connectivity 7 → 4</b>, and all three went off the same way the earlier ones did:
     /// their Catalog reads moved to <c>ICatalogApi</c> and their credential to the seam first, and
@@ -313,7 +317,7 @@ public class ModuleContractTests
     private static readonly Dictionary<Module, int> Baseline = new()
     {
         [Module.DataServices] = 2,
-        [Module.Telemetry] = 4,
+        [Module.Telemetry] = 3,
         [Module.Connectivity] = 4,
         [Module.Support] = 7,
         [Module.Catalog] = 6,
