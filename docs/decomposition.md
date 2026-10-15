@@ -549,7 +549,7 @@ shape the work turned out to have. Where it stands, against the figures this sec
 |---|---|---|
 | credential sites | 508 in 57 files | **22 in 13** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
-| foreign reads of `ClusterComponents` | 87 | **6** |
+| foreign reads of `ClusterComponents` | 87 | **4 direct + 22 navigation** |
 | foreign *writes* to it | 22 | **0** |
 | own-process kubectl/helm outside the gate (§5.4) | 49 | **1** |
 | component lookups escaping their tenant | 14 | **0** |
@@ -709,12 +709,40 @@ read Catalog's table through `Include(c => c.Components)` on the cluster row, an
 by a different spelling — it is a query against another module's table, it breaks the same way when
 that table moves, and the contract has to serve it either way.
 
-Measured independently (`ModuleServiceMap` for ownership, Catalog's own services excluded, as the
-test does): **8 navigation reads in 5 files** —`KubernetesOperationsService` (4), `AppRouteService`,
-`AppL4RouteService`, `IngressDashboardService` and `StorageService`. So the row that says 4 should
-say 12, and until the metric is taught, this coupling can grow for free in the one spelling nobody
-is counting. Same class of error as the file-name/type-name bug in §4.0.1.4, and the same lesson:
-a count that becomes an argument has to be checked against a second measurement.
+**22 navigation reads in 6 files**: `KubernetesOperationsService` 11, `AppL4RouteService` 3,
+`AppRouteService` 2, `IngressDashboardService` 2, `StorageService` 2, `DatabaseService` 2. The
+metric now counts them, with the same per-mention unit as the DbSet form and two narrow
+exclusions (the `EntKube.Web.Components` namespace, and `UpgradeReport.Components`, which is a
+DTO). So the ledger row reads **4 direct + 22 navigation**, and a new one in either spelling now
+fails the build.
+
+⚠️ **The first measurement of this gap was itself wrong, and it had already been quoted.** It
+counted only the `Include`/`ThenInclude` form and reported *8 in 5 files*, missing every in-memory
+traversal of the loaded collection (eleven of the twenty-two) and both correlated subqueries; the
+figure 8 reached a commit message, a pull request and this document before the second measurement
+corrected it to 22. That is the third time in this programme that a count became an argument before
+it was checked — see §4.0.1.4's file-name/type-name bug — and the discipline it keeps earning is
+*measure twice, then quote*, not *quote, then verify*.
+
+**Most of the 22 is one question asked six times.** Fifteen pass the loaded collection to one of
+`ExternalRouteService`'s three gateway resolvers — "which gateway does this cluster use?" — and
+those resolvers already take `IEnumerable<ICatalogApi`'s `IComponentNaming>`, so they are
+contract-shaped today and it is only their callers that feed them an EF navigation. **No new
+contract method is needed for any of the 22**, which is worth stating because the first guess was
+that this number was asking for one:
+
+- the fifteen gateway sites want `GetComponentsForClusterAsync(tenantId, clusterId)`;
+- four (`DatabaseService` 2, `StorageService` 2) ask "which of this tenant's clusters have X
+  installed?" — `GetComponentsForTenantAsync(tenantId)` plus the name predicate in memory, which is
+  where an asymmetric predicate belongs anyway;
+- one is a *join through* Catalog's table to reach Connectivity's own rows
+  (`cluster.Components.SelectMany(c => c.ExternalRoutes)`), because `ExternalRoute` is keyed by
+  component id. That one is a real conversion rather than a swap: ask Catalog which components are
+  on the cluster, then query `ExternalRoutes` by those ids.
+
+Tenant availability, which is what decides whether each can move: three of the four
+`KubernetesOperationsService` entry points already take one; its private
+`ApplyGatewayForClusterAsync` does not and will have to.
 
 ## 5. The agent model
 

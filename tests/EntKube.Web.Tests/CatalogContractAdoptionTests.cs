@@ -408,10 +408,46 @@ public class CatalogContractAdoptionTests
     /// </summary>
     private const int BaselineWrites = 0;
 
+    /// <summary>
+    /// Catalog's table reached through Fleet's row — <c>cluster.Components</c> — in services
+    /// Catalog does not own. <b>22 in 6 files</b>, measured 2026-10-15, and every one of them was
+    /// invisible to this test until now.
+    ///
+    /// <para><b>Why it was missed.</b> <see cref="BaselineQueries"/> counts <c>.ClusterComponents</c>,
+    /// the DbSet. A navigation read is the same coupling in a different spelling: it is a query
+    /// against another module's table (an <c>Include</c> is a JOIN, <c>k.Components.Any(…)</c> is an
+    /// EXISTS subquery), it breaks the same way when that table moves to another database, and
+    /// <c>ICatalogApi</c> has to serve it either way. <c>LokiService</c> is what surfaced it: it
+    /// read its component through <c>Include(c =&gt; c.Components)</c>, converting it to the
+    /// contract moved this ratchet by <em>zero</em>, and the service had plainly stopped touching
+    /// Catalog's table.</para>
+    ///
+    /// <para>⚠️ <b>The first measurement of the gap was itself wrong</b>, in the same direction
+    /// and for the same kind of reason as §4.0.1.4's file-name/type-name bug. It counted only the
+    /// <c>Include</c>/<c>ThenInclude</c> form and reported <b>8 in 5 files</b> — missing every
+    /// in-memory traversal of the loaded collection (<c>ResolveGatewayClass(cluster.Components)</c>,
+    /// eleven of the twenty-two) and both correlated subqueries. The figure 8 had already reached a
+    /// commit message, a pull request and <c>docs/decomposition.md</c> before the second
+    /// measurement. The lesson is the one already written down: a count that becomes an argument
+    /// has to be checked by a second measurement <em>before</em> it is quoted, not after.</para>
+    ///
+    /// <para><b>What they are:</b> <c>KubernetesOperationsService</c> 11, <c>AppL4RouteService</c> 3,
+    /// <c>AppRouteService</c> 2, <c>IngressDashboardService</c> 2, <c>StorageService</c> 2,
+    /// <c>DatabaseService</c> 2. Fifteen of them pass the loaded collection to one of
+    /// <c>ExternalRouteService</c>'s three gateway resolvers, so most of this number is one
+    /// question — "which gateway does this cluster use?" — asked in six places, and that is the
+    /// shape of the contract method it wants rather than six conversions.</para>
+    ///
+    /// <para>Counted per <em>mention</em>, like <see cref="BaselineQueries"/>: an <c>Include</c> and
+    /// the traversal it enables are two, because that is how the DbSet form has always been
+    /// counted and a unit that changes with the spelling is how this went unnoticed.</para>
+    /// </summary>
+    private const int BaselineNavigation = 22;
+
     [Fact]
     public void No_new_service_reaches_past_the_catalog_contract()
     {
-        (int queries, int writes) = Measure();
+        (int queries, int writes, int navigation) = Measure();
 
         queries.Should().BeLessThanOrEqualTo(BaselineQueries,
             "a new direct query on Catalog's table is one more caller that cannot be moved off "
@@ -420,18 +456,25 @@ public class CatalogContractAdoptionTests
         writes.Should().BeLessThanOrEqualTo(BaselineWrites,
             "a foreign module mutating a component through change tracking is the write this "
             + "contract exists to express — use MergeHelmValuesAsync or SetHelmValuesAsync");
+
+        navigation.Should().BeLessThanOrEqualTo(BaselineNavigation,
+            "reaching Catalog's table through cluster.Components is the same coupling as "
+            + "querying it directly — it is a JOIN or an EXISTS against another module's table");
     }
 
     [Fact]
     public void The_adoption_baseline_does_not_carry_slack()
     {
-        (int queries, int writes) = Measure();
+        (int queries, int writes, int navigation) = Measure();
 
         queries.Should().Be(BaselineQueries,
             $"now {queries} — bank it by lowering the baseline, or the slack lets direct access "
             + "creep back for free");
 
         writes.Should().Be(BaselineWrites, $"now {writes} writes; lower the baseline to match");
+
+        navigation.Should().Be(BaselineNavigation,
+            $"now {navigation} navigation reads; lower the baseline to match");
     }
 
     /// <summary>
@@ -496,7 +539,7 @@ public class CatalogContractAdoptionTests
         [.. Regex.Matches(body, @"\b(?:class|record|struct|interface)\s+(\w+)")
             .Select(m => m.Groups[1].Value)];
 
-    private static (int Queries, int Writes) Measure()
+    private static (int Queries, int Writes, int Navigation) Measure()
     {
         string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, Web));
 
@@ -511,7 +554,7 @@ public class CatalogContractAdoptionTests
         modules.Should().NotBeEmpty("ModuleServiceMap is how this test knows whose code it is reading");
         properties.Should().NotBeEmpty("ClusterComponent's settable properties are what a write writes");
 
-        int queries = 0, writes = 0;
+        int queries = 0, writes = 0, navigation = 0;
 
         foreach (string path in Directory.EnumerateFiles(
                      Path.Combine(root, "Services"), "*.cs", SearchOption.AllDirectories))
@@ -554,7 +597,21 @@ public class CatalogContractAdoptionTests
                 if (trimmed.StartsWith("//", StringComparison.Ordinal)
                     || trimmed.StartsWith("*", StringComparison.Ordinal)) continue;
 
+                // A using directive is not a read of anything. It matters only for the navigation
+                // count below, where `using Microsoft.AspNetCore.Components;` otherwise scores as
+                // one — which is how the first run of this came out at 23 instead of 22.
+                if (trimmed.StartsWith("using ", StringComparison.Ordinal)) continue;
+
                 queries += Regex.Matches(line, @"\.ClusterComponents\b").Count;
+
+                // The navigation spelling. `(?<!Web)` keeps the EntKube.Web.Components namespace
+                // out of it; the receiver check keeps DTOs that happen to have a Components
+                // property out. Both exclusions are narrow on purpose — anything else new is
+                // counted, so a fresh one forces a decision rather than passing in silence.
+                foreach (Match m in Regex.Matches(line, @"(?<!Web)(?:(\w+)\s*)?\.Components\b"))
+                {
+                    if (!DtoReceivers.Contains(m.Groups[1].Value)) navigation++;
+                }
 
                 foreach (string name in held)
                 {
@@ -566,6 +623,14 @@ public class CatalogContractAdoptionTests
             }
         }
 
-        return (queries, writes);
+        return (queries, writes, navigation);
     }
+
+    /// <summary>
+    /// Receivers whose <c>.Components</c> is not Catalog's navigation. One entry:
+    /// <c>UpgradeReport.Components</c>, a list of <c>ComponentUpgrade</c> the upgrade service
+    /// builds — a DTO, not the table. Named rather than pattern-matched, because an exemption is
+    /// a claim that something is not coupling and should be readable as one.
+    /// </summary>
+    private static readonly HashSet<string> DtoReceivers = new(StringComparer.Ordinal) { "report" };
 }
