@@ -388,7 +388,23 @@ public class CatalogContractAdoptionTests
     /// that is not yours, and an empty list is a 200 — "does not exist" and "has no components" are
     /// different answers.</para>
     /// </summary>
-    private const int BaselineQueries = 4;
+    /// <summary>
+    /// ⚠️ <b>8, from 4 — and this is a measurement correction, not a regression.</b> The four new
+    /// ones were always there, in a spelling this test could not see: <c>db.Set&lt;ClusterComponent&gt;()</c>.
+    ///
+    /// <para><c>DbContext.Set&lt;T&gt;()</c> is public, so it reaches any entity in the shared model
+    /// from any context — <em>including a module context that deliberately exposes no property for
+    /// it</em>. All four are in <c>VaultService</c>, which is <b>Secrets</b>, on
+    /// <c>SecretsDbContext</c>: <c>CreateComponentAsync</c>, <c>GetComponentsAsync</c> and
+    /// <c>DeleteComponentAsync</c>. Three pages and <c>BlueprintFromClusterService</c> (Fleet) call
+    /// them, so none of it is dead.</para>
+    ///
+    /// <para>This is the <b>third</b> spelling of this one coupling, and the pattern is now
+    /// unmistakable: the DbSet property, the navigation (see <see cref="BaselineNavigation"/>), and
+    /// <c>Set&lt;T&gt;()</c>. Every time, the fix was to stop listing what to look for and start
+    /// deriving it.</para>
+    /// </summary>
+    private const int BaselineQueries = 8;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,
@@ -406,7 +422,30 @@ public class CatalogContractAdoptionTests
     /// which until this point had no callers at all, so the contract's write half existed only on
     /// paper.</para>
     /// </summary>
-    private const int BaselineWrites = 0;
+    /// <summary>
+    /// ⚠️ <b>2, from "0" — and the 0 was wrong, which matters because it is quoted as a design
+    /// premise.</b>
+    ///
+    /// <para>This number's own history is the warning. The first measurement looked for
+    /// <c>.ClusterComponents.Add/Remove/Update</c>, found none, and concluded the table was
+    /// read-only outside Catalog — a conclusion <b>written into <c>ICatalogApi</c>'s documentation
+    /// as the reason it has no write methods</b>. That was corrected once, for EF's change
+    /// tracking (<c>component.HelmValues = x; SaveChangesAsync()</c> is a write with no
+    /// <c>Update()</c> near it). It was still wrong: <c>VaultService.CreateComponentAsync</c> does
+    /// <c>db.Set&lt;ClusterComponent&gt;().Add(...)</c> and <c>DeleteComponentAsync</c> does
+    /// <c>.Remove(...)</c>, both with <c>SaveChangesAsync</c>. <b>A foreign module creates and
+    /// deletes Catalog's components.</b></para>
+    ///
+    /// <para>⚠️ And the boundary is not the worst of it. None of those three methods takes a
+    /// tenant: <c>CreateComponentAsync(clusterId, name, type)</c>,
+    /// <c>DeleteComponentAsync(componentId)</c>, <c>GetComponentsAsync(clusterId)</c>. A page
+    /// deletes a component by id with nothing checking whose cluster it is on. The contract's own
+    /// <c>GetComponentsForClusterAsync(tenantId, clusterId)</c> is tenant-first; this path is not.
+    /// Moving the CRUD into Catalog <em>with</em> a tenant is the follow-up this baseline exists to
+    /// make impossible to forget — the number is raised here rather than quietly fixed, because a
+    /// violation that was always present should be visible before it is moved.</para>
+    /// </summary>
+    private const int BaselineWrites = 2;
 
     /// <summary>
     /// Catalog's table reached through a <b>navigation</b> rather than the DbSet — eleven entities
@@ -617,6 +656,11 @@ public class CatalogContractAdoptionTests
     /// </summary>
     private static bool NotTheNavigation(string file, string receiver)
         => receiver is "BlueprintStepType" or "report" or "notice" or "Source"
+           // `Data.ClusterComponent` is a TYPE reference, not a navigation — the entity namespace
+           // ends in `.Data`, so a qualified mention reads identically to a property access. No
+           // such line exists outside Catalog today; this was found by injecting one, which is the
+           // only reason it is here before it is needed.
+           || receiver == "Data"
            || (file == "SupportMailboxService.cs" && receiver == "r");
 
     /// <summary>
@@ -749,6 +793,26 @@ public class CatalogContractAdoptionTests
                 if (trimmed.StartsWith("using ", StringComparison.Ordinal)) continue;
 
                 queries += Regex.Matches(line, @"\.ClusterComponents\b").Count;
+
+                // ⚠️ The THIRD spelling, and the one that made this file's "writes: 0" untrue.
+                // `DbContext.Set<T>()` is public, so `db.Set<ClusterComponent>()` reaches Catalog's
+                // table from any context — including a module context that deliberately exposes no
+                // property for it. VaultService (Secrets) creates, lists and DELETES components
+                // that way. Counted as a query, and as a write when it is followed by Add/Remove.
+                // The type argument may be written qualified (`Set<Data.ClusterComponent>()`).
+                // Found by injection: the first version of this rule required the bare name and
+                // scored a qualified write as zero — the same "one spelling" mistake one level down.
+                foreach (Match m in Regex.Matches(
+                             line, @"\.Set<(?:[\w\.]*\.)?ClusterComponent>\(\)(\.\w+)?"))
+                {
+                    queries++;
+
+                    if (m.Groups[1].Value is ".Add" or ".AddRange" or ".Remove" or ".RemoveRange"
+                        or ".Update" or ".UpdateRange")
+                    {
+                        writes++;
+                    }
+                }
 
                 // The navigation spellings, derived from the model above. `(?<!Web)` keeps the
                 // EntKube.Web.Components namespace out of it; NotTheNavigation keeps the five
