@@ -547,19 +547,31 @@ shape the work turned out to have. Where it stands, against the figures this sec
 
 | measure | at the start | now |
 |---|---|---|
-| credential sites | 508 in 57 files | **82 in 26** |
+| credential sites | 508 in 57 files | **58 in 22** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
-| foreign reads of `ClusterComponents` | 87 | **13** |
+| foreign reads of `ClusterComponents` | 87 | **6** |
 | foreign *writes* to it | 22 | **0** |
-| own-process kubectl/helm outside the gate (§5.4) | 49 | **6** |
+| own-process kubectl/helm outside the gate (§5.4) | 49 | **2** |
 | component lookups escaping their tenant | 14 | **0** |
 
 Those are six ratchets, each with a banked baseline and a second test that fails when the
 baseline carries slack, so none of them can drift back quietly.
 
-*Two columns count work that is open rather than merged: credential sites are 82 in 26 files on
-`main` and **72 in 26** with #198, and the foreign reads are 14 on `main` and 13 with the routing
-change below. Every other number is on `main` today.*
+⚠️ **The foreign-reads row was wrong for several batches, and the measurement was why.**
+`CatalogContractAdoptionTests` resolved a file's owning module by looking up its *file name* in a
+map keyed by *type* names, and skipped whatever it could not find — so a file whose name differs
+from the class inside it was silently exempt. `OperationsAdvisor.cs` (declaring
+`OperationsAdvisorService`), `Mail/SmtpSettings.cs` (declaring `SmtpSettingsResolver`) and
+`PublicApi/PublicApiEndpoints.cs` held four real queries between them, one of which read KEDA
+installs across the whole installation with no tenant predicate, and one of which was in the
+**public REST API**. The true figure when the row said 6 was 10.
+
+Ownership now comes from the types a file declares, `ModuleServiceMap.PlatformServices` supplies
+the one exemption that is deliberate (`BackupService`, a whole-installation export), and a file
+with no mapped type is counted rather than skipped. All four sites then converted, so the row is
+6 again — and means it. **The lesson is the one §4.0.1.1 already records in a different form: a
+number that becomes documentation has to be checked against an independent measurement, because
+by the time it is wrong it is also an argument.**
 
 **The seam was the constraint far more often than the callers were.** §4.0.1 said the opposite —
 "the seam is not the constraint any more" — and that was wrong in a specific and repeatable way.

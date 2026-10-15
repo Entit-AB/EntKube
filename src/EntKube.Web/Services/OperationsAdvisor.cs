@@ -1,5 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using ICatalogApi = EntKube.Contracts.Catalog.ICatalogApi;
+using InstalledComponent = EntKube.Contracts.Catalog.InstalledComponent;
+using ContractComponentStatus = EntKube.Contracts.Catalog.ComponentStatus;
 using EntKube.Web.Services.Jit;
 using EntKube.Web.Services.Upgrades;
 
@@ -147,6 +150,7 @@ public class OperationsAdvisorService(
     EntKube.Web.Services.Upgrades.DriftScanCache driftCache,
     EntKube.Web.Services.SupplyChain.SupplyChainScanCache supplyChainCache,
     EntKube.Web.Services.Dr.DrScanCache drCache,
+    ICatalogApi catalog,
     ILogger<OperationsAdvisorService> logger)
 {
     /// <summary>Overdue findings older than this, still unacknowledged, are escalated.</summary>
@@ -992,10 +996,19 @@ public class OperationsAdvisorService(
         }
 
         // ── Reliability: KEDA installed on the cluster but the workload has no autoscaler ──
-        HashSet<Guid> kedaClusters = (await db.ClusterComponents
-                .Where(c => c.Status == ComponentStatus.Installed
-                         && (c.Name == "keda" || c.HelmChartName == "keda" || c.ReleaseName == "keda"))
-                .Select(c => c.ClusterId).ToListAsync(ct))
+        // Asked of Catalog, as this tenant. It used to select KEDA installs across the WHOLE
+        // installation with no tenant predicate at all — harmless-looking, because the result is
+        // only a set of cluster ids used as a membership test, but it is another tenant's
+        // inventory deciding whether this tenant gets a finding. The predicate stays in memory:
+        // "keda" is matched asymmetrically across Name, HelmChartName and ReleaseName, and the
+        // contract's find-by-key takes one key.
+        IReadOnlyList<InstalledComponent> tenantComponents =
+            await catalog.GetComponentsForTenantAsync(tenantId, ct);
+
+        HashSet<Guid> kedaClusters = tenantComponents
+            .Where(c => c.Status == ContractComponentStatus.Installed
+                     && (c.Name == "keda" || c.HelmChartName == "keda" || c.ReleaseName == "keda"))
+            .Select(c => c.ClusterId)
             .ToHashSet();
         if (kedaClusters.Count > 0)
         {
@@ -1027,11 +1040,15 @@ public class OperationsAdvisorService(
         }
 
         // ── Security: Kyverno installed for an environment but no policies defined ──
-        HashSet<Guid> kyvernoEnvs = (await db.KubernetesClusters
-                .Where(cl => cl.TenantId == tenantId && db.ClusterComponents.Any(c =>
-                    c.ClusterId == cl.Id && c.Status == ComponentStatus.Installed
-                    && (c.Name == "kyverno" || c.HelmChartName == "kyverno" || c.ReleaseName == "kyverno")))
-                .Select(cl => cl.EnvironmentId).ToListAsync(ct))
+        // The same correlated subquery this programme has converted three times before — a cluster
+        // joined to its components to ask "is kyverno installed here". The contract's DTO already
+        // carries the cluster's EnvironmentId, so the join disappears entirely rather than moving:
+        // one tenant-scoped call replaces a clusters query with a ClusterComponents subquery
+        // inside it.
+        HashSet<Guid> kyvernoEnvs = tenantComponents
+            .Where(c => c.Status == ContractComponentStatus.Installed
+                     && (c.Name == "kyverno" || c.HelmChartName == "kyverno" || c.ReleaseName == "kyverno"))
+            .Select(c => c.EnvironmentId)
             .ToHashSet();
         if (kyvernoEnvs.Count > 0)
         {

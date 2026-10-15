@@ -318,6 +318,53 @@ public class CatalogContractAdoptionTests
     /// <para>So 87 → 6, and every one of the six is now waiting on the credential seam rather than
     /// on a tenant. The two ratchets have converged: this one cannot move again until
     /// <see cref="ClusterCredentialCustodyTests"/> does.</para>
+    ///
+    /// <para>⚠️⚠️ <b>That paragraph was wrong, and the measurement was why. The real number was
+    /// 10.</b> This test resolved a file's owning module by looking up
+    /// <c>Path.GetFileNameWithoutExtension(path)</c> in a dictionary keyed by <em>type</em> names,
+    /// and skipped anything it could not find — so every file whose name differs from the class
+    /// inside it was silently exempt:</para>
+    ///
+    /// <list type="bullet">
+    ///   <item><c>OperationsAdvisor.cs</c> declares <c>OperationsAdvisorService</c> — 2 queries,
+    ///     one of which selected KEDA installs across the <b>whole installation</b> with no tenant
+    ///     predicate at all.</item>
+    ///   <item><c>Mail/SmtpSettings.cs</c> declares <c>SmtpSettingsResolver</c> — 1 query.</item>
+    ///   <item><c>PublicApi/PublicApiEndpoints.cs</c> declares nothing the map holds, because it is
+    ///     not a service — 1 query, in the <b>public REST API</b>.</item>
+    ///   <item><c>BackupService.cs</c> — 3 queries, and these are a <em>real</em> exemption: the
+    ///     backup bundle is a whole-installation export and <c>ModuleServiceMap.PlatformServices</c>
+    ///     says so. It was being exempted by accident rather than by that rule.</item>
+    /// </list>
+    ///
+    /// <para><b>Ownership now comes from the types a file declares</b> (<see cref="DeclaredTypes"/>),
+    /// and <c>PlatformServices</c> is read for the one exemption that is deliberate. A file with no
+    /// mapped type is now <em>counted</em> rather than skipped: "not a service" is no reason to let
+    /// the public API reach past the contract, and that route is the one the CLI, the MCP server and
+    /// every future BFF go through.</para>
+    ///
+    /// <para><b>This is the third time a name-shaped measurement in this programme has been wrong,
+    /// and the most expensive.</b> The number 6 had already been copied into this file's own prose,
+    /// into <c>docs/decomposition.md</c> and into the project notes as the reason the ratchet was
+    /// blocked — "every one of the six is waiting on the credential seam" was an argument built on
+    /// a count that could not see four of the ten. A measurement that feeds documentation has to be
+    /// checked against something independent; this one was, with a throwaway script that walked the
+    /// same files and disagreed.</para>
+    ///
+    /// <para><b>Back to 6, and now it means 6.</b> All four newly-visible sites converted, because
+    /// all four had a tenant in scope: <c>OperationsAdvisorService</c> 2 → 0 (the KEDA sweep and the
+    /// Kyverno correlated subquery, the latter collapsing entirely because the DTO already carries
+    /// the cluster's <c>EnvironmentId</c>), <c>SmtpSettingsResolver</c> 1 → 0, and the public API's
+    /// component listing 1 → 0.</para>
+    ///
+    /// <para>The public API's conversion carried one risk worth recording: it serialises
+    /// <c>Status.ToString()</c>, so the published JSON now comes from the <em>contract's</em> copy
+    /// of <c>ComponentStatus</c> rather than the entity's. The two agree member for member today;
+    /// <c>ApiComponentStatusTests</c> is what keeps them agreeing, because a wire format that
+    /// changes when someone edits an enum is noticed only by the caller. Its 404 check also stays:
+    /// <c>GetComponentsForClusterAsync</c> is tenant-first and answers an empty list for a cluster
+    /// that is not yours, and an empty list is a 200 — "does not exist" and "has no components" are
+    /// different answers.</para>
     /// </summary>
     private const int BaselineQueries = 6;
 
@@ -388,6 +435,45 @@ public class CatalogContractAdoptionTests
             .ToDictionary(g => g.Key, g => g.First().Groups[2].Value, StringComparer.Ordinal);
     }
 
+    /// <summary>
+    /// The cross-cutting wiring <c>ModuleServiceMap.PlatformServices</c> names — services that
+    /// belong to no business module on purpose.
+    ///
+    /// <para>Read because one of them, <c>BackupService</c>, legitimately touches every table in
+    /// the product: the backup bundle is a whole-installation export and a tenant-scoped contract
+    /// cannot express it. That exemption was previously granted by accident — the file simply did
+    /// not resolve to a module — and an exemption nobody states is indistinguishable from a
+    /// measurement bug, which is what the rest of this method turned out to be.</para>
+    /// </summary>
+    private static IReadOnlySet<string> PlatformServices(string root)
+    {
+        string map = File.ReadAllText(Path.Combine(root, "Modules", "ModuleServiceMap.cs"));
+
+        int start = map.IndexOf("PlatformServices", StringComparison.Ordinal);
+        start.Should().BeGreaterThan(0, "the platform-wiring set is how this test knows which "
+            + "services are deliberately module-less");
+
+        return Regex.Matches(map[start..], @"typeof\(([\w\.<>]+)\)")
+            .Select(m => m.Groups[1].Value.Split('.')[^1])
+            .ToHashSet(StringComparer.Ordinal);
+    }
+
+    /// <summary>
+    /// The type names a file declares, which is what <c>ModuleServiceMap</c> is keyed by.
+    ///
+    /// <para>⚠️ <b>This is the fix for the bug that made this whole ratchet under-count.</b> The
+    /// previous version looked up <c>Path.GetFileNameWithoutExtension(path)</c> in a map keyed by
+    /// <em>type</em> names, and silently skipped every file whose name differs from its class:
+    /// <c>OperationsAdvisor.cs</c> declares <c>OperationsAdvisorService</c> and
+    /// <c>Mail/SmtpSettings.cs</c> declares <c>SmtpSettingsResolver</c>, so three real foreign
+    /// queries were exempted by a filename mismatch and the headline number was wrong by two
+    /// thirds of its remaining distance. It had already been copied into this file's prose and
+    /// into docs/decomposition.md as rationale.</para>
+    /// </summary>
+    private static IReadOnlyList<string> DeclaredTypes(string body) =>
+        [.. Regex.Matches(body, @"\b(?:class|record|struct|interface)\s+(\w+)")
+            .Select(m => m.Groups[1].Value)];
+
     private static (int Queries, int Writes) Measure()
     {
         string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, Web));
@@ -398,6 +484,7 @@ public class CatalogContractAdoptionTests
 
         IReadOnlyDictionary<string, string> modules = ServiceModules(root);
         IReadOnlySet<string> properties = MutableProperties(root);
+        IReadOnlySet<string> platform = PlatformServices(root);
 
         modules.Should().NotBeEmpty("ModuleServiceMap is how this test knows whose code it is reading");
         properties.Should().NotBeEmpty("ClusterComponent's settable properties are what a write writes");
@@ -407,14 +494,24 @@ public class CatalogContractAdoptionTests
         foreach (string path in Directory.EnumerateFiles(
                      Path.Combine(root, "Services"), "*.cs", SearchOption.AllDirectories))
         {
-            string service = Path.GetFileNameWithoutExtension(path);
-
-            // Services Catalog owns are supposed to use the table; so is anything the map does
-            // not place in a module, which is not a service at all.
-            if (!modules.TryGetValue(service, out string? owner) || owner == "Catalog") continue;
-
             string[] lines = File.ReadAllLines(path);
             string body = string.Join('\n', lines);
+
+            // Ownership is resolved from the types the file DECLARES, not from its name — see
+            // DeclaredTypes for the bug that caused. A file with no mapped type at all is still
+            // read: PublicApi/PublicApiEndpoints.cs is not a service and never will be, but it is
+            // the public REST surface the CLI, the MCP server and every future BFF go through, so
+            // "not a service" is no reason to let it reach past the contract.
+            List<string> declared = [.. DeclaredTypes(body)];
+
+            if (declared.Any(platform.Contains)) continue;
+
+            string? owner = declared
+                .Select(d => modules.TryGetValue(d, out string? m) ? m : null)
+                .FirstOrDefault(m => m is not null);
+
+            // Catalog's own services are supposed to use the table.
+            if (owner == "Catalog") continue;
 
             // Anything named as a ClusterComponent — what a tracked write would be written
             // through. Deliberately any declaration position, not just a local assigned where it
