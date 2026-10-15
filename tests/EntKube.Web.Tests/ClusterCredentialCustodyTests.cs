@@ -437,7 +437,7 @@ public class ClusterCredentialCustodyTests
     /// so the id was the whole authorization. They take the asking tenant now, from the page that
     /// already had it.</para>
     /// </summary>
-    private const int BaselineOccurrences = 38;
+    private const int BaselineOccurrences = 37;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -468,6 +468,27 @@ public class ClusterCredentialCustodyTests
     /// <para>27. <c>NodeManagementService</c>.</para>
     ///
     /// <para>26. <c>ComponentScanService</c>.</para>
+    ///
+    /// <para>17. <c>JitProxyService</c> — the <b>second connection shape</b>, and the one that
+    /// needed no argument at all.
+    ///
+    /// <para>It held the cluster's kubeconfig to read three things out of it — the API server
+    /// address, the CA roots, and the skip-TLS flag — while leaving <c>ClientCertificates</c>
+    /// deliberately empty, because presenting EntKube's identity would make the API server
+    /// authenticate the certificate and <em>ignore the grant's bound token</em>. So the one service
+    /// that must never act as EntKube was the one holding the means to.</para>
+    ///
+    /// <para><c>IClusterClient.GetConnectionAsync</c> returns exactly those three.
+    /// Unlike <c>ProxyServiceAsync</c>, whose authority had to be argued for, this one is
+    /// <em>strictly less</em> than what it replaces: a CA bundle and an address cannot authenticate
+    /// to anything. That is the test worth applying to the next seam addition — does it reduce
+    /// authority, or only move the credential?</para>
+    ///
+    /// <para>The upstream pool keyed its cache on a hash of the kubeconfig text, so any rotation
+    /// rebuilt the client — including a client-certificate rotation it never used. It keys on the
+    /// address, the CA thumbprints and the flag now: the property that mattered is kept, the
+    /// rebuilds that meant nothing are gone, and the <c>Include(g =&gt; g.KubernetesCluster)</c>
+    /// that existed only to carry the credential went with it.</para>
     ///
     /// <para>18. <c>TelemetryNodeClient</c> — five occurrences, and the one conversion that needed
     /// the seam to learn a <b>new shape</b> rather than a new verb.
@@ -552,7 +573,7 @@ public class ClusterCredentialCustodyTests
     /// seam's error contract is not the caller's, and a conversion that ignores that changes
     /// control flow silently.</para>
     /// </summary>
-    private const int BaselineFiles = 18;
+    private const int BaselineFiles = 17;
 
     private static (int Occurrences, int Files) Measure()
     {

@@ -17,6 +17,7 @@ namespace EntKube.Web.Services.Jit;
 /// </summary>
 public class JitProxyService(
     IDbContextFactory<IdentityDbContext> dbFactory,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     JitUpstreamClientPool clientPool,
     VaultEncryptionService encryption,
     AuditService auditService,
@@ -46,8 +47,7 @@ public class JitProxyService(
 
         string? presented = ExtractToken(http.Request);
 
-        (JitGrant? grant, string? clusterToken, string? kubeconfig) =
-            await ResolveAsync(grantId, presented, ct);
+        (JitGrant? grant, string? clusterToken) = await ResolveAsync(grantId, presented, ct);
 
         if (grant is null)
         {
@@ -74,7 +74,7 @@ public class JitProxyService(
             return;
         }
 
-        if (clusterToken is null || kubeconfig is null)
+        if (clusterToken is null)
         {
             // Approved, but its credential is gone — torn down, or never successfully minted.
             await WriteStatusAsync(http, HttpStatusCode.Unauthorized,
@@ -82,8 +82,26 @@ public class JitProxyService(
             return;
         }
 
+        // The tenant comes off the grant, and that is sound HERE: the authorization on this path is
+        // the presented token, compared in fixed time against the grant's stored hash a few lines
+        // up. The caller has proved possession of a credential issued FOR this grant, so the tenant
+        // is not what is being decided — which is the same reasoning JitAccessService records for
+        // EndOwnGrantAsync, and the opposite of a tenant derived in place of a check.
+        EntKube.Web.Services.Clusters.IClusterClient? access =
+            await clusterAccess.ForAsync(grant.TenantId, grant.KubernetesClusterId, ct);
+
+        EntKube.Web.Services.Clusters.ClusterConnection? connection =
+            access is null ? null : await access.GetConnectionAsync(ct);
+
+        if (connection is null)
+        {
+            await WriteStatusAsync(http, HttpStatusCode.ServiceUnavailable,
+                "The grant's cluster can no longer be reached.");
+            return;
+        }
+
         await RecordUseAsync(grant, http.Request.Method, path, ct);
-        await ForwardAsync(http, grant, clusterToken, kubeconfig, path, ct);
+        await ForwardAsync(http, grant, clusterToken, connection, path, ct);
     }
 
     // ── Resolution ────────────────────────────────────────────────────────────
@@ -94,34 +112,38 @@ public class JitProxyService(
     /// The grant id in the URL is not trusted on its own — the token is matched against it, so a
     /// valid token for one grant cannot be pointed at another by editing the kubeconfig.
     /// </summary>
-    private async Task<(JitGrant?, string?, string?)> ResolveAsync(
+    private async Task<(JitGrant?, string?)> ResolveAsync(
         Guid grantId, string? presented, CancellationToken ct)
     {
-        if (string.IsNullOrWhiteSpace(presented)) return (null, null, null);
+        if (string.IsNullOrWhiteSpace(presented)) return (null, null);
 
         string hash = KubernetesJitProvisioner.Hash(presented.Trim());
 
         using IdentityDbContext db = dbFactory.CreateDbContext();
 
         JitGrant? grant = await db.JitGrants
-            .Include(g => g.KubernetesCluster)
             .Include(g => g.User)
             .FirstOrDefaultAsync(g => g.Id == grantId, ct);
 
-        if (grant?.TokenHash is null) return (null, null, null);
+        if (grant?.TokenHash is null) return (null, null);
 
         // Fixed-time comparison. The hash is not a secret an attacker could usefully recover by
         // timing, but the habit costs nothing and the alternative invites the question.
         if (!System.Security.Cryptography.CryptographicOperations.FixedTimeEquals(
                 Convert.FromHexString(hash), Convert.FromHexString(grant.TokenHash)))
         {
-            return (null, null, null);
+            return (null, null);
         }
 
-        if (!grant.IsLiveAt(DateTime.UtcNow)) return (null, null, null);
+        if (!grant.IsLiveAt(DateTime.UtcNow)) return (null, null);
 
+        // No kubeconfig here any more. This used to return `grant.KubernetesCluster?.Kubeconfig`
+        // so the pool could read three fields out of it — the address, the CA and the skip-TLS
+        // flag — while deliberately never using the identity it carried. The seam hands over
+        // exactly those three now, so the one service that must not act as EntKube no longer holds
+        // the means to.
         string? clusterToken = JitClusterTokenStore.Read(encryption, grant);
-        return (grant, clusterToken, grant.KubernetesCluster?.Kubeconfig);
+        return (grant, clusterToken);
     }
 
     /// <summary>Reads the bearer token, ignoring anything that is not one.</summary>
@@ -137,13 +159,14 @@ public class JitProxyService(
     // ── Forwarding ────────────────────────────────────────────────────────────
 
     private async Task ForwardAsync(
-        HttpContext http, JitGrant grant, string clusterToken, string kubeconfig,
+        HttpContext http, JitGrant grant, string clusterToken,
+        EntKube.Web.Services.Clusters.ClusterConnection connection,
         string? path, CancellationToken ct)
     {
         JitUpstreamClientPool.Upstream upstream;
         try
         {
-            upstream = clientPool.Get(kubeconfig);
+            upstream = clientPool.Get(connection);
         }
         catch (Exception ex)
         {

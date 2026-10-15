@@ -3,6 +3,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services;
 using EntKube.Web.Services.Jit;
 using FluentAssertions;
+using Moq;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -52,7 +53,10 @@ public class JitProxyServiceTests : IDisposable
         TestDbContextFactory factory = new(connection);
         pool = new JitUpstreamClientPool(NullLogger<JitUpstreamClientPool>.Instance);
         sut = new JitProxyService(
-            factory, pool, encryption, new AuditService(factory), NullLogger<JitProxyService>.Instance);
+            factory,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(
+                factory, new Mock<IKubernetesClientFactory>().Object),
+            pool, encryption, new AuditService(factory), NullLogger<JitProxyService>.Instance);
     }
 
     // ── Authentication ────────────────────────────────────────────────────────

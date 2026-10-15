@@ -26,6 +26,22 @@ public interface IClusterClient
     Task DeleteManifestAsync(string kind, string name, string ns, CancellationToken ct = default);
 
     /// <summary>
+    /// How to reach this cluster's API server, <b>without the means to authenticate to it</b>.
+    ///
+    /// <para>The second connection-shaped thing the seam needed, and the cleaner of the two: a CA
+    /// bundle and an address are strictly <em>less</em> than a kubeconfig, because you cannot
+    /// authenticate with them. That is what makes this safe to hand out where
+    /// <see cref="ProxyServiceAsync"/>'s authority had to be argued for.</para>
+    ///
+    /// <para>It exists for <c>JitProxyService</c>, which must reach the API server while
+    /// deliberately <em>not</em> presenting EntKube's own identity — it substitutes the grant's
+    /// bound token, so a request is executed as the grant and not as cluster-admin. Taking the
+    /// whole kubeconfig to use one third of it was how that service ended up holding a credential
+    /// it was careful never to use.</para>
+    /// </summary>
+    Task<ClusterConnection?> GetConnectionAsync(CancellationToken ct = default);
+
+    /// <summary>
     /// Sends one HTTP request to a Service in this cluster, through the API server's proxy.
     ///
     /// <para><b>Why this shape, and not "give me a client".</b> The three callers that needed it
@@ -264,3 +280,16 @@ public interface IClusterClientFactory
     /// </returns>
     Task<IClusterClient?> ForAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default);
 }
+
+/// <summary>
+/// Where a cluster's API server is and what to trust it by — and nothing that authenticates to it.
+///
+/// <para><paramref name="SkipTlsVerify"/> is carried rather than resolved here because it is a
+/// property of the stored kubeconfig, and a caller that silently ignored it would verify against a
+/// CA the operator chose not to trust. A caller that honours it should say so out loud: it means
+/// the real API server cannot be told from anything answering on its address.</para>
+/// </summary>
+public sealed record ClusterConnection(
+    Uri Server,
+    System.Security.Cryptography.X509Certificates.X509Certificate2Collection? CaCerts,
+    bool SkipTlsVerify);
