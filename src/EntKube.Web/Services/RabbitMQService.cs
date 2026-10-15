@@ -4,6 +4,7 @@ using System.Text.RegularExpressions;
 using Amazon.S3;
 using Amazon.S3.Model;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -155,10 +156,11 @@ public class RabbitMQOperatorStatus
 /// in S3, mirroring the Keycloak realm export pattern.
 /// </summary>
 public class RabbitMQService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DataServicesDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     VaultService vaultService,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
+    EntKube.Contracts.Delivery.IDeliveryApi delivery,
     ILogger<RabbitMQService>? logger = null)
 {
     /// <summary>
@@ -241,7 +243,7 @@ public class RabbitMQService(
 
     public async Task<List<RabbitMQCluster>> GetClustersAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.RabbitMQClusters
             .Include(c => c.KubernetesCluster).ThenInclude(k => k.Environment)
@@ -253,7 +255,7 @@ public class RabbitMQService(
 
     public async Task<RabbitMQCluster?> GetClusterAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.RabbitMQClusters
             .Include(c => c.KubernetesCluster).ThenInclude(k => k.Environment)
@@ -272,7 +274,7 @@ public class RabbitMQService(
     public async Task<RabbitMQOperatorStatus> GetOperatorStatusAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         // Asked of Catalog rather than of its table. The predicate is unchanged and applied
         // here: the alias lists are not symmetrical across Name and ReleaseName — the topology
@@ -320,7 +322,7 @@ public class RabbitMQService(
         Guid? storageLinkId,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         if (await db.RabbitMQClusters.AnyAsync(
                 c => c.KubernetesClusterId == kubernetesClusterId && c.Name == name && c.Namespace == ns, ct))
@@ -361,7 +363,7 @@ public class RabbitMQService(
             cluster.LastError = ex.Message;
         }
 
-        using ApplicationDbContext db2 = dbFactory.CreateDbContext();
+        using DataServicesDbContext db2 = dbFactory.CreateDbContext();
         db2.RabbitMQClusters.Update(cluster);
         await db2.SaveChangesAsync(ct);
 
@@ -388,7 +390,7 @@ public class RabbitMQService(
         string version, int replicas, string storageSize, string? storageClass,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RabbitMQCluster cluster = await db.RabbitMQClusters
             .Include(c => c.KubernetesCluster)
@@ -428,7 +430,7 @@ public class RabbitMQService(
     /// </summary>
     public async Task DeleteClusterAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RabbitMQCluster cluster = await db.RabbitMQClusters
             .Include(c => c.KubernetesCluster)
@@ -489,7 +491,7 @@ public class RabbitMQService(
     {
         RabbitMQDiscoveryResult result = new();
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         List<KubernetesCluster> k8sClusters = await db.KubernetesClusters
             .Where(c => c.TenantId == tenantId && c.KubeconfigSecretId != null)
@@ -889,7 +891,7 @@ public class RabbitMQService(
     public async Task<RabbitMQClusterInfo?> GetLiveStatusAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RabbitMQCluster cluster = await db.RabbitMQClusters
             .Include(c => c.KubernetesCluster)
@@ -931,7 +933,7 @@ public class RabbitMQService(
         RabbitMQClusterInfo? info = await GetLiveStatusAsync(tenantId, clusterId, ct);
         if (info is null) return;
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RabbitMQCluster cluster = await db.RabbitMQClusters
             .FirstOrDefaultAsync(c => c.Id == clusterId, ct)
@@ -965,13 +967,13 @@ public class RabbitMQService(
     /// One tenant's brokers that a status poll should look at. Public and static so the scoping is
     /// assertable without a cluster; see <c>ReconcileSweepTenancyTests</c>.
     /// </summary>
-    public static IQueryable<RabbitMQCluster> ReconcilableFor(ApplicationDbContext db, Guid tenantId)
+    public static IQueryable<RabbitMQCluster> ReconcilableFor(DataServicesDbContext db, Guid tenantId)
         => db.RabbitMQClusters
             .Where(c => c.TenantId == tenantId && c.Status != RabbitMQClusterStatus.Deleting);
 
     public async Task ReconcileAllAsync(CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         // One tenant at a time, outermost (docs/decomposition.md §4.0.1.2). The brokers were
         // selected across the installation and each one's tenant taken off its own row, which is
@@ -1008,7 +1010,7 @@ public class RabbitMQService(
     public async Task<(string Username, string Password)?> GetAdminCredentialsAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RabbitMQCluster cluster = await db.RabbitMQClusters
             .Include(c => c.KubernetesCluster)
@@ -1088,7 +1090,7 @@ public class RabbitMQService(
     public async Task<List<RabbitMQBackup>> GetBackupsAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.RabbitMQBackups
             .Include(b => b.StorageLink)
@@ -1104,7 +1106,7 @@ public class RabbitMQService(
     public async Task<RabbitMQBackup> CreateBackupAsync(
         Guid tenantId, Guid clusterId, Guid storageLinkId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RabbitMQCluster cluster = await db.RabbitMQClusters
             .Include(c => c.KubernetesCluster)
@@ -1152,7 +1154,7 @@ public class RabbitMQService(
             backup.LastError = ex.Message;
         }
 
-        using ApplicationDbContext db2 = dbFactory.CreateDbContext();
+        using DataServicesDbContext db2 = dbFactory.CreateDbContext();
         db2.RabbitMQBackups.Update(backup);
         await db2.SaveChangesAsync(ct);
 
@@ -1170,7 +1172,7 @@ public class RabbitMQService(
     public async Task RestoreBackupAsync(
         Guid tenantId, Guid backupId, Guid? targetClusterId = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RabbitMQBackup backup = await db.RabbitMQBackups
             .Include(b => b.Cluster).ThenInclude(c => c.KubernetesCluster)
@@ -1204,7 +1206,7 @@ public class RabbitMQService(
 
     public async Task DeleteBackupAsync(Guid tenantId, Guid backupId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RabbitMQBackup backup = await db.RabbitMQBackups
             .Include(b => b.StorageLink)
@@ -2204,7 +2206,7 @@ public class RabbitMQService(
     public async Task<List<MessagingBinding>> GetMessagingBindingsAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.MessagingBindings
             .Include(b => b.AppDeployment).ThenInclude(d => d.App).ThenInclude(a => a.Customer)
             .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
@@ -2216,7 +2218,7 @@ public class RabbitMQService(
     public async Task<List<MessagingBinding>> GetMessagingBindingsForDeploymentAsync(
         Guid appDeploymentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.MessagingBindings
             .Include(b => b.Cluster)
             .Where(b => b.AppDeploymentId == appDeploymentId)
@@ -2229,7 +2231,7 @@ public class RabbitMQService(
         string vhost, string? queueName, string? exchangeName,
         string k8sSecretName, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MessagingBinding binding = new()
         {
@@ -2256,7 +2258,7 @@ public class RabbitMQService(
     public async Task DeleteMessagingBindingAsync(
         Guid tenantId, Guid bindingId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MessagingBinding binding = await db.MessagingBindings
             .Include(b => b.Cluster).ThenInclude(c => c.KubernetesCluster)
@@ -2301,7 +2303,7 @@ public class RabbitMQService(
     public async Task SyncMessagingBindingAsync(
         Guid tenantId, Guid bindingId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MessagingBinding binding = await db.MessagingBindings
             .Include(b => b.Cluster).ThenInclude(c => c.KubernetesCluster)
@@ -2364,7 +2366,7 @@ public class RabbitMQService(
         await appCluster.ApplyManifestAsync(secretManifest, ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
-        using ApplicationDbContext db2 = dbFactory.CreateDbContext();
+        using DataServicesDbContext db2 = dbFactory.CreateDbContext();
         db2.MessagingBindings.Update(binding);
         await db2.SaveChangesAsync(ct);
     }
@@ -2497,7 +2499,7 @@ public class RabbitMQService(
     private async Task PruneBackupsAsync(
         Guid tenantId, Guid clusterId, int maxBackups, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         List<RabbitMQBackup> backups = await db.RabbitMQBackups
             .Include(b => b.StorageLink)
@@ -2525,24 +2527,26 @@ public class RabbitMQService(
 
     // ── App deployment listing ────────────────────────────────────────────────
 
-    public async Task<List<AppDeployment>> GetTenantDeploymentsAsync(
+    /// <summary>
+    /// The tenant's deployments, for the binding pickers.
+    ///
+    /// <para>Asked of Delivery. All four service tabs had this same query written out — the
+    /// tenant's deployments with app, customer and cluster included — and it was the only thing
+    /// keeping this service on the all-seeing context. <c>DeploymentSummary</c> now carries
+    /// <c>ClusterName</c> beside <c>ClusterId</c>, which is what the pickers display.</para>
+    /// </summary>
+    public async Task<List<EntKube.Contracts.Delivery.DeploymentSummary>> GetTenantDeploymentsAsync(
         Guid tenantId, CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        return await db.AppDeployments
-            .Include(d => d.App).ThenInclude(a => a.Customer)
-            .Include(d => d.Cluster)
-            .Where(d => d.App.Customer.TenantId == tenantId)
-            .OrderBy(d => d.App.Customer.Name).ThenBy(d => d.App.Name).ThenBy(d => d.Name)
-            .ToListAsync(ct);
-    }
+        => [.. (await delivery.GetDeploymentsForTenantAsync(tenantId, ct))
+            .OrderBy(d => d.AppName, StringComparer.Ordinal)
+            .ThenBy(d => d.Name, StringComparer.Ordinal)];
 
     // ── Topology helpers ──────────────────────────────────────────────────────
 
     private async Task<RabbitMQCluster> LoadClusterAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.RabbitMQClusters
             .Include(c => c.KubernetesCluster)
             .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
@@ -2620,7 +2624,7 @@ public class RabbitMQService(
     public async Task UpdateBackupScheduleAsync(
         Guid tenantId, Guid clusterId, string? schedule, int maxBackups, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RabbitMQCluster cluster = await db.RabbitMQClusters
             .Include(c => c.KubernetesCluster)

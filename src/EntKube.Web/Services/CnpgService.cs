@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -16,7 +17,7 @@ namespace EntKube.Web.Services;
 /// tag them for Kubernetes sync so applications can consume them as K8s Secrets.
 /// </summary>
 public class CnpgService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DataServicesDbContext> dbFactory,
     VaultService vaultService,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     EntKube.Contracts.Catalog.ICatalogApi catalog)
@@ -58,7 +59,7 @@ public class CnpgService(
         string postgresVersion = "18",
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         // Verify the CNPG operator is installed on the target cluster.
 
@@ -189,7 +190,7 @@ public class CnpgService(
     /// </summary>
     public async Task DeleteClusterAsync(Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -250,7 +251,7 @@ public class CnpgService(
         string ns,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KubernetesCluster k8sCluster = await db.KubernetesClusters
             .FirstAsync(k => k.Id == kubernetesClusterId, ct);
@@ -338,7 +339,7 @@ public class CnpgService(
     /// </summary>
     public async Task UnregisterClusterAsync(Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.Databases)
@@ -364,7 +365,7 @@ public class CnpgService(
     public async Task<List<(string Name, string Owner)>> DiscoverDatabasesAsync(
         Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -405,7 +406,7 @@ public class CnpgService(
         string databaseName, string ownerRole, string password,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -444,7 +445,7 @@ public class CnpgService(
     public async Task UpgradeClusterAsync(
         Guid tenantId, Guid cnpgClusterId, string targetVersion, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -501,7 +502,7 @@ public class CnpgService(
     public async Task ReapplyClusterSpecAsync(
         Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -523,7 +524,7 @@ public class CnpgService(
     public async Task RestartClusterAsync(
         Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -559,7 +560,7 @@ public class CnpgService(
         Guid tenantId, Guid sourceCnpgClusterId, string targetVersion,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster source = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -676,7 +677,7 @@ public class CnpgService(
         string? schedule, int retentionDays, int maxBackups,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -728,7 +729,7 @@ public class CnpgService(
     public async Task<int> CleanupOldBackupsAsync(
         Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -786,7 +787,7 @@ public class CnpgService(
     public async Task ApplyScheduledBackupAsync(
         Guid tenantId, Guid cnpgClusterId, string? schedule = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -824,7 +825,7 @@ public class CnpgService(
     /// </summary>
     public async Task<CnpgBackup> BackupAsync(Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -889,7 +890,7 @@ public class CnpgService(
         Guid tenantId, Guid sourceCnpgClusterId, string newClusterName,
         DateTime? targetTime = null, string? barmanBackupId = null, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster source = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -968,7 +969,7 @@ public class CnpgService(
     public async Task<CnpgCluster> RestoreInPlaceAsync(
         Guid tenantId, Guid cnpgClusterId, DateTime targetTime, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster source = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1025,7 +1026,7 @@ public class CnpgService(
     public async Task<CnpgDatabase> CreateDatabaseAsync(
         Guid tenantId, Guid cnpgClusterId, string databaseName, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1088,7 +1089,7 @@ public class CnpgService(
     public async Task DeleteDatabaseAsync(
         Guid tenantId, Guid cnpgClusterId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1199,7 +1200,7 @@ public class CnpgService(
     public async Task SyncDatabaseCredentialsToK8sAsync(
         Guid tenantId, Guid cnpgClusterId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1298,7 +1299,7 @@ public class CnpgService(
     public async Task RotateDatabasePasswordAsync(
         Guid tenantId, Guid cnpgClusterId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1335,7 +1336,7 @@ public class CnpgService(
     public async Task FetchSuperuserCredentialsAsync(
         Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1375,7 +1376,7 @@ public class CnpgService(
     public async Task<bool> IsDatabaseOwnershipCorrectAsync(
         Guid tenantId, Guid cnpgClusterId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1417,7 +1418,7 @@ public class CnpgService(
     public async Task<(int Version, bool Dirty)?> ReadMigrateSchemaVersionAsync(
         Guid tenantId, Guid cnpgClusterId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster? cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1480,7 +1481,7 @@ public class CnpgService(
     public async Task GrantDatabaseOwnerPermissionsAsync(
         Guid tenantId, Guid cnpgClusterId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1523,7 +1524,7 @@ public class CnpgService(
     public async Task ReleaseLiquibaseLockAsync(
         Guid tenantId, Guid cnpgClusterId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1549,7 +1550,7 @@ public class CnpgService(
         Guid tenantId, Guid cnpgClusterId, Guid databaseId, string frontendUrl,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster cnpg = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1588,7 +1589,7 @@ public class CnpgService(
     public async Task<List<DatabaseBinding>> GetDatabaseBindingsAsync(
         Guid appDeploymentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.DatabaseBindings
             .Include(b => b.CnpgDatabase)
@@ -1609,7 +1610,7 @@ public class CnpgService(
         Guid appDeploymentId, Guid cnpgDatabaseId, string kubernetesSecretName,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         DatabaseBinding binding = new()
         {
@@ -1630,7 +1631,7 @@ public class CnpgService(
     /// </summary>
     public async Task RemoveDatabaseBindingAsync(Guid bindingId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         DatabaseBinding binding = await db.DatabaseBindings
             .FirstOrDefaultAsync(b => b.Id == bindingId, ct)
@@ -1647,7 +1648,7 @@ public class CnpgService(
     /// </summary>
     public async Task<List<CnpgCluster>> GetClustersAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1665,7 +1666,7 @@ public class CnpgService(
     /// </summary>
     public async Task<CnpgCluster?> GetClusterAsync(Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1684,7 +1685,7 @@ public class CnpgService(
     public async Task<CnpgClusterDetail?> GetClusterDetailAsync(
         Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         CnpgCluster? cluster = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
@@ -1755,7 +1756,7 @@ public class CnpgService(
 
         if (detail.Backups.Count == 0)
         {
-            using ApplicationDbContext backupsDb = dbFactory.CreateDbContext();
+            using DataServicesDbContext backupsDb = dbFactory.CreateDbContext();
             detail.Backups = await backupsDb.CnpgBackups
                 .Where(b => b.CnpgClusterId == cluster.Id)
                 .OrderByDescending(b => b.StartedAt)
@@ -1812,7 +1813,7 @@ public class CnpgService(
 
         try
         {
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
+            using DataServicesDbContext db = dbFactory.CreateDbContext();
             CnpgCluster? tracked = await db.CnpgClusters.FindAsync([cluster.Id], ct);
 
             if (tracked is not null && tracked.Status != newStatus.Value)
@@ -1951,7 +1952,7 @@ public class CnpgService(
         {
             try
             {
-                using ApplicationDbContext db = dbFactory.CreateDbContext();
+                using DataServicesDbContext db = dbFactory.CreateDbContext();
 
                 CnpgBackup? existing = await db.CnpgBackups
                     .FirstOrDefaultAsync(

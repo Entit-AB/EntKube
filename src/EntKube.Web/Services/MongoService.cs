@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -21,7 +22,7 @@ namespace EntKube.Web.Services;
 /// the point in time of the selected backup dump.
 /// </summary>
 public class MongoService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DataServicesDbContext> dbFactory,
     VaultService vaultService,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     EntKube.Contracts.Catalog.ICatalogApi catalog)
@@ -60,7 +61,7 @@ public class MongoService(
         string mongoVersion = "8.3.2",
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         // Verify the MongoDB Community Operator is installed on the target cluster.
 
@@ -186,7 +187,7 @@ public class MongoService(
     /// </summary>
     public async Task UnregisterClusterAsync(Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.Databases)
@@ -208,7 +209,7 @@ public class MongoService(
     /// </summary>
     public async Task DeleteClusterAsync(Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -265,7 +266,7 @@ public class MongoService(
         string? schedule, int retentionDays, int maxBackups,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -325,7 +326,7 @@ public class MongoService(
     public async Task<MongoScheduledBackupStatus> GetScheduledBackupStatusAsync(
         Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -421,7 +422,7 @@ public class MongoService(
     /// </summary>
     public async Task<int> CleanupOldBackupsAsync(Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -475,7 +476,7 @@ public class MongoService(
     public async Task UpgradeClusterAsync(
         Guid tenantId, Guid mongoClusterId, string targetVersion, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -524,7 +525,7 @@ public class MongoService(
     public async Task RestartClusterAsync(
         Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -571,7 +572,7 @@ public class MongoService(
         string? memoryLimit,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -634,7 +635,7 @@ public class MongoService(
     /// </summary>
     public async Task<MongoBackup> BackupAsync(Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -691,7 +692,7 @@ public class MongoService(
     public async Task<MongoBackup> RestoreAsync(
         Guid tenantId, Guid mongoClusterId, Guid sourceBackupId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -751,7 +752,7 @@ public class MongoService(
         string targetDatabase,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -870,7 +871,7 @@ public class MongoService(
         Guid tenantId, Guid sourceMongoClusterId, Guid sourceBackupId, string newName,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster source = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -923,7 +924,7 @@ public class MongoService(
         Guid tenantId, Guid mongoClusterId, Guid sourceBackupId, string externalMongoUri,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -965,7 +966,7 @@ public class MongoService(
     public async Task<MongoDatabase> CreateDatabaseAsync(
         Guid tenantId, Guid mongoClusterId, string databaseName, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -1052,7 +1053,7 @@ public class MongoService(
     public async Task DeleteDatabaseAsync(
         Guid tenantId, Guid mongoClusterId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -1094,7 +1095,7 @@ public class MongoService(
     /// </summary>
     public async Task UnregisterDatabaseAsync(Guid tenantId, Guid mongoClusterId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .FirstOrDefaultAsync(c => c.Id == mongoClusterId && c.TenantId == tenantId, ct)
@@ -1130,7 +1131,7 @@ public class MongoService(
         string targetDatabaseName,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster source = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -1261,7 +1262,7 @@ public class MongoService(
     public async Task SyncDatabaseCredentialsToK8sAsync(
         Guid tenantId, Guid mongoClusterId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -1343,7 +1344,7 @@ public class MongoService(
     public async Task RotateDatabasePasswordAsync(
         Guid tenantId, Guid mongoClusterId, Guid databaseId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -1406,7 +1407,7 @@ public class MongoService(
     /// </summary>
     public async Task<List<MongoCluster>> GetClustersAsync(Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -1432,7 +1433,7 @@ public class MongoService(
         string? externalUri = null,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongoCluster = new()
         {
@@ -1470,7 +1471,7 @@ public class MongoService(
         int maxBackups,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -1521,7 +1522,7 @@ public class MongoService(
         Guid tenantId, Guid mongoClusterId, string databaseName, string owner,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .FirstOrDefaultAsync(c => c.Id == mongoClusterId && c.TenantId == tenantId && c.IsExternal, ct)
@@ -1559,7 +1560,7 @@ public class MongoService(
     public async Task<string> SyncLiveDatabasesAsync(
         Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster? cluster = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -1662,7 +1663,7 @@ public class MongoService(
         Guid tenantId, Guid sourceMongoClusterId, Guid targetMongoClusterId,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster source = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -1699,7 +1700,7 @@ public class MongoService(
     public async Task<MongoClusterDetail?> GetClusterDetailAsync(
         Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster? cluster = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -1764,7 +1765,7 @@ public class MongoService(
             string rawOutput = await SyncLiveDatabasesAsync(cluster.TenantId, cluster.Id, ct);
 
             // Reload databases so the detail reflects any newly synced ones.
-            using ApplicationDbContext refreshDb = dbFactory.CreateDbContext();
+            using DataServicesDbContext refreshDb = dbFactory.CreateDbContext();
             cluster.Databases = await refreshDb.Set<MongoDatabase>()
                 .Where(d => d.MongoClusterId == cluster.Id)
                 .ToListAsync(ct);
@@ -1802,7 +1803,7 @@ public class MongoService(
 
         // Always reload from DB after persisting so backup objects carry real GUIDs.
         // K8s-fetched records have Id=Guid.Empty; DB records are what restore methods need.
-        using ApplicationDbContext backupsDb = dbFactory.CreateDbContext();
+        using DataServicesDbContext backupsDb = dbFactory.CreateDbContext();
         DateTime retentionCutoff = DateTime.UtcNow.AddDays(-cluster.RetentionDays);
         List<MongoBackup> dbBackups = await backupsDb.MongoBackups
             .Where(b => b.MongoClusterId == cluster.Id
@@ -1828,7 +1829,7 @@ public class MongoService(
 
         try
         {
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
+            using DataServicesDbContext db = dbFactory.CreateDbContext();
             MongoCluster? tracked = await db.MongoClusters.FindAsync([cluster.Id], ct);
             if (tracked is not null && tracked.Status != newStatus.Value)
             {
@@ -2024,7 +2025,7 @@ public class MongoService(
 
             try
             {
-                using ApplicationDbContext db = dbFactory.CreateDbContext();
+                using DataServicesDbContext db = dbFactory.CreateDbContext();
                 MongoBackup? existing = await db.MongoBackups
                     .FirstOrDefaultAsync(
                         b => b.MongoClusterId == mongoClusterId && b.Name == k8s.Name, ct);
@@ -2064,7 +2065,7 @@ public class MongoService(
     {
         try
         {
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
+            using DataServicesDbContext db = dbFactory.CreateDbContext();
             DateTime threshold = DateTime.UtcNow.AddHours(-25);
 
             List<MongoBackup> stale = await db.MongoBackups
@@ -2097,7 +2098,7 @@ public class MongoService(
     {
         try
         {
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
+            using DataServicesDbContext db = dbFactory.CreateDbContext();
             DateTime cutoff = DateTime.UtcNow.AddDays(-cluster.RetentionDays);
 
             List<MongoBackup> expired = await db.MongoBackups
@@ -2184,7 +2185,7 @@ public class MongoService(
     {
         try
         {
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
+            using DataServicesDbContext db = dbFactory.CreateDbContext();
 
             List<MongoBackup> running = await db.MongoBackups
                 .Where(b => b.MongoClusterId == cluster.Id && b.Status == MongoBackupStatus.Running)
@@ -2453,7 +2454,7 @@ public class MongoService(
     public async Task FetchAdminPasswordAsync(
         Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster mongo = await db.MongoClusters
             .Include(c => c.KubernetesCluster)
@@ -2489,7 +2490,7 @@ public class MongoService(
         Guid appDeploymentId, Guid mongoDatabaseId, string kubernetesSecretName,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         DatabaseBinding binding = new()
         {
@@ -3183,7 +3184,7 @@ public class MongoService(
     private async Task PersistDiscoveredMetadataAsync(
         MongoCluster cluster, MongoClusterDetail detail, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         MongoCluster? record = await db.MongoClusters
             .Include(c => c.Databases)

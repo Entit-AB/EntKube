@@ -1333,9 +1333,9 @@
                                             <label class="form-label small mb-1">Deployment</label>
                                             <select class="form-select form-select-sm" @bind="bindingDeploymentId">
                                                 <option value="@Guid.Empty">Select deployment...</option>
-                                                @foreach (AppDeployment d in BindingDeploymentOptions)
+                                                @foreach (EntKube.Contracts.Delivery.DeploymentSummary d in BindingDeploymentOptions)
                                                 {
-                                                    <option value="@d.Id">@d.App.Name / @d.Name (@d.Namespace)</option>
+                                                    <option value="@d.Id">@d.AppName / @d.Name (@d.Namespace)</option>
                                                 }
                                             </select>
                                         </div>
@@ -1695,7 +1695,7 @@
     // Users and bindings
     private readonly Dictionary<Guid, List<ElasticsearchUser>> allUsers = [];
     private readonly Dictionary<Guid, List<ElasticsearchBinding>> allBindings = [];
-    private List<AppDeployment> allDeployments = [];
+    private List<EntKube.Contracts.Delivery.DeploymentSummary> allDeployments = [];
     private Guid? addUserClusterId;
     private string userName = "";
     private string userIndexPattern = "";
@@ -1724,7 +1724,7 @@
     /// Deployments the binding form offers. Scoped to the environment when the tab is, so a
     /// production cluster is not offered a staging app by a stray click.
     /// </summary>
-    private List<AppDeployment> BindingDeploymentOptions =>
+    private List<EntKube.Contracts.Delivery.DeploymentSummary> BindingDeploymentOptions =>
         EnvironmentId is Guid envId
             ? [.. allDeployments.Where(d => d.EnvironmentId == envId)]
             : allDeployments;
@@ -1921,7 +1921,7 @@
         Task<List<KubernetesCluster>> k8sTask = TenantService.GetClustersAsync(TenantId);
         Task<ElasticsearchOperatorStatus> operatorTask = Search.GetOperatorStatusAsync(TenantId);
         Task<List<StorageLink>> storageTask = StorageService.GetStorageLinksAsync(TenantId, EnvironmentId);
-        Task<List<AppDeployment>> deploymentsTask = Search.GetTenantDeploymentsAsync(TenantId);
+        Task<List<EntKube.Contracts.Delivery.DeploymentSummary>> deploymentsTask = Search.GetTenantDeploymentsAsync(TenantId);
 
         await Task.WhenAll(clustersTask, k8sTask, operatorTask, storageTask, deploymentsTask);
         allDeployments = deploymentsTask.Result;
@@ -2489,7 +2489,7 @@
     private void ShowAddBinding(ElasticsearchCluster cluster)
     {
         addBindingClusterId = cluster.Id;
-        List<AppDeployment> options = BindingDeploymentOptions;
+        List<EntKube.Contracts.Delivery.DeploymentSummary> options = BindingDeploymentOptions;
         bindingDeploymentId = EnvironmentId is not null && options.Count == 1 ? options[0].Id : Guid.Empty;
         bindingUserId = Guid.Empty;
         bindingSecretName = "elasticsearch";

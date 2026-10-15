@@ -1,5 +1,6 @@
 using System.Text;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -44,10 +45,11 @@ public class KafkaClusterDetail
 /// (dev) and multi-node (production) clusters both produce a valid config.
 /// </summary>
 public class KafkaService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<DataServicesDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     VaultService vaultService,
-    EntKube.Contracts.Catalog.ICatalogApi catalog)
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
+    EntKube.Contracts.Delivery.IDeliveryApi delivery)
 {
     /// <summary>
     /// A client for one of the tenant's clusters, or a refusal that says why — keeping the
@@ -65,7 +67,7 @@ public class KafkaService(
     public async Task<List<KafkaCluster>> GetClustersAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.KafkaClusters
             .Include(c => c.KubernetesCluster).ThenInclude(k => k.Environment)
             .Where(c => c.TenantId == tenantId)
@@ -76,7 +78,7 @@ public class KafkaService(
     public async Task<KafkaOperatorStatus> GetOperatorStatusAsync(
         Guid tenantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         // Asked of Catalog rather than of its table. The predicate is unchanged and
         // applied here: these alias lists are not symmetrical across Name,
@@ -113,7 +115,7 @@ public class KafkaService(
         string? memoryLimit,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         if (await db.KafkaClusters.AnyAsync(
                 c => c.KubernetesClusterId == kubernetesClusterId
@@ -162,7 +164,7 @@ public class KafkaService(
             cluster.LastError = ex.Message;
         }
 
-        using ApplicationDbContext db2 = dbFactory.CreateDbContext();
+        using DataServicesDbContext db2 = dbFactory.CreateDbContext();
         db2.KafkaClusters.Update(cluster);
         await db2.SaveChangesAsync(ct);
 
@@ -180,7 +182,7 @@ public class KafkaService(
         string? cpuRequest, string? memoryRequest, string? memoryLimit,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KafkaCluster cluster = await db.KafkaClusters
             .Include(c => c.KubernetesCluster)
@@ -216,7 +218,7 @@ public class KafkaService(
 
     public async Task DeleteClusterAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KafkaCluster cluster = await db.KafkaClusters
             .Include(c => c.KubernetesCluster)
@@ -250,7 +252,7 @@ public class KafkaService(
     public async Task<KafkaClusterDetail?> GetClusterDetailAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KafkaCluster? cluster = await db.KafkaClusters
             .Include(c => c.KubernetesCluster)
@@ -293,7 +295,7 @@ public class KafkaService(
     /// </summary>
     public async Task ReconcileStatusAsync(Guid clusterId, bool ready, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         KafkaCluster? tracked = await db.KafkaClusters.FindAsync([clusterId], ct);
         if (tracked is null) return;
 
@@ -317,13 +319,13 @@ public class KafkaService(
     /// One tenant's Kafka clusters that a status poll should look at. Public and static so the
     /// scoping is assertable without a cluster; see <c>ReconcileSweepTenancyTests</c>.
     /// </summary>
-    public static IQueryable<KafkaCluster> ReconcilableFor(ApplicationDbContext db, Guid tenantId)
+    public static IQueryable<KafkaCluster> ReconcilableFor(DataServicesDbContext db, Guid tenantId)
         => db.KafkaClusters
             .Where(c => c.TenantId == tenantId && c.Status != KafkaClusterStatus.Failed);
 
     public async Task ReconcileAllAsync(CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         // One tenant at a time, outermost (docs/decomposition.md §4.0.1.2). The Include went with
         // the flat select: nothing in this loop reads the navigation, and a materialized
@@ -358,7 +360,7 @@ public class KafkaService(
     public async Task<List<KafkaTopic>> GetTopicsAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.KafkaTopics
             .Where(t => t.TenantId == tenantId && t.KafkaClusterId == clusterId)
             .OrderBy(t => t.Name)
@@ -369,7 +371,7 @@ public class KafkaService(
         Guid tenantId, Guid clusterId, string name, int partitions, int replicas,
         long? retentionMs, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KafkaCluster cluster = await db.KafkaClusters
             .Include(c => c.KubernetesCluster)
@@ -399,7 +401,7 @@ public class KafkaService(
 
     public async Task DeleteTopicAsync(Guid tenantId, Guid topicId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KafkaTopic topic = await db.KafkaTopics
             .Include(t => t.KafkaCluster).ThenInclude(c => c.KubernetesCluster)
@@ -422,7 +424,7 @@ public class KafkaService(
     public async Task<List<KafkaUser>> GetUsersAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.KafkaUsers
             .Where(u => u.TenantId == tenantId && u.KafkaClusterId == clusterId)
             .OrderBy(u => u.Username)
@@ -434,7 +436,7 @@ public class KafkaService(
         string? producerTopics, string? consumerTopics, string? consumerGroup, bool superUser,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KafkaCluster cluster = await db.KafkaClusters
             .Include(c => c.KubernetesCluster)
@@ -469,7 +471,7 @@ public class KafkaService(
 
     public async Task DeleteUserAsync(Guid tenantId, Guid userId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KafkaUser user = await db.KafkaUsers
             .Include(u => u.KafkaCluster).ThenInclude(c => c.KubernetesCluster)
@@ -490,7 +492,7 @@ public class KafkaService(
     /// <summary>Reads a Kafka user's SCRAM password from the Strimzi-generated Secret.</summary>
     public async Task<string?> GetUserPasswordAsync(Guid tenantId, Guid userId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         KafkaUser? user = await db.KafkaUsers
             .Include(u => u.KafkaCluster).ThenInclude(c => c.KubernetesCluster)
             .FirstOrDefaultAsync(u => u.Id == userId && u.TenantId == tenantId, ct);
@@ -502,22 +504,24 @@ public class KafkaService(
 
     // ── App bindings ────────────────────────────────────────────────────────────
 
-    public async Task<List<AppDeployment>> GetTenantDeploymentsAsync(
+    /// <summary>
+    /// The tenant's deployments, for the binding pickers.
+    ///
+    /// <para>Asked of Delivery. All four service tabs had this same query written out — the
+    /// tenant's deployments with app, customer and cluster included — and it was the only thing
+    /// keeping this service on the all-seeing context. <c>DeploymentSummary</c> now carries
+    /// <c>ClusterName</c> beside <c>ClusterId</c>, which is what the pickers display.</para>
+    /// </summary>
+    public async Task<List<EntKube.Contracts.Delivery.DeploymentSummary>> GetTenantDeploymentsAsync(
         Guid tenantId, CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        return await db.AppDeployments
-            .Include(d => d.App).ThenInclude(a => a.Customer)
-            .Include(d => d.Cluster)
-            .Where(d => d.App.Customer.TenantId == tenantId)
-            .OrderBy(d => d.App.Name).ThenBy(d => d.Name)
-            .ToListAsync(ct);
-    }
+        => [.. (await delivery.GetDeploymentsForTenantAsync(tenantId, ct))
+            .OrderBy(d => d.AppName, StringComparer.Ordinal)
+            .ThenBy(d => d.Name, StringComparer.Ordinal)];
 
     public async Task<List<KafkaBinding>> GetBindingsAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.KafkaBindings
             .Include(b => b.AppDeployment).ThenInclude(d => d.App).ThenInclude(a => a.Customer)
             .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
@@ -530,7 +534,7 @@ public class KafkaService(
     public async Task<List<KafkaBinding>> GetBindingsForDeploymentAsync(
         Guid appDeploymentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.KafkaBindings
             .Include(b => b.KafkaCluster).ThenInclude(c => c.KubernetesCluster)
             .Include(b => b.KafkaUser)
@@ -543,7 +547,7 @@ public class KafkaService(
         Guid tenantId, Guid clusterId, Guid appDeploymentId, Guid? kafkaUserId,
         string k8sSecretName, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KafkaBinding binding = new()
         {
@@ -565,7 +569,7 @@ public class KafkaService(
 
     public async Task DeleteBindingAsync(Guid tenantId, Guid bindingId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KafkaBinding binding = await db.KafkaBindings
             .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
@@ -586,7 +590,7 @@ public class KafkaService(
 
     public async Task SyncBindingAsync(Guid tenantId, Guid bindingId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         KafkaBinding binding = await db.KafkaBindings
             .Include(b => b.KafkaCluster).ThenInclude(c => c.KubernetesCluster)

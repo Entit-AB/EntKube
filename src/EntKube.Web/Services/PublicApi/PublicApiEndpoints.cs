@@ -146,7 +146,7 @@ public static class PublicApiEndpoints
 
         api.MapGet("/deployments", async (
             HttpContext ctx, EntKube.Contracts.Delivery.IDeliveryApi delivery,
-            EntKube.Contracts.Fleet.IFleetApi fleet, Guid? appId, CancellationToken ct) =>
+            Guid? appId, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
 
@@ -158,13 +158,10 @@ public static class PublicApiEndpoints
                 deployments = deployments.Where(d => d.AppId == id);
             }
 
-            // The cluster NAME is Fleet's and DeploymentSummary carries only the id, so it is
-            // resolved from one Fleet call rather than by adding a Fleet field to a Delivery DTO.
-            // The enum strings are unchanged: #223 made the contract enums mirror Delivery's
-            // member for member, and ModuleApiTests holds them there.
-            Dictionary<Guid, string> clusterNames =
-                (await fleet.GetClustersAsync(tenantId, ct)).ToDictionary(c => c.Id, c => c.Name);
-
+            // DeploymentSummary carries ClusterName now — four callers wanted it, which is what
+            // earned it a place beside ClusterId — so the separate Fleet lookup this route used to
+            // make is gone. The enum strings are unchanged: #223 made the contract enums mirror
+            // Delivery's member for member, and ModuleApiTests holds them there.
             return Results.Ok(deployments
                 .OrderBy(d => d.Name, StringComparer.Ordinal)
                 .Select(d => new
@@ -174,7 +171,7 @@ public static class PublicApiEndpoints
                     app = d.AppName,
                     type = d.Type.ToString(),
                     environment = d.EnvironmentName,
-                    cluster = clusterNames.GetValueOrDefault(d.ClusterId, ""),
+                    cluster = d.ClusterName,
                     ns = d.Namespace,
                     syncStatus = d.SyncStatus.ToString(),
                     healthStatus = d.HealthStatus.ToString(),

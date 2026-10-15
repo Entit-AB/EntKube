@@ -53,7 +53,8 @@ public class ComponentScanServiceTests : IDisposable
         RabbitMQService rabbitMQService = new(
             dbFactory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory),
-            vaultService, new EntKube.Web.Modules.Api.CatalogApi(dbFactory));
+            vaultService, new EntKube.Web.Modules.Api.CatalogApi(dbFactory),
+            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory));
         sut = new ComponentScanService(
             dbFactory, vaultService, kyvernoService, rabbitMQService,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory));
