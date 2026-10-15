@@ -85,9 +85,38 @@ public class JitGrantReaperService(
         var dbFactory = scope.ServiceProvider
             .GetRequiredService<IDbContextFactory<IdentityDbContext>>();
         var provisioner = scope.ServiceProvider.GetRequiredService<IJitProvisioner>();
+        var clusterAccess = scope.ServiceProvider
+            .GetRequiredService<EntKube.Web.Services.Clusters.IClusterClientFactory>();
 
-        await TearDownEndedGrantsAsync(dbFactory, provisioner, ct);
-        await SweepOrphansAsync(dbFactory, scope.ServiceProvider, ct);
+        // One tenant at a time, outermost (docs/decomposition.md §4.0.1.2). This swept every grant
+        // and every cluster in the installation and took the tenant off nothing at all — it reached
+        // clusters by reading Kubeconfig off each row. What it does there is DELETE RBAC, so acting
+        // as the wrong tenant removes somebody else's access.
+        List<Guid> tenants;
+        using (IdentityDbContext db = dbFactory.CreateDbContext())
+        {
+            tenants = await db.Tenants.Select(x => x.Id).ToListAsync(ct);
+        }
+
+        foreach (Guid tenantId in tenants)
+        {
+            if (ct.IsCancellationRequested) return;
+
+            // Per tenant, so one unreachable cluster cannot end the sweep for the rest.
+            try
+            {
+                await TearDownEndedGrantsAsync(dbFactory, provisioner, tenantId, ct);
+                await SweepOrphansAsync(dbFactory, clusterAccess, tenantId, ct);
+            }
+            catch (OperationCanceledException) when (ct.IsCancellationRequested)
+            {
+                return;
+            }
+            catch (Exception ex)
+            {
+                logger.LogWarning(ex, "JIT sweep failed for tenant {TenantId}", tenantId);
+            }
+        }
     }
 
     /// <summary>
@@ -98,24 +127,20 @@ public class JitGrantReaperService(
     /// because they simply ran out.
     /// </summary>
     private async Task TearDownEndedGrantsAsync(
-        IDbContextFactory<IdentityDbContext> dbFactory, IJitProvisioner provisioner, CancellationToken ct)
+        IDbContextFactory<IdentityDbContext> dbFactory, IJitProvisioner provisioner,
+        Guid tenantId, CancellationToken ct)
     {
         DateTime now = DateTime.UtcNow;
 
         using IdentityDbContext db = dbFactory.CreateDbContext();
 
-        List<JitGrant> ended = await db.JitGrants
-            .Where(g => g.ApprovedAt != null
-                        && g.TornDownAt == null
-                        && g.ExpiresAt != null
-                        && g.ExpiresAt <= now)
-            .ToListAsync(ct);
+        List<JitGrant> ended = await EndedFor(db, tenantId, now).ToListAsync(ct);
 
         foreach (JitGrant grant in ended)
         {
             try
             {
-                await provisioner.TearDownAsync(grant, ct);
+                await provisioner.TearDownAsync(tenantId, grant, ct);
                 grant.TornDownAt = DateTime.UtcNow;
                 await db.SaveChangesAsync(ct);
 
@@ -132,28 +157,51 @@ public class JitGrantReaperService(
     }
 
     /// <summary>
+    /// One tenant's grants that have ended and not been cleaned up.
+    ///
+    /// <para>Public and static so the scoping can be asserted without running the sweep: the
+    /// previous version selected every ended grant in the installation, and a test that only
+    /// counted what came back would pass against either.</para>
+    /// </summary>
+    public static IQueryable<JitGrant> EndedFor(IdentityDbContext db, Guid tenantId, DateTime now)
+        => db.JitGrants
+            .Where(g => g.TenantId == tenantId
+                        && g.ApprovedAt != null
+                        && g.TornDownAt == null
+                        && g.ExpiresAt != null
+                        && g.ExpiresAt <= now);
+
+    /// <summary>
     /// Deletes JIT-labelled objects that no live grant claims.
     ///
     /// Scoped per cluster, and driven by the label rather than the database, because the whole
     /// point is to find things the database does not know about.
     /// </summary>
     private async Task SweepOrphansAsync(
-        IDbContextFactory<IdentityDbContext> dbFactory, IServiceProvider services, CancellationToken ct)
+        IDbContextFactory<IdentityDbContext> dbFactory,
+        EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
+        Guid tenantId, CancellationToken ct)
     {
-        var k8sFactory = services.GetRequiredService<IKubernetesClientFactory>();
-
         using IdentityDbContext db = dbFactory.CreateDbContext();
 
-        // Only clusters that have ever hosted a grant. Scanning every registered cluster for a
-        // label that has never been applied there is work with no possible result.
-        List<KubernetesCluster> clusters = await db.KubernetesClusters
-            .Where(c => db.JitGrants.Any(g => g.KubernetesClusterId == c.Id))
+        // Only this tenant's clusters, and only ones that have ever hosted a grant: scanning a
+        // cluster for a label that has never been applied there is work with no possible result.
+        List<Guid> clusterIds = await db.KubernetesClusters
+            .Where(c => c.TenantId == tenantId
+                        && db.JitGrants.Any(g => g.KubernetesClusterId == c.Id))
+            .Select(c => c.Id)
             .ToListAsync(ct);
 
-        if (clusters.Count == 0) return;
+        if (clusterIds.Count == 0) return;
 
         // A grant is "live" for this purpose if it has not been torn down — including one still
         // pending mint. Being conservative here costs a sweep; being wrong deletes live RBAC.
+        //
+        // ⚠️ Deliberately NOT narrowed to this tenant, unlike everything else here. The set is
+        // protective: an id in it means "do not delete". Narrowing it could only ever make the
+        // sweep delete MORE, and the one case where it would differ — RBAC on this tenant's
+        // cluster claimed by another tenant's grant — is exactly the broken state the scoping
+        // above now prevents, so reaping it is not worth the risk of being wrong about it.
         HashSet<Guid> claimed = (await db.JitGrants
             .Where(g => g.TornDownAt == null)
             .Select(g => g.Id)
@@ -162,37 +210,40 @@ public class JitGrantReaperService(
 
         DateTime cutoff = DateTime.UtcNow - OrphanGrace;
 
-        foreach (KubernetesCluster cluster in clusters)
+        foreach (Guid clusterId in clusterIds)
         {
-            if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            EntKube.Web.Services.Clusters.IClusterClient? access =
+                await clusterAccess.ForAsync(tenantId, clusterId, ct);
+
+            if (access is null)
             {
-                // Said out loud rather than skipped silently: Kubeconfig is materialized from the
-                // vault, so a null here means the secret is missing or undecryptable, and a
+                // Said out loud rather than skipped silently: the credential is materialized from
+                // the vault, so "no" here means the secret is missing or undecryptable, and a
                 // cluster that is quietly never swept accumulates JIT RBAC forever.
                 logger.LogWarning(
-                    "Skipping JIT orphan sweep on cluster {Cluster}: no kubeconfig could be resolved",
-                    cluster.Name);
+                    "Skipping JIT orphan sweep on cluster {ClusterId}: no credential could be resolved",
+                    clusterId);
                 continue;
             }
 
             try
             {
-                string json = await k8sFactory.GetJsonAllNamespacesAsync(
-                    "serviceaccounts", cluster.Kubeconfig,
+                string json = await access.GetJsonAllNamespacesAsync(
+                    "serviceaccounts",
                     $"{JitRbacBuilder.ManagedLabel}={JitRbacBuilder.ManagedValue}", ct);
 
                 foreach ((Guid grantId, string ns) in SelectOrphans(json, claimed, cutoff))
                 {
                     logger.LogWarning(
-                        "Deleting orphaned JIT objects for grant {GrantId} in {Cluster}/{Namespace} "
-                        + "— no grant claims them", grantId, cluster.Name, ns);
+                        "Deleting orphaned JIT objects for grant {GrantId} in {ClusterId}/{Namespace} "
+                        + "— no grant claims them", grantId, clusterId, ns);
 
-                    await DeleteOrphanAsync(k8sFactory, cluster, grantId, ns, ct);
+                    await DeleteOrphanAsync(access, grantId, ns, ct);
                 }
             }
             catch (Exception ex)
             {
-                logger.LogWarning(ex, "Orphan sweep failed on cluster {Cluster}", cluster.Name);
+                logger.LogWarning(ex, "Orphan sweep failed on cluster {ClusterId}", clusterId);
             }
         }
     }
@@ -224,7 +275,7 @@ public class JitGrantReaperService(
     }
 
     private static async Task DeleteOrphanAsync(
-        IKubernetesClientFactory k8sFactory, KubernetesCluster cluster,
+        EntKube.Web.Services.Clusters.IClusterClient access,
         Guid grantId, string ns, CancellationToken ct)
     {
         // Same order as a normal teardown: the binding is what grants, so it goes first.
@@ -237,7 +288,7 @@ public class JitGrantReaperService(
         {
             try
             {
-                await k8sFactory.DeleteManifestAsync(kind, name, ns, cluster.Kubeconfig!, ct);
+                await access.DeleteManifestAsync(kind, name, ns, ct);
             }
             catch
             {

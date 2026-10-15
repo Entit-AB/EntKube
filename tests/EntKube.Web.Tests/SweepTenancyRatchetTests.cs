@@ -62,6 +62,7 @@ public class SweepTenancyRatchetTests
         "DriftScanService",
         "GitSyncService",
         "HeadscaleCertSyncService",
+        "JitGrantReaperService",
         "KeycloakBackupSchedulerService",
         "ExternalRouteHealthService",
         "ObservedSecretRefreshService",
@@ -102,9 +103,6 @@ public class SweepTenancyRatchetTests
     /// </summary>
     private static readonly Dictionary<string, string> NotYetTenantScoped = new(StringComparer.Ordinal)
     {
-        ["JitGrantReaperService"] =
-            "reaps expiring grants installation-wide and takes the tenant off the grant row; it also "
-            + "holds three credential reads, so it converts with the custody work rather than before it",
     };
 
     /// <summary>
@@ -150,7 +148,29 @@ public class SweepTenancyRatchetTests
     /// what each conversion bought therefore has to live in this prose, and "it is in the
     /// ActsAsEachTenant list" is not the same claim as "every query in it is tenant-scoped".</para>
     /// </summary>
-    private const int BaselineNotYetTenantScoped = 1;
+    /// <para><b>0 — the backlog is empty.</b> <c>JitGrantReaperService</c> was the last entry, and
+    /// it was held back on purpose: its three credential reads meant it had to convert <em>with</em>
+    /// the custody work rather than before it, so that two open branches would not both be lowering
+    /// a constant. It did, and both numbers moved in one change.</para>
+    ///
+    /// <para>It is also the entry where acting as the wrong tenant was worst. The sweep's job is to
+    /// <b>delete RBAC</b>: it selected every ended grant in the installation, and reached each
+    /// cluster by reading <c>Kubeconfig</c> off the row, so there was no tenant anywhere in it.
+    /// Both halves are per tenant now (<c>EndedFor</c> is public and static so the predicate is
+    /// assertable), and the cluster comes from <c>ForAsync</c>.</para>
+    ///
+    /// <para>⚠️ One set is deliberately <em>not</em> narrowed: the "claimed" grant ids that protect
+    /// live RBAC from the orphan sweep. It is a do-not-delete list, so narrowing it could only ever
+    /// make the sweep delete more — and the single case where it would differ is RBAC on one
+    /// tenant's cluster claimed by another's grant, which is the broken state the scoping now
+    /// prevents. Reaping it is not worth being wrong about. Keeping that reasoning next to the code
+    /// matters more than the symmetry.</para>
+    ///
+    /// <para>This list may only shrink, and it has reached zero — so what this ratchet now does is
+    /// stop a NEW sweep being written against the installation. That is a different job from the
+    /// one it was created for, and the classification test is what does it.</para>
+    /// </summary>
+    private const int BaselineNotYetTenantScoped = 0;
 
     // ──────────────────────────────────────────────────────────────────────────
 

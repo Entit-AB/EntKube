@@ -44,14 +44,15 @@ public interface IJitProvisioner
     /// returns a credential for it. Called with the grant already carrying its approved level,
     /// namespace and expiry.
     /// </summary>
-    Task<MintedCredential> MintAsync(JitGrant grant, TimeSpan duration, CancellationToken ct = default);
+    Task<MintedCredential> MintAsync(
+        Guid tenantId, JitGrant grant, TimeSpan duration, CancellationToken ct = default);
 
     /// <summary>
     /// Removes the grant's cluster objects. Must be safe to call more than once and on a grant
     /// whose objects are already gone — the reaper cannot tell a crash mid-mint from a clean
     /// teardown, so it calls this either way.
     /// </summary>
-    Task TearDownAsync(JitGrant grant, CancellationToken ct = default);
+    Task TearDownAsync(Guid tenantId, JitGrant grant, CancellationToken ct = default);
 }
 
 /// <summary>
@@ -60,9 +61,10 @@ public interface IJitProvisioner
 /// </summary>
 public sealed class NullJitProvisioner : IJitProvisioner
 {
-    public Task<MintedCredential> MintAsync(JitGrant grant, TimeSpan duration, CancellationToken ct = default) =>
+    public Task<MintedCredential> MintAsync(
+        Guid tenantId, JitGrant grant, TimeSpan duration, CancellationToken ct = default) =>
         throw new InvalidOperationException(
             "JIT cluster access is not enabled on this deployment, so a grant cannot be minted.");
 
-    public Task TearDownAsync(JitGrant grant, CancellationToken ct = default) => Task.CompletedTask;
+    public Task TearDownAsync(Guid tenantId, JitGrant grant, CancellationToken ct = default) => Task.CompletedTask;
 }

@@ -68,6 +68,12 @@ public class JitGrantReaperTests : IDisposable
                 new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
                 NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance));
         collection.AddSingleton(k8s.Object);
+
+        // The orphan sweep reaches clusters through the seam now, so it has to be resolvable here
+        // exactly as in production — and the seam is what refuses a cluster that is not the
+        // asking tenant's, which is the behaviour the cross-tenant test below relies on.
+        collection.AddSingleton<EntKube.Web.Services.Clusters.IClusterClientFactory>(
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(factory, k8s.Object));
         services = collection.BuildServiceProvider();
 
         sut = new JitGrantReaperService(
@@ -86,6 +92,28 @@ public class JitGrantReaperTests : IDisposable
 
         provisioner.TornDown.Should().Equal(grant.Id);
         Reload(grant.Id).TornDownAt.Should().NotBeNull();
+    }
+
+    /// <summary>
+    /// The sweep tears down as the tenant it is sweeping for, not as whatever tenant the grant row
+    /// happens to name.
+    ///
+    /// <para>The reaper's job is to <b>delete RBAC</b>. Before this it selected every ended grant
+    /// in the installation and reached each cluster by reading <c>Kubeconfig</c> off the row, so
+    /// there was no tenant in it at all — and a grant stamped with the wrong tenant would have had
+    /// its access removed by somebody else's sweep. Asserting the tenant the provisioner was asked
+    /// as is what distinguishes the conversion from a loop that merely looks like one.</para>
+    /// </summary>
+    [Fact]
+    public async Task An_expired_grant_is_torn_down_as_its_own_tenant()
+    {
+        JitGrant grant = AddGrant(expiresAt: DateTime.UtcNow.AddMinutes(-1));
+
+        await sut.SweepAsync(default);
+
+        provisioner.TornDown.Should().Equal(grant.Id);
+        provisioner.ActedAsTenants.Should().Equal([tenantId],
+            "the tenant is the sweep's, taken from the tenant table — not read off the grant");
     }
 
     [Fact]
@@ -342,14 +370,16 @@ public class JitGrantReaperTests : IDisposable
     private sealed class FakeProvisioner : IJitProvisioner
     {
         public List<Guid> TornDown { get; } = [];
+        public List<Guid> ActedAsTenants { get; } = [];
         public bool FailNext { get; set; }
 
         public Task<MintedCredential> MintAsync(
-            JitGrant grant, TimeSpan duration, CancellationToken ct = default) =>
+            Guid tenantId, JitGrant grant, TimeSpan duration, CancellationToken ct = default) =>
             throw new NotSupportedException("The reaper never mints.");
 
-        public Task TearDownAsync(JitGrant grant, CancellationToken ct = default)
+        public Task TearDownAsync(Guid tenantId, JitGrant grant, CancellationToken ct = default)
         {
+            ActedAsTenants.Add(tenantId);
             if (FailNext)
             {
                 FailNext = false;

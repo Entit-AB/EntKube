@@ -26,6 +26,11 @@ public sealed class ClusterClient(
     public Task DeleteManifestAsync(string kind, string name, string ns, CancellationToken ct = default)
         => inner.DeleteManifestAsync(kind, name, ns, kubeconfig, ct);
 
+    public Task<ServiceAccountToken> RequestServiceAccountTokenAsync(
+        string serviceAccount, string ns, TimeSpan duration, IReadOnlyList<string> audiences,
+        CancellationToken ct = default)
+        => inner.RequestServiceAccountTokenAsync(serviceAccount, ns, duration, audiences, kubeconfig, ct);
+
     public Task PatchJsonAsync(string resource, string name, string ns, string jsonPatch, CancellationToken ct = default)
         => inner.PatchJsonAsync(resource, name, ns, jsonPatch, kubeconfig, ct);
 

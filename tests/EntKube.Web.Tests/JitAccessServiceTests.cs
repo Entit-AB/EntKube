@@ -238,8 +238,7 @@ public class JitAccessServiceTests : IDisposable
             requestedLevel: JitAccessLevel.Operate,
             requestedDuration: TimeSpan.FromHours(4));
 
-        JitApproval approval = await sut.ApproveAsync(
-            requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe, TimeSpan.FromMinutes(15));
+        JitApproval approval = await sut.ApproveAsync(tenantId, requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe, TimeSpan.FromMinutes(15));
 
         approval.Grant.Level.Should().Be(JitAccessLevel.Observe);
         approval.Grant.ExpiresAt.Should().BeCloseTo(
@@ -293,7 +292,7 @@ public class JitAccessServiceTests : IDisposable
     {
         JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
-        JitApproval approval = await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
+        JitApproval approval = await sut.ApproveAsync(tenantId, requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
         approval.Plaintext.Should().NotBeNullOrEmpty();
         approval.Grant.StatusAt(DateTime.UtcNow).Should().Be(JitGrantStatus.Active);
@@ -306,7 +305,7 @@ public class JitAccessServiceTests : IDisposable
     public async Task The_plaintext_token_is_never_stored()
     {
         JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
-        JitApproval approval = await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
+        JitApproval approval = await sut.ApproveAsync(tenantId, requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
         JitGrant stored = (await sut.GetAsync(requested.Id))!;
 
@@ -321,7 +320,7 @@ public class JitAccessServiceTests : IDisposable
         JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
         Func<Task> act = () =>
-            sut.ApproveAsync(requested.Id, SubjectId, SubjectEmail, JitAccessLevel.Observe);
+            sut.ApproveAsync(tenantId, requested.Id, SubjectId, SubjectEmail, JitAccessLevel.Observe);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*person who made it*");
         provisioner.Minted.Should().BeEmpty();
@@ -336,7 +335,7 @@ public class JitAccessServiceTests : IDisposable
             appId, envId, subjectUserId: OtherSubjectId, "debugging", requestedBy: ApproverEmail);
 
         Func<Task> act = () =>
-            sut.ApproveAsync(requested.Id, OtherSubjectId, OtherSubjectEmail, JitAccessLevel.Observe);
+            sut.ApproveAsync(tenantId, requested.Id, OtherSubjectId, OtherSubjectEmail, JitAccessLevel.Observe);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*grants access to*");
     }
@@ -350,7 +349,7 @@ public class JitAccessServiceTests : IDisposable
         JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
         Func<Task> act = () =>
-            sut.ApproveAsync(requested.Id, DeployerId, DeployerEmail, JitAccessLevel.Observe);
+            sut.ApproveAsync(tenantId, requested.Id, DeployerId, DeployerEmail, JitAccessLevel.Observe);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*permission*");
         provisioner.Minted.Should().BeEmpty();
@@ -366,7 +365,7 @@ public class JitAccessServiceTests : IDisposable
         AddApp(Guid.NewGuid(), "Globex API", deployNamespace: Namespace);
         await db.SaveChangesAsync();
 
-        Func<Task> act = () => sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
+        Func<Task> act = () => sut.ApproveAsync(tenantId, requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*shared*");
     }
@@ -375,9 +374,9 @@ public class JitAccessServiceTests : IDisposable
     public async Task An_already_decided_request_cannot_be_approved_again()
     {
         JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
-        await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
+        await sut.ApproveAsync(tenantId, requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
-        Func<Task> act = () => sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Operate);
+        Func<Task> act = () => sut.ApproveAsync(tenantId, requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Operate);
 
         await act.Should().ThrowAsync<InvalidOperationException>();
         provisioner.Minted.Should().ContainSingle("a second approval must not mint a second credential");
@@ -405,7 +404,7 @@ public class JitAccessServiceTests : IDisposable
     public async Task Handing_back_a_live_grant_removes_its_cluster_objects()
     {
         JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
-        await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
+        await sut.ApproveAsync(tenantId, requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
         await sut.EndOwnGrantAsync(requested.Id, SubjectId, SubjectEmail);
 
@@ -452,7 +451,7 @@ public class JitAccessServiceTests : IDisposable
         await db.SaveChangesAsync();
 
         Func<Task> act = () =>
-            sut.ApproveAsync(stale.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
+            sut.ApproveAsync(tenantId, stale.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*lapsed*");
         provisioner.Minted.Should().BeEmpty();
@@ -488,8 +487,7 @@ public class JitAccessServiceTests : IDisposable
         // Refusing would only push people to approve twice in a row for the same effect.
         JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
-        JitApproval approval = await sut.ApproveAsync(
-            requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe, TimeSpan.FromDays(7));
+        JitApproval approval = await sut.ApproveAsync(tenantId, requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe, TimeSpan.FromDays(7));
 
         approval.Grant.ExpiresAt.Should().BeCloseTo(
             DateTime.UtcNow.Add(JitAccessService.MaximumDuration), TimeSpan.FromMinutes(1));
@@ -563,9 +561,9 @@ public class JitAccessServiceTests : IDisposable
         // A bound token cannot be invalidated early, so deleting the RoleBinding is what actually
         // stops it working. Marking the row only stops the proxy.
         JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
-        await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
+        await sut.ApproveAsync(tenantId, requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
-        await sut.RevokeAsync(requested.Id, ApproverEmail, "finished");
+        await sut.RevokeAsync(tenantId, requested.Id, ApproverEmail, "finished");
 
         provisioner.TornDown.Should().ContainSingle();
         JitGrant stored = (await sut.GetAsync(requested.Id))!;
@@ -577,10 +575,10 @@ public class JitAccessServiceTests : IDisposable
     public async Task Revoking_twice_tears_down_once()
     {
         JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
-        await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
+        await sut.ApproveAsync(tenantId, requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
 
-        await sut.RevokeAsync(requested.Id, ApproverEmail);
-        await sut.RevokeAsync(requested.Id, ApproverEmail);
+        await sut.RevokeAsync(tenantId, requested.Id, ApproverEmail);
+        await sut.RevokeAsync(tenantId, requested.Id, ApproverEmail);
 
         provisioner.TornDown.Should().ContainSingle();
     }
@@ -590,7 +588,7 @@ public class JitAccessServiceTests : IDisposable
     {
         JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
 
-        await sut.RevokeAsync(requested.Id, ApproverEmail, "withdrawn");
+        await sut.RevokeAsync(tenantId, requested.Id, ApproverEmail, "withdrawn");
 
         provisioner.TornDown.Should().BeEmpty("nothing was ever created in the cluster");
     }
@@ -599,8 +597,8 @@ public class JitAccessServiceTests : IDisposable
     public async Task Finished_grants_stay_in_the_history()
     {
         JitGrant requested = await sut.RequestAsync(appId, envId, SubjectId, "debugging", SubjectEmail);
-        await sut.ApproveAsync(requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
-        await sut.RevokeAsync(requested.Id, ApproverEmail, "done");
+        await sut.ApproveAsync(tenantId, requested.Id, ApproverId, ApproverEmail, JitAccessLevel.Observe);
+        await sut.RevokeAsync(tenantId, requested.Id, ApproverEmail, "done");
 
         (await sut.ListForTenantAsync(tenantId)).Should().ContainSingle();
         (await sut.ListForUserAsync(SubjectId)).Should().ContainSingle();
@@ -714,16 +712,21 @@ public class JitAccessServiceTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    /// <summary>Records what it was asked to do, so the service's ordering can be asserted.</summary>
+    /// <summary>
+    /// Records what it was asked to do, so the service's ordering can be asserted — and, since the
+    /// provisioner now takes the tenant it acts as, which tenant it was asked as.
+    /// </summary>
     private sealed class FakeProvisioner : IJitProvisioner
     {
         public List<Guid> Minted { get; } = [];
         public List<Guid> TornDown { get; } = [];
+        public List<Guid> ActedAsTenants { get; } = [];
 
         public Task<MintedCredential> MintAsync(
-            JitGrant grant, TimeSpan duration, CancellationToken ct = default)
+            Guid tenantId, JitGrant grant, TimeSpan duration, CancellationToken ct = default)
         {
             Minted.Add(grant.Id);
+            ActedAsTenants.Add(tenantId);
             return Task.FromResult(new MintedCredential
             {
                 ServiceAccountName = $"jit-{grant.Id:N}"[..20],
@@ -736,8 +739,9 @@ public class JitAccessServiceTests : IDisposable
             });
         }
 
-        public Task TearDownAsync(JitGrant grant, CancellationToken ct = default)
+        public Task TearDownAsync(Guid tenantId, JitGrant grant, CancellationToken ct = default)
         {
+            ActedAsTenants.Add(tenantId);
             TornDown.Add(grant.Id);
             return Task.CompletedTask;
         }

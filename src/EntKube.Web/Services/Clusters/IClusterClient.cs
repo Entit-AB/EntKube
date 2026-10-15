@@ -25,6 +25,15 @@ public interface IClusterClient
 
     Task DeleteManifestAsync(string kind, string name, string ns, CancellationToken ct = default);
 
+    /// <summary>
+    /// A short-lived token bound to a ServiceAccount in this cluster. The credential that asks for
+    /// it stays inside the seam; what comes back is scoped to the ServiceAccount and expires on the
+    /// cluster's own terms.
+    /// </summary>
+    Task<ServiceAccountToken> RequestServiceAccountTokenAsync(
+        string serviceAccount, string ns, TimeSpan duration, IReadOnlyList<string> audiences,
+        CancellationToken ct = default);
+
     Task PatchJsonAsync(string resource, string name, string ns, string jsonPatch, CancellationToken ct = default);
 
     Task PatchStrategicAsync(string resource, string name, string ns, string jsonPatch, CancellationToken ct = default);

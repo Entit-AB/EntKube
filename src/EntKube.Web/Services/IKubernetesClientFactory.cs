@@ -27,6 +27,14 @@ public interface IKubernetesClientFactory
     Task DeleteManifestAsync(string kind, string name, string ns, string kubeconfig, CancellationToken ct = default);
 
     /// <summary>
+    /// A short-lived token bound to a ServiceAccount, with the expiry the API server actually
+    /// granted. See the implementation for why the requested window is not trusted.
+    /// </summary>
+    Task<ServiceAccountToken> RequestServiceAccountTokenAsync(
+        string serviceAccount, string ns, TimeSpan duration, IReadOnlyList<string> audiences,
+        string kubeconfig, CancellationToken ct = default);
+
+    /// <summary>
     /// Applies a JSON merge patch to an existing resource. Only the specified fields are changed;
     /// all other fields are preserved. Safer than ApplyManifestAsync for partial updates.
     /// </summary>
@@ -322,3 +330,9 @@ public interface IKubernetesClientFactory
     Task<string> RunCommandOnPodWithStdinAsync(string podName, string ns, IReadOnlyList<string> command,
         string stdin, string kubeconfig, CancellationToken ct = default, string? container = null);
 }
+
+/// <summary>
+/// A bound ServiceAccount token. <paramref name="ExpiresAt"/> is what the API server returned,
+/// which can be sooner than was asked for.
+/// </summary>
+public sealed record ServiceAccountToken(string Token, DateTime? ExpiresAt);
