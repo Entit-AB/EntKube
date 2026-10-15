@@ -420,7 +420,24 @@ public class ClusterCredentialCustodyTests
     /// guard first would have left the runner reading a kubeconfig to pass nothing, and converting
     /// the runner first would have left the guard with no way to reach a cluster.</para>
     /// </summary>
-    private const int BaselineOccurrences = 66;
+    /// <summary>
+    /// <b>58 in 22 files.</b> <c>AppGovernanceService</c>, the largest single holding left, is at
+    /// zero — and it held the credential for two reasons rather than one. Its namespace check built
+    /// its <em>own</em> <c>Kubernetes</c> client from the kubeconfig, and its two apply paths ran
+    /// <c>kubectl apply</c> through a private process call with the kubeconfig on disk.
+    ///
+    /// <para>⚠️ Those applies were <b>gated and invisible at the same time</b>, which is worth
+    /// knowing because it is the shape <see cref="ClusterChangeGateCoverageTests"/> warns it cannot
+    /// see: the file called <c>gate.AcknowledgeAsync</c> itself — so the metric scored it zero — and
+    /// then ran its own CLI. The operator was asked, but about a summary string this service wrote,
+    /// not a dry-run diff; and the apply reached the cluster without passing anything that watches
+    /// the factory. Through the seam both become one call that previews and applies.</para>
+    ///
+    /// <para>The three methods took an app, an environment and a cluster id with no tenant anywhere,
+    /// so the id was the whole authorization. They take the asking tenant now, from the page that
+    /// already had it.</para>
+    /// </summary>
+    private const int BaselineOccurrences = 58;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -452,7 +469,7 @@ public class ClusterCredentialCustodyTests
     ///
     /// <para>26. <c>ComponentScanService</c>.</para>
     /// </summary>
-    private const int BaselineFiles = 23;
+    private const int BaselineFiles = 22;
 
     private static (int Occurrences, int Files) Measure()
     {

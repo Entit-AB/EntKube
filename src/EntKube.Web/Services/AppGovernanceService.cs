@@ -1,4 +1,5 @@
 using System.Text;
+using System.Text.Json;
 using EntKube.Web.Data;
 using k8s;
 using Microsoft.EntityFrameworkCore;
@@ -16,7 +17,7 @@ namespace EntKube.Web.Services;
 /// </summary>
 public class AppGovernanceService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     ILogger<AppGovernanceService> logger)
 {
     // ── Namespace ─────────────────────────────────────────────────────────────
@@ -60,7 +61,7 @@ public class AppGovernanceService(
     /// would land anyway.
     /// </summary>
     public async Task<NamespaceCheckResult> CheckNamespaceAsync(
-        Guid appId, Guid environmentId, string? ns, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid environmentId, string? ns, CancellationToken ct = default)
     {
         string? name = Blank(ns)?.ToLowerInvariant();
         if (name is null) return new NamespaceCheckResult { Namespace = "" };
@@ -88,18 +89,21 @@ public class AppGovernanceService(
 
         foreach (KubernetesCluster cluster in clusters.OrderBy(c => c.Name, StringComparer.OrdinalIgnoreCase))
         {
-            if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+            EntKube.Web.Services.Clusters.IClusterClient? access =
+                await clusterAccess.ForAsync(tenantId, cluster.Id, ct);
+
+            if (access is null)
             {
                 statuses.Add(new NamespaceClusterStatus
                 {
                     ClusterId   = cluster.Id,
                     ClusterName = cluster.Name,
-                    Error       = "Cluster has no kubeconfig configured.",
+                    Error       = "Cluster is not this tenant's, or has no kubeconfig configured.",
                 });
                 continue;
             }
 
-            (List<string>? names, string? error) = await ListNamespacesAsync(cluster.Kubeconfig, ct);
+            (List<string>? names, string? error) = await ListNamespacesAsync(access, ct);
             if (names is null)
             {
                 statuses.Add(new NamespaceClusterStatus
@@ -135,7 +139,7 @@ public class AppGovernanceService(
     /// operator acknowledges the dry-run before the namespace is written.
     /// </summary>
     public async Task<(bool Success, string Output)> CreateNamespaceOnClusterAsync(
-        Guid clusterId, string ns, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string ns, CancellationToken ct = default)
     {
         string? name = Blank(ns)?.ToLowerInvariant();
         if (name is null) return (false, "Namespace name is empty.");
@@ -148,33 +152,31 @@ public class AppGovernanceService(
         }
 
         if (cluster is null) return (false, "Cluster not found.");
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return (false, "Cluster has no kubeconfig configured.");
 
-        string yaml = Y(
-            "apiVersion: v1",
-            "kind: Namespace",
-            "metadata:",
-            $"  name: {name}");
+        EntKube.Web.Services.Clusters.IClusterClient? access =
+            await clusterAccess.ForAsync(tenantId, clusterId, ct);
 
-        await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+        if (access is null)
+            return (false, "Cluster is not this tenant's, or has no kubeconfig configured.");
+
+        // One seam call instead of a hand-built acknowledgment followed by this service's own
+        // kubectl: EnsureNamespaceAsync is the same operation, and the factory raises the
+        // acknowledgment on the way through with a dry-run preview rather than a summary string.
+        try
         {
-            Verb        = EntKube.Web.Services.ClusterChanges.ChangeVerb.EnsureNamespace,
-            Kubeconfig  = cluster.Kubeconfig,
-            ClusterLabel = cluster.Name,
-            Namespace   = name,
-            Summary     = $"Create namespace {name}",
-            Manifest    = yaml,
-        }, ct);
-
-        (bool ok, string output) = await KubectlApplyAsync(yaml, cluster.Kubeconfig, ct);
-
-        if (ok)
+            await access.EnsureNamespaceAsync(name, ct);
             logger.LogInformation("Namespace {Namespace} created on {Cluster}", name, cluster.Name);
-        else
-            logger.LogWarning("Namespace {Namespace} create failed on {Cluster}: {Output}", name, cluster.Name, output);
-
-        return (ok, output);
+            return (true, $"namespace/{name} applied");
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Namespace {Namespace} create failed on {Cluster}", name, cluster.Name);
+            return (false, ex.Message);
+        }
     }
 
     /// <summary>
@@ -190,22 +192,40 @@ public class AppGovernanceService(
         return null;
     }
 
+    /// <summary>
+    /// The cluster's namespaces, through the seam. It used to build its own <c>Kubernetes</c>
+    /// client from the kubeconfig — a second route to the API server that nothing else in the
+    /// product could see or pool.
+    /// </summary>
     private static async Task<(List<string>? Names, string? Error)> ListNamespacesAsync(
-        string kubeconfig, CancellationToken ct)
+        EntKube.Web.Services.Clusters.IClusterClient access, CancellationToken ct)
     {
         try
         {
-            using var stream = new MemoryStream(Encoding.UTF8.GetBytes(kubeconfig));
-            KubernetesClientConfiguration config =
-                KubernetesClientConfiguration.BuildConfigFromConfigFile(stream);
-            using var client = new Kubernetes(config);
+            // Empty namespace means cluster-scoped, which is the seam's convention.
+            string json = await access.GetJsonAsync("namespaces", "", ct: ct);
 
-            k8s.Models.V1NamespaceList list = await client.CoreV1.ListNamespaceAsync(cancellationToken: ct);
-            return (list.Items
-                .Select(n => n.Metadata?.Name)
-                .Where(n => !string.IsNullOrEmpty(n))
-                .Select(n => n!)
-                .ToList(), null);
+            using JsonDocument doc = JsonDocument.Parse(json);
+
+            if (!doc.RootElement.TryGetProperty("items", out JsonElement items))
+            {
+                return ([], null);
+            }
+
+            return (
+                [
+                    .. items.EnumerateArray()
+                        .Select(i => i.TryGetProperty("metadata", out JsonElement m)
+                                     && m.TryGetProperty("name", out JsonElement n)
+                            ? n.GetString()
+                            : null)
+                        .Where(n => !string.IsNullOrEmpty(n))
+                        .Select(n => n!)
+                ], null);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
         }
         catch (Exception ex)
         {
@@ -532,8 +552,12 @@ public class AppGovernanceService(
     /// namespace — not a global app namespace — so each environment targets the
     /// correct namespace on the correct cluster.
     /// </summary>
+    /// <param name="cluster">
+    /// Identifying fields only. It used to be the whole entity, which carried a materialised
+    /// kubeconfig — the credential came in through the parameter, so the caller had to hold one.
+    /// </param>
     public async Task<(bool Success, string Output)> ApplyToClusterAsync(
-        Guid appId, Guid environmentId, KubernetesCluster cluster,
+        Guid tenantId, Guid appId, Guid environmentId, KubernetesCluster cluster,
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
@@ -550,73 +574,38 @@ public class AppGovernanceService(
         if (string.IsNullOrWhiteSpace(ns))
             return (false, "No deployment found for this app in this environment on this cluster. Create a deployment first.");
 
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            return (false, "Cluster has no kubeconfig configured.");
+        EntKube.Web.Services.Clusters.IClusterClient? access =
+            await clusterAccess.ForAsync(tenantId, cluster.Id, ct);
+
+        if (access is null)
+            return (false, "Cluster is not this tenant's, or has no kubeconfig configured.");
 
         AppGovernanceData data = await LoadAsync(appId, environmentId, ct);
         string yaml = BuildManifest(data, ns);
 
-        await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
-        {
-            Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
-            Kubeconfig = cluster.Kubeconfig,
-            ClusterLabel = cluster.Name,
-            Namespace = ns,
-            Summary = $"Apply governance (quota/limits/NetworkPolicy/RBAC) to {ns}",
-            Manifest = yaml,
-        }, ct);
-
-        (bool ok, string result) = await KubectlApplyAsync(yaml, cluster.Kubeconfig, ct);
-
-        if (ok)
-            logger.LogInformation("Governance applied to {Cluster}/{Namespace}", cluster.Name, ns);
-        else
-            logger.LogWarning("Governance apply failed for {Cluster}: {Output}", cluster.Name, result);
-
-        return (ok, result);
-    }
-
-    /// <summary>
-    /// Runs "kubectl apply" for a manifest against a kubeconfig, returning the exit status and
-    /// combined stdout/stderr. Callers gate the change before calling this.
-    /// </summary>
-    private static async Task<(bool Success, string Output)> KubectlApplyAsync(
-        string yaml, string kubeconfig, CancellationToken ct)
-    {
-        string kubeconfigPath = Path.Combine(Path.GetTempPath(), $"entkube-gov-{Guid.NewGuid():N}.kubeconfig");
-        string manifestPath   = Path.Combine(Path.GetTempPath(), $"entkube-gov-{Guid.NewGuid():N}.yaml");
-
+        // The seam applies and acknowledges in one call. What this replaces was an acknowledgment
+        // built here from a summary string, followed by this service running its own kubectl with
+        // the kubeconfig on disk — so the operator was asked, but about a sentence rather than a
+        // diff, and the apply itself was invisible to everything that watches the factory.
         try
         {
-            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
-            await SecretFile.WriteAsync(manifestPath, yaml, ct);
+            string result = await access.ApplyManifestInNamespaceAsync(
+                yaml, ns, $"Apply governance (quota/limits/NetworkPolicy/RBAC) to {ns}", ct);
 
-            System.Diagnostics.ProcessStartInfo psi = new("kubectl",
-                $"apply -f {manifestPath} --kubeconfig {kubeconfigPath}")
-            {
-                RedirectStandardOutput = true,
-                RedirectStandardError  = true,
-                UseShellExecute        = false,
-                CreateNoWindow         = true
-            };
-
-            using System.Diagnostics.Process proc = new() { StartInfo = psi };
-            StringBuilder output = new();
-            proc.OutputDataReceived += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-            proc.ErrorDataReceived  += (_, e) => { if (e.Data is not null) output.AppendLine(e.Data); };
-            proc.Start();
-            proc.BeginOutputReadLine();
-            proc.BeginErrorReadLine();
-            await proc.WaitForExitAsync(ct);
-
-            return (proc.ExitCode == 0, output.ToString().TrimEnd());
+            logger.LogInformation("Governance applied to {Cluster}/{Namespace}", cluster.Name, ns);
+            return (true, result);
         }
-        finally
+        catch (OperationCanceledException)
         {
-            if (File.Exists(kubeconfigPath)) File.Delete(kubeconfigPath);
-            if (File.Exists(manifestPath))   File.Delete(manifestPath);
+            throw;
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "Governance apply failed for {Cluster}", cluster.Name);
+            return (false, ex.Message);
         }
     }
+
 
     // ── Manifest builder ──────────────────────────────────────────────────────
 
