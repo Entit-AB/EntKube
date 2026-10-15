@@ -321,7 +321,7 @@ public class ModuleContractTests
         [Module.Connectivity] = 4,
         [Module.Support] = 7,
         [Module.Catalog] = 6,
-        [Module.Delivery] = 6,
+        [Module.Delivery] = 3,
         [Module.Identity] = 4,
         [Module.Fleet] = 2,
         [Module.Mail] = 2,

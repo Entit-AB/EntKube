@@ -16,7 +16,10 @@ namespace EntKube.Web.Services;
 /// environment.
 /// </summary>
 public class KedaScalerService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    // Delivery's own context. Every table this touches — KedaScalers, AppDeployments,
+    // AppEnvironments — is Delivery's, and KubernetesClusters is the read-only hub. Its component
+    // and credential reads moved to ICatalogApi and the seam first; this is what was left.
+    IDbContextFactory<EntKube.Web.Data.Modules.DeliveryDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<KedaScalerService> logger)
@@ -26,7 +29,7 @@ public class KedaScalerService(
     public async Task<List<KedaScaler>> GetScalersAsync(
         Guid appId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
         return await db.KedaScalers
             .Where(s => s.AppId == appId && s.EnvironmentId == environmentId)
             .OrderBy(s => s.Name)
@@ -46,7 +49,7 @@ public class KedaScalerService(
         CancellationToken ct = default)
     {
         name = NormalizeName(name);
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         await EnsureNameAvailableAsync(db, appId, environmentId, name, id, ct);
 
@@ -115,7 +118,7 @@ public class KedaScalerService(
                 throw new InvalidOperationException("Maximum replicas must be greater than or equal to minimum replicas.");
         }
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         await EnsureNameAvailableAsync(db, appId, environmentId, name, id, ct);
 
@@ -153,7 +156,7 @@ public class KedaScalerService(
         CancellationToken ct = default)
     {
         name = NormalizeName(name);
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         await EnsureNameAvailableAsync(db, appId, environmentId, name, id, ct);
 
@@ -174,7 +177,7 @@ public class KedaScalerService(
 
     public async Task<bool> DeleteScalerAsync(Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
         KedaScaler? scaler = await db.KedaScalers.FindAsync([id], ct);
         if (scaler is null) return false;
         db.KedaScalers.Remove(scaler);
@@ -186,7 +189,7 @@ public class KedaScalerService(
     public async Task CopyFromEnvironmentAsync(
         Guid appId, Guid sourceEnvId, Guid targetEnvId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         List<KedaScaler> source = await db.KedaScalers
             .Where(s => s.AppId == appId && s.EnvironmentId == sourceEnvId)
@@ -234,7 +237,7 @@ public class KedaScalerService(
     }
 
     private static async Task EnsureNameAvailableAsync(
-        ApplicationDbContext db, Guid appId, Guid environmentId, string name, Guid? selfId, CancellationToken ct)
+        EntKube.Web.Data.Modules.DeliveryDbContext db, Guid appId, Guid environmentId, string name, Guid? selfId, CancellationToken ct)
     {
         bool taken = await db.KedaScalers.AnyAsync(
             s => s.AppId == appId && s.EnvironmentId == environmentId && s.Name == name
@@ -246,7 +249,7 @@ public class KedaScalerService(
     // ── Conflicting autoscalers ───────────────────────────────────────────────
 
     private static async Task EnsureNoTargetConflictAsync(
-        ApplicationDbContext db, Guid appId, Guid environmentId, KedaScaler candidate, CancellationToken ct)
+        EntKube.Web.Data.Modules.DeliveryDbContext db, Guid appId, Guid environmentId, KedaScaler candidate, CancellationToken ct)
     {
         List<KedaScaler> existing = await db.KedaScalers
             .AsNoTracking()
@@ -302,7 +305,7 @@ public class KedaScalerService(
     public async Task<bool> IsKedaAvailableAsync(
         Guid tenantId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         List<Guid> clusterIds = await db.KubernetesClusters
             .Where(c => c.TenantId == tenantId && c.EnvironmentId == environmentId)
@@ -333,7 +336,7 @@ public class KedaScalerService(
     public async Task<List<(string Target, bool Success, string Output)>> ApplyToEnvironmentAsync(
         Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
         List<KedaScaler> scalers = await GetScalersAsync(appId, environmentId, ct);
         if (scalers.Count == 0)
@@ -368,7 +371,7 @@ public class KedaScalerService(
     /// is what the seam wants.</para>
     /// </summary>
     private static async Task<List<(Guid ClusterId, string ClusterName, string Namespace)>> ResolveTargetsAsync(
-        ApplicationDbContext db, Guid appId, Guid environmentId, CancellationToken ct)
+        EntKube.Web.Data.Modules.DeliveryDbContext db, Guid appId, Guid environmentId, CancellationToken ct)
     {
         string? lockedNs = (await db.AppEnvironments
             .FirstOrDefaultAsync(ae => ae.AppId == appId && ae.EnvironmentId == environmentId, ct))?.Namespace;
@@ -458,7 +461,7 @@ public class KedaScalerService(
         List<KedaScaler> configured = await GetScalersAsync(appId, environmentId, ct);
 
         List<(Guid ClusterId, string ClusterName, string Namespace)> targets;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext())
         {
             targets = await ResolveTargetsAsync(db, appId, environmentId, ct);
         }
