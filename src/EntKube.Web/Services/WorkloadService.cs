@@ -138,8 +138,12 @@ public class WorkloadService(
 
         Clusters.IClusterClient? client = await clusterAccess.ForAsync(tenantId, clusterId, ct);
 
+        // Both reasons, because ForAsync does not distinguish them and naming only one sends the
+        // reader to the wrong place. This said "has no kubeconfig configured" while the caller was
+        // simply passing no tenant, about clusters whose credential was fine.
         if (client is null)
-            return WorkloadSnapshot.Failure("Cluster has no kubeconfig configured.");
+            return WorkloadSnapshot.Failure(
+                "This cluster is not this tenant's, or has no kubeconfig configured.");
         string? scope = string.IsNullOrWhiteSpace(ns) ? null : ns.Trim();
 
         // The six calls are independent of one another, and each is a round trip to the

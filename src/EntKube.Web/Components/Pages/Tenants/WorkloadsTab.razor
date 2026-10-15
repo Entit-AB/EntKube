@@ -17,7 +17,13 @@
    picker over the tenant's registered clusters.
    ═══════════════════════════════════════════════════════════════════ *@
 
-@if (TenantId is not null && clusters.Count == 0 && !loading)
+@if (ParameterError is not null)
+{
+    <div class="alert alert-danger small mb-0">
+        <i class="bi bi-exclamation-triangle me-1"></i>@ParameterError
+    </div>
+}
+else if (clusters.Count == 0 && ClusterId == Guid.Empty && !loading)
 {
     <div class="text-center text-muted py-5">
         <i class="bi bi-hdd-rack fs-3 d-block mb-2"></i>
@@ -366,15 +372,31 @@ else if (snapshot is not null)
     /// <summary>Cluster to browse. Optional when <see cref="TenantId"/> is set — the picker chooses one.</summary>
     [Parameter] public Guid ClusterId { get; set; }
 
-    /// <summary>Set instead of (or alongside) ClusterId to browse any of the tenant's clusters.</summary>
-    [Parameter] public Guid? TenantId { get; set; }
+    /// <summary>
+    /// The tenant whose clusters may be read. Required: <c>WorkloadService</c> asks the seam as
+    /// this tenant, and the seam answers about no cluster at all without one.
+    ///
+    /// <para>⚠️ This was <c>Guid?</c> defaulting to <c>Guid.Empty</c>, described as "failing closed
+    /// rather than open". Failing closed was right; <b>reporting it as a missing kubeconfig was
+    /// not</b>. <c>ClusterDetail</c> mounted this tab with a cluster id and no tenant, so every
+    /// workload view on a cluster page said "Cluster has no kubeconfig configured" about a cluster
+    /// whose credential was fine and which every other tab could reach. The guard below now says
+    /// what actually happened.</para>
+    /// </summary>
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    /// <summary>Set alongside TenantId to pin one cluster; otherwise the picker chooses.</summary>
+    private Guid Tenant => TenantId;
 
     /// <summary>
-    /// The tenant whose clusters may be read. WorkloadService now requires one, because it used
-    /// to answer about any cluster in the installation given its id. Empty when the component is
-    /// hosted without a tenant, which resolves to no cluster — failing closed rather than open.
+    /// A mount site that forgot the tenant is a programming error, and it has to read as one. The
+    /// alternative is what shipped: a credential problem reported about a working cluster, which
+    /// sends whoever sees it to look at the wrong thing entirely.
     /// </summary>
-    private Guid Tenant => TenantId ?? Guid.Empty;
+    private string? ParameterError => TenantId == Guid.Empty
+        ? "WorkloadsTab was mounted without a TenantId, so no cluster can be resolved. "
+          + "This is a wiring mistake in the page hosting it, not a problem with the cluster."
+        : null;
 
     /// <summary>Namespace to preselect — lets callers deep-link into one namespace's workloads.</summary>
     [Parameter] public string? InitialNamespace { get; set; }
@@ -404,9 +426,9 @@ else if (snapshot is not null)
 
         // Tenant mount: offer every registered cluster, defaulting to the current
         // one (or the first) so the page has something to show immediately.
-        if (TenantId is Guid tenantId)
+        if (TenantId != Guid.Empty)
         {
-            clusters = await TenantService.GetClustersAsync(tenantId);
+            clusters = await TenantService.GetClustersAsync(TenantId);
             if (!clusters.Any(c => c.Id == ClusterId))
                 ClusterId = clusters.FirstOrDefault()?.Id ?? Guid.Empty;
         }
