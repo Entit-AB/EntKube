@@ -26,6 +26,12 @@ public sealed class ClusterClient(
     public Task DeleteManifestAsync(string kind, string name, string ns, CancellationToken ct = default)
         => inner.DeleteManifestAsync(kind, name, ns, kubeconfig, ct);
 
+    public Task<ServiceProxyResponse> ProxyServiceAsync(
+        string ns, string service, int port, HttpMethod method, string path,
+        object? body = null, IReadOnlyDictionary<string, string>? headers = null,
+        CancellationToken ct = default)
+        => inner.ProxyServiceAsync(ns, service, port, method, path, kubeconfig, body, headers, ct);
+
     public Task<ServiceAccountToken> RequestServiceAccountTokenAsync(
         string serviceAccount, string ns, TimeSpan duration, IReadOnlyList<string> audiences,
         CancellationToken ct = default)

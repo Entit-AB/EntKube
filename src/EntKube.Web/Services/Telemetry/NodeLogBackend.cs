@@ -13,7 +13,11 @@ namespace EntKube.Web.Services.Telemetry;
 /// store — one HTTP request per user action, answered next to the data, rather than a Lucene scan across
 /// every segment the management plane holds for the tenant.
 /// </summary>
-public sealed class NodeLogBackend(TelemetryNodeClient client) : ILogBackend
+// The tenant arrives on the CONSTRUCTOR, not on ILogBackend's methods. That interface is also
+// implemented inside the in-cluster node, where a tenant means nothing and a new parameter would be
+// a change to a shipped wire surface — see ITelemetryBackends for the full reasoning (#199). The
+// router constructs one of these per tenant, exactly as it already does for its own wrappers.
+public sealed class NodeLogBackend(Guid tenantId, TelemetryNodeClient client) : ILogBackend
 {
     public bool IsEnabled => true;
 
@@ -23,7 +27,7 @@ public sealed class NodeLogBackend(TelemetryNodeClient client) : ILogBackend
     /// data is going somewhere else", and it is what the read routing turns on.
     /// </summary>
     public Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
-        => AskAsync(client, clusterId, "api/logs/has-data", ct);
+        => AskAsync(client, tenantId, clusterId, "api/logs/has-data", ct);
 
     /// <summary>
     /// False on any failure, deliberately. A node that cannot be reached, or one running an image from
@@ -31,45 +35,45 @@ public sealed class NodeLogBackend(TelemetryNodeClient client) : ILogBackend
     /// how reads get pointed at an empty store.
     /// </summary>
     internal static async Task<bool> AskAsync(
-        TelemetryNodeClient client, Guid clusterId, string path, CancellationToken ct)
+        TelemetryNodeClient client, Guid tenantId, Guid clusterId, string path, CancellationToken ct)
     {
-        KubernetesOperationResult<bool> result = await client.GetAsync<bool>(clusterId, path, ct);
+        KubernetesOperationResult<bool> result = await client.GetAsync<bool>(tenantId, clusterId, path, ct);
         return result.IsSuccess && result.Data;
     }
 
     public Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(
         Guid clusterId, int windowMinutes = 60, CancellationToken ct = default)
-        => client.GetAsync<List<string>>(clusterId, $"api/logs/namespaces?windowMinutes={windowMinutes}", ct);
+        => client.GetAsync<List<string>>(tenantId, clusterId, $"api/logs/namespaces?windowMinutes={windowMinutes}", ct);
 
     public Task<KubernetesOperationResult<List<string>>> GetPodsAsync(
         Guid clusterId, string namespaceName, int windowMinutes = 60, CancellationToken ct = default)
-        => client.GetAsync<List<string>>(clusterId,
+        => client.GetAsync<List<string>>(tenantId, clusterId,
             $"api/logs/pods?ns={Uri.EscapeDataString(namespaceName)}&windowMinutes={windowMinutes}", ct);
 
     public Task<KubernetesOperationResult<List<string>>> GetContainersAsync(
         Guid clusterId, string namespaceName, int windowMinutes = 60, CancellationToken ct = default)
-        => client.GetAsync<List<string>>(clusterId,
+        => client.GetAsync<List<string>>(tenantId, clusterId,
             $"api/logs/containers?ns={Uri.EscapeDataString(namespaceName)}&windowMinutes={windowMinutes}", ct);
 
     public Task<KubernetesOperationResult<List<LokiLogStream>>> QueryAsync(
         Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int limit = 200, CancellationToken ct = default)
-        => client.GetAsync<List<LokiLogStream>>(clusterId,
+        => client.GetAsync<List<LokiLogStream>>(tenantId, clusterId,
             $"api/logs/search?{NodeQuery.Parameter}={NodeQuery.Encode(LogSearchBody.ForFilter(filter, from, to, limit: limit))}", ct);
 
     public Task<KubernetesOperationResult<List<LogHistogramBucket>>> GetHistogramAsync(
         Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int buckets = 48, CancellationToken ct = default)
-        => client.GetAsync<List<LogHistogramBucket>>(clusterId,
+        => client.GetAsync<List<LogHistogramBucket>>(tenantId, clusterId,
             $"api/logs/histogram?{NodeQuery.Parameter}={NodeQuery.Encode(LogSearchBody.ForFilter(filter, from, to, buckets: buckets))}", ct);
 
     public Task<KubernetesOperationResult<List<LokiLogStream>>> QueryByTraceAsync(
         Guid clusterId, string traceId, int limit = 500, CancellationToken ct = default)
-        => client.GetAsync<List<LokiLogStream>>(clusterId,
+        => client.GetAsync<List<LokiLogStream>>(tenantId, clusterId,
             $"api/logs/by-trace?traceId={Uri.EscapeDataString(traceId)}&limit={limit}", ct);
 
     public Task<KubernetesOperationResult<long>> CountAsync(
         Guid clusterId, string? ns, string? matchText, LogLevel minLevel, DateTime from, DateTime to,
         CancellationToken ct = default)
-        => client.GetAsync<long>(clusterId, $"api/logs/count?{NodeQuery.Parameter}={NodeQuery.Encode(LogSearchBody.ForFilter(
+        => client.GetAsync<long>(tenantId, clusterId, $"api/logs/count?{NodeQuery.Parameter}={NodeQuery.Encode(LogSearchBody.ForFilter(
             new LogQueryFilter { Namespaces = ns is null ? [] : [ns], Text = matchText, MinLevel = minLevel },
             from, to))}", ct);
 }
@@ -78,16 +82,16 @@ public sealed class NodeLogBackend(TelemetryNodeClient client) : ILogBackend
 /// Reads a cluster's traces from its in-cluster telemetry node. The node handles the tier split and, where
 /// an aggregate cannot be merged from two halves, the delegation — none of which is visible from here.
 /// </summary>
-public sealed class NodeTraceService(TelemetryNodeClient client) : ITraceQueryService
+public sealed class NodeTraceService(Guid tenantId, TelemetryNodeClient client) : ITraceQueryService
 {
     /// <summary>Whether the node holds any of this cluster's spans. See NodeLogBackend.HasDataAsync.</summary>
     public Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
-        => NodeLogBackend.AskAsync(client, clusterId, "api/traces/has-data", ct);
+        => NodeLogBackend.AskAsync(client, tenantId, clusterId, "api/traces/has-data", ct);
 
     public Task<KubernetesOperationResult<List<string>>> GetServicesAsync(
         Guid clusterId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null,
         string? podPattern = null, int windowMinutes = 60)
-        => client.GetAsync<List<string>>(clusterId,
+        => client.GetAsync<List<string>>(tenantId, clusterId,
             $"api/traces/services?{NodeQuery.Parameter}={NodeQuery.Encode(new TraceQueryBody
         {
             Namespaces = namespaces, PodPattern = podPattern, WindowMinutes = windowMinutes,
@@ -97,7 +101,7 @@ public sealed class NodeTraceService(TelemetryNodeClient client) : ITraceQuerySe
         Guid clusterId, string? service, DateTime from, DateTime to,
         double minDurationMs = 0, bool errorsOnly = false, int limit = 50, CancellationToken ct = default,
         IReadOnlyList<string>? namespaces = null, string? podPattern = null)
-        => client.GetAsync<List<TraceSummary>>(clusterId,
+        => client.GetAsync<List<TraceSummary>>(tenantId, clusterId,
             $"api/traces/list?{NodeQuery.Parameter}={NodeQuery.Encode(new TraceQueryBody
         {
             Service = service, From = from, To = to, MinDurationMs = minDurationMs,
@@ -106,13 +110,13 @@ public sealed class NodeTraceService(TelemetryNodeClient client) : ITraceQuerySe
 
     public Task<KubernetesOperationResult<List<SpanRecord>>> GetTraceAsync(
         Guid clusterId, string traceId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null)
-        => client.GetAsync<List<SpanRecord>>(clusterId,
+        => client.GetAsync<List<SpanRecord>>(tenantId, clusterId,
             $"api/traces/trace?{NodeQuery.Parameter}={NodeQuery.Encode(new TraceQueryBody { TraceId = traceId, Namespaces = namespaces })}", ct);
 
     public Task<KubernetesOperationResult<List<RedBucket>>> GetServiceRedAsync(
         Guid clusterId, string service, DateTime from, DateTime to, int buckets = 48, CancellationToken ct = default,
         IReadOnlyList<string>? namespaces = null, string? podPattern = null)
-        => client.GetAsync<List<RedBucket>>(clusterId,
+        => client.GetAsync<List<RedBucket>>(tenantId, clusterId,
             $"api/traces/red?{NodeQuery.Parameter}={NodeQuery.Encode(new TraceQueryBody
         {
             Service = service, From = from, To = to, Buckets = buckets,
@@ -122,7 +126,7 @@ public sealed class NodeTraceService(TelemetryNodeClient client) : ITraceQuerySe
     public Task<KubernetesOperationResult<List<ServiceEdge>>> GetServiceMapAsync(
         Guid clusterId, DateTime from, DateTime to, CancellationToken ct = default,
         IReadOnlyList<string>? namespaces = null, string? podPattern = null)
-        => client.GetAsync<List<ServiceEdge>>(clusterId,
+        => client.GetAsync<List<ServiceEdge>>(tenantId, clusterId,
             $"api/traces/map?{NodeQuery.Parameter}={NodeQuery.Encode(new TraceQueryBody
         {
             From = from, To = to, Namespaces = namespaces, PodPattern = podPattern,
@@ -130,6 +134,6 @@ public sealed class NodeTraceService(TelemetryNodeClient client) : ITraceQuerySe
 
     public Task<KubernetesOperationResult<ServiceStats>> GetServiceStatsAsync(
         Guid clusterId, string service, DateTime from, DateTime to, CancellationToken ct = default)
-        => client.GetAsync<ServiceStats>(clusterId,
+        => client.GetAsync<ServiceStats>(tenantId, clusterId,
             $"api/traces/stats?{NodeQuery.Parameter}={NodeQuery.Encode(new TraceQueryBody { Service = service, From = from, To = to })}", ct);
 }

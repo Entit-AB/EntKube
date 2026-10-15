@@ -1,5 +1,6 @@
 using System.Diagnostics;
 using System.Text;
+using System.Net.Http.Json;
 using System.Text.Json;
 using EntKube.Web.Services.ClusterChanges;
 
@@ -17,8 +18,13 @@ namespace EntKube.Web.Services;
 public class KubernetesClientFactory : IKubernetesClientFactory
 {
     private readonly IClusterChangeGate _gate;
+    private readonly KubernetesProxyClientPool _proxies;
 
-    public KubernetesClientFactory(IClusterChangeGate gate) => _gate = gate;
+    public KubernetesClientFactory(IClusterChangeGate gate, KubernetesProxyClientPool proxies)
+    {
+        _gate = gate;
+        _proxies = proxies;
+    }
 
     /// <summary>
     /// Applies a YAML manifest by writing it to a temp file and running kubectl apply.
@@ -929,6 +935,48 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// a set of manifests and counts the ones the cluster no longer has, so "not found" is an
     /// answer rather than a failure.
     /// </summary>
+    /// <summary>
+    /// One HTTP request to an in-cluster Service, through the API server's proxy endpoint.
+    ///
+    /// <para>⚠️ <b>Authorization is not touched.</b> The request authenticates to the API SERVER,
+    /// and the k8s client sets that header from the kubeconfig. Overwriting it with the Service's
+    /// own credential makes the API server reject the call with a 401 before it is ever forwarded —
+    /// which reads exactly like the Service rejecting the credential and is nothing of the sort.
+    /// Unknown headers pass through untouched, so a Service's own credential travels in one of
+    /// those. That lesson was learned painfully in the telemetry node client and belongs here now
+    /// that the request is built here.</para>
+    ///
+    /// <para>Not gated: a proxied request is the caller's own protocol with something running in
+    /// the cluster, and the gate acknowledges changes to cluster STATE. The pool is shared per
+    /// kubeconfig so a page issuing a dozen queries pays one TLS handshake.</para>
+    /// </summary>
+    public async Task<ServiceProxyResponse> ProxyServiceAsync(
+        string ns, string service, int port, HttpMethod method, string path, string kubeconfig,
+        object? body = null, IReadOnlyDictionary<string, string>? headers = null,
+        CancellationToken ct = default)
+    {
+        k8s.Kubernetes client = _proxies.Get(kubeconfig);
+
+        string baseUrl = client.BaseUri.ToString().TrimEnd('/')
+            + $"/api/v1/namespaces/{ns}/services/{service}:{port}/proxy";
+
+        using HttpRequestMessage request = new(method, $"{baseUrl}/{path.TrimStart('/')}");
+
+        if (headers is not null)
+        {
+            foreach ((string name, string value) in headers) request.Headers.Add(name, value);
+        }
+
+        if (body is not null) request.Content = JsonContent.Create(body, body.GetType());
+
+        using HttpResponseMessage response = await client.HttpClient.SendAsync(request, ct);
+
+        return new ServiceProxyResponse(
+            (int)response.StatusCode,
+            response.ReasonPhrase,
+            await response.Content.ReadAsStringAsync(ct));
+    }
+
     /// <summary>
     /// Asks the API server for a short-lived token bound to a ServiceAccount.
     ///

@@ -273,7 +273,7 @@ public class HelmSeamTests : IDisposable
         RecordingSink sink = new(ClusterChangeDecision.Cancelled);
         using IDisposable registration = gate.RegisterSink(sink);
 
-        KubernetesClientFactory factory = new(gate);
+        KubernetesClientFactory factory = new(gate, new KubernetesProxyClientPool(Microsoft.Extensions.Logging.Abstractions.NullLogger<KubernetesProxyClientPool>.Instance));
 
         // Cancelled, so if the acknowledgment is raised at all this throws — and it throws before
         // helm is reached, which is the ordering that matters.
@@ -298,7 +298,7 @@ public class HelmSeamTests : IDisposable
         RecordingSink sink = new(ClusterChangeDecision.Cancelled);
         using IDisposable registration = gate.RegisterSink(sink);
 
-        KubernetesClientFactory factory = new(gate);
+        KubernetesClientFactory factory = new(gate, new KubernetesProxyClientPool(Microsoft.Extensions.Logging.Abstractions.NullLogger<KubernetesProxyClientPool>.Instance));
 
         Func<Task> act = () => factory.RunHelmAsync(
             new HelmInvocation("uninstall", "orphan", "some-ns", ["orphan"]), TestKubeconfig.Valid);

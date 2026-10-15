@@ -187,8 +187,10 @@ public static partial class ModuleMap
         [typeof(LogQueryService)] = Module.Telemetry,
         [typeof(LokiService)] = Module.Telemetry,
         [typeof(MimirService)] = Module.Telemetry,
-        [typeof(NodeLogBackend)] = Module.Telemetry,
-        [typeof(NodeTraceService)] = Module.Telemetry,
+        // NodeLogBackend and NodeTraceService are deliberately absent: they take the tenant they
+        // ask the node as, so TelemetryBackendRouter constructs one of each per tenant instead of
+        // DI resolving them. That is the same reason ClusterRoutedLogBackend and
+        // ClusterRoutedTraceService have never been here — only the router that builds them is.
         [typeof(NotificationProviderConfigService)] = Module.Telemetry,
         [typeof(NotificationService)] = Module.Telemetry,
         [typeof(PromMetricsService)] = Module.Telemetry,

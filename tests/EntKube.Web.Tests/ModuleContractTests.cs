@@ -195,11 +195,17 @@ public class ModuleContractTests
     /// it never used</b> — <c>await using</c>, then not one query. Nothing failed, because an EF
     /// context opens no connection until it is asked something; it is only visible as a count on
     /// this ratchet, which is a fair argument for counting.</para>
+    /// <para><b>Telemetry 6 → 5.</b> <c>TelemetryNodeClient</c> came off without being aimed at: it
+    /// held the shared context to read its component <em>and the cluster's kubeconfig in the same
+    /// projection</em>, and once the component came from <c>ICatalogApi</c> and the request went
+    /// through the seam's new <c>ProxyServiceAsync</c>, nothing was left to hold a context for. One
+    /// file moved three ratchets — this one, custody and the Catalog contract — which is what "the
+    /// two ratchets have converged" was predicting.</para>
     /// </summary>
     private static readonly Dictionary<Module, int> Baseline = new()
     {
         [Module.DataServices] = 12,
-        [Module.Telemetry] = 6,
+        [Module.Telemetry] = 5,
         [Module.Connectivity] = 8,
         [Module.Support] = 7,
         [Module.Catalog] = 6,
