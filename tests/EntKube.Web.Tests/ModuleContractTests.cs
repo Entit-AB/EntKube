@@ -163,11 +163,43 @@ public class ModuleContractTests
     /// which is a Catalog question. Asking <c>ICatalogApi</c> instead left it with no reason to
     /// hold a context at all. That is the shape the paragraph above predicts: the Catalog
     /// contract is what takes services off this list, one read at a time.</para>
+    ///
+    /// <para><b>Telemetry 9 → 6, and it took the fifth module contract.</b> Three services came off
+    /// at once — <c>MimirService</c>, <c>TempoService</c> and <c>EntKubeTelemetryService</c> — and
+    /// they were held by the <em>same</em> query, spelled out by hand in each:
+    /// <c>StorageLinks.FirstOrDefaultAsync(s =&gt; s.Id == storageLinkId &amp;&amp; s.TenantId ==
+    /// tenantId)</c>, to turn a bucket into object-store chart values. Each read exactly three
+    /// fields off it (region, bucket, endpoint). <c>StorageLink</c> belongs to DataServices, which
+    /// had no contract, so <c>IDataServicesApi</c> is that one method and nothing else.</para>
+    ///
+    /// <para>It starts with <b>four</b> callers rather than none, which is the whole of what #138
+    /// got wrong: the four earlier contracts were written as complete-looking surfaces first and
+    /// adopted later, two of them not at all for months. This one was written from the callers
+    /// backwards, and the method list is literally what they asked for — no list method, no
+    /// find-by-name, because nothing outside DataServices does either.</para>
+    ///
+    /// <para><c>StorageLink</c> also makes the point that <c>ClusterSummary</c> had to make the
+    /// hard way: the DTO carries the <em>whole</em> row, because a storage link's access keys live
+    /// in the vault and not on the entity. That is a fact about the schema, not a property of
+    /// contracts, so <c>ModuleApiTests</c> asserts it — if a key ever lands on the row, the test
+    /// says so instead of the contract quietly handing it out.</para>
+    ///
+    /// <para>⚠️ <c>LokiService</c> is the fourth caller and did <b>not</b> come off the list. Its
+    /// storage read converted like the others, but <c>ResolveLokiInfoAsync</c> loads the cluster
+    /// <em>with its components</em> and reads <c>cluster.Kubeconfig</c> off the row — a credential
+    /// site, so it belongs to the custody conversion. It is worth being explicit that converting
+    /// one of a service's two reasons for holding the context buys nothing on this ratchet, and
+    /// the comment now sits on its constructor so the next reader does not have to find out.</para>
+    ///
+    /// <para><c>EntKubeTelemetryService.ConfigureIdentityAsync</c> was also <b>creating a context
+    /// it never used</b> — <c>await using</c>, then not one query. Nothing failed, because an EF
+    /// context opens no connection until it is asked something; it is only visible as a count on
+    /// this ratchet, which is a fair argument for counting.</para>
     /// </summary>
     private static readonly Dictionary<Module, int> Baseline = new()
     {
         [Module.DataServices] = 12,
-        [Module.Telemetry] = 9,
+        [Module.Telemetry] = 6,
         [Module.Connectivity] = 8,
         [Module.Support] = 7,
         [Module.Catalog] = 6,

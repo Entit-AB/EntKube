@@ -53,6 +53,10 @@ internal static class DataServicesServices
         services.AddHostedService<MessagingStatusPollingService>();
         services.AddHostedService<SearchStatusPollingService>();
 
+        // The module's contract — what everyone else is allowed to know about it.
+        services.AddScoped<EntKube.Contracts.DataServices.IDataServicesApi,
+            EntKube.Web.Modules.Api.DataServicesApi>();
+
         return services;
     }
 }

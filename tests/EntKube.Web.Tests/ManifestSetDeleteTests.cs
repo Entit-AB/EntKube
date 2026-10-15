@@ -100,7 +100,7 @@ public class ManifestSetDeleteTests : IDisposable
                 new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
                 new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object)),
             tokens,
-            new EntKubeTelemetryService(testDb.Factory, vault, tokens,
+            new EntKubeTelemetryService(new EntKube.Web.Modules.Api.DataServicesApi(testDb.Factory), vault, tokens,
                 new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), config),
             config,
             clusters,

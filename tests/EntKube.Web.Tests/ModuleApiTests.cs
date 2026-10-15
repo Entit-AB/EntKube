@@ -1,4 +1,5 @@
 using EntKube.Contracts.Catalog;
+using EntKube.Contracts.DataServices;
 using EntKube.Contracts.Delivery;
 using EntKube.Contracts.Fleet;
 using EntKube.Web.Data;
@@ -28,6 +29,7 @@ public class ModuleApiTests : IDisposable
     private readonly Guid theirTenant = Guid.NewGuid();
     private Guid ourCluster, theirCluster, ourComponent, theirComponent;
     private Guid ourApp, theirApp, ourDeployment, theirDeployment;
+    private Guid ourStorageLink, theirStorageLink;
 
     public ModuleApiTests()
     {
@@ -37,14 +39,17 @@ public class ModuleApiTests : IDisposable
         db = factory.CreateDbContext();
         db.Database.EnsureCreated();
 
-        Seed(ourTenant, "ours", out ourCluster, out ourComponent, out ourApp, out ourDeployment);
-        Seed(theirTenant, "theirs", out theirCluster, out theirComponent, out theirApp, out theirDeployment);
+        Seed(ourTenant, "ours", out ourCluster, out ourComponent, out ourApp, out ourDeployment,
+            out ourStorageLink);
+        Seed(theirTenant, "theirs", out theirCluster, out theirComponent, out theirApp,
+            out theirDeployment, out theirStorageLink);
         db.SaveChanges();
     }
 
     private void Seed(Guid tenantId, string label, out Guid clusterId, out Guid componentId,
-        out Guid appId, out Guid deploymentId)
+        out Guid appId, out Guid deploymentId, out Guid storageLinkId)
     {
+        storageLinkId = Guid.NewGuid();
         Guid environmentId = Guid.NewGuid();
         clusterId = Guid.NewGuid();
         componentId = Guid.NewGuid();
@@ -71,6 +76,12 @@ public class ModuleApiTests : IDisposable
             Id = deploymentId, AppId = appId, Name = $"{label}-deploy",
             EnvironmentId = environmentId, ClusterId = clusterId, Namespace = label,
         });
+        db.StorageLinks.Add(new StorageLink
+        {
+            Id = storageLinkId, TenantId = tenantId, EnvironmentId = environmentId,
+            Provider = StorageProvider.CleuraS3, Name = $"{label}-bucket",
+            Endpoint = $"https://s3.{label}.example", BucketName = $"{label}-chunks", Region = "Kna1",
+        });
     }
 
     public void Dispose()
@@ -83,6 +94,7 @@ public class ModuleApiTests : IDisposable
     private ICatalogApi Catalog => new CatalogApi(factory);
     private IFleetApi Fleet => new FleetApi(factory);
     private IDeliveryApi Delivery => new DeliveryApi(factory);
+    private IDataServicesApi DataServices => new DataServicesApi(factory);
 
     [Fact]
     public async Task Catalog_answers_for_the_asking_tenant_and_refuses_the_neighbour()
@@ -216,6 +228,69 @@ public class ModuleApiTests : IDisposable
         // contract field that silently stops being projected.
         ours.EnvironmentName.Should().Be("ours-env");
         (await Delivery.GetDeploymentsForClusterAsync(ourTenant, theirCluster)).Should().BeEmpty();
+    }
+
+    [Fact]
+    public async Task DataServices_answers_for_the_asking_tenant_and_refuses_the_neighbour()
+    {
+        StorageLinkSummary ours = (await DataServices.GetStorageLinkAsync(ourTenant, ourStorageLink))
+            .Should().NotBeNull().And.Subject.As<StorageLinkSummary>();
+
+        (await DataServices.GetStorageLinkAsync(ourTenant, theirStorageLink)).Should().BeNull(
+            "the four telemetry services this contract was written for were each handed a "
+            + "storageLinkId and a tenantId as independent parameters");
+
+        // The three fields every caller reads. The enum is checked by ordinal across every member
+        // in its own test below, since one value round-tripping here would not notice a member
+        // appended to only one of the two.
+        ours.Endpoint.Should().Be("https://s3.ours.example");
+        ours.BucketName.Should().Be("ours-chunks");
+        ours.Region.Should().Be("Kna1");
+        ours.Provider.Should().Be(StorageProviderKind.CleuraS3);
+    }
+
+    /// <summary>
+    /// <see cref="StorageProviderKind"/> is mapped from <see cref="StorageProvider"/> by a cast
+    /// through <c>int</c>, which is the cheapest mapping and the one that fails silently: a member
+    /// added to one enum and not the other configures a chart for the wrong provider, with nothing
+    /// to say so. Compared by name at every ordinal, so either edit fails here.
+    ///
+    /// <para>Names are compared case-insensitively on purpose — the entity spells them
+    /// <c>MinIO</c> and <c>CubeFS</c>, the contract <c>Minio</c> and <c>CubeFs</c>, and the
+    /// contract follows .NET naming rather than copying the entity's.</para>
+    /// </summary>
+    [Fact]
+    public void The_storage_provider_enums_agree_member_for_member()
+    {
+        string[] entity = Enum.GetNames<StorageProvider>();
+        string[] contract = Enum.GetNames<StorageProviderKind>();
+
+        contract.Should().BeEquivalentTo(entity, o => o.WithStrictOrdering().Using<string>(
+            c => c.Subject.Should().BeEquivalentTo(c.Expectation)).WhenTypeIs<string>());
+
+        foreach (StorageProvider p in Enum.GetValues<StorageProvider>())
+        {
+            ((int)(StorageProviderKind)(int)p).Should().Be((int)p,
+                $"{p} must keep its ordinal, because the projection casts rather than switches");
+        }
+    }
+
+    /// <summary>
+    /// A storage link's access keys live in the vault, not on the row — which is why
+    /// <see cref="StorageLinkSummary"/> can carry the whole row where
+    /// <see cref="ClusterSummary"/> cannot. That is a fact about the schema and not about
+    /// contracts, so it is asserted rather than assumed: if a key ever lands on the entity,
+    /// this fails instead of the contract quietly handing it out.
+    /// </summary>
+    [Fact]
+    public void A_storage_link_summary_carries_no_credential()
+    {
+        typeof(StorageLink).GetProperties().Select(p => p.Name)
+            .Should().NotContain(n => n.Contains("AccessKey", StringComparison.OrdinalIgnoreCase)
+                                   || n.Contains("SecretKey", StringComparison.OrdinalIgnoreCase)
+                                   || n.Contains("Password", StringComparison.OrdinalIgnoreCase),
+                "the contract projects every field of this entity, so a credential added to it "
+                + "would be published to every module without anyone choosing to");
     }
 
     /// <summary>
