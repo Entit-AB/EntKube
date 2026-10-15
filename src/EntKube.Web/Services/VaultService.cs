@@ -1392,6 +1392,71 @@ public class VaultService(
     }
 
     /// <summary>
+    /// Removes every vault secret belonging to a CNPG database, for one tenant.
+    ///
+    /// <para><b>Why this is here rather than in <c>CnpgService</c>.</b> It was in
+    /// <c>CnpgService</c>, deleting straight out of <c>db.VaultSecrets</c> with
+    /// <c>Where(s =&gt; s.CnpgDatabaseId == databaseId)</c> — <b>no tenant predicate</b>, in a
+    /// method that was handed a <c>tenantId</c> and never used it. A database id from another
+    /// tenant therefore deleted that tenant's secrets. The predicate here is the one
+    /// <see cref="GetCnpgDatabaseSecretsAsync"/> has always used, which is the point: the read and
+    /// the delete of the same rows should not be able to disagree about who owns them.</para>
+    /// </summary>
+    public async Task DeleteCnpgDatabaseSecretsAsync(
+        Guid tenantId, Guid cnpgDatabaseId, CancellationToken ct = default)
+    {
+        using SecretsDbContext db = dbFactory.CreateDbContext();
+
+        List<VaultSecret> secrets = await db.Set<VaultSecret>()
+            .Where(s => s.Vault.TenantId == tenantId && s.CnpgDatabaseId == cnpgDatabaseId)
+            .ToListAsync(ct);
+
+        if (secrets.Count == 0) return;
+
+        db.Set<VaultSecret>().RemoveRange(secrets);
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Removes every vault secret belonging to a MongoDB database, for one tenant. Same history as
+    /// <see cref="DeleteCnpgDatabaseSecretsAsync"/>, except that Mongo's version had no tenant in
+    /// scope at all.
+    /// </summary>
+    public async Task DeleteMongoDatabaseSecretsAsync(
+        Guid tenantId, Guid mongoDatabaseId, CancellationToken ct = default)
+    {
+        using SecretsDbContext db = dbFactory.CreateDbContext();
+
+        List<VaultSecret> secrets = await db.Set<VaultSecret>()
+            .Where(s => s.Vault.TenantId == tenantId && s.MongoDatabaseId == mongoDatabaseId)
+            .ToListAsync(ct);
+
+        if (secrets.Count == 0) return;
+
+        db.Set<VaultSecret>().RemoveRange(secrets);
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Removes every vault secret scoped to a managed MongoDB cluster — the admin password among
+    /// them, which is why deleting somebody else's would be worse than the database case.
+    /// </summary>
+    public async Task DeleteMongoClusterSecretsAsync(
+        Guid tenantId, Guid mongoClusterId, CancellationToken ct = default)
+    {
+        using SecretsDbContext db = dbFactory.CreateDbContext();
+
+        List<VaultSecret> secrets = await db.Set<VaultSecret>()
+            .Where(s => s.Vault.TenantId == tenantId && s.MongoClusterId == mongoClusterId)
+            .ToListAsync(ct);
+
+        if (secrets.Count == 0) return;
+
+        db.Set<VaultSecret>().RemoveRange(secrets);
+        await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
     /// Returns the decrypted password for a CNPG database. Used when another
     /// service (e.g. Keycloak) needs to read the DB password to propagate it.
     /// </summary>

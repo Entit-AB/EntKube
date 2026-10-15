@@ -194,9 +194,9 @@ public class MongoService(
             ?? throw new InvalidOperationException("MongoDB cluster not found.");
 
         foreach (MongoDatabase database in mongo.Databases)
-            await DeleteDatabaseSecretsAsync(database.Id, ct);
+            await DeleteDatabaseSecretsAsync(tenantId, database.Id, ct);
 
-        await DeleteClusterSecretsAsync(mongo.Id, ct);
+        await DeleteClusterSecretsAsync(tenantId, mongo.Id, ct);
 
         db.MongoClusters.Remove(mongo);
         await db.SaveChangesAsync(ct);
@@ -243,12 +243,12 @@ public class MongoService(
 
         foreach (MongoDatabase database in mongo.Databases)
         {
-            await DeleteDatabaseSecretsAsync(database.Id, ct);
+            await DeleteDatabaseSecretsAsync(tenantId, database.Id, ct);
         }
 
         // Remove cluster-level vault secrets (admin password, etc.).
 
-        await DeleteClusterSecretsAsync(mongo.Id, ct);
+        await DeleteClusterSecretsAsync(tenantId, mongo.Id, ct);
 
         // Remove the cluster record (cascades to databases and backups).
 
@@ -1079,7 +1079,7 @@ public class MongoService(
 
         // Remove vault secrets.
 
-        await DeleteDatabaseSecretsAsync(database.Id, ct);
+        await DeleteDatabaseSecretsAsync(tenantId, database.Id, ct);
 
         // Remove the database record.
 
@@ -1104,7 +1104,7 @@ public class MongoService(
             .FirstOrDefaultAsync(d => d.Id == databaseId && d.MongoClusterId == mongo.Id, ct)
             ?? throw new InvalidOperationException("Database not found.");
 
-        await DeleteDatabaseSecretsAsync(database.Id, ct);
+        await DeleteDatabaseSecretsAsync(tenantId, database.Id, ct);
 
         db.MongoDatabases.Remove(database);
         await db.SaveChangesAsync(ct);
@@ -2430,33 +2430,18 @@ public class MongoService(
 
     /// <summary>
     /// Removes all vault secrets associated with a MongoDB database.
+    ///
+    /// <para>Delegated to <c>VaultService</c>, which owns that table. Both of these read it
+    /// directly and filtered on the owning id alone, with <b>no tenant in scope at all</b> — so a
+    /// database or cluster id from another tenant deleted that tenant's secrets, the cluster's
+    /// admin password among them.</para>
     /// </summary>
-    private async Task DeleteDatabaseSecretsAsync(Guid databaseId, CancellationToken ct)
-    {
-        using ApplicationDbContext secretDb = dbFactory.CreateDbContext();
+    private async Task DeleteDatabaseSecretsAsync(Guid tenantId, Guid databaseId, CancellationToken ct)
+        => await vaultService.DeleteMongoDatabaseSecretsAsync(tenantId, databaseId, ct);
 
-        List<VaultSecret> secrets = await secretDb.VaultSecrets
-            .Where(s => s.MongoDatabaseId == databaseId)
-            .ToListAsync(ct);
-
-        secretDb.VaultSecrets.RemoveRange(secrets);
-        await secretDb.SaveChangesAsync(ct);
-    }
-
-    /// <summary>
-    /// Removes all vault secrets scoped to a managed MongoDB cluster (e.g. the admin password).
-    /// </summary>
-    private async Task DeleteClusterSecretsAsync(Guid mongoClusterId, CancellationToken ct)
-    {
-        using ApplicationDbContext secretDb = dbFactory.CreateDbContext();
-
-        List<VaultSecret> secrets = await secretDb.VaultSecrets
-            .Where(s => s.MongoClusterId == mongoClusterId)
-            .ToListAsync(ct);
-
-        secretDb.VaultSecrets.RemoveRange(secrets);
-        await secretDb.SaveChangesAsync(ct);
-    }
+    /// <summary>Removes all vault secrets scoped to a managed MongoDB cluster.</summary>
+    private async Task DeleteClusterSecretsAsync(Guid tenantId, Guid mongoClusterId, CancellationToken ct)
+        => await vaultService.DeleteMongoClusterSecretsAsync(tenantId, mongoClusterId, ct);
 
     // ──────── Admin Credentials ────────
 

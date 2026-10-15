@@ -2088,18 +2088,13 @@ public class CnpgService(
 
     /// <summary>
     /// Removes all vault secrets associated with a CNPG database.
+    ///
+    /// <para>Delegated to <c>VaultService</c>, which owns that table. This read it directly and
+    /// filtered on <c>CnpgDatabaseId</c> alone — with a <c>tenantId</c> in scope that it never
+    /// used — so a database id from another tenant deleted that tenant's secrets.</para>
     /// </summary>
     private async Task DeleteDatabaseSecretsAsync(Guid tenantId, Guid databaseId, CancellationToken ct)
-    {
-        using ApplicationDbContext secretDb = dbFactory.CreateDbContext();
-
-        List<VaultSecret> secrets = await secretDb.VaultSecrets
-            .Where(s => s.CnpgDatabaseId == databaseId)
-            .ToListAsync(ct);
-
-        secretDb.VaultSecrets.RemoveRange(secrets);
-        await secretDb.SaveChangesAsync(ct);
-    }
+        => await vaultService.DeleteCnpgDatabaseSecretsAsync(tenantId, databaseId, ct);
 
     /// <summary>
     /// Generates a secure random password for database roles.
