@@ -36,7 +36,10 @@ public sealed class DeliveryApi(IDbContextFactory<DeliveryDbContext> dbFactory) 
     {
         await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        return await ScopedDeployments(db, tenantId).Where(d => d.Id == deploymentId).Select(ToDeployment).FirstOrDefaultAsync(ct);
+        Row? row = await ScopedDeployments(db, tenantId)
+            .Where(d => d.Id == deploymentId).Select(ToRow).FirstOrDefaultAsync(ct);
+
+        return row is null ? null : ToDeployment(row);
     }
 
     public async Task<IReadOnlyList<DeploymentSummary>> GetDeploymentsForTenantAsync(
@@ -44,7 +47,8 @@ public sealed class DeliveryApi(IDbContextFactory<DeliveryDbContext> dbFactory) 
     {
         await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        return await ScopedDeployments(db, tenantId).Select(ToDeployment).ToListAsync(ct);
+        return (await ScopedDeployments(db, tenantId).Select(ToRow).ToListAsync(ct))
+            .Select(ToDeployment).ToList();
     }
 
     public async Task<IReadOnlyList<DeploymentSummary>> GetDeploymentsForAppEnvironmentAsync(
@@ -52,9 +56,10 @@ public sealed class DeliveryApi(IDbContextFactory<DeliveryDbContext> dbFactory) 
     {
         await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        return await ScopedDeployments(db, tenantId)
+        return (await ScopedDeployments(db, tenantId)
             .Where(d => d.AppId == appId && d.EnvironmentId == environmentId)
-            .Select(ToDeployment).ToListAsync(ct);
+            .Select(ToRow).ToListAsync(ct))
+            .Select(ToDeployment).ToList();
     }
 
     public async Task<IReadOnlyList<DeploymentSummary>> GetDeploymentsForClusterAsync(
@@ -62,7 +67,9 @@ public sealed class DeliveryApi(IDbContextFactory<DeliveryDbContext> dbFactory) 
     {
         await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        return await ScopedDeployments(db, tenantId).Where(d => d.ClusterId == clusterId).Select(ToDeployment).ToListAsync(ct);
+        return (await ScopedDeployments(db, tenantId)
+            .Where(d => d.ClusterId == clusterId).Select(ToRow).ToListAsync(ct))
+            .Select(ToDeployment).ToList();
     }
 
     private static IQueryable<Data.App> ScopedApps(DeliveryDbContext db, Guid tenantId)
@@ -76,8 +83,43 @@ public sealed class DeliveryApi(IDbContextFactory<DeliveryDbContext> dbFactory) 
         a => new AppSummary(
             a.Id, a.Customer.TenantId, a.CustomerId, a.Customer.Name, a.Name, a.Namespace);
 
-    private static readonly Expression<Func<Data.AppDeployment, DeploymentSummary>> ToDeployment =
-        d => new DeploymentSummary(
+    /// <summary>
+    /// The deployment row as the database hands it over, carrying the <em>entity</em> enums.
+    ///
+    /// <para><b>Why this intermediate exists.</b> The projection used to build
+    /// <see cref="DeploymentSummary"/> directly with <c>(ContractDeploymentType)(int)d.Type</c>, and
+    /// <c>Type</c>, <c>SyncStatus</c> and <c>HealthStatus</c> are all persisted as <b>text</b>
+    /// (<c>HasConversion&lt;string&gt;()</c> in <c>DeliveryModel</c>). Inside an
+    /// <see cref="Expression"/> that cast is not a C# cast — it becomes
+    /// <c>CAST("Type" AS integer)</c> in SQL, which PostgreSQL rejects outright:
+    /// <c>22P02: invalid input syntax for type integer: "HelmChart"</c>. That is the error the cost
+    /// report raised the first time anything called this contract.</para>
+    ///
+    /// <para>⚠️ <b>On SQLite the same cast silently returns 0</b>, so every deployment came back as
+    /// <c>Manual</c> with status <c>0</c> and no error at all — which is why the unit tests passed
+    /// while the feature was broken. A projection that casts an enum has to be split like this: the
+    /// database converts text to the entity enum (it owns the converter), and the contract enum is
+    /// mapped afterwards, in memory, where a cast means what it says.</para>
+    /// </summary>
+    private sealed record Row(
+        Guid Id,
+        Guid TenantId,
+        Guid AppId,
+        string AppName,
+        Guid EnvironmentId,
+        string EnvironmentName,
+        Guid ClusterId,
+        string Name,
+        Data.DeploymentType Type,
+        string Namespace,
+        Data.SyncStatus SyncStatus,
+        Data.HealthStatus HealthStatus,
+        string? StatusMessage,
+        DateTime? LastSyncedAt,
+        bool IsManaged);
+
+    private static readonly Expression<Func<Data.AppDeployment, Row>> ToRow =
+        d => new Row(
             d.Id,
             d.App.Customer.TenantId,
             d.AppId,
@@ -86,11 +128,32 @@ public sealed class DeliveryApi(IDbContextFactory<DeliveryDbContext> dbFactory) 
             d.Environment.Name,
             d.ClusterId,
             d.Name,
-            (ContractDeploymentType)(int)d.Type,
+            d.Type,
             d.Namespace,
-            (ContractSyncStatus)(int)d.SyncStatus,
-            (ContractHealthStatus)(int)d.HealthStatus,
+            d.SyncStatus,
+            d.HealthStatus,
             d.StatusMessage,
             d.LastSyncedAt,
             d.IsManaged);
+
+    /// <summary>
+    /// Entity enums to contract enums, by ordinal — which is only sound while the two declarations
+    /// agree member for member, so <c>ModuleApiTests</c> checks that they do rather than trusting it.
+    /// </summary>
+    private static DeploymentSummary ToDeployment(Row r) => new(
+        r.Id,
+        r.TenantId,
+        r.AppId,
+        r.AppName,
+        r.EnvironmentId,
+        r.EnvironmentName,
+        r.ClusterId,
+        r.Name,
+        (ContractDeploymentType)(int)r.Type,
+        r.Namespace,
+        (ContractSyncStatus)(int)r.SyncStatus,
+        (ContractHealthStatus)(int)r.HealthStatus,
+        r.StatusMessage,
+        r.LastSyncedAt,
+        r.IsManaged);
 }

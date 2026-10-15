@@ -179,7 +179,7 @@ else if (selectedEnv is not null)
     {
         @foreach (KubernetesCluster cluster in envClusters)
         {
-            <CaTrustTab TenantId="TenantId" ClusterId="cluster.Id" ClusterName="cluster.Name" />
+            <CaTrustTab TenantId="TenantId" ClusterId="cluster.Id" ClusterName="@cluster.Name" />
         }
     }
 }

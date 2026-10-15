@@ -1095,7 +1095,7 @@
 {
     @if (IsPortalView)
     {
-        <AppGovernancePanel AppId="App.Id" AppName="App.Name" EnvironmentId="Environment.Id" CustomerId="App.CustomerId" />
+        <AppGovernancePanel AppId="App.Id" AppName="@App.Name" EnvironmentId="Environment.Id" CustomerId="App.CustomerId" />
     }
     else
     {
@@ -1109,7 +1109,7 @@
    ══════════════════════════════════════════════════════ *@
 @if (section == "connectivity")
 {
-    <ConnectivityTab AppId="App.Id" EnvironmentId="Environment.Id" TenantId="TenantId" AppName="App.Name" IsReadOnly="IsPortalView" />
+    <ConnectivityTab AppId="App.Id" EnvironmentId="Environment.Id" TenantId="TenantId" AppName="@App.Name" IsReadOnly="IsPortalView" />
 }
 
 
