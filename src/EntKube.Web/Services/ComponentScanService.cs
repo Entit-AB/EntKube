@@ -154,7 +154,7 @@ public class ComponentScanService(
 
         // Get existing components on this cluster to mark already-tracked ones.
 
-        List<ClusterComponent> existingComponents = await vaultService.GetComponentsAsync(clusterId, ct);
+        List<ClusterComponent> existingComponents = await vaultService.GetComponentsAsync(tenantId, clusterId, ct);
 
         // Include both Name and ReleaseName so that components registered via the
         // catalog (where Name = catalog key, e.g. "cloudnative-pg") are still
@@ -1043,7 +1043,7 @@ public class ComponentScanService(
         // Existing tracked names, so we can flag components already registered.
         // Mirror the Helm scan: match on both Name (catalog key) and ReleaseName.
 
-        List<ClusterComponent> existingComponents = await vaultService.GetComponentsAsync(clusterId, ct);
+        List<ClusterComponent> existingComponents = await vaultService.GetComponentsAsync(tenantId, clusterId, ct);
 
         HashSet<string> trackedNames = new(StringComparer.OrdinalIgnoreCase);
         foreach (ClusterComponent c in existingComponents)

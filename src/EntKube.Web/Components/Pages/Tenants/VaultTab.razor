@@ -1088,7 +1088,7 @@ else
 
         foreach (KubernetesCluster cluster in clusters)
         {
-            List<ClusterComponent> components = await VaultService.GetComponentsAsync(cluster.Id);
+            List<ClusterComponent> components = await VaultService.GetComponentsAsync(TenantId, cluster.Id);
 
             foreach (ClusterComponent comp in components)
             {

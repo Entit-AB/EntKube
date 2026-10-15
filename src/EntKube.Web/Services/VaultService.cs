@@ -3093,14 +3093,38 @@ public class VaultService(
     }
 
     // --- Cluster Components ---
+    //
+    // ⚠️ These three are a BOUNDARY VIOLATION that is deliberately left in place for now, and a
+    // separate authorization bug that is fixed here. ClusterComponent is CATALOG's table, reached
+    // from Secrets' context through `Set<ClusterComponent>()` — public on DbContext, so it
+    // compiles against a module context that exposes no property for it. That is what made the
+    // adoption ratchet's "foreign writes: 0" untrue; see CatalogContractAdoptionTests.
+    //
+    // Moving the CRUD into Catalog is a PAGE refactor, not a service move: ClusterDetail reads
+    // thirteen properties off the entity (including HelmRepoUrl, which InstalledComponent does not
+    // carry), mirrors saved values back onto the instances in place, and feeds them to
+    // entity-typed helpers. So the move waits, and the dangerous half does not: until now none of
+    // these took a tenant, so a page could create, list or DELETE a component on any cluster in
+    // the installation by id.
 
     /// <summary>
     /// Adds a new component (helm chart, deployment, etc.) to a cluster.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose cluster to add it to. Every one of the nine production callers already had a tenant
+    /// in scope — three pages with a <c>TenantId</c> parameter, two scan methods and the blueprint
+    /// generator with a <c>tenantId</c> argument — so the id was never the only thing available,
+    /// just the only thing passed.
+    /// </param>
     public async Task<ClusterComponent> CreateComponentAsync(
-        Guid clusterId, string name, string componentType, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string name, string componentType, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.KubernetesClusters.AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("That cluster is not this tenant's.");
+        }
 
         ClusterComponent component = new()
         {
@@ -3118,12 +3142,18 @@ public class VaultService(
     /// <summary>
     /// Lists all components for a cluster.
     /// </summary>
-    public async Task<List<ClusterComponent>> GetComponentsAsync(Guid clusterId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose cluster's components. The predicate reaches the tenant through the component's
+    /// cluster, which is the same route <c>CatalogApi.Scoped</c> takes — so a cluster id belonging
+    /// to someone else now returns nothing instead of their component list.
+    /// </param>
+    public async Task<List<ClusterComponent>> GetComponentsAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<ClusterComponent>()
-            .Where(c => c.ClusterId == clusterId)
+            .Where(c => c.ClusterId == clusterId && c.Cluster.TenantId == tenantId)
             .OrderBy(c => c.Name)
             .ToListAsync(ct);
     }
@@ -3131,11 +3161,20 @@ public class VaultService(
     /// <summary>
     /// Deletes a component by ID. Cascade will also remove its secrets.
     /// </summary>
-    public async Task<bool> DeleteComponentAsync(Guid componentId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose component. ⚠️ This is the one that mattered: <c>FindAsync(componentId)</c> deletes by
+    /// primary key alone, so before this parameter existed a component id was the entire
+    /// authorization for destroying it <em>and</em> its secrets by cascade — and this is the only
+    /// production delete of a <c>ClusterComponent</c> row anywhere in the product. A component the
+    /// tenant does not own now answers false, exactly as a missing one does.
+    /// </param>
+    public async Task<bool> DeleteComponentAsync(
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
-        ClusterComponent? component = await db.Set<ClusterComponent>().FindAsync([componentId], ct);
+        ClusterComponent? component = await db.Set<ClusterComponent>()
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct);
 
         if (component is null)
         {

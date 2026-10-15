@@ -2052,7 +2052,7 @@ else if (section == "components")
 
     private async Task LoadComponents()
     {
-        components = await VaultService.GetComponentsAsync(Cluster.Id);
+        components = await VaultService.GetComponentsAsync(TenantId, Cluster.Id);
         List<KeycloakComponentConfig> kcConfigs = await KeycloakService.GetConfigsForClusterAsync(TenantId, Cluster.Id);
         keycloakConfigsByComponentId = kcConfigs
             .Where(c => c.ClusterComponentId.HasValue)
@@ -2145,7 +2145,7 @@ else if (section == "components")
         try
         {
             BlueprintFromClusterService.GenerateResult result =
-                await BlueprintFromClusterService.GenerateAsync(Cluster.Id, blueprintName, blueprintDescription);
+                await BlueprintFromClusterService.GenerateAsync(TenantId, Cluster.Id, blueprintName, blueprintDescription);
 
             string skippedNote = result.Skipped.Count > 0
                 ? $" Skipped {result.Skipped.Count} unrecognized component(s): {string.Join(", ", result.Skipped)}."
@@ -2987,7 +2987,7 @@ else if (section == "components")
             selectedComponentId = null;
         }
 
-        await VaultService.DeleteComponentAsync(componentId);
+        await VaultService.DeleteComponentAsync(TenantId, componentId);
         await LoadComponents();
     }
 
