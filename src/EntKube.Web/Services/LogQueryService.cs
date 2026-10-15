@@ -126,7 +126,7 @@ public class LogQueryService(
         Task<bool> nativeProbe = Native(tenantId).IsEnabled
             ? NativeUsableAsync(tenantId, clusterId, ct)
             : Task.FromResult(false);
-        Task<bool> lokiProbe = loki.IsAvailableAsync(clusterId, ct);
+        Task<bool> lokiProbe = loki.IsAvailableAsync(tenantId, clusterId, ct);
         return (await WithinBudgetAsync(nativeProbe, clusterId, "EntKube telemetry"),
                 await WithinBudgetAsync(lokiProbe, clusterId, "Loki"));
     }
@@ -154,25 +154,25 @@ public class LogQueryService(
 
     public async Task<bool> IsAvailableAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
         => await UseNativeAsync(tenantId, clusterId, LogBackendKind.Auto, ct)
-            || await loki.IsAvailableAsync(clusterId, ct);
+            || await loki.IsAvailableAsync(tenantId, clusterId, ct);
 
     public async Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(
         Guid tenantId, Guid clusterId, LogBackendKind backend = LogBackendKind.Auto, int windowMinutes = 60, CancellationToken ct = default)
         => await UseNativeAsync(tenantId, clusterId, backend, ct)
             ? await Native(tenantId).GetNamespacesAsync(clusterId, windowMinutes, ct)
-            : await loki.GetNamespacesAsync(clusterId, ct);
+            : await loki.GetNamespacesAsync(tenantId, clusterId, ct);
 
     public async Task<KubernetesOperationResult<List<string>>> GetPodsAsync(
         Guid tenantId, Guid clusterId, string namespaceName, LogBackendKind backend = LogBackendKind.Auto, int windowMinutes = 60, CancellationToken ct = default)
         => await UseNativeAsync(tenantId, clusterId, backend, ct)
             ? await Native(tenantId).GetPodsAsync(clusterId, namespaceName, windowMinutes, ct)
-            : await loki.GetPodsAsync(clusterId, namespaceName, ct);
+            : await loki.GetPodsAsync(tenantId, clusterId, namespaceName, ct);
 
     public async Task<KubernetesOperationResult<List<string>>> GetContainersAsync(
         Guid tenantId, Guid clusterId, string namespaceName, LogBackendKind backend = LogBackendKind.Auto, int windowMinutes = 60, CancellationToken ct = default)
         => await UseNativeAsync(tenantId, clusterId, backend, ct)
             ? await Native(tenantId).GetContainersAsync(clusterId, namespaceName, windowMinutes, ct)
-            : await loki.GetContainersAsync(clusterId, namespaceName, ct);
+            : await loki.GetContainersAsync(tenantId, clusterId, namespaceName, ct);
 
     public async Task<KubernetesOperationResult<List<LokiLogStream>>> QueryAsync(
         Guid tenantId, Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int limit = 200,
@@ -180,7 +180,7 @@ public class LogQueryService(
         => await UseNativeAsync(tenantId, clusterId, backend, ct)
             ? await Native(tenantId).QueryAsync(clusterId, filter, from, to, limit, ct)
             // Loki path: minLevel is re-applied client-side by the viewer; attribute filters are native-only.
-            : await loki.QueryRangeMultiAsync(clusterId, filter.Namespaces, filter.Pod, filter.Container, filter.Text, from, to, limit, ct);
+            : await loki.QueryRangeMultiAsync(tenantId, clusterId, filter.Namespaces, filter.Pod, filter.Container, filter.Text, from, to, limit, ct);
 
     /// <summary>
     /// Log-volume histogram for the native store; returns an empty set for Loki-backed clusters
@@ -191,7 +191,7 @@ public class LogQueryService(
         LogBackendKind backend = LogBackendKind.Auto, CancellationToken ct = default)
         => await UseNativeAsync(tenantId, clusterId, backend, ct)
             ? await Native(tenantId).GetHistogramAsync(clusterId, filter, from, to, buckets, ct)
-            : await loki.GetHistogramAsync(clusterId, filter, from, to, buckets, ct);
+            : await loki.GetHistogramAsync(tenantId, clusterId, filter, from, to, buckets, ct);
 }
 
 /// <summary>Which log backend the viewer queries. Auto picks by where the data is.</summary>

@@ -476,7 +476,26 @@ public class ClusterCredentialCustodyTests
     /// noticing because "the page only lists this tenant's clusters" reads like a check and is
     /// not one.</para>
     /// </summary>
-    private const int BaselineOccurrences = 25;
+    /// <summary>
+    /// <b>22 in 13 files.</b> <c>LokiService</c>, and like the two files before it, the reason it
+    /// could not move was written at the top of the file: <c>ResolveLokiInfoAsync</c> "loads the
+    /// cluster WITH its components and reads cluster.Kubeconfig off the row… so it moves with the
+    /// custody work (IClusterClient + ICatalogApi) rather than here — converting the storage read
+    /// on its own would otherwise look like this service had been dealt with".
+    ///
+    /// <para>It cost nothing to thread, which is the part worth recording: every caller of the
+    /// seven query methods is <c>LogQueryService</c>, and it already carries a <c>tenantId</c> on
+    /// all seven. So this was the "pick the method whose caller already holds a tenant" rule with
+    /// no plumbing at all — and until it was done, a cluster id alone answered about any cluster
+    /// in the installation, through a log viewer.</para>
+    ///
+    /// <para>The pooled SDK client is the same pool as before (<c>KubernetesProxyClientPool</c>,
+    /// keyed on the credential); what changed is that reaching it no longer requires holding one.
+    /// That distinction is why <c>GetPooledSdkClient</c> exists beside <c>CreateSdkClient</c> —
+    /// see <c>PrometheusService</c>, where a fresh client per query was "a fixed WAN latency added
+    /// to every tile".</para>
+    /// </summary>
+    private const int BaselineOccurrences = 22;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -640,7 +659,7 @@ public class ClusterCredentialCustodyTests
     /// seam's error contract is not the caller's, and a conversion that ignores that changes
     /// control flow silently.</para>
     /// </summary>
-    private const int BaselineFiles = 14;
+    private const int BaselineFiles = 13;
 
     private static (int Occurrences, int Files) Measure()
     {

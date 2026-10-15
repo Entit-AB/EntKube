@@ -547,7 +547,7 @@ shape the work turned out to have. Where it stands, against the figures this sec
 
 | measure | at the start | now |
 |---|---|---|
-| credential sites | 508 in 57 files | **25 in 14** |
+| credential sites | 508 in 57 files | **22 in 13** |
 | tautological seam calls (§4.0.1.1) | 19 | **0** |
 | foreign reads of `ClusterComponents` | 87 | **6** |
 | foreign *writes* to it | 22 | **0** |
@@ -658,13 +658,13 @@ bumped and a new image ships. The tenant goes on a factory in front of the inter
 checking, before the next cascade that ends at an interface, whether anything outside this process
 implements it.
 
-**What the remaining 25 are made of** (re-measured 2026-10-15, not carried forward — an earlier
+**What the remaining 22 are made of** (re-measured 2026-10-15, not carried forward — an earlier
 version of this list still named `ComponentScanService` with ten after it had reached zero).
-Eight files hold conversions that are ordinary work: `StorageLinkClientFactory` (3), `LokiService`
-(3), `StorageService` (2), `RemediationService` (2), `OpenStackKeystoneClient` (2),
+Seven files hold conversions that are ordinary work: `StorageLinkClientFactory` (3),
+`StorageService` (2), `RemediationService` (2), `OpenStackKeystoneClient` (2),
 `DeploymentImportService` (2), and single reads in `TenantService`,
-`KubernetesOperationsService`, `JitAccessService` and `PortalJitAccessPanel.razor`. *(`VpnService`
-held two and is at zero — see §5.4.)*
+`KubernetesOperationsService`, `JitAccessService` and `PortalJitAccessPanel.razor`.
+*(`VpnService` held two and `LokiService` three; both are at zero — see §5.4 and §4.0.1.5.)*
 
 Six of those sites are **blocked on one undecided seam shape**, and it is worth naming rather than
 rediscovering: `StorageService` + `StorageLinkClientFactory` reach an in-cluster S3 gateway with
@@ -678,6 +678,43 @@ a decision, not an oversight.
 The rest are the seam and its infrastructure, and are *supposed* to hold a credential:
 `KubeconfigMaterializationInterceptor` (2), `ClusterClient` (2), `ClusterChangeGate` (2) and one
 line of `Program.cs`.
+
+#### 4.0.1.5 Three blockers that were written down in advance (2026-10-15)
+
+`ConnectivityGraphService`, `VpnService` and `LokiService` are at zero, and all three had been
+*recorded* as blocked — twice in a comment at the top of the file, once in §5.4 of this document.
+Each note was correct about the dependency and each had the same shape: **this cannot move until
+that moves, and both have to move in the same change.**
+
+- `ConnectivityGraphService.ApplyNetworkPoliciesAsync` derived its tenant from the app and
+  explained that a tenant parameter "makes those reads reachable in `CustodyTriageTests`'s sense —
+  they have to move onto the seam in the same change".
+- `LokiService`'s header said `ResolveLokiInfoAsync` "loads the cluster WITH its components and
+  reads cluster.Kubeconfig off the row", so it had to move as custody work, because "converting
+  the storage read on its own would otherwise look like this service had been dealt with".
+- §5.4 said `VpnService`'s CLI invocation was "expressible, two credential reads", so it belonged
+  with the custody work rather than the gate work.
+
+**A recorded half-measure is a to-do with its precondition attached, and it is cheaper to read than
+to rediscover.** Two of the three cost nothing to thread once the precondition was met —
+`ConnectivityTab.razor` and `LogQueryService` already had a tenant on every relevant call — which
+is the §4.0.1.3 rule ("pick the method whose caller already holds a tenant") arriving for free.
+The generalisation worth keeping is the inverse: when a conversion looks blocked, write the note in
+the file and say *what would unblock it*, because the next person to read it is the one doing that
+other half.
+
+⚠️ **`LokiService` moved nothing on the foreign-read row, and that is a gap in the metric.** It
+read Catalog's table through `Include(c => c.Components)` on the cluster row, and
+`CatalogContractAdoptionTests` counts `.ClusterComponents`. A navigation read is the same coupling
+by a different spelling — it is a query against another module's table, it breaks the same way when
+that table moves, and the contract has to serve it either way.
+
+Measured independently (`ModuleServiceMap` for ownership, Catalog's own services excluded, as the
+test does): **8 navigation reads in 5 files** —`KubernetesOperationsService` (4), `AppRouteService`,
+`AppL4RouteService`, `IngressDashboardService` and `StorageService`. So the row that says 4 should
+say 12, and until the metric is taught, this coupling can grow for free in the one spelling nobody
+is counting. Same class of error as the file-name/type-name bug in §4.0.1.4, and the same lesson:
+a count that becomes an argument has to be checked against a second measurement.
 
 ## 5. The agent model
 
