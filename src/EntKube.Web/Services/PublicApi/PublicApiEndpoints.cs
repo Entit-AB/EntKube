@@ -68,13 +68,19 @@ public static class PublicApiEndpoints
 
         api.MapGet("/clusters/{clusterId:guid}/components", async (
             Guid clusterId, HttpContext ctx,
-            IDbContextFactory<ApplicationDbContext> dbFactory, CancellationToken ct) =>
+            IDbContextFactory<ApplicationDbContext> dbFactory,
+            EntKube.Contracts.Catalog.ICatalogApi catalog, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
             await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
             // The tenant predicate is on the CLUSTER, not just the component, so a guessed
             // cluster id from another tenant returns 404 rather than leaking its components.
+            //
+            // The existence check stays, and is not redundant: GetComponentsForClusterAsync is
+            // tenant-first and would return an empty list for a cluster that is not this
+            // tenant's, but an empty list is a 200 and the contract of this route is a 404.
+            // "Does not exist" and "has no components" are different answers.
             bool exists = await db.KubernetesClusters
                 .AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
             if (!exists)
@@ -82,10 +88,12 @@ public static class PublicApiEndpoints
                 return Results.NotFound();
             }
 
-            var components = await db.ClusterComponents
-                .AsNoTracking()
-                .Where(c => c.ClusterId == clusterId)
-                .OrderBy(c => c.Name)
+            // Asked of Catalog. The projection is unchanged field for field, including
+            // Status.ToString() — the contract's enum is a copy with the same member names in the
+            // same order, which ApiComponentStatusTests now asserts, because this route's JSON
+            // would otherwise change if either enum were edited alone.
+            var components = (await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct))
+                .OrderBy(c => c.Name, StringComparer.Ordinal)
                 .Select(c => new
                 {
                     id = c.Id,
@@ -97,7 +105,7 @@ public static class PublicApiEndpoints
                     version = c.HelmChartVersion,
                     installedAt = c.InstalledAt,
                 })
-                .ToListAsync(ct);
+                .ToList();
 
             return Results.Ok(components);
         }).RequireApiScope(ApiScopes.FleetRead);

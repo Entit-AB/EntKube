@@ -65,7 +65,10 @@ public class SmtpSettingsResolver(
     // tests — is not made to supply them. Without them the tenant's mailbox is simply not
     // consulted, which is exactly the behaviour this class had before.
     VaultService? vault = null,
-    MailboxTokenProvider? tokens = null)
+    MailboxTokenProvider? tokens = null,
+    // Same reason as the two above: a caller with no mail server to derive from need not supply
+    // it, and without it the tenant's mailbox is simply not consulted.
+    EntKube.Contracts.Catalog.ICatalogApi? catalog = null)
 {
     /// <summary>The address used when nothing names a better one.</summary>
     public const string DefaultFrom = "alerts@entkube.io";
@@ -169,7 +172,7 @@ public class SmtpSettingsResolver(
     /// </summary>
     private async Task<SmtpSettings?> FromSupportMailboxAsync(Guid tenantId, CancellationToken ct)
     {
-        if (vault is null)
+        if (vault is null || catalog is null)
         {
             return null;
         }
@@ -185,8 +188,11 @@ public class SmtpSettingsResolver(
             return null;
         }
 
-        ClusterComponent? component = await db.ClusterComponents.AsNoTracking()
-            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct);
+        // c.Id == componentId && c.Cluster.TenantId == tenantId is GetComponentAsync exactly. The
+        // DTO goes straight into ResolveSubmission below, which takes IComponentNaming — the shape
+        // #172 introduced for precisely this, so no conversion is needed at the call.
+        EntKube.Contracts.Catalog.InstalledComponent? component =
+            await catalog.GetComponentAsync(tenantId, componentId, ct);
 
         StalwartComponentConfig? config = await db.StalwartComponentConfigs.AsNoTracking()
             .FirstOrDefaultAsync(c => c.ClusterComponentId == componentId, ct);
