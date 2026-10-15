@@ -10,7 +10,11 @@ namespace EntKube.Web.Services;
 /// Sends are best-effort and logged so one bad channel can't abort the batch.
 /// </summary>
 public class IncidentDispatcher(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    // Telemetry's own context: NotificationChannels is its table, and the maintenance window —
+    // Fleet's — now comes from IFleetApi, which is what was keeping this service on the
+    // all-seeing one.
+    IDbContextFactory<EntKube.Web.Data.Modules.TelemetryDbContext> dbFactory,
+    EntKube.Contracts.Fleet.IFleetApi fleet,
     NotificationService notifications,
     StormSuppressionService stormSuppression,
     Tickets.AlertTicketBridge alertTickets,
@@ -22,7 +26,7 @@ public class IncidentDispatcher(
     {
         if (firing.Count == 0 && resolved.Count == 0) return;
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using EntKube.Web.Data.Modules.TelemetryDbContext db = dbFactory.CreateDbContext();
         DateTime now = DateTime.UtcNow;
 
         // §14.3: the ticket is opened whether or not anyone is notified. A maintenance
@@ -30,9 +34,7 @@ public class IncidentDispatcher(
         await alertTickets.OpenForIncidentsAsync(tenantId, firing, ct);
         await alertTickets.NoteIncidentResolvedAsync(resolved, now, ct);
 
-        bool inMaintenance = await db.MaintenanceWindows.AnyAsync(
-            w => w.TenantId == tenantId && (w.ClusterId == null || w.ClusterId == clusterId)
-                 && w.StartsAt <= now && w.EndsAt >= now, ct);
+        bool inMaintenance = await fleet.IsInMaintenanceAsync(tenantId, clusterId, now, ct);
         if (inMaintenance)
         {
             logger.LogInformation(
