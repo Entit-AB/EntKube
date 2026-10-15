@@ -43,47 +43,50 @@ public static class PublicApiEndpoints
         // ── Fleet ──
 
         api.MapGet("/clusters", async (
-            HttpContext ctx, IDbContextFactory<ApplicationDbContext> dbFactory, CancellationToken ct) =>
+            HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
+            EntKube.Contracts.Catalog.ICatalogApi catalog, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
-            await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-            var clusters = await db.KubernetesClusters
-                .AsNoTracking()
-                .Where(c => c.TenantId == tenantId)
-                .OrderBy(c => c.Name)
+            // The component count is Catalog's, not Fleet's, so it is asked of Catalog rather than
+            // added to ClusterSummary — one call for the tenant's components, grouped, instead of
+            // one per cluster.
+            IReadOnlyList<EntKube.Contracts.Fleet.ClusterSummary> clusters =
+                await fleet.GetClustersAsync(tenantId, ct);
+
+            Dictionary<Guid, int> componentCounts =
+                (await catalog.GetComponentsForTenantAsync(tenantId, ct))
+                .GroupBy(c => c.ClusterId)
+                .ToDictionary(g => g.Key, g => g.Count());
+
+            return Results.Ok(clusters
+                .OrderBy(c => c.Name, StringComparer.Ordinal)
                 .Select(c => new
                 {
                     id = c.Id,
                     name = c.Name,
                     apiServerUrl = c.ApiServerUrl,
-                    environment = c.Environment.Name,
-                    provisioningStatus = c.ProvisioningStatus.ToString(),
-                    componentCount = c.Components.Count,
+                    environment = c.EnvironmentName,
+                    provisioningStatus = PublishedProvisioningStatus(c.ProvisioningStatus),
+                    componentCount = componentCounts.GetValueOrDefault(c.Id),
                 })
-                .ToListAsync(ct);
-
-            return Results.Ok(clusters);
+                .ToList());
         }).RequireApiScope(ApiScopes.FleetRead);
 
         api.MapGet("/clusters/{clusterId:guid}/components", async (
             Guid clusterId, HttpContext ctx,
-            IDbContextFactory<ApplicationDbContext> dbFactory,
+            EntKube.Contracts.Fleet.IFleetApi fleet,
             EntKube.Contracts.Catalog.ICatalogApi catalog, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
-            await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-            // The tenant predicate is on the CLUSTER, not just the component, so a guessed
-            // cluster id from another tenant returns 404 rather than leaking its components.
-            //
             // The existence check stays, and is not redundant: GetComponentsForClusterAsync is
             // tenant-first and would return an empty list for a cluster that is not this
             // tenant's, but an empty list is a 200 and the contract of this route is a 404.
-            // "Does not exist" and "has no components" are different answers.
-            bool exists = await db.KubernetesClusters
-                .AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
-            if (!exists)
+            // "Does not exist" and "has no components" are different answers — and asking Fleet
+            // keeps the tenant predicate on the CLUSTER, so a guessed id from another tenant is
+            // a 404 rather than a leak.
+            if (await fleet.GetClusterAsync(tenantId, clusterId, ct) is null)
             {
                 return Results.NotFound();
             }
@@ -113,67 +116,77 @@ public static class PublicApiEndpoints
         // ── Apps and deployments ──
 
         api.MapGet("/apps", async (
-            HttpContext ctx, IDbContextFactory<ApplicationDbContext> dbFactory, CancellationToken ct) =>
+            HttpContext ctx, EntKube.Contracts.Delivery.IDeliveryApi delivery, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
-            await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-            var apps = await db.Apps
-                .AsNoTracking()
-                .Where(a => a.Customer.TenantId == tenantId)
-                .OrderBy(a => a.Name)
+            // Two contract calls rather than one query with a navigation count. Deliberate: the
+            // count is over Delivery's own deployments, so one fetch per tenant and a group is both
+            // correct and bounded — the alternative that avoids it is a field on AppSummary that
+            // only this route would read.
+            IReadOnlyList<EntKube.Contracts.Delivery.AppSummary> apps =
+                await delivery.GetAppsAsync(tenantId, ct);
+
+            Dictionary<Guid, int> deploymentCounts =
+                (await delivery.GetDeploymentsForTenantAsync(tenantId, ct))
+                .GroupBy(d => d.AppId)
+                .ToDictionary(g => g.Key, g => g.Count());
+
+            return Results.Ok(apps
+                .OrderBy(a => a.Name, StringComparer.Ordinal)
                 .Select(a => new
                 {
                     id = a.Id,
                     name = a.Name,
-                    customer = a.Customer.Name,
-                    deploymentCount = a.Deployments.Count,
+                    customer = a.CustomerName,
+                    deploymentCount = deploymentCounts.GetValueOrDefault(a.Id),
                 })
-                .ToListAsync(ct);
-
-            return Results.Ok(apps);
+                .ToList());
         }).RequireApiScope(ApiScopes.AppsRead);
 
         api.MapGet("/deployments", async (
-            HttpContext ctx, IDbContextFactory<ApplicationDbContext> dbFactory,
-            Guid? appId, CancellationToken ct) =>
+            HttpContext ctx, EntKube.Contracts.Delivery.IDeliveryApi delivery,
+            EntKube.Contracts.Fleet.IFleetApi fleet, Guid? appId, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
-            await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-            IQueryable<AppDeployment> query = db.AppDeployments
-                .AsNoTracking()
-                .Where(d => d.App.Customer.TenantId == tenantId);
+            IEnumerable<EntKube.Contracts.Delivery.DeploymentSummary> deployments =
+                await delivery.GetDeploymentsForTenantAsync(tenantId, ct);
 
             if (appId is Guid id)
             {
-                query = query.Where(d => d.AppId == id);
+                deployments = deployments.Where(d => d.AppId == id);
             }
 
-            var deployments = await query
-                .OrderBy(d => d.Name)
+            // The cluster NAME is Fleet's and DeploymentSummary carries only the id, so it is
+            // resolved from one Fleet call rather than by adding a Fleet field to a Delivery DTO.
+            // The enum strings are unchanged: #223 made the contract enums mirror Delivery's
+            // member for member, and ModuleApiTests holds them there.
+            Dictionary<Guid, string> clusterNames =
+                (await fleet.GetClustersAsync(tenantId, ct)).ToDictionary(c => c.Id, c => c.Name);
+
+            return Results.Ok(deployments
+                .OrderBy(d => d.Name, StringComparer.Ordinal)
                 .Select(d => new
                 {
                     id = d.Id,
                     name = d.Name,
-                    app = d.App.Name,
+                    app = d.AppName,
                     type = d.Type.ToString(),
-                    environment = d.Environment.Name,
-                    cluster = d.Cluster.Name,
+                    environment = d.EnvironmentName,
+                    cluster = clusterNames.GetValueOrDefault(d.ClusterId, ""),
                     ns = d.Namespace,
                     syncStatus = d.SyncStatus.ToString(),
                     healthStatus = d.HealthStatus.ToString(),
                     lastSyncedAt = d.LastSyncedAt,
                     isManaged = d.IsManaged,
                 })
-                .ToListAsync(ct);
-
-            return Results.Ok(deployments);
+                .ToList());
         }).RequireApiScope(ApiScopes.AppsRead);
 
         api.MapPost("/deployments/{deploymentId:guid}/sync", async (
             Guid deploymentId, HttpContext ctx,
-            IDbContextFactory<ApplicationDbContext> dbFactory,
+            EntKube.Contracts.Delivery.IDeliveryApi delivery,
             KubernetesOperationsService operations,
             EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
             CancellationToken ct) =>
@@ -186,11 +199,10 @@ public static class PublicApiEndpoints
             // trail says which token applied the change rather than only that nobody was asked.
             using IDisposable unattended = gate.DeclareUnattended(
                 $"api-token:{principal.TokenName}");
-            await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-
-            bool owned = await db.AppDeployments
-                .AnyAsync(d => d.Id == deploymentId && d.App.Customer.TenantId == principal.TenantId, ct);
-            if (!owned)
+            // Asked of Delivery: GetDeploymentAsync is tenant-first and reaches tenancy through the
+            // app's customer, which is the same long way round this wrote by hand — and the place a
+            // hand-written version goes wrong.
+            if (await delivery.GetDeploymentAsync(principal.TenantId, deploymentId, ct) is null)
             {
                 return Results.NotFound();
             }
@@ -211,7 +223,7 @@ public static class PublicApiEndpoints
         // restarting the wrong workload in a namespace that hosts several.
         api.MapPost("/deployments/{deploymentId:guid}/restart", async (
             Guid deploymentId, string workload, HttpContext ctx,
-            IDbContextFactory<ApplicationDbContext> dbFactory,
+            EntKube.Contracts.Delivery.IDeliveryApi delivery,
             KubernetesOperationsService operations,
             EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
             CancellationToken ct) =>
@@ -228,11 +240,10 @@ public static class PublicApiEndpoints
                     statusCode: StatusCodes.Status400BadRequest);
             }
 
-            await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-
-            bool owned = await db.AppDeployments
-                .AnyAsync(d => d.Id == deploymentId && d.App.Customer.TenantId == principal.TenantId, ct);
-            if (!owned)
+            // Asked of Delivery: GetDeploymentAsync is tenant-first and reaches tenancy through the
+            // app's customer, which is the same long way round this wrote by hand — and the place a
+            // hand-written version goes wrong.
+            if (await delivery.GetDeploymentAsync(principal.TenantId, deploymentId, ct) is null)
             {
                 return Results.NotFound();
             }
@@ -772,6 +783,22 @@ public static class PublicApiEndpoints
     /// so a mistyped date falls back to the default window rather than being read as
     /// some other date the caller did not ask for.
     /// </summary>
+    /// <summary>
+    /// The provisioning status string this API has always published.
+    ///
+    /// <para>⚠️ <b>Not <c>ToString()</c> on the contract enum, on purpose.</b> Fleet's entity calls
+    /// the initial state <c>None</c> and the contract calls it <c>Registered</c> — the same state
+    /// under a better name. Projecting the contract value directly would therefore have changed a
+    /// <b>published</b> JSON string as a side effect of an internal refactor, and the CLI and MCP
+    /// server both read this field. Renaming it is a deliberate API change for whoever owns that
+    /// decision; it is not something a custody conversion gets to do quietly.</para>
+    /// </summary>
+    private static string PublishedProvisioningStatus(
+        EntKube.Contracts.Fleet.ClusterProvisioningStatus status)
+        => status == EntKube.Contracts.Fleet.ClusterProvisioningStatus.Registered
+            ? "None"
+            : status.ToString();
+
     private static DateTime? ParseDay(string? value) =>
         DateTime.TryParse(
             value, System.Globalization.CultureInfo.InvariantCulture,
