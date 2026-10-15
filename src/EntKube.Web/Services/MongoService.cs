@@ -153,28 +153,31 @@ public class MongoService(
         string adminSecretManifest = BuildAdminSecretManifest(name, ns, adminPassword);
         string clusterManifest = BuildClusterManifest(mongoCluster);
 
-        await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).EnsureNamespaceAsync(ns, ct);
+        // The asking tenant, not the row's own — see the note in KafkaService.CreateClusterAsync:
+        // this loaded the cluster by id with no tenant predicate and then checked that row against
+        // itself, while `tenantId` was in scope and already used for the vault writes above.
+        await (await ClusterFor(tenantId, k8sCluster.Id, ct)).EnsureNamespaceAsync(ns, ct);
 
         // The Community Operator sets serviceAccountName: mongodb-database on every pod it creates.
         // It only creates this ServiceAccount in its own installation namespace, so when the MongoDB
         // resource lives in a different namespace the pod admission fails with "serviceaccount not found".
         // We apply the ServiceAccount ourselves so it always exists in the target namespace.
-        await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).ApplyManifestAsync(BuildServiceAccountManifest(ns), ct);
+        await (await ClusterFor(tenantId, k8sCluster.Id, ct)).ApplyManifestAsync(BuildServiceAccountManifest(ns), ct);
 
         if (storageLink is not null && s3SecretName is not null)
         {
             await EnsureStorageSecretsInK8sAsync(
                 tenantId, storageLink, s3SecretName, ns,
-                await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct), ct);
+                await ClusterFor(tenantId, k8sCluster.Id, ct), ct);
         }
 
-        await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).ApplyManifestAsync(adminSecretManifest, ct);
-        await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).ApplyManifestAsync(clusterManifest, ct);
+        await (await ClusterFor(tenantId, k8sCluster.Id, ct)).ApplyManifestAsync(adminSecretManifest, ct);
+        await (await ClusterFor(tenantId, k8sCluster.Id, ct)).ApplyManifestAsync(clusterManifest, ct);
 
         if (!string.IsNullOrEmpty(backupSchedule) && storageLink is not null && s3SecretName is not null)
         {
             string cronManifest = BuildScheduledBackupCronJobManifest(mongoCluster, storageLink, s3SecretName);
-            await (await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct)).ApplyManifestAsync(cronManifest, ct);
+            await (await ClusterFor(tenantId, k8sCluster.Id, ct)).ApplyManifestAsync(cronManifest, ct);
         }
 
         return mongoCluster;

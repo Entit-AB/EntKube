@@ -528,7 +528,7 @@ public class ElasticsearchServiceTests : IDisposable
         c.HotCount = 8;
         c.HotMemory = "8Gi";
 
-        Func<Task> act = () => sut.CreateClusterAsync(c);
+        Func<Task> act = () => sut.CreateClusterAsync(tenantId, c);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*more memory than the cluster has unallocated*");
         (await db.ElasticsearchClusters.CountAsync()).Should().Be(0);
@@ -549,7 +549,7 @@ public class ElasticsearchServiceTests : IDisposable
         c.TenantId = tenantId;
         c.KubernetesClusterId = k8sClusterId;
 
-        await sut.CreateClusterAsync(c);
+        await sut.CreateClusterAsync(tenantId, c);
 
         applied.Should().HaveCount(2);
         applied[0].Should().Contain("kind: Elasticsearch");

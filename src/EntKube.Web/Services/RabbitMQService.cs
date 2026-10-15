@@ -350,7 +350,11 @@ public class RabbitMQService(
         {
             KubernetesCluster k8sCluster = await db.KubernetesClusters
                 .FirstAsync(c => c.Id == kubernetesClusterId, ct);
-            Clusters.IClusterClient client = await ClusterFor(k8sCluster.TenantId, k8sCluster.Id, ct);
+            // The ASKING tenant, not the row's own. This read the cluster by id with no tenant
+            // predicate and then handed that row's tenant to the seam, so the check compared the
+            // row to itself — while `tenantId`, which the vault writes in this same method already
+            // use, sat in scope. A foreign cluster id provisioned onto another tenant's cluster.
+            Clusters.IClusterClient client = await ClusterFor(tenantId, k8sCluster.Id, ct);
 
             await client.EnsureNamespaceAsync(ns, ct);
             await client.ApplyManifestAsync(BuildClusterManifest(cluster), ct);
@@ -514,7 +518,7 @@ public class RabbitMQService(
             string? crJson = null;
             try
             {
-                crJson = await (await ClusterFor(k.TenantId, k.Id, ct)).GetJsonAllNamespacesAsync(
+                crJson = await (await ClusterFor(tenantId, k.Id, ct)).GetJsonAllNamespacesAsync(
                     "rabbitmqclusters.rabbitmq.com", ct: ct);
             }
             catch
@@ -538,7 +542,7 @@ public class RabbitMQService(
             string stsJson;
             try
             {
-                stsJson = await (await ClusterFor(k.TenantId, k.Id, ct)).GetJsonAllNamespacesAsync("statefulsets", ct: ct);
+                stsJson = await (await ClusterFor(tenantId, k.Id, ct)).GetJsonAllNamespacesAsync("statefulsets", ct: ct);
             }
             catch
             {
