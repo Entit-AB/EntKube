@@ -26,6 +26,7 @@ namespace EntKube.Web.Services;
 /// </summary>
 public class DeploymentImportService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     DeploymentService deploymentService,
     VaultService vaultService,
     RegisteredPostgresService postgresService,
@@ -40,8 +41,14 @@ public class DeploymentImportService(
     /// importable. Each resource lister is wrapped so a missing CRD or permission
     /// degrades gracefully (recorded as a warning) instead of aborting the scan.
     /// </summary>
+    /// <param name="tenantId">
+    /// Who is scanning. <c>ImportAsync</c> took this first (and refuses a cluster that is not the
+    /// tenant's); the scan that feeds it was still reading the credential off whatever row the page
+    /// passed in, so the preview could be built for a cluster the caller does not own.
+    /// </param>
     public async Task<ImportPreview> ScanAsync(
-        KubernetesCluster cluster, IReadOnlyList<string> namespaces, CancellationToken ct = default)
+        Guid tenantId, KubernetesCluster cluster, IReadOnlyList<string> namespaces,
+        CancellationToken ct = default)
     {
         ImportPreview preview = new()
         {
@@ -49,13 +56,19 @@ public class DeploymentImportService(
             Namespaces = namespaces.Where(n => !string.IsNullOrWhiteSpace(n)).Select(n => n.Trim()).Distinct().ToList()
         };
 
-        if (string.IsNullOrWhiteSpace(cluster.Kubeconfig))
+        EntKube.Web.Services.Clusters.IClusterClient? access =
+            await clusterAccess.ForAsync(tenantId, cluster.Id, ct);
+
+        if (access is null)
         {
-            preview.Warnings.Add("This cluster has no stored kubeconfig, so it cannot be scanned.");
+            // Both refusals in one sentence, as everywhere else this seam is used: the old message
+            // asserted the second and was wrong whenever it was the first.
+            preview.Warnings.Add(
+                "That cluster is not this tenant's, or has no stored kubeconfig, so it cannot be scanned.");
             return preview;
         }
 
-        Kubernetes client = CreateClient(cluster.Kubeconfig);
+        Kubernetes client = access.CreateSdkClient();
         HashSet<string> boundPvNames = new(StringComparer.Ordinal);
 
         // Secrets EntKube already syncs from the vault to this cluster, keyed "name|namespace".

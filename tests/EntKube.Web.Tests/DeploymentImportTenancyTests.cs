@@ -43,6 +43,14 @@ public class DeploymentImportTenancyTests : IDisposable
         };
         db.KubernetesClusters.Add(ourCluster);
         db.SaveChanges();
+
+        // The import tests above need no credential — their guard runs before any cluster access.
+        // The SCAN tests do: it resolves through the seam, so without a stored kubeconfig the
+        // owner's scan is refused for the second reason and the test would pass for the wrong one.
+        // The address is a closed port so the scan fails on the connection, immediately.
+        testDb.SeedKubeconfigAsync(testDb.CreateVaultService(), ourTenant, ourCluster.Id,
+            TestKubeconfig.Valid.Replace("https://k8s.example.com", "https://127.0.0.1:1"))
+            .GetAwaiter().GetResult();
     }
 
     public void Dispose()
@@ -66,6 +74,7 @@ public class DeploymentImportTenancyTests : IDisposable
 
         return new DeploymentImportService(
             testDb.Factory,
+            clusters,
             new DeploymentService(testDb.Factory, new AuditService(testDb.Factory),
                 new DeploymentStatusNotifier(), NullLogger<DeploymentService>.Instance),
             vault,
@@ -87,6 +96,31 @@ public class DeploymentImportTenancyTests : IDisposable
         EnvironmentId = ourCluster.EnvironmentId,
         Preview = new ImportPreview { ClusterId = ourCluster.Id },
     };
+
+    /// <summary>
+    /// The scan is the half that was still unauthorized. <c>ImportAsync</c> refused a stranger's
+    /// cluster, but the preview that feeds it read the credential off whatever row the page passed
+    /// in — so namespaces, workloads, secrets and PVCs could be listed for a cluster the caller
+    /// does not own, which is the part of an import that actually reads the customer's data.
+    /// </summary>
+    [Fact]
+    public async Task Scanning_a_cluster_as_another_tenant_reads_nothing()
+    {
+        ImportPreview preview = await Build().ScanAsync(theirTenant, ourCluster, ["billing"]);
+
+        preview.Warnings.Should().ContainMatch("*not this tenant's*");
+        preview.Resources.Should().BeEmpty();
+        preview.Secrets.Should().BeEmpty();
+    }
+
+    /// <summary>The owner's scan gets past the guard and fails on the unreachable API server.</summary>
+    [Fact]
+    public async Task The_owners_scan_passes_the_tenant_check()
+    {
+        ImportPreview preview = await Build().ScanAsync(ourTenant, ourCluster, ["billing"]);
+
+        preview.Warnings.Should().NotContainMatch("*not this tenant's*");
+    }
 
     /// <summary>
     /// The refusal. Nothing else in this method asks the question, so without it a cluster id from
