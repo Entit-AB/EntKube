@@ -255,7 +255,7 @@ public class ModuleContractTests
     {
         [Module.DataServices] = 2,
         [Module.Telemetry] = 5,
-        [Module.Connectivity] = 8,
+        [Module.Connectivity] = 7,
         [Module.Support] = 7,
         [Module.Catalog] = 6,
         [Module.Delivery] = 6,

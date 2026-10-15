@@ -21,24 +21,49 @@ namespace EntKube.Web.Tests;
 /// </summary>
 public class TailscaleIngressListingTests : IDisposable
 {
-    private readonly SqliteConnection connection;
+    private static readonly byte[] TestRootKey = Convert.FromBase64String(TestServices.TestRootKeyBase64);
+
+    private readonly InterceptingTestDb testDb;
     private readonly Mock<IKubernetesClientFactory> k8s = new();
     private readonly TailscaleService sut;
 
+    // The service resolves the cluster through the seam now, so the test seeds one it can resolve —
+    // which means seeding the credential where it actually lives, in the vault. A plain factory
+    // with Kubeconfig set on the entity does not persist it: the plaintext column is gone.
+    private readonly Guid tenantId = Guid.NewGuid();
+    private readonly Guid clusterId = Guid.NewGuid();
+
     public TailscaleIngressListingTests()
     {
-        connection = new SqliteConnection("DataSource=:memory:");
-        connection.Open();
-        TestDbContextFactory factory = new(connection);
-        using ApplicationDbContext db = factory.CreateDbContext();
-        db.Database.EnsureCreated();
+        testDb = new InterceptingTestDb(TestRootKey);
+        using ApplicationDbContext db = testDb.CreateContext();
 
-        sut = new TailscaleService(factory, k8s.Object);
+        Guid envId = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = tenantId, Name = "t", Slug = $"t-{tenantId:N}" });
+        db.Set<Data.Environment>().Add(new Data.Environment
+        {
+            Id = envId, TenantId = tenantId, Name = "production",
+        });
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = clusterId, TenantId = tenantId, EnvironmentId = envId,
+            Name = "primary", ApiServerUrl = "https://c:6443",
+        });
+        db.SaveChanges();
+
+        VaultService vault = testDb.CreateVaultService();
+        vault.InitializeVaultAsync(tenantId).GetAwaiter().GetResult();
+        testDb.SeedKubeconfigAsync(vault, tenantId, clusterId, TestKubeconfig.Valid)
+            .GetAwaiter().GetResult();
+
+        sut = new TailscaleService(
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory));
     }
 
     public void Dispose()
     {
-        connection.Dispose();
+        testDb.Dispose();
         GC.SuppressFinalize(this);
     }
 
@@ -46,6 +71,29 @@ public class TailscaleIngressListingTests : IDisposable
         k8s.Setup(x => x.GetJsonAllNamespacesAsync("ingresses", It.IsAny<string>(),
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(json);
+
+    /// <summary>
+    /// These calls are <em>authorized</em> for the first time, which is the part of the conversion
+    /// that is not a refactor.
+    ///
+    /// <para>The credential used to arrive already resolved — the page dug it out of the DTO and
+    /// handed it in — so "is this the asking tenant's cluster" was a question nothing asked. Now the
+    /// service resolves it through <c>ForAsync</c>, so a cluster id belonging to somebody else
+    /// reaches nothing.</para>
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_cluster_is_refused_before_any_cluster_call()
+    {
+        Guid stranger = Guid.NewGuid();
+
+        Func<Task> act = () => sut.ListIngressesAsync(stranger, clusterId);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*not this tenant's*");
+
+        k8s.Verify(x => x.GetJsonAllNamespacesAsync(It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
 
     [Fact]
     public async Task A_pending_load_balancer_does_not_take_the_whole_listing_down()
@@ -64,7 +112,7 @@ public class TailscaleIngressListingTests : IDisposable
             }]}
             """);
 
-        List<TailscaleIngress> result = await sut.ListIngressesAsync("kubeconfig");
+        List<TailscaleIngress> result = await sut.ListIngressesAsync(tenantId, clusterId);
 
         result.Should().ContainSingle();
         result[0].Name.Should().Be("grafana");
@@ -89,7 +137,7 @@ public class TailscaleIngressListingTests : IDisposable
             }]}
             """);
 
-        List<TailscaleIngress> result = await sut.ListIngressesAsync("kubeconfig");
+        List<TailscaleIngress> result = await sut.ListIngressesAsync(tenantId, clusterId);
 
         result.Should().ContainSingle();
         result[0].TailscaleHostname.Should().BeNull();
@@ -118,7 +166,7 @@ public class TailscaleIngressListingTests : IDisposable
             }]}
             """);
 
-        List<TailscaleIngress> result = await sut.ListIngressesAsync("kubeconfig");
+        List<TailscaleIngress> result = await sut.ListIngressesAsync(tenantId, clusterId);
 
         result.Should().ContainSingle();
         result[0].Name.Should().Be("empty-rules");
@@ -138,7 +186,7 @@ public class TailscaleIngressListingTests : IDisposable
             }]}
             """);
 
-        List<TailscaleIngress> result = await sut.ListIngressesAsync("kubeconfig");
+        List<TailscaleIngress> result = await sut.ListIngressesAsync(tenantId, clusterId);
 
         result.Should().ContainSingle();
         result[0].TailscaleHostname.Should().Be("somewhere");
@@ -159,7 +207,7 @@ public class TailscaleIngressListingTests : IDisposable
             }]}
             """);
 
-        (await sut.ListIngressesAsync("kubeconfig")).Should().ContainSingle()
+        (await sut.ListIngressesAsync(tenantId, clusterId)).Should().ContainSingle()
             .Which.LoadBalancerHostname.Should().Be("api.tailnet.ts.net");
     }
 
@@ -177,7 +225,7 @@ public class TailscaleIngressListingTests : IDisposable
 
         // The class filter is what keeps this view about the VPN; an empty rules array on the
         // foreign one must not throw on the way past it either.
-        (await sut.ListIngressesAsync("kubeconfig")).Should().ContainSingle()
+        (await sut.ListIngressesAsync(tenantId, clusterId)).Should().ContainSingle()
             .Which.Name.Should().Be("ts-one");
     }
 }
