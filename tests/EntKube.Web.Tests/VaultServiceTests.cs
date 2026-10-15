@@ -728,9 +728,14 @@ public class VaultServiceTests : IDisposable
         info.Should().NotBeNull();
         info!.Subject.Should().Contain("import-test.example.com");
 
-        // And it lands in the observed set the reverse-refresher polls.
-        List<Guid> observed = await sut.GetObservedAppSecretIdsAsync();
+        // And it lands in the observed set the reverse-refresher polls — for its own tenant, and
+        // only for its own tenant. The refresher reaches a cluster with whatever tenant the list
+        // is drawn for, so a stranger finding it here would be a stranger reading it.
+        List<Guid> observed = await sut.GetObservedAppSecretIdsAsync(tenant.Id);
         observed.Should().Contain(cert.Id);
+
+        (await sut.GetObservedAppSecretIdsAsync(Guid.NewGuid())).Should().BeEmpty(
+            "the observed set is drawn per tenant, and the sweep acts as the tenant it asked for");
     }
 
     [Fact]
