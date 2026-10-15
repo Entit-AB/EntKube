@@ -283,6 +283,7 @@ public class JitAccessService(
     /// reads in the history and what <see cref="JitGrant.RequestedBy"/> is compared to.
     /// </summary>
     public async Task<JitApproval> ApproveAsync(
+        Guid tenantId,
         Guid grantId,
         string approverUserId,
         string approverDisplay,
@@ -292,10 +293,14 @@ public class JitAccessService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // Scoped by the ASKING tenant. Approving was a grant id and nothing else, so whoever could
+        // reach this method could approve any grant in the installation — and approving is what
+        // mints cluster access. The page above has always had the tenant; it simply was not asked
+        // for.
         JitGrant grant = await db.JitGrants
             .Include(g => g.KubernetesCluster)
             .Include(g => g.User)
-            .FirstOrDefaultAsync(g => g.Id == grantId, ct)
+            .FirstOrDefaultAsync(g => g.Id == grantId && g.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Grant not found.");
 
         DateTime now = DateTime.UtcNow;
@@ -332,7 +337,7 @@ public class JitAccessService(
         grant.ApprovedBy = approverDisplay;
         grant.ExpiresAt = now.Add(window);
 
-        MintedCredential credential = await provisioner.MintAsync(grant, window, ct);
+        MintedCredential credential = await provisioner.MintAsync(tenantId, grant, window, ct);
 
         grant.ServiceAccountName = credential.ServiceAccountName;
         grant.TokenHash = credential.TokenHash;
@@ -468,8 +473,12 @@ public class JitAccessService(
 
         // A pending request never reached a cluster, so there is nothing to tear down. Going
         // through RevokeAsync anyway keeps the teardown-before-the-row order in one place.
+        // grant.TenantId rather than a parameter, and that is sound HERE specifically: the
+        // authorization on this path is the ownership check above — the caller proved the grant is
+        // theirs by user identity — so the tenant is not what is being decided. Everywhere else
+        // the tenant is an input, because everywhere else it is the check.
         return wasApproved
-            ? await RevokeAsync(grantId, endedBy, "handed back by the requester", ct)
+            ? await RevokeAsync(grant.TenantId, grantId, endedBy, "handed back by the requester", ct)
             : await WithdrawAsync(db, grant, endedBy, ct);
     }
 
@@ -500,20 +509,21 @@ public class JitAccessService(
     /// could reach the API server with that token.
     /// </summary>
     public async Task<JitGrant> RevokeAsync(
-        Guid grantId, string revokedBy, string? reason = null, CancellationToken ct = default)
+        Guid tenantId, Guid grantId, string revokedBy, string? reason = null,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         JitGrant grant = await db.JitGrants
             .Include(g => g.KubernetesCluster)
-            .FirstOrDefaultAsync(g => g.Id == grantId, ct)
+            .FirstOrDefaultAsync(g => g.Id == grantId && g.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Grant not found.");
 
         if (grant.RevokedAt is not null) return grant;
 
         if (grant.ApprovedAt is not null && grant.TornDownAt is null)
         {
-            await provisioner.TearDownAsync(grant, ct);
+            await provisioner.TearDownAsync(tenantId, grant, ct);
             grant.TornDownAt = DateTime.UtcNow;
         }
 

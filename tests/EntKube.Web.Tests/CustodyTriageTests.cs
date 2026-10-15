@@ -74,7 +74,26 @@ public class CustodyTriageTests
     /// no tenant in scope. What this measured was whether a conversion was <em>possible</em>, and
     /// the answer is now "nothing easy is left" rather than "nothing is left".</para>
     ///
-    private const int BaselineReachable = 3;
+    /// <para><b>4, and the fourth arrived the way this metric is designed to notice.</b> Giving
+    /// <c>KubernetesJitProvisioner.MintAsync</c> a <c>tenantId</c> moved every credential site
+    /// inside it from "gated" to "reachable" — which is the trap this programme has hit before:
+    /// threading a tenant into a method makes whatever is left in it newly inexcusable, so the
+    /// remaining reads have to be converted in the same change. Eight of the nine were.</para>
+    ///
+    /// <para>The ninth is <c>MintedCredential.Kubeconfig</c>, and it is <b>not a cluster
+    /// credential</b>: it is the kubeconfig EntKube <em>generates</em> for the customer, pointing
+    /// at EntKube's own proxy and carrying the grant's token, never the cluster's. There is no seam
+    /// to ask, so it belongs with the other three here — all of which are also counted and also not
+    /// conversions.</para>
+    ///
+    /// <para>⚠️ Renaming that property — <c>ProxyKubeconfig</c> would be the more accurate name, and
+    /// the provisioner's own prose already insists on the distinction — would drop it out of this
+    /// count <em>and</em> out of <see cref="ClusterCredentialCustodyTests"/>. That is deliberately
+    /// <b>not</b> done in the same change as a conversion: the custody number would then move for
+    /// two reasons at once, and a number that moves for two reasons is the thing this file keeps
+    /// learning not to publish.</para>
+    /// </summary>
+    private const int BaselineReachable = 4;
 
     [Fact]
     public void The_sites_that_could_already_ask_the_seam_do_not_multiply()

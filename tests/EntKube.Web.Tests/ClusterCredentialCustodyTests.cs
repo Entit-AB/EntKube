@@ -437,7 +437,7 @@ public class ClusterCredentialCustodyTests
     /// so the id was the whole authorization. They take the asking tenant now, from the page that
     /// already had it.</para>
     /// </summary>
-    private const int BaselineOccurrences = 52;
+    private const int BaselineOccurrences = 43;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -469,6 +469,37 @@ public class ClusterCredentialCustodyTests
     ///
     /// <para>26. <c>ComponentScanService</c>.</para>
     ///
+    /// <para>18. The <b>JIT feature</b> — <c>KubernetesJitProvisioner</c>,
+    /// <c>JitGrantReaperService</c> and the one read in <c>JitProxyService</c>'s resolve path — nine
+    /// occurrences across three files, converted together because they are one feature and the
+    /// reaper's sweep conversion needed the same change.
+    ///
+    /// <para><c>KubernetesJitProvisioner</c> loaded its cluster <b>by id alone, with no tenant
+    /// predicate anywhere in the file</b>. For the one feature whose entire purpose is handing out
+    /// cluster access, that is the worst place for the check to be missing: a grant row naming any
+    /// cluster in the installation was provisioned on it. <c>ApproveAsync</c> and
+    /// <c>RevokeAsync</c> found their grant by id alone too, so the tenant now comes in at the page
+    /// — which always had it.</para>
+    ///
+    /// <para>This conversion needed a <b>new seam verb</b>, the fifth time that rather than a caller
+    /// has been the blocker: minting asks the API server for a bound ServiceAccount token, which no
+    /// existing verb expressed. <c>RequestServiceAccountTokenAsync</c> runs
+    /// <c>kubectl create token -o json</c> — JSON rather than the bare token, because the API server
+    /// may grant a shorter life than was asked for and <c>status.expirationTimestamp</c> is what the
+    /// grant records. Checked against <c>kubectl create token --help</c> rather than assumed.</para>
+    ///
+    /// <para>⚠️ <c>JitProxyService</c> keeps <b>one</b> read, and it is a different shape. It needs
+    /// the cluster's <em>CA and server URL</em> — deliberately not its credential, since the proxy
+    /// substitutes the grant's bound token precisely so a request is not executed as cluster-admin.
+    /// No command verb expresses "describe this connection", so that is a seam addition to design
+    /// rather than a caller to fix, like <c>ClusterEgressTunnel</c> in
+    /// <see cref="ClusterChangeGateCoverageTests"/>.</para>
+    ///
+    /// <para>The remaining count also includes <c>MintedCredential.Kubeconfig</c> — the proxy
+    /// kubeconfig EntKube <em>generates</em> for the customer, not a cluster credential. It is
+    /// counted anyway, and correctly: by this metric's own rationale, a generated kubeconfig
+    /// carrying a live token is also a place it can be logged or cached.</para>
+    ///
     /// <para>21. <c>KyvernoPolicyService</c> — six occurrences in one file, and all six went with
     /// two method signatures. Its two public entry points took a <c>KubernetesCluster</c> and read
     /// the credential off the row they were handed, so any caller holding a cluster entity could
@@ -491,7 +522,7 @@ public class ClusterCredentialCustodyTests
     /// seam's error contract is not the caller's, and a conversion that ignores that changes
     /// control flow silently.</para>
     /// </summary>
-    private const int BaselineFiles = 21;
+    private const int BaselineFiles = 19;
 
     private static (int Occurrences, int Files) Measure()
     {

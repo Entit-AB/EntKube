@@ -929,6 +929,85 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// a set of manifests and counts the ones the cluster no longer has, so "not found" is an
     /// answer rather than a failure.
     /// </summary>
+    /// <summary>
+    /// Asks the API server for a short-lived token bound to a ServiceAccount.
+    ///
+    /// <para>Requested with an explicit duration rather than mounted as a Secret, so expiry is
+    /// enforced by the cluster: if every background job in EntKube stopped running, the credential
+    /// would still stop working. The API server may return a shorter life than was asked for
+    /// (<c>--service-account-max-token-expiration</c>), so <c>status.expirationTimestamp</c> is
+    /// read back and treated as authoritative rather than the requested window — which is why this
+    /// asks for JSON rather than the bare token <c>kubectl create token</c> prints by default.</para>
+    ///
+    /// <para><b>Not gated.</b> It creates no durable object — the token is bound to a
+    /// ServiceAccount that an acknowledged apply has already created — and the acknowledgment for
+    /// that apply named the grant it belongs to. A dialog here would ask about the consequence of a
+    /// change the operator approved one line earlier, which is how an operator learns to click
+    /// through dialogs.</para>
+    /// </summary>
+    public async Task<ServiceAccountToken> RequestServiceAccountTokenAsync(
+        string serviceAccount, string ns, TimeSpan duration, IReadOnlyList<string> audiences,
+        string kubeconfig, CancellationToken ct = default)
+    {
+        string kubeconfigPath = Path.GetTempFileName();
+
+        try
+        {
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+
+            string json = await RunKubectlAsync(
+                BuildCreateTokenArguments(serviceAccount, ns, duration, audiences, kubeconfigPath), ct);
+
+            return ReadServiceAccountToken(json, serviceAccount, ns);
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+        }
+    }
+
+    /// <summary>
+    /// The command line for a bound-token request. Split out for the same reason as
+    /// <see cref="BuildDeleteArguments"/>: every test on this path reaches the cluster through a
+    /// mocked factory, so an argv built inline is argv no test ever runs.
+    /// </summary>
+    public static string BuildCreateTokenArguments(
+        string serviceAccount, string ns, TimeSpan duration, IReadOnlyList<string> audiences,
+        string kubeconfigPath)
+        => $"create token {serviceAccount} -n {ns}"
+           + $" --duration={(long)duration.TotalSeconds}s"
+           + string.Concat(audiences.Select(a => $" --audience={a}"))
+           + $" -o json --kubeconfig={kubeconfigPath}";
+
+    /// <summary>
+    /// Reads the token and its real expiry out of a TokenRequest. An absent token is an error
+    /// rather than an empty credential, because a caller handed "" would mint a grant that cannot
+    /// authenticate and look successful doing it.
+    /// </summary>
+    public static ServiceAccountToken ReadServiceAccountToken(string json, string serviceAccount, string ns)
+    {
+        using JsonDocument doc = JsonDocument.Parse(json);
+
+        string? token = doc.RootElement.TryGetProperty("status", out JsonElement status)
+            && status.TryGetProperty("token", out JsonElement t)
+                ? t.GetString()
+                : null;
+
+        if (string.IsNullOrWhiteSpace(token))
+        {
+            throw new InvalidOperationException(
+                $"The API server returned no token for ServiceAccount '{serviceAccount}' in '{ns}'.");
+        }
+
+        DateTime? expires =
+            status.TryGetProperty("expirationTimestamp", out JsonElement e)
+            && e.TryGetDateTimeOffset(out DateTimeOffset parsed)
+                ? parsed.UtcDateTime
+                : null;
+
+        return new ServiceAccountToken(token, expires);
+    }
+
     public async Task<HelmExecutionResult> GetResourceJsonAsync(
         string resource, string name, string ns, string kubeconfig, CancellationToken ct = default)
     {

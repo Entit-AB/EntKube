@@ -306,7 +306,8 @@
         try
         {
             await Jit.ApproveAsync(
-                grant.Id, userId, userDisplay, LevelOf(grant), TimeSpan.FromMinutes(MinutesOf(grant)));
+                TenantId, grant.Id, userId, userDisplay, LevelOf(grant),
+                TimeSpan.FromMinutes(MinutesOf(grant)));
 
             // The credential itself is deliberately not shown here. It belongs to the person the
             // grant is for, and they collect it from their own portal.
@@ -349,7 +350,7 @@
         busy = grant.Id;
         try
         {
-            await Jit.RevokeAsync(grant.Id, userDisplay, "revoked by an operator");
+            await Jit.RevokeAsync(TenantId, grant.Id, userDisplay, "revoked by an operator");
             Toasts.Success("Access revoked. The cluster credential has been removed.");
             await LoadAsync();
         }

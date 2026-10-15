@@ -14,7 +14,7 @@ namespace EntKube.Web.Services.Jit;
 /// </summary>
 public class KubernetesJitProvisioner(
     IDbContextFactory<ApplicationDbContext> dbFactory,
-    IKubernetesClientFactory k8sFactory,
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     IClusterChangeGate gate,
     VaultEncryptionService encryption,
     IConfiguration configuration,
@@ -31,39 +31,43 @@ public class KubernetesJitProvisioner(
     private static readonly string[] TokenAudiences = ["https://kubernetes.default.svc"];
 
     public async Task<MintedCredential> MintAsync(
-        JitGrant grant, TimeSpan duration, CancellationToken ct = default)
+        Guid tenantId, JitGrant grant, TimeSpan duration, CancellationToken ct = default)
     {
-        KubernetesCluster cluster = await LoadClusterAsync(grant.KubernetesClusterId, ct);
+        // ⚠️ The cluster used to be loaded by id ALONE — no tenant predicate anywhere in this file —
+        // so a grant row naming any cluster in the installation was provisioned on it. For a feature
+        // whose entire purpose is handing out cluster access, that is the worst place for the check
+        // to be missing. ForAsync answers "no" both for a cluster that is not this tenant's and for
+        // one with no credential stored, which were two separate conditions here before.
+        EntKube.Web.Services.Clusters.IClusterClient access =
+            await clusterAccess.ForAsync(tenantId, grant.KubernetesClusterId, ct)
+            ?? throw new InvalidOperationException(
+                "The grant's cluster no longer exists, is not this tenant's, or has no kubeconfig, "
+                + "so JIT access cannot be provisioned on it.");
 
         string manifest = JitRbacBuilder.BuildManifest(grant);
         string sa = JitRbacBuilder.ServiceAccountName(grant.Id);
 
-        await gate.AcknowledgeAsync(new PlannedClusterChange
-        {
-            Verb = ChangeVerb.Apply,
-            Kubeconfig = cluster.Kubeconfig!,
-            ClusterLabel = cluster.Name,
-            Namespace = grant.Namespace,
-            Summary = $"Grant {grant.Level} JIT access to {JitAccessService.SubjectName(grant)} in {grant.Namespace} "
-                      + $"until {grant.ExpiresAt:u}",
-            Manifest = manifest,
-        }, ct);
+        // The acknowledgment is raised by the seam on the way through, carrying this summary — the
+        // explicit gate call here supplied the credential itself, which is the thing being removed.
+        await access.ApplyManifestInNamespaceAsync(
+            manifest, grant.Namespace,
+            $"Grant {grant.Level} JIT access to {JitAccessService.SubjectName(grant)} in {grant.Namespace} "
+            + $"until {grant.ExpiresAt:u}", ct);
 
-        await k8sFactory.ApplyManifestAsync(manifest, cluster.Kubeconfig!, ct);
-
-        (string token, DateTime? tokenExpiry) =
-            await RequestBoundTokenAsync(cluster, grant.Namespace, sa, duration, ct);
+        ServiceAccountToken bound = await access.RequestServiceAccountTokenAsync(
+            sa, grant.Namespace, duration, TokenAudiences, ct);
 
         // The bound token never leaves EntKube — it is what the proxy presents to the API server.
         // What the customer gets is this, which means nothing to the cluster and everything to
         // the proxy, and can be checked against a revoked row on every request.
         string plaintext = TokenPrefix + Convert.ToHexStringLower(RandomNumberGenerator.GetBytes(32));
 
-        await StoreClusterTokenAsync(grant.Id, token, ct);
+
+        await StoreClusterTokenAsync(grant.Id, bound.Token, ct);
 
         logger.LogInformation(
-            "Minted JIT ServiceAccount {ServiceAccount} in {Namespace} on {Cluster} for grant {GrantId}",
-            sa, grant.Namespace, cluster.Name, grant.Id);
+            "Minted JIT ServiceAccount {ServiceAccount} in {Namespace} on cluster {ClusterId} for grant {GrantId}",
+            sa, grant.Namespace, grant.KubernetesClusterId, grant.Id);
 
         return new MintedCredential
         {
@@ -71,19 +75,21 @@ public class KubernetesJitProvisioner(
             Plaintext = plaintext,
             TokenHash = Hash(plaintext),
             DisplayPrefix = plaintext[..12],
-            TokenExpiresAt = tokenExpiry,
+            TokenExpiresAt = bound.ExpiresAt,
             Kubeconfig = BuildKubeconfig(grant, plaintext),
         };
     }
 
-    public async Task TearDownAsync(JitGrant grant, CancellationToken ct = default)
+    public async Task TearDownAsync(Guid tenantId, JitGrant grant, CancellationToken ct = default)
     {
-        KubernetesCluster? cluster = await TryLoadClusterAsync(grant.KubernetesClusterId, ct);
-        if (cluster?.Kubeconfig is null)
+        EntKube.Web.Services.Clusters.IClusterClient? access =
+            await clusterAccess.ForAsync(tenantId, grant.KubernetesClusterId, ct);
+
+        if (access is null)
         {
             logger.LogWarning(
-                "Cannot tear down JIT grant {GrantId}: cluster {ClusterId} has no kubeconfig",
-                grant.Id, grant.KubernetesClusterId);
+                "Cannot tear down JIT grant {GrantId}: cluster {ClusterId} is not this tenant's or "
+                + "has no kubeconfig", grant.Id, grant.KubernetesClusterId);
             return;
         }
 
@@ -92,9 +98,9 @@ public class KubernetesJitProvisioner(
         // tidying. Deleting them in the other order would leave a window where the binding still
         // grants against a Role that is gone, which is harmless, and a window where the binding
         // survives a partial failure, which is not.
-        await DeleteAsync(cluster, "rolebinding", JitRbacBuilder.RoleBindingName(grant.Id), grant.Namespace, ct);
-        await DeleteAsync(cluster, "role", JitRbacBuilder.RoleName(grant.Id), grant.Namespace, ct);
-        await DeleteAsync(cluster, "serviceaccount", JitRbacBuilder.ServiceAccountName(grant.Id), grant.Namespace, ct);
+        await DeleteAsync(access, "rolebinding", JitRbacBuilder.RoleBindingName(grant.Id), grant.Namespace, ct);
+        await DeleteAsync(access, "role", JitRbacBuilder.RoleName(grant.Id), grant.Namespace, ct);
+        await DeleteAsync(access, "serviceaccount", JitRbacBuilder.ServiceAccountName(grant.Id), grant.Namespace, ct);
 
         await ForgetClusterTokenAsync(grant.Id, ct);
 
@@ -107,51 +113,17 @@ public class KubernetesJitProvisioner(
     /// so both call this and it has to be idempotent.
     /// </summary>
     private async Task DeleteAsync(
-        KubernetesCluster cluster, string kind, string name, string ns, CancellationToken ct)
+        EntKube.Web.Services.Clusters.IClusterClient access,
+        string kind, string name, string ns, CancellationToken ct)
     {
         try
         {
-            await k8sFactory.DeleteManifestAsync(kind, name, ns, cluster.Kubeconfig!, ct);
+            await access.DeleteManifestAsync(kind, name, ns, ct);
         }
         catch (Exception ex)
         {
             logger.LogWarning(ex, "Deleting {Kind}/{Name} in {Namespace} failed", kind, name, ns);
         }
-    }
-
-    /// <summary>
-    /// Asks the API server for a short-lived token bound to the grant's ServiceAccount.
-    ///
-    /// Requested with an explicit duration rather than mounted as a Secret, so expiry is enforced
-    /// by the cluster itself: if every background job in EntKube stopped running, the credential
-    /// would still stop working. The API server may return a shorter life than was asked for
-    /// (<c>--service-account-max-token-expiration</c>), so the returned timestamp is treated as
-    /// authoritative rather than the requested window.
-    /// </summary>
-    private static async Task<(string Token, DateTime? ExpiresAt)> RequestBoundTokenAsync(
-        KubernetesCluster cluster, string ns, string serviceAccount, TimeSpan duration,
-        CancellationToken ct)
-    {
-        using Kubernetes client = CreateClient(cluster.Kubeconfig!);
-
-        Authenticationv1TokenRequest request = new()
-        {
-            Spec = new V1TokenRequestSpec
-            {
-                Audiences = TokenAudiences,
-                ExpirationSeconds = (long)duration.TotalSeconds,
-            }
-        };
-
-        Authenticationv1TokenRequest response = await client.CoreV1
-            .CreateNamespacedServiceAccountTokenAsync(request, serviceAccount, ns, cancellationToken: ct);
-
-        string? token = response.Status?.Token;
-        if (string.IsNullOrWhiteSpace(token))
-            throw new InvalidOperationException(
-                $"The API server returned no token for ServiceAccount '{serviceAccount}' in '{ns}'.");
-
-        return (token, response.Status?.ExpirationTimestamp.ToUniversalTime());
     }
 
     /// <summary>
@@ -211,29 +183,6 @@ public class KubernetesJitProvisioner(
         await JitClusterTokenStore.ForgetAsync(dbFactory, grantId, ct);
 
     // ── Helpers ───────────────────────────────────────────────────────────────
-
-    private async Task<KubernetesCluster> LoadClusterAsync(Guid clusterId, CancellationToken ct) =>
-        await TryLoadClusterAsync(clusterId, ct)
-        ?? throw new InvalidOperationException("The grant's cluster no longer exists.");
-
-    private async Task<KubernetesCluster?> TryLoadClusterAsync(Guid clusterId, CancellationToken ct)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-        KubernetesCluster? cluster = await db.KubernetesClusters
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
-
-        if (cluster is not null && string.IsNullOrWhiteSpace(cluster.Kubeconfig))
-            throw new InvalidOperationException(
-                $"Cluster '{cluster.Name}' has no kubeconfig, so JIT access cannot be provisioned on it.");
-
-        return cluster;
-    }
-
-    private static Kubernetes CreateClient(string kubeconfig)
-    {
-        using MemoryStream stream = new(Encoding.UTF8.GetBytes(kubeconfig));
-        return new Kubernetes(KubernetesClientConfiguration.BuildConfigFromConfigFile(stream));
-    }
 
     public static string Hash(string token) =>
         Convert.ToHexStringLower(SHA256.HashData(Encoding.UTF8.GetBytes(token)));
