@@ -614,7 +614,7 @@
                 .Split(['\n', '\r', ','], StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries)
                 .ToList();
 
-            preview = await ImportService.ScanAsync(cluster!, namespaces);
+            preview = await ImportService.ScanAsync(TenantId, cluster!, namespaces);
             step = Step.Review;
         }
         catch (Exception ex)

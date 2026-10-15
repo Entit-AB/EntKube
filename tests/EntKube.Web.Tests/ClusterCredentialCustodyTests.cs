@@ -495,7 +495,52 @@ public class ClusterCredentialCustodyTests
     /// see <c>PrometheusService</c>, where a fresh client per query was "a fixed WAN latency added
     /// to every tile".</para>
     /// </summary>
-    private const int BaselineOccurrences = 22;
+    /// <summary>
+    /// <b>19 in 11 files</b>, and <b>no ordinary conversion work is left</b> — the first time that
+    /// has been true since this test was written.
+    ///
+    /// <para><c>DeploymentImportService</c> is at zero. <c>ImportAsync</c> already took a tenant and
+    /// refused a cluster that was not that tenant's; the <em>scan</em> feeding it still read the
+    /// credential off whatever row the page passed in, so a preview — namespaces, workloads,
+    /// secrets, PVCs — could be built for a cluster the caller does not own. Half a feature
+    /// authorized is the shape worth watching for: the write was fixed two changes ago and the read
+    /// that precedes it was not.</para>
+    ///
+    /// <para>⚠️ <c>KubernetesOperationsService</c>'s last site was <b>also an ungated delete</b>.
+    /// <c>DeletePrunedResourceAsync</c> wrote the kubeconfig to a temp file and ran its own
+    /// <c>kubectl delete</c>, so every resource dropped from a manifest set — which is what pruning
+    /// is — was deleted with nobody asked and nothing recorded.
+    /// <see cref="ClusterChangeGateCoverageTests"/> cannot see it, and says so about this very
+    /// file: a file that acknowledges <em>anywhere</em> scores zero there. That is the <b>second</b>
+    /// delete path this blind spot has hidden (the first was Kyverno's <c>delete clusterpolicy</c>),
+    /// so the way to find the next one is to grep for own-process <c>kubectl</c> inside the files
+    /// that metric <em>excludes</em>, rather than trusting its total.</para>
+    ///
+    /// <para>Three things were checked before routing that delete through the seam, each of which
+    /// would have changed behaviour silently: <c>--ignore-not-found</c> survives (the seam's
+    /// <c>BuildDeleteArguments</c> passes it, so a resource already gone still counts as pruned);
+    /// the seam <b>throws</b> where the old helper returned false, and its caller counts failures
+    /// and carries on pruning, so the conversion catches; and the gate's delete preview returns
+    /// <c>NoChange()</c> for an object it cannot read, <em>by design</em> — "mirrors
+    /// --ignore-not-found" — which is correct for a prune and the opposite of the node-drain bug
+    /// where <c>NoChange</c> meant "apply the destructive thing without asking".</para>
+    ///
+    /// <para><b>What the 19 are.</b> Supposed to hold a credential:
+    /// <c>KubeconfigMaterializationInterceptor</c> 2, <c>ClusterClient</c> 2,
+    /// <c>ClusterChangeGate</c> 2. A kubeconfig EntKube <em>mints</em> rather than a cluster's:
+    /// <c>JitAccessService</c> 1, <c>PortalJitAccessPanel.razor</c> 1. Waiting on the
+    /// <b>credentialed channel</b> seam shape: <c>StorageLinkClientFactory</c> 3,
+    /// <c>StorageService</c> 2, <c>OpenStackKeystoneClient</c> 2. And three that another open change
+    /// removes: <c>RemediationService</c> 2 and <c>TenantService</c> 1, plus <c>Program.cs</c>'s log
+    /// line, which was never a credential site at all.</para>
+    ///
+    /// <para>⚠️ <b>That overlap means this constant has no correct merge.</b> The other change banks
+    /// 18 against a tree where these three are still present; this one banks 19 against a tree where
+    /// those three still are. Whichever lands second must <b>re-measure</b> — expected 15 in 8 —
+    /// rather than keeping either number, which is the rule
+    /// <c>feedback_clean_merge_is_not_a_working_merge</c> exists for.</para>
+    /// </summary>
+    private const int BaselineOccurrences = 19;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -659,7 +704,7 @@ public class ClusterCredentialCustodyTests
     /// seam's error contract is not the caller's, and a conversion that ignores that changes
     /// control flow silently.</para>
     /// </summary>
-    private const int BaselineFiles = 13;
+    private const int BaselineFiles = 11;
 
     private static (int Occurrences, int Files) Measure()
     {

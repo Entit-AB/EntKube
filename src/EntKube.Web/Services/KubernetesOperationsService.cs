@@ -1039,7 +1039,8 @@ public class KubernetesOperationsService(
             // resources. Failure here never fails the (already successful) apply.
             try
             {
-                output += await PruneRemovedResourcesAsync(db, deployment, manifests, performedBy, ct);
+                output += await PruneRemovedResourcesAsync(
+                    clusterAccess, db, deployment, manifests, performedBy, ct);
             }
             catch (Exception ex)
             {
@@ -2053,9 +2054,14 @@ public class KubernetesOperationsService(
     /// and never touching Namespaces), then rewrites the inventory to the new set.
     /// Returns a human-readable summary to append to the apply output ("" when nothing pruned).
     /// </summary>
+    /// <param name="clusterAccess">
+    /// The cluster this deployment is on, already resolved by the caller. It used to take the
+    /// kubeconfig off <c>deployment.Cluster</c> and hand the string to a private kubectl runner,
+    /// which is why these deletes never reached the change gate.
+    /// </param>
     private async Task<string> PruneRemovedResourcesAsync(
-        ApplicationDbContext db, AppDeployment deployment, List<DeploymentManifest> manifests,
-        string? performedBy, CancellationToken ct)
+        IClusterClient clusterAccess, ApplicationDbContext db, AppDeployment deployment,
+        List<DeploymentManifest> manifests, string? performedBy, CancellationToken ct)
     {
         // Desired set from the current manifests (version-agnostic identity).
         Dictionary<(string, string, string?, string), ManifestResourceRef> newSet = new();
@@ -2080,11 +2086,11 @@ public class KubernetesOperationsService(
 
         List<string> pruned = [];
         List<string> failed = [];
-        string kubeconfig = deployment.Cluster!.Kubeconfig!;
+
         foreach (DeploymentAppliedResource r in toPrune)
         {
             string label = $"{r.Kind}/{r.Name}" + (r.Namespace is null ? "" : $" (ns: {r.Namespace})");
-            if (await DeletePrunedResourceAsync(kubeconfig, r, ct))
+            if (await DeletePrunedResourceAsync(clusterAccess, r, ct))
             {
                 pruned.Add(label);
                 await auditService.RecordAsync(deployment.Id, "PruneResource", r.Kind, r.Name,
@@ -2127,23 +2133,35 @@ public class KubernetesOperationsService(
     }
 
     /// <summary>Deletes a single pruned resource by kind(.group)/name, scoping to its namespace only when it has one.</summary>
-    private async Task<bool> DeletePrunedResourceAsync(string kubeconfig, DeploymentAppliedResource r, CancellationToken ct)
+    /// <summary>
+    /// Deletes one resource the manifest set no longer contains.
+    ///
+    /// <para>⚠️ This used to write the kubeconfig to a temp file and run its own
+    /// <c>kubectl delete</c>, so <b>every pruned resource was deleted without the change gate</b> —
+    /// invisible to <c>ClusterChangeGateCoverageTests</c>, because that metric treats a file which
+    /// acknowledges <em>anywhere</em> as gated, and this file does. Through the seam the delete is
+    /// acknowledged like any other. The seam also passes <c>--ignore-not-found</c>, so a resource
+    /// that is already gone still counts as pruned, exactly as before.</para>
+    ///
+    /// <para>The seam <b>throws</b> where this returned false, and the difference is load-bearing:
+    /// the caller counts failures into a summary and carries on pruning the rest, so letting the
+    /// exception out would abandon the remaining resources on the first one that resists.</para>
+    /// </summary>
+    private async Task<bool> DeletePrunedResourceAsync(
+        IClusterClient clusterAccess, DeploymentAppliedResource r, CancellationToken ct)
     {
         string target = string.IsNullOrEmpty(r.Group) ? r.Kind : $"{r.Kind}.{r.Group}";
-        string nsArg = string.IsNullOrEmpty(r.Namespace) ? "" : $" --namespace {r.Namespace}";
-        string tempKubeconfig = Path.Combine(Path.GetTempPath(), $"entkube-{Guid.NewGuid()}.kubeconfig");
+
         try
         {
-            await SecretFile.WriteAsync(tempKubeconfig, kubeconfig, ct);
-            HelmExecutionResult res = await RunCliAsync(
-                "kubectl",
-                $"delete {target} {r.Name}{nsArg} --kubeconfig {tempKubeconfig} --ignore-not-found",
-                ct);
-            return res.Success;
+            await clusterAccess.DeleteManifestAsync(target, r.Name, r.Namespace ?? "", ct);
+            return true;
         }
-        finally
+        catch (Exception ex)
         {
-            if (File.Exists(tempKubeconfig)) File.Delete(tempKubeconfig);
+            logger.LogWarning(ex, "Could not prune {Target}/{Name} in {Namespace} on {Cluster}",
+                target, r.Name, r.Namespace ?? "(cluster-scoped)", clusterAccess.ClusterName);
+            return false;
         }
     }
 
