@@ -127,8 +127,8 @@ public class KubernetesOperationsService(
             // Rewrite the cluster-scoped policy first. Its deny-list is a literal namespace list,
             // so a namespace created by this very deploy is absent from whatever was applied
             // before — and stays uncovered until something rewrites it.
-            (bool cpOk, string cpOutput) =
-                await kyvernoPolicyService.ReconcileClusterRbacPolicyAsync(deployment.Cluster, ct);
+            (bool cpOk, string cpOutput) = await kyvernoPolicyService
+                .ReconcileClusterRbacPolicyAsync(tenantId, deployment.ClusterId, ct);
             if (!cpOk && !string.IsNullOrWhiteSpace(cpOutput))
                 logger.LogWarning(
                     "Cluster RBAC policy reconcile failed on {Cluster} after deployment {DeploymentId}: {Output}",
@@ -138,8 +138,12 @@ public class KubernetesOperationsService(
                 await kyvernoPolicyService.GetPoliciesAsync(tenantId, deployment.EnvironmentId, ct);
             if (policies.Count == 0) return;
 
+            // The tenant is derived from the deployment's app's customer a few lines up, so this
+            // is a cross-row check rather than a caller's word — but it is a check: a deployment
+            // naming a cluster outside its own tenant now resolves to nothing instead of having
+            // that cluster's credential read off the navigation property.
             (bool ok, string output) = await kyvernoPolicyService.ApplyToNamespaceAsync(
-                policies, deployment.Cluster, deployment.Namespace, ct);
+                policies, tenantId, deployment.ClusterId, deployment.Namespace, ct);
 
             if (ok)
                 logger.LogInformation(

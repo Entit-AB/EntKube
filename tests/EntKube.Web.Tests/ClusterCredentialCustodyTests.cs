@@ -437,7 +437,7 @@ public class ClusterCredentialCustodyTests
     /// so the id was the whole authorization. They take the asking tenant now, from the page that
     /// already had it.</para>
     /// </summary>
-    private const int BaselineOccurrences = 58;
+    private const int BaselineOccurrences = 52;
 
     /// <summary>
     /// Files doing so. A file that has stopped should not be able to start again quietly.
@@ -468,8 +468,30 @@ public class ClusterCredentialCustodyTests
     /// <para>27. <c>NodeManagementService</c>.</para>
     ///
     /// <para>26. <c>ComponentScanService</c>.</para>
+    ///
+    /// <para>21. <c>KyvernoPolicyService</c> — six occurrences in one file, and all six went with
+    /// two method signatures. Its two public entry points took a <c>KubernetesCluster</c> and read
+    /// the credential off the row they were handed, so any caller holding a cluster entity could
+    /// aim them at any cluster in the installation; they take <c>(tenantId, clusterId)</c> now, the
+    /// shape <c>KedaScalerService.ApplyToNamespaceAsync</c> established first.</para>
+    ///
+    /// <para>Two things came off with them. The private <c>RunKubectlAsync</c> funnel is gone —
+    /// converting the funnel rather than the public methods is what makes these conversions small —
+    /// and so are both explicit <c>gate.AcknowledgeAsync</c> calls, because the seam raises the
+    /// acknowledgment itself with the same verb and manifest. That also closed an <em>ungated</em>
+    /// delete: the <c>delete clusterpolicy</c> path never acknowledged at all, which
+    /// <see cref="ClusterChangeGateCoverageTests"/> could not see because the metric treats a file
+    /// that acknowledges <em>anywhere</em> as gated — a coarseness its own prose predicts.</para>
+    ///
+    /// <para>⚠️ The seam <b>throws</b> on a non-zero exit where both methods returned
+    /// <c>(false, output)</c>, and that difference is load-bearing rather than cosmetic: their
+    /// caller logs a failed cluster-policy reconcile and <em>goes on</em> to apply the namespace
+    /// policies. Letting the exception out would have skipped the second step on any failure of the
+    /// first, so both methods keep the tuple and catch. Worth recording as the general trap — the
+    /// seam's error contract is not the caller's, and a conversion that ignores that changes
+    /// control flow silently.</para>
     /// </summary>
-    private const int BaselineFiles = 22;
+    private const int BaselineFiles = 21;
 
     private static (int Occurrences, int Files) Measure()
     {
