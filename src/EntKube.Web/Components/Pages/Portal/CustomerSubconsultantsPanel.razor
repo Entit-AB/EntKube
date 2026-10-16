@@ -205,7 +205,8 @@
 
     private async Task ApproveAsync(Subconsultant person)
     {
-        await OnCall.ApproveSubconsultantAsync(person.Id, DateTime.UtcNow);
+        await OnCall.ApproveSubconsultantAsync(
+            Customer.TenantId, Customer.Id, person.Id, DateTime.UtcNow);
         Toasts.Success($"Thank you — {person.Name} is approved.");
         await LoadAsync();
     }
@@ -220,6 +221,7 @@
         try
         {
             await OnCall.ObjectToSubconsultantAsync(
+                Customer.TenantId, Customer.Id,
                 objecting.Id, objectionReason ?? "", DateTime.UtcNow);
 
             Toasts.Success("Recorded. We will come back to you about it.");

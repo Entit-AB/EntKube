@@ -192,12 +192,28 @@ public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
     /// Records the customer's approval of a subconsultant. §18 makes this explicit approval;
     /// silence for ten working days does the same thing on its own.
     /// </summary>
+    /// <param name="tenantId">Whose subconsultant.</param>
+    /// <param name="customerId">
+    /// Which customer is approving. The predicate below <b>mirrors
+    /// <see cref="GetSubconsultantsForCustomerAsync"/> exactly</b> — tenant, plus the row being
+    /// either tenant-wide or this customer's — so a customer can only record a decision about a
+    /// subconsultant the list actually showed them.
+    ///
+    /// <para>⚠️ This took a bare id while the list two lines above it in
+    /// <c>CustomerSubconsultantsPanel</c> was already passing
+    /// <c>Customer.TenantId</c> and <c>Customer.Id</c>. §18 makes this a contractual record of
+    /// sub-processor consent, so an unscoped write let one customer record an approval — or an
+    /// objection, with a reason in their words — against another tenant's subconsultant.</para>
+    /// </param>
     public async Task ApproveSubconsultantAsync(
-        Guid id, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, Guid id, DateTime at, CancellationToken ct = default)
     {
         using SupportDbContext db = dbFactory.CreateDbContext();
 
-        Subconsultant? person = await db.Subconsultants.FirstOrDefaultAsync(c => c.Id == id, ct);
+        Subconsultant? person = await db.Subconsultants
+            .FirstOrDefaultAsync(
+                c => c.Id == id && c.TenantId == tenantId
+                  && (c.CustomerId == null || c.CustomerId == customerId), ct);
 
         if (person is null)
         {
@@ -219,8 +235,22 @@ public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
     /// substance of the objection rather than a note attached to it — it is what the
     /// objection would be argued against. So it is required.</para>
     /// </summary>
+    /// <param name="tenantId">Whose subconsultant.</param>
+    /// <param name="customerId">
+    /// Which customer is approving. The predicate below <b>mirrors
+    /// <see cref="GetSubconsultantsForCustomerAsync"/> exactly</b> — tenant, plus the row being
+    /// either tenant-wide or this customer's — so a customer can only record a decision about a
+    /// subconsultant the list actually showed them.
+    ///
+    /// <para>⚠️ This took a bare id while the list two lines above it in
+    /// <c>CustomerSubconsultantsPanel</c> was already passing
+    /// <c>Customer.TenantId</c> and <c>Customer.Id</c>. §18 makes this a contractual record of
+    /// sub-processor consent, so an unscoped write let one customer record an approval — or an
+    /// objection, with a reason in their words — against another tenant's subconsultant.</para>
+    /// </param>
     public async Task ObjectToSubconsultantAsync(
-        Guid id, string reason, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, Guid id, string reason, DateTime at,
+        CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(reason))
         {
@@ -231,7 +261,10 @@ public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
 
         using SupportDbContext db = dbFactory.CreateDbContext();
 
-        Subconsultant? person = await db.Subconsultants.FirstOrDefaultAsync(c => c.Id == id, ct);
+        Subconsultant? person = await db.Subconsultants
+            .FirstOrDefaultAsync(
+                c => c.Id == id && c.TenantId == tenantId
+                  && (c.CustomerId == null || c.CustomerId == customerId), ct);
 
         if (person is null)
         {

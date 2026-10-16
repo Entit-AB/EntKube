@@ -490,7 +490,8 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
         OnCallService onCall = new(new TestDbContextFactory(connection));
 
         Func<Task> objecting =
-            () => onCall.ObjectToSubconsultantAsync(person.Id, "   ", DateTime.UtcNow);
+            () => onCall.ObjectToSubconsultantAsync(
+                customer.TenantId, customer.Id, person.Id, "   ", DateTime.UtcNow);
 
         await objecting.Should().ThrowAsync<ArgumentException>().WithMessage("*§18*");
     }
@@ -537,5 +538,54 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
         SignIn("karin@entit.example");
 
         RenderTickets().Markup.Should().NotContain("Journalen svarar inte");
+    }
+    /// <summary>
+    /// §18 approval is a contractual record of sub-processor consent, and these two writes took a
+    /// bare subconsultant id — while the list rendered two lines above them in
+    /// <c>CustomerSubconsultantsPanel</c> was already passing <c>Customer.TenantId</c> and
+    /// <c>Customer.Id</c>.
+    ///
+    /// <para>The predicate mirrors the list exactly (tenant, plus the row being tenant-wide or
+    /// this customer's), so both failure directions are worth separating: another tenant's
+    /// subconsultant, and <b>another customer of the same tenant</b> — the second is the one a
+    /// tenant-only predicate would still allow.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_customer_can_only_decide_about_subconsultants_its_list_shows()
+    {
+        Subconsultant ours = Engage("Anna Berg", forCustomer: customer.Id, notified: DateTime.UtcNow);
+        Subconsultant tenantWide = Engage("Bo Ek", forCustomer: null, notified: DateTime.UtcNow);
+
+        Guid otherCustomerId = Guid.NewGuid();
+        db.Customers.Add(new Customer
+        {
+            Id = otherCustomerId, TenantId = tenantId, Name = "Annan kund",
+        });
+        Subconsultant theirs = Engage("Cecilia Dahl", forCustomer: otherCustomerId, notified: DateTime.UtcNow);
+        await db.SaveChangesAsync();
+
+        OnCallService onCall = new(new TestDbContextFactory(connection));
+        DateTime at = DateTime.UtcNow;
+
+        // Its own, and the tenant-wide one the list also returns.
+        await onCall.ApproveSubconsultantAsync(customer.TenantId, customer.Id, ours.Id, at);
+        await onCall.ApproveSubconsultantAsync(customer.TenantId, customer.Id, tenantWide.Id, at);
+
+        // Another CUSTOMER of the same tenant — refused by the half of the predicate that a
+        // tenant-only check would have missed.
+        await onCall.ApproveSubconsultantAsync(customer.TenantId, customer.Id, theirs.Id, at);
+
+        // Another TENANT entirely.
+        await onCall.ApproveSubconsultantAsync(Guid.NewGuid(), customer.Id, ours.Id, at);
+        await onCall.ObjectToSubconsultantAsync(
+            Guid.NewGuid(), customer.Id, tenantWide.Id, "not acceptable", at);
+
+        db.ChangeTracker.Clear();
+        db.Subconsultants.Single(c => c.Id == ours.Id).ApprovedAt.Should().NotBeNull();
+        db.Subconsultants.Single(c => c.Id == tenantWide.Id).ApprovedAt.Should().NotBeNull();
+        db.Subconsultants.Single(c => c.Id == tenantWide.Id).ObjectedAt.Should().BeNull(
+            "a stranger's objection must not overwrite an approval");
+        db.Subconsultants.Single(c => c.Id == theirs.Id).ApprovedAt.Should().BeNull(
+            "another customer of the same tenant may not consent on their behalf");
     }
 }
