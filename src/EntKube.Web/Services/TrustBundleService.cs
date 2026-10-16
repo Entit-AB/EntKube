@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.ClusterChanges;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
@@ -19,8 +20,9 @@ public sealed record TrustSourceView(CaTrustBundleSource Source, CertificateInfo
 /// Bundle manifest generation, and gated apply/removal against the cluster.
 /// </summary>
 public class TrustBundleService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<CatalogDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
+    EntKube.Contracts.Delivery.IDeliveryApi delivery,
     ILogger<TrustBundleService> logger)
 {
     /// <summary>The trust-manager API group/version and label we stamp on managed Bundles.</summary>
@@ -33,7 +35,7 @@ public class TrustBundleService(
     /// </summary>
     public async Task<bool> IsTrustManagerAvailableAsync(Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using CatalogDbContext db = dbFactory.CreateDbContext();
         return await db.ClusterComponents
             .AnyAsync(c => c.ClusterId == clusterId
                         && c.Status == ComponentStatus.Installed
@@ -46,7 +48,7 @@ public class TrustBundleService(
 
     public async Task<List<CaTrustBundle>> GetBundlesAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using CatalogDbContext db = dbFactory.CreateDbContext();
         return await db.CaTrustBundles
             .Include(b => b.Sources)
             .Where(b => b.TenantId == tenantId && b.ClusterId == clusterId)
@@ -56,7 +58,7 @@ public class TrustBundleService(
 
     public async Task<CaTrustBundle?> GetBundleAsync(Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using CatalogDbContext db = dbFactory.CreateDbContext();
         return await db.CaTrustBundles
             .Include(b => b.Sources)
             .FirstOrDefaultAsync(b => b.Id == id, ct);
@@ -64,7 +66,7 @@ public class TrustBundleService(
 
     public async Task<CaTrustBundle> CreateBundleAsync(CaTrustBundle bundle, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using CatalogDbContext db = dbFactory.CreateDbContext();
         bundle.Id = bundle.Id == Guid.Empty ? Guid.NewGuid() : bundle.Id;
         bundle.TargetName = SanitizeName(bundle.TargetName, "entkube-trust-bundle");
         bundle.CreatedAt = bundle.UpdatedAt = DateTime.UtcNow;
@@ -76,7 +78,7 @@ public class TrustBundleService(
     public async Task<CaTrustBundle> UpdateBundleAsync(
         Guid id, Action<CaTrustBundle> mutate, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using CatalogDbContext db = dbFactory.CreateDbContext();
         CaTrustBundle bundle = await db.CaTrustBundles.FindAsync([id], ct)
             ?? throw new InvalidOperationException($"Trust bundle {id} not found.");
         mutate(bundle);
@@ -89,7 +91,7 @@ public class TrustBundleService(
     /// <summary>Removes the bundle from the DB and best-effort deletes the live Bundle CR from the cluster.</summary>
     public async Task DeleteBundleAsync(Guid tenantId, Guid id, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using CatalogDbContext db = dbFactory.CreateDbContext();
 
         // Scoped: the bundle must be this tenant's before anything is removed from a cluster.
         CaTrustBundle? bundle = await db.CaTrustBundles
@@ -129,7 +131,7 @@ public class TrustBundleService(
         if (CertificateParser.TryParse(pem) is null)
             throw new InvalidOperationException("The CA certificate is not valid PEM. Paste the full -----BEGIN CERTIFICATE----- block.");
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using CatalogDbContext db = dbFactory.CreateDbContext();
         CaTrustBundleSource source = new()
         {
             Id = Guid.NewGuid(),
@@ -145,7 +147,7 @@ public class TrustBundleService(
 
     public async Task RemoveSourceAsync(Guid sourceId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using CatalogDbContext db = dbFactory.CreateDbContext();
         CaTrustBundleSource? source = await db.CaTrustBundleSources.FindAsync([sourceId], ct);
         if (source is null) return;
         Guid bundleId = source.BundleId;
@@ -154,7 +156,7 @@ public class TrustBundleService(
         await db.SaveChangesAsync(ct);
     }
 
-    private static async Task TouchBundleAsync(ApplicationDbContext db, Guid bundleId, CancellationToken ct)
+    private static async Task TouchBundleAsync(CatalogDbContext db, Guid bundleId, CancellationToken ct)
     {
         CaTrustBundle? bundle = await db.CaTrustBundles.FindAsync([bundleId], ct);
         if (bundle is not null) bundle.UpdatedAt = DateTime.UtcNow;
@@ -176,7 +178,7 @@ public class TrustBundleService(
     public async Task<(bool Success, string Output)> ApplyBundleAsync(
         Guid tenantId, Guid bundleId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using CatalogDbContext db = dbFactory.CreateDbContext();
         CaTrustBundle? bundle = await db.CaTrustBundles
             .Include(b => b.Sources)
             .FirstOrDefaultAsync(b => b.Id == bundleId && b.TenantId == tenantId, ct);
@@ -192,7 +194,11 @@ public class TrustBundleService(
         IReadOnlyList<string> tenantNamespaces = [];
         if (bundle.Scope == TrustDistributionScope.TenantNamespaces)
         {
-            tenantNamespaces = await ResolveTenantNamespacesAsync(db, bundle.TenantId, bundle.ClusterId, ct);
+            // Delivery's question, asked of Delivery. The predicate that used to live here —
+            // the tenant's apps, their governance-locked namespaces, their deployments on this
+            // cluster — is three of Delivery's tables and none of Catalog's.
+            tenantNamespaces = await delivery.GetTenantNamespacesOnClusterAsync(
+                tenantId, bundle.ClusterId, ct);
             if (tenantNamespaces.Count == 0)
                 return (false, "No namespaces found for this tenant on the target cluster. Deploy an app first, or choose a different scope.");
         }
@@ -217,39 +223,6 @@ public class TrustBundleService(
             logger.LogWarning(
                 "Trust bundle apply failed for {Cluster}: {Output}", target.ClusterName, output);
         return (ok, output);
-    }
-
-    /// <summary>
-    /// Resolves the distinct namespace names this tenant's apps occupy on a given cluster,
-    /// preferring the governance-locked AppEnvironment namespace when present.
-    /// </summary>
-    internal static async Task<IReadOnlyList<string>> ResolveTenantNamespacesAsync(
-        ApplicationDbContext db, Guid tenantId, Guid clusterId, CancellationToken ct)
-    {
-        List<Guid> appIds = await db.Apps
-            .Where(a => a.Customer.TenantId == tenantId)
-            .Select(a => a.Id)
-            .ToListAsync(ct);
-
-        Dictionary<(Guid, Guid), string?> lockedNs = (await db.AppEnvironments
-            .Where(ae => appIds.Contains(ae.AppId))
-            .Select(ae => new { ae.AppId, ae.EnvironmentId, ae.Namespace })
-            .ToListAsync(ct))
-            .ToDictionary(x => (x.AppId, x.EnvironmentId), x => x.Namespace);
-
-        List<AppDeployment> deployments = await db.AppDeployments
-            .Where(d => appIds.Contains(d.AppId) && d.ClusterId == clusterId)
-            .ToListAsync(ct);
-
-        return deployments
-            .Select(d => lockedNs.TryGetValue((d.AppId, d.EnvironmentId), out string? locked) && !string.IsNullOrWhiteSpace(locked)
-                ? locked!
-                : d.Namespace)
-            .Where(ns => !string.IsNullOrWhiteSpace(ns))
-            .Select(ns => ns!)
-            .Distinct()
-            .OrderBy(ns => ns)
-            .ToList();
     }
 
     // ── Bundle manifest builder ────────────────────────────────────────────────
