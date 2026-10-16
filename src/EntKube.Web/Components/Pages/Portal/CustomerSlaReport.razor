@@ -91,8 +91,8 @@ else
         List<SlaRow> result = [];
         foreach (AppDeployment dep in Deployments)
         {
-            UptimeResult u7 = await IncidentService.GetUptimeAsync(dep.Id, 7);
-            UptimeResult u30 = await IncidentService.GetUptimeAsync(dep.Id, 30);
+            UptimeResult u7 = await IncidentService.GetUptimeAsync(TenantId, dep.Id, 7);
+            UptimeResult u30 = await IncidentService.GetUptimeAsync(TenantId, dep.Id, 30);
             SlaTarget? sla = await IncidentService.GetSlaTargetAsync(TenantId, CustomerId, dep.AppId);
 
             result.Add(new SlaRow(

@@ -253,13 +253,13 @@ else if (!isLoading)
 
     private async Task AckStorm(IncidentGroup g)
     {
-        await IncidentService.BulkAcknowledgeAsync(g.IncidentIds, currentUser!);
+        await IncidentService.BulkAcknowledgeAsync(TenantId, g.IncidentIds, currentUser!);
         await Task.WhenAll(LoadIncidents(), LoadStats());
     }
 
     private async Task ResolveStorm(IncidentGroup g)
     {
-        await IncidentService.BulkResolveAsync(g.IncidentIds);
+        await IncidentService.BulkResolveAsync(TenantId, g.IncidentIds);
         await Task.WhenAll(LoadIncidents(), LoadStats());
     }
 
@@ -480,7 +480,7 @@ else if (!isLoading)
 
     private async Task LoadDeliveriesAsync(Guid incidentId)
     {
-        List<NotificationDelivery> deliveries = await IncidentService.GetDeliveriesAsync(incidentId);
+        List<NotificationDelivery> deliveries = await IncidentService.GetDeliveriesAsync(TenantId, incidentId);
         deliveriesByIncident[incidentId] = deliveries;
         StateHasChanged();
     }
@@ -522,7 +522,7 @@ else if (!isLoading)
         try
         {
             string assignee = assignForm.Assignee.Trim();
-            await IncidentService.AssignAsync(incident.Id, assignee);
+            await IncidentService.AssignAsync(TenantId, incident.Id, assignee);
             assigningId = null;
             await Task.WhenAll(LoadIncidents(), LoadStats());
             expandedId = incident.Id;
@@ -536,13 +536,13 @@ else if (!isLoading)
 
     private async Task Acknowledge(AlertIncident incident)
     {
-        await IncidentService.AcknowledgeAsync(incident.Id, currentUser!);
+        await IncidentService.AcknowledgeAsync(TenantId, incident.Id, currentUser!);
         await Task.WhenAll(LoadIncidents(), LoadStats());
     }
 
     private async Task Resolve(AlertIncident incident)
     {
-        await IncidentService.ResolveAsync(incident.Id, currentUser!);
+        await IncidentService.ResolveAsync(TenantId, incident.Id, currentUser!);
         await Task.WhenAll(LoadIncidents(), LoadStats());
     }
 
@@ -550,7 +550,7 @@ else if (!isLoading)
     {
         try
         {
-            await IncidentService.AddNoteAsync(incident.Id, currentUser!, noteForm.Content.Trim());
+            await IncidentService.AddNoteAsync(TenantId, incident.Id, currentUser!, noteForm.Content.Trim());
             noteForm = new NoteForm();
             await LoadIncidents();
             expandedId = incident.Id;

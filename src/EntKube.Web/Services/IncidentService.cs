@@ -11,7 +11,15 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// matched by cluster ID and namespace label in the alert's LabelsJson.
     /// Used by the customer portal to show incidents scoped to the customer's apps.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose incidents. This method takes <em>entities</em> and derives its cluster set from
+    /// them, so without a tenant it trusts the caller's list completely — and the predicate below
+    /// is on <c>ClusterId</c>, which says nothing about who owns the cluster. The portal builds
+    /// that list for one customer today; the clause means the service no longer depends on that
+    /// being true.
+    /// </param>
     public async Task<List<AlertIncident>> GetIncidentsForDeploymentsAsync(
+        Guid tenantId,
         List<AppDeployment> deployments,
         int windowDays = 30,
         IncidentStatus? status = null,
@@ -28,7 +36,8 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
         IQueryable<AlertIncident> query = db.AlertIncidents
             .Include(i => i.Cluster)
             .Include(i => i.Notes.OrderBy(n => n.CreatedAt))
-            .Where(i => clusterIds.Contains(i.ClusterId) && i.StartsAt >= from)
+            .Where(i => clusterIds.Contains(i.ClusterId) && i.StartsAt >= from
+                     && i.Cluster.TenantId == tenantId)
             .OrderByDescending(i => i.StartsAt);
 
         if (status.HasValue)
@@ -102,19 +111,29 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
         return await query.ToListAsync(ct);
     }
 
-    public async Task<AlertIncident?> GetByIdAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose incident. ⚠️ <c>AlertIncident</c> carries no <c>TenantId</c> — only a
+    /// <c>ClusterId</c> — so the scope travels through the cluster, exactly as
+    /// <see cref="GetIncidentsForTenantAsync"/> already does with
+    /// <c>i.Cluster.TenantId == tenantId</c>. The missing column is very likely why these by-id
+    /// methods never gained the parameter while every <c>*ForTenantAsync</c> beside them has one.
+    /// </param>
+    public async Task<AlertIncident?> GetByIdAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.AlertIncidents
             .Include(i => i.Cluster)
             .Include(i => i.Notes.OrderBy(n => n.CreatedAt))
-            .FirstOrDefaultAsync(i => i.Id == id, ct);
+            .FirstOrDefaultAsync(i => i.Id == id && i.Cluster.TenantId == tenantId, ct);
     }
 
-    public async Task AcknowledgeAsync(Guid id, string acknowledgedBy, CancellationToken ct = default)
+    public async Task AcknowledgeAsync(
+        Guid tenantId, Guid id, string acknowledgedBy, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        AlertIncident? incident = await db.AlertIncidents.FindAsync([id], ct);
+        AlertIncident? incident = await db.AlertIncidents
+            .FirstOrDefaultAsync(i => i.Id == id && i.Cluster.TenantId == tenantId, ct);
         if (incident is null || incident.Status != IncidentStatus.Active) return;
 
         incident.Status = IncidentStatus.Acknowledged;
@@ -124,10 +143,12 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task ResolveAsync(Guid id, string resolvedBy, CancellationToken ct = default)
+    public async Task ResolveAsync(
+        Guid tenantId, Guid id, string resolvedBy, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        AlertIncident? incident = await db.AlertIncidents.FindAsync([id], ct);
+        AlertIncident? incident = await db.AlertIncidents
+            .FirstOrDefaultAsync(i => i.Id == id && i.Cluster.TenantId == tenantId, ct);
         if (incident is null || incident.Status == IncidentStatus.Resolved) return;
 
         incident.Status = IncidentStatus.Resolved;
@@ -137,10 +158,12 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task AssignAsync(Guid id, string assignee, CancellationToken ct = default)
+    public async Task AssignAsync(
+        Guid tenantId, Guid id, string assignee, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        AlertIncident? incident = await db.AlertIncidents.FindAsync([id], ct);
+        AlertIncident? incident = await db.AlertIncidents
+            .FirstOrDefaultAsync(i => i.Id == id && i.Cluster.TenantId == tenantId, ct);
         if (incident is null) return;
 
         incident.AssignedTo = assignee;
@@ -149,14 +172,19 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task BulkAcknowledgeAsync(IEnumerable<Guid> ids, string acknowledgedBy, CancellationToken ct = default)
+    public async Task BulkAcknowledgeAsync(
+        Guid tenantId, IEnumerable<Guid> ids, string acknowledgedBy,
+        CancellationToken ct = default)
     {
         List<Guid> idList = ids.ToList();
         if (idList.Count == 0) return;
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         List<AlertIncident> incidents = await db.AlertIncidents
-            .Where(i => idList.Contains(i.Id) && i.Status == IncidentStatus.Active)
+            // The tenant clause applies to the SET, not per id: a bulk call carrying a mix
+            // acknowledges only this tenant's and leaves the rest alone.
+            .Where(i => idList.Contains(i.Id) && i.Cluster.TenantId == tenantId
+                     && i.Status == IncidentStatus.Active)
             .ToListAsync(ct);
 
         DateTime now = DateTime.UtcNow;
@@ -170,25 +198,29 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task<List<NotificationDelivery>> GetDeliveriesAsync(Guid incidentId, CancellationToken ct = default)
+    public async Task<List<NotificationDelivery>> GetDeliveriesAsync(
+        Guid tenantId, Guid incidentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.NotificationDeliveries
             .Include(d => d.Channel)
-            .Where(d => d.IncidentId == incidentId)
+            .Where(d => d.IncidentId == incidentId
+                     && d.Incident.Cluster.TenantId == tenantId)
             .OrderByDescending(d => d.SentAt)
             .Take(30)
             .ToListAsync(ct);
     }
 
-    public async Task BulkResolveAsync(IEnumerable<Guid> ids, CancellationToken ct = default)
+    public async Task BulkResolveAsync(
+        Guid tenantId, IEnumerable<Guid> ids, CancellationToken ct = default)
     {
         List<Guid> idList = ids.ToList();
         if (idList.Count == 0) return;
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         List<AlertIncident> incidents = await db.AlertIncidents
-            .Where(i => idList.Contains(i.Id) && i.Status != IncidentStatus.Resolved)
+            .Where(i => idList.Contains(i.Id) && i.Cluster.TenantId == tenantId
+                     && i.Status != IncidentStatus.Resolved)
             .ToListAsync(ct);
 
         DateTime now = DateTime.UtcNow;
@@ -202,9 +234,26 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task AddNoteAsync(Guid incidentId, string author, string content, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose incident. ⚠️ This WRITES WITHOUT READING — it inserts the note for the id it was
+    /// handed, so there was no lookup here to be missing a predicate, and a scan for unscoped
+    /// by-id lookups could not have found it. An incident note is operator-visible commentary on
+    /// somebody's outage, so it needs an existence check rather than a scoped lookup.
+    /// </param>
+    public async Task AddNoteAsync(
+        Guid tenantId, Guid incidentId, string author, string content,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        bool incidentIsTenants = await db.AlertIncidents
+            .AnyAsync(i => i.Id == incidentId && i.Cluster.TenantId == tenantId, ct);
+
+        if (!incidentIsTenants)
+        {
+            return;
+        }
+
         db.IncidentNotes.Add(new IncidentNote
         {
             IncidentId = incidentId,
@@ -215,6 +264,7 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
     }
 
     public async Task<UptimeResult> GetUptimeAsync(
+        Guid tenantId,
         Guid deploymentId,
         int windowDays,
         CancellationToken ct = default)
@@ -223,7 +273,8 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
         DateTime from = DateTime.UtcNow.AddDays(-windowDays);
 
         List<DeploymentHealthSnapshot> snapshots = await db.DeploymentHealthSnapshots
-            .Where(s => s.DeploymentId == deploymentId && s.SnapshotAt >= from)
+            .Where(s => s.DeploymentId == deploymentId && s.SnapshotAt >= from
+                     && s.Deployment.App.Customer.TenantId == tenantId)
             .OrderBy(s => s.SnapshotAt)
             .ToListAsync(ct);
 
@@ -452,10 +503,12 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task DeleteMaintenanceWindowAsync(Guid id, CancellationToken ct = default)
+    public async Task DeleteMaintenanceWindowAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        MaintenanceWindow? w = await db.MaintenanceWindows.FindAsync([id], ct);
+        MaintenanceWindow? w = await db.MaintenanceWindows
+            .FirstOrDefaultAsync(m => m.Id == id && m.TenantId == tenantId, ct);
         if (w is not null) db.MaintenanceWindows.Remove(w);
         await db.SaveChangesAsync(ct);
     }

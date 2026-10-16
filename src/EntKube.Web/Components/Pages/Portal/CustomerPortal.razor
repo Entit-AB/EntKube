@@ -362,7 +362,7 @@ else
                     <h6 class="text-muted small mb-2"><span class="bi bi-clock-history me-1"></span>Incident History (30 days)</h6>
                     @if (AllCustomerDeployments.Count > 0)
                     {
-                        <CustomerIncidentHistory Deployments="AllCustomerDeployments" WindowDays="30" />
+                        <CustomerIncidentHistory TenantId="selectedCustomer.TenantId" Deployments="AllCustomerDeployments" WindowDays="30" />
                     }
                     else { <div class="text-muted small">No deployments yet.</div> }
                 </div>

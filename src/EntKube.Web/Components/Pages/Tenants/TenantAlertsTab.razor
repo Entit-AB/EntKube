@@ -542,13 +542,13 @@ else
 
     private async Task AcknowledgeIncident(AlertIncident incident)
     {
-        await IncidentService.AcknowledgeAsync(incident.Id, currentUser!);
+        await IncidentService.AcknowledgeAsync(TenantId, incident.Id, currentUser!);
         await Refresh();
     }
 
     private async Task ResolveIncident(AlertIncident incident)
     {
-        await IncidentService.ResolveAsync(incident.Id, currentUser!);
+        await IncidentService.ResolveAsync(TenantId, incident.Id, currentUser!);
         await Refresh();
     }
 
@@ -577,7 +577,7 @@ else
             .ToList();
 
         if (incidentIds.Count > 0)
-            await IncidentService.BulkAcknowledgeAsync(incidentIds, currentUser!);
+            await IncidentService.BulkAcknowledgeAsync(TenantId, incidentIds, currentUser!);
 
         selectedKeys.Clear();
         await Refresh();
