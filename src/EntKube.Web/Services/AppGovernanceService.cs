@@ -34,6 +34,43 @@ public class AppGovernanceService(
     /// theirs is as wrong as the reverse, and governance written against that pair would be
     /// applied to a namespace in the wrong tenant.</para>
     /// </summary>
+    /// <summary>
+    /// Whether every named database belongs to <paramref name="tenantId"/>. None of the three
+    /// carries a <c>TenantId</c> of its own: a CNPG or Mongo database is owned by its cluster,
+    /// a registered one by its instance. A null id grants nothing, so it passes.
+    /// </summary>
+    private async Task<bool> DatabasesBelongToTenantAsync(
+        Guid tenantId,
+        Guid? cnpgDatabaseId, Guid? mongoDatabaseId, Guid? registeredPostgresDatabaseId,
+        CancellationToken ct)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (cnpgDatabaseId is Guid cnpgId
+            && !await db.CnpgDatabases.AnyAsync(
+                d => d.Id == cnpgId && d.CnpgCluster.TenantId == tenantId, ct))
+        {
+            return false;
+        }
+
+        if (mongoDatabaseId is Guid mongoId
+            && !await db.MongoDatabases.AnyAsync(
+                d => d.Id == mongoId && d.MongoCluster.TenantId == tenantId, ct))
+        {
+            return false;
+        }
+
+        if (registeredPostgresDatabaseId is Guid registeredId
+            && !await db.RegisteredPostgresDatabases.AnyAsync(
+                d => d.Id == registeredId
+                  && d.RegisteredPostgresInstance.TenantId == tenantId, ct))
+        {
+            return false;
+        }
+
+        return true;
+    }
+
     private async Task<bool> PairBelongsToTenantAsync(
         Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct)
     {
@@ -383,10 +420,18 @@ public class AppGovernanceService(
         return policy;
     }
 
-    public async Task<bool> DeleteNetworkPolicyAsync(Guid policyId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose row. ⚠️ It used <c>FindAsync</c>, which takes a key and cannot carry a predicate —
+    /// part of why these deletes never gained a tenant. Every one of these entities has an
+    /// <c>AppId</c>, so the scope travels through the app.
+    /// </param>
+    public async Task<bool> DeleteNetworkPolicyAsync(
+        Guid tenantId, Guid policyId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        AppNetworkPolicy? p = await db.AppNetworkPolicies.FindAsync([policyId], ct);
+        AppNetworkPolicy? p = await db.AppNetworkPolicies
+            .FirstOrDefaultAsync(
+                x => x.Id == policyId && x.App.Customer.TenantId == tenantId, ct);
         if (p is null) return false;
         db.AppNetworkPolicies.Remove(p);
         await db.SaveChangesAsync(ct);
@@ -446,10 +491,23 @@ public class AppGovernanceService(
     /// Adds one rule to an app's Role. Throws <see cref="InvalidOperationException"/> when the rule
     /// is on the RBAC deny-list — see <see cref="AppRbacRuleValidator"/> for what that covers and why.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose policy. The rule hangs off an <c>AppRbacPolicy</c>, so the policy is what has to
+    /// be this tenant's — a rule added to someone else's policy grants verbs in their namespace.
+    /// </param>
     public async Task<AppRbacRule> AddRbacRuleAsync(
-        Guid rbacPolicyId, string apiGroups, string resources, string verbs,
+        Guid tenantId, Guid rbacPolicyId, string apiGroups, string resources, string verbs,
         CancellationToken ct = default)
     {
+        using ApplicationDbContext guard = dbFactory.CreateDbContext();
+
+        if (!await guard.AppRbacPolicies
+                .AnyAsync(x => x.Id == rbacPolicyId && x.App.Customer.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException(
+                "RBAC policy not found, or it does not belong to this tenant.");
+        }
+
         AppRbacRuleValidator.ThrowIfBlocked(apiGroups, resources, verbs);
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
@@ -466,10 +524,19 @@ public class AppGovernanceService(
         return rule;
     }
 
-    public async Task<bool> DeleteRbacRuleAsync(Guid ruleId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose row. ⚠️ It used <c>FindAsync</c>, which takes a key and cannot carry a predicate —
+    /// part of why these deletes never gained a tenant. Every one of these entities has an
+    /// <c>AppId</c>, so the scope travels through the app.
+    /// </param>
+    public async Task<bool> DeleteRbacRuleAsync(
+        Guid tenantId, Guid ruleId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        AppRbacRule? r = await db.AppRbacRules.FindAsync([ruleId], ct);
+        // AppRbacRule has no App of its own — it hangs off a policy, which has one.
+        AppRbacRule? r = await db.AppRbacRules
+            .FirstOrDefaultAsync(
+                x => x.Id == ruleId && x.Policy.App.Customer.TenantId == tenantId, ct);
         if (r is null) return false;
         db.AppRbacRules.Remove(r);
         await db.SaveChangesAsync(ct);
@@ -521,9 +588,23 @@ public class AppGovernanceService(
     /// Copies quota, network policies, and RBAC from <paramref name="sourceEnvId"/>
     /// to <paramref name="targetEnvId"/>, overwriting any existing settings.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose governance. This one names three things, so it is guarded twice: the app with the
+    /// source environment, and the app with the target. Copying is a read of one environment and
+    /// a write to another, and either side crossing the boundary is a breach — reading a
+    /// stranger's quota and network policies, or overwriting theirs with ours.
+    /// </param>
     public async Task CopyFromEnvironmentAsync(
-        Guid appId, Guid sourceEnvId, Guid targetEnvId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid sourceEnvId, Guid targetEnvId,
+        CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, sourceEnvId, ct)
+            || !await PairBelongsToTenantAsync(tenantId, appId, targetEnvId, ct))
+        {
+            throw new InvalidOperationException(
+                "The app or one of the environments does not belong to this tenant.");
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         // ── Namespace ──
@@ -872,11 +953,29 @@ public class AppGovernanceService(
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose grant. A grant names two things — the app+environment it is written against and the
+    /// database it opens — so both have to be this tenant's: the pair guard alone would let one
+    /// tenant hand its own app a stranger's database.
+    /// </param>
     public async Task<AppAllowedDatabase> AddAllowedDatabaseAsync(
-        Guid appId, Guid environmentId,
+        Guid tenantId, Guid appId, Guid environmentId,
         Guid? cnpgDatabaseId, Guid? mongoDatabaseId, Guid? registeredPostgresDatabaseId,
         CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "The app or the environment does not belong to this tenant.");
+        }
+
+        if (!await DatabasesBelongToTenantAsync(
+                tenantId, cnpgDatabaseId, mongoDatabaseId, registeredPostgresDatabaseId, ct))
+        {
+            throw new InvalidOperationException(
+                "The database does not belong to this tenant.");
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         AppAllowedDatabase entry = new()
         {
@@ -897,10 +996,18 @@ public class AppGovernanceService(
             .FirstAsync(a => a.Id == entry.Id, ct);
     }
 
-    public async Task<bool> DeleteAllowedDatabaseAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose row. ⚠️ It used <c>FindAsync</c>, which takes a key and cannot carry a predicate —
+    /// part of why these deletes never gained a tenant. Every one of these entities has an
+    /// <c>AppId</c>, so the scope travels through the app.
+    /// </param>
+    public async Task<bool> DeleteAllowedDatabaseAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        AppAllowedDatabase? entry = await db.AppAllowedDatabases.FindAsync([id], ct);
+        AppAllowedDatabase? entry = await db.AppAllowedDatabases
+            .FirstOrDefaultAsync(
+                x => x.Id == id && x.App.Customer.TenantId == tenantId, ct);
         if (entry is null) return false;
         db.AppAllowedDatabases.Remove(entry);
         await db.SaveChangesAsync(ct);
@@ -924,9 +1031,27 @@ public class AppGovernanceService(
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose grant — the app+environment and the Redis cluster both have to be this tenant's.
+    /// </param>
     public async Task<AppAllowedCache> AddAllowedCacheAsync(
-        Guid appId, Guid environmentId, Guid redisClusterId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid environmentId, Guid redisClusterId,
+        CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "The app or the environment does not belong to this tenant.");
+        }
+
+        using ApplicationDbContext guard = dbFactory.CreateDbContext();
+        if (!await guard.RedisClusters.AnyAsync(
+                c => c.Id == redisClusterId && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException(
+                "The cache does not belong to this tenant.");
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         AppAllowedCache entry = new()
         {
@@ -943,10 +1068,18 @@ public class AppGovernanceService(
             .FirstAsync(a => a.Id == entry.Id, ct);
     }
 
-    public async Task<bool> DeleteAllowedCacheAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose row. ⚠️ It used <c>FindAsync</c>, which takes a key and cannot carry a predicate —
+    /// part of why these deletes never gained a tenant. Every one of these entities has an
+    /// <c>AppId</c>, so the scope travels through the app.
+    /// </param>
+    public async Task<bool> DeleteAllowedCacheAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        AppAllowedCache? entry = await db.AppAllowedCaches.FindAsync([id], ct);
+        AppAllowedCache? entry = await db.AppAllowedCaches
+            .FirstOrDefaultAsync(
+                x => x.Id == id && x.App.Customer.TenantId == tenantId, ct);
         if (entry is null) return false;
         db.AppAllowedCaches.Remove(entry);
         await db.SaveChangesAsync(ct);
@@ -970,9 +1103,27 @@ public class AppGovernanceService(
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose grant — the app+environment and the storage link both have to be this tenant's.
+    /// </param>
     public async Task<AppAllowedStorage> AddAllowedStorageAsync(
-        Guid appId, Guid environmentId, Guid storageLinkId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid environmentId, Guid storageLinkId,
+        CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "The app or the environment does not belong to this tenant.");
+        }
+
+        using ApplicationDbContext guard = dbFactory.CreateDbContext();
+        if (!await guard.StorageLinks.AnyAsync(
+                l => l.Id == storageLinkId && l.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException(
+                "The storage link does not belong to this tenant.");
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         AppAllowedStorage entry = new()
         {
@@ -989,10 +1140,18 @@ public class AppGovernanceService(
             .FirstAsync(a => a.Id == entry.Id, ct);
     }
 
-    public async Task<bool> DeleteAllowedStorageAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose row. ⚠️ It used <c>FindAsync</c>, which takes a key and cannot carry a predicate —
+    /// part of why these deletes never gained a tenant. Every one of these entities has an
+    /// <c>AppId</c>, so the scope travels through the app.
+    /// </param>
+    public async Task<bool> DeleteAllowedStorageAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        AppAllowedStorage? entry = await db.AppAllowedStorages.FindAsync([id], ct);
+        AppAllowedStorage? entry = await db.AppAllowedStorages
+            .FirstOrDefaultAsync(
+                x => x.Id == id && x.App.Customer.TenantId == tenantId, ct);
         if (entry is null) return false;
         db.AppAllowedStorages.Remove(entry);
         await db.SaveChangesAsync(ct);
