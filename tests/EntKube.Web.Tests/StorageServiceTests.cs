@@ -816,7 +816,7 @@ public class StorageServiceTests : IDisposable
 
         // Act
 
-        List<StorageBinding> bindings = await sut.GetBindingsForDeploymentAsync(deployment.Id);
+        List<StorageBinding> bindings = await sut.GetBindingsForDeploymentAsync(tenant.Id, deployment.Id);
 
         // Assert
 
@@ -920,5 +920,35 @@ public class StorageServiceTests : IDisposable
             s.KubernetesSecretName.Should().BeNull();
             s.KubernetesNamespace.Should().BeNull();
         });
+    }
+    /// <summary>
+    /// The five "what is bound to this deployment" readers each took a bare deployment id, and
+    /// <c>PortalSecretsDetail</c> — a customer-facing panel — calls all of them by id. A binding
+    /// row names the Kubernetes Secret the credentials land in and the backing cluster, so
+    /// listing them for an arbitrary id describes another tenant's wiring.
+    ///
+    /// <para>This covers the harder of the two predicate shapes. <c>CacheBinding</c>,
+    /// <c>MessagingBinding</c> and <c>KafkaBinding</c> carry a <c>TenantId</c> column, so theirs
+    /// is a direct comparison; <c>StorageBinding</c> and <c>IdentityBinding</c> do not, so the
+    /// scope has to travel through <c>AppDeployment → App → Customer</c>. The traversal is the
+    /// part that can be written wrong.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_list_another_tenants_storage_bindings()
+    {
+        (Tenant tenant, Data.Environment env) = CreateTenantWithEnvironment();
+        (_, AppDeployment deployment, StorageLink link) = CreateDeploymentWithStorageLink(tenant, env);
+        await db.SaveChangesAsync();
+
+        await sut.BindStorageToDeploymentAsync(link.Id, deployment.Id, "invoices");
+
+        (Tenant stranger, _) = CreateTenantWithEnvironment();
+        await db.SaveChangesAsync();
+
+        (await sut.GetBindingsForDeploymentAsync(tenant.Id, deployment.Id))
+            .Should().ContainSingle("the owner still sees its own binding");
+
+        (await sut.GetBindingsForDeploymentAsync(stranger.Id, deployment.Id))
+            .Should().BeEmpty("StorageBinding has no TenantId, so this is the navigation path");
     }
 }

@@ -2219,13 +2219,18 @@ public class RabbitMQService(
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose deployment. A binding row names the Kubernetes Secret the credentials land in and
+    /// the backing cluster, so listing them for an arbitrary deployment id describes another
+    /// tenant's wiring. <c>PortalSecretsDetail</c> — a customer-facing panel — calls this by id.
+    /// </param>
     public async Task<List<MessagingBinding>> GetMessagingBindingsForDeploymentAsync(
-        Guid appDeploymentId, CancellationToken ct = default)
+        Guid tenantId, Guid appDeploymentId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.MessagingBindings
             .Include(b => b.Cluster)
-            .Where(b => b.AppDeploymentId == appDeploymentId)
+            .Where(b => b.AppDeploymentId == appDeploymentId && b.TenantId == tenantId)
             .OrderBy(b => b.Vhost).ThenBy(b => b.QueueName ?? b.ExchangeName)
             .ToListAsync(ct);
     }
