@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
@@ -128,9 +129,9 @@ public class AlertSyncService(
         using (IServiceScope scope = scopeFactory.CreateScope())
         {
             using IDisposable unattended = scope.DeclareUnattended("alert-sync");
-            var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+            var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<TelemetryDbContext>>();
             var catalog = scope.ServiceProvider.GetRequiredService<EntKube.Contracts.Catalog.ICatalogApi>();
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
+            using TelemetryDbContext db = dbFactory.CreateDbContext();
 
             foreach (Guid tenantId in await db.Tenants.Select(t => t.Id).ToListAsync(ct))
             {
@@ -174,7 +175,7 @@ public class AlertSyncService(
     {
         using IServiceScope scope = scopeFactory.CreateScope();
         using IDisposable unattended = scope.DeclareUnattended("alert-sync");
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<TelemetryDbContext>>();
         var prometheusService = scope.ServiceProvider.GetRequiredService<PrometheusService>();
         var notificationService = scope.ServiceProvider.GetRequiredService<NotificationService>();
         var stormSuppression = scope.ServiceProvider.GetRequiredService<StormSuppressionService>();
@@ -201,7 +202,7 @@ public class AlertSyncService(
         List<AlertInfo> liveAlerts = [.. liveAlertsByFingerprint.Values];
         HashSet<string> liveFingerprints = liveAlertsByFingerprint.Keys.ToHashSet();
 
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using TelemetryDbContext db = dbFactory.CreateDbContext();
 
         // Scoped by tenant as well as id. The row is still needed — an incident carries the
         // cluster as a navigation — but it no longer *supplies* the tenant, so a cluster that is
@@ -313,6 +314,12 @@ public class AlertSyncService(
 
         await db.SaveChangesAsync(ct);
 
+        // Everything that writes is above this line. The cluster comes off a hub that the module
+        // context exposes AsNoTracking, so it is DETACHED — assigning it to a tracked incident's
+        // navigation below is fixup for the notification label (NotificationService reads
+        // incident.Cluster?.Name and nothing else) and must stay after the last SaveChanges. A
+        // SaveChanges added below this point would see a detached principal on a tracked
+        // dependent and try to insert the cluster.
         KubernetesCluster cluster = clusterEarly;
 
         // §14.3: an issue our monitoring finds is registered by us, timed at the alarm.

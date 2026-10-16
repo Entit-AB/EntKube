@@ -441,6 +441,25 @@ public class ModuleContractTests
     /// against a small set, and the same route <c>MessagingTab</c> was given when
     /// <c>CustomerName</c> was refused a place on the DTO for having one reader.</para>
     ///
+    /// <para><b>Telemetry 5 → 3, and the two that moved were the ones the ratchet had never
+    /// counted.</b> <c>AlertSyncService</c> and <c>TelemetryAlertEvaluator</c> needed no contract
+    /// and no tidying: between them they touch <c>AlertIncidents</c>,
+    /// <c>AlertRoutingRules</c>, <c>NotificationChannels</c> and <c>TelemetryAlertRules</c> — all
+    /// Telemetry's own — plus <c>Tenants</c> and <c>KubernetesClusters</c>, which every module
+    /// context has exposed read-only from the start. They were a context swap the whole time, and
+    /// the only reason nobody did it is that the metric said they were not there. Correcting a
+    /// measurement is not bookkeeping; it is how work gets found.</para>
+    ///
+    /// <para>⚠️ The swap is not quite free, and the reason is worth keeping: a module context
+    /// exposes the four hubs as <c>IQueryable</c> with <c>AsNoTracking</c>, so a cluster read
+    /// through one comes back <b>detached</b> where <c>ApplicationDbContext</c>'s <c>DbSet</c>
+    /// returned it tracked. <c>AlertSyncService</c> assigns that cluster onto each incident's
+    /// navigation so <c>NotificationService</c> can render <c>incident.Cluster?.Name</c>, and
+    /// attaching a detached principal to a <em>tracked</em> dependent is how EF is persuaded to
+    /// insert a row that already exists. It is correct today only because every write in the
+    /// method happens above that line; the comment there says so, in the imperative, because the
+    /// next person to add a <c>SaveChanges</c> is who it is for.</para>
+    ///
     /// <para>⚠️ Two files resolve the context from a scope and are in no module at all:
     /// <c>KubeconfigResolver</c> and <c>TelemetrySegmentBlobStore</c>. They are absent from
     /// <c>ModuleServiceMap</c>, so this ratchet cannot see them however many spellings it learns —
@@ -450,7 +469,7 @@ public class ModuleContractTests
     private static readonly Dictionary<Module, int> Baseline = new()
     {
         [Module.DataServices] = 2,
-        [Module.Telemetry] = 5,
+        [Module.Telemetry] = 3,
         [Module.Connectivity] = 6,
         [Module.Support] = 7,
         [Module.Catalog] = 6,
