@@ -29,6 +29,7 @@ public class CertificateDistributionService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     VaultService vault,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
+    EntKube.Contracts.Delivery.IDeliveryApi delivery,
     ILogger<CertificateDistributionService> logger)
 {
     // Namespaces never targeted by an "all namespaces" distribution.
@@ -349,7 +350,7 @@ public class CertificateDistributionService(
             IReadOnlyList<string> namespaces = dist.Scope switch
             {
                 TrustDistributionScope.TenantNamespaces =>
-                    await TrustBundleService.ResolveTenantNamespacesAsync(db, tenantId, clusterId, ct),
+                    await delivery.GetTenantNamespacesOnClusterAsync(tenantId, clusterId, ct),
                 TrustDistributionScope.AllNamespaces =>
                     (await ListClusterNamespacesAsync(cluster, selector: null, ct))
                         .Where(ns => !SystemNamespaces.Contains(ns)).ToList(),

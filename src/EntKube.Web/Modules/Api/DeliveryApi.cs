@@ -168,6 +168,49 @@ public sealed class DeliveryApi(IDbContextFactory<DeliveryDbContext> dbFactory) 
     private static IQueryable<Data.App> ScopedApps(DeliveryDbContext db, Guid tenantId)
         => db.Apps.AsNoTracking().Where(a => a.Customer.TenantId == tenantId);
 
+    public async Task<IReadOnlyList<string>> GetTenantNamespacesOnClusterAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        var deployments = await ScopedDeployments(db, tenantId)
+            .Where(d => d.ClusterId == clusterId)
+            .Select(d => new { d.AppId, d.EnvironmentId, d.Namespace })
+            .ToListAsync(ct);
+
+        if (deployments.Count == 0)
+        {
+            return [];
+        }
+
+        // Only the app/environment pairs that actually deploy here. The hand-written version
+        // loaded every AppEnvironment row belonging to every app in the tenant and then looked up
+        // a handful of them; the result is identical because nothing outside these pairs can be
+        // consulted below.
+        HashSet<Guid> appIds = [.. deployments.Select(d => d.AppId)];
+
+        Dictionary<(Guid, Guid), string?> locked = (await db.AppEnvironments
+                .AsNoTracking()
+                .Where(ae => appIds.Contains(ae.AppId))
+                .Select(ae => new { ae.AppId, ae.EnvironmentId, ae.Namespace })
+                .ToListAsync(ct))
+            .ToDictionary(x => (x.AppId, x.EnvironmentId), x => x.Namespace);
+
+        return
+        [
+            .. deployments
+                .Select(d =>
+                    locked.TryGetValue((d.AppId, d.EnvironmentId), out string? pinned)
+                    && !string.IsNullOrWhiteSpace(pinned)
+                        ? pinned!
+                        : d.Namespace)
+                .Where(ns => !string.IsNullOrWhiteSpace(ns))
+                .Select(ns => ns!)
+                .Distinct()
+                .Order()
+        ];
+    }
+
     private static IQueryable<Data.AppDeployment> ScopedDeployments(DeliveryDbContext db, Guid tenantId)
         => db.AppDeployments.AsNoTracking().Where(d => d.App.Customer.TenantId == tenantId);
 

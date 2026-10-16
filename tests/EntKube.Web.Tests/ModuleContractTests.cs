@@ -593,6 +593,32 @@ public class ModuleContractTests
     /// same value by a different name only when nobody recorded one. A contract that hands over
     /// the columns hands over the rule as well.</para>
     ///
+    /// <para><b>Catalog 6 → 5, by moving a rule rather than a query.</b>
+    /// <c>TrustBundleService.ResolveTenantNamespacesAsync</c> was an <c>internal static</c> helper
+    /// over the shared context, called by two Catalog services. What it implements — an app's
+    /// namespace is the one governance pinned on its <c>AppEnvironment</c>, falling back to the
+    /// deployment's own — reads <c>Apps</c>, <c>AppEnvironments</c> and <c>AppDeployments</c>:
+    /// three of <em>Delivery's</em> tables and none of Catalog's. Correct code in the wrong
+    /// module, which a count of foreign reads shows and a count of foreign <em>rules</em> would
+    /// have shown sooner.</para>
+    ///
+    /// <para>It is <c>GetTenantNamespacesOnClusterAsync</c> now, and it returns namespace
+    /// <em>names</em>: both callers want exactly a list for a namespace selector, so a row-shaped
+    /// answer would hand back app and environment ids neither reads. It also queries less — the
+    /// original loaded every <c>AppEnvironment</c> row for every app in the tenant and then looked
+    /// up a handful, where this looks up only the pairs that deploy on the cluster, which cannot
+    /// change the answer — and it <b>orders</b> the result, which the original did not. The list
+    /// goes into a generated manifest, so an unstable order reads as drift in a resource nobody
+    /// touched.</para>
+    ///
+    /// <para>⚠️ The rule had <b>no test</b>. The only ones naming <c>TenantNamespaces</c> hand an
+    /// already-resolved list to <c>BuildBundleManifest</c>, so the resolution itself was never
+    /// exercised in either of its two callers. <c>TenantNamespaceResolutionTests</c> covers it in
+    /// seven cases, each verified by deleting the rule it names and watching that test — not
+    /// merely some test — fail. What distributes into these namespaces is a CA trust store: one
+    /// wrongly included receives another tenant's trust anchors, and one wrongly left out silently
+    /// never gets the CA it needs. Moving a rule is the moment to cover it, not to assume it.</para>
+    ///
     /// <para>⚠️ Two files resolve the context from a scope and are in no module at all:
     /// <c>KubeconfigResolver</c> and <c>TelemetrySegmentBlobStore</c>. They are absent from
     /// <c>ModuleServiceMap</c>, so this ratchet cannot see them however many spellings it learns —
@@ -622,7 +648,7 @@ public class ModuleContractTests
         [Module.Telemetry] = 3,
         [Module.Connectivity] = 3,
         [Module.Support] = 6,
-        [Module.Catalog] = 6,
+        [Module.Catalog] = 5,
         [Module.Delivery] = 3,
         [Module.Identity] = 3,
         [Module.Fleet] = 2,

@@ -38,6 +38,7 @@ public sealed class TrustBundleServiceTests : IDisposable
             dbFactory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(
                 dbFactory, new Mock<IKubernetesClientFactory>().Object),
+            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory),
             NullLogger<TrustBundleService>.Instance);
     }
 

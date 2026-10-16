@@ -265,6 +265,26 @@ public interface IDeliveryApi
         DateTime? to = null, CancellationToken ct = default);
 
     /// <summary>Everything deployed to one cluster.</summary>
+    /// <summary>
+    /// The distinct namespaces a tenant's apps occupy on one cluster, governance lock first.
+    ///
+    /// <para>An app's namespace has two sources: the <c>AppEnvironment</c> row, where governance
+    /// pins it, and the deployment's own. The pin wins when it is set — an app can be locked to a
+    /// namespace before anything has deployed into it, and the lock is the statement of intent.
+    /// This is <b>Delivery's rule about three of Delivery's tables</b>, and it was written out in
+    /// a Catalog service, which is the wrong place for it to live however correct it was.</para>
+    ///
+    /// <para>Returned as namespace names rather than rows because that is the whole of what both
+    /// callers want: a trust bundle and a certificate distribution each need the list to put in a
+    /// namespace selector. A row-shaped answer would hand back app and environment ids that
+    /// neither reads.</para>
+    ///
+    /// <para>Ordered, which the hand-written version was not. The list goes into a generated
+    /// manifest, so an unstable order shows up as drift in a resource nobody changed.</para>
+    /// </summary>
+    Task<IReadOnlyList<string>> GetTenantNamespacesOnClusterAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default);
+
     Task<IReadOnlyList<DeploymentSummary>> GetDeploymentsForClusterAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default);
 }
