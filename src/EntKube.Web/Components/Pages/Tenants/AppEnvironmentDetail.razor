@@ -3100,7 +3100,7 @@
     {
         msgBindingsByDeployment.Clear();
         foreach (AppDeployment dep in deployments ?? [])
-            msgBindingsByDeployment[dep.Id] = await RabbitMQService.GetMessagingBindingsForDeploymentAsync(dep.Id);
+            msgBindingsByDeployment[dep.Id] = await RabbitMQService.GetMessagingBindingsForDeploymentAsync(TenantId, dep.Id);
         msgBindingsLoaded = true;
         if (availableRabbitClusters is null)
             availableRabbitClusters = await RabbitMQService.GetClustersAsync(TenantId);
@@ -3116,7 +3116,7 @@
     {
         cacheBindingsByDeployment.Clear();
         foreach (AppDeployment dep in deployments ?? [])
-            cacheBindingsByDeployment[dep.Id] = await RedisService.GetCacheBindingsForDeploymentAsync(dep.Id);
+            cacheBindingsByDeployment[dep.Id] = await RedisService.GetCacheBindingsForDeploymentAsync(TenantId, dep.Id);
         cacheBindingsLoaded = true;
         if (availableRedisClusters is null)
             availableRedisClusters = await RedisService.GetClustersAsync(TenantId);
@@ -3132,7 +3132,7 @@
     {
         storageBindingsByDeployment.Clear();
         foreach (AppDeployment dep in deployments ?? [])
-            storageBindingsByDeployment[dep.Id] = await StorageService.GetBindingsForDeploymentAsync(dep.Id);
+            storageBindingsByDeployment[dep.Id] = await StorageService.GetBindingsForDeploymentAsync(TenantId, dep.Id);
         availableStorageLinks = await StorageService.GetStorageLinksAsync(TenantId);
         storageBindingsLoaded = true;
     }
@@ -3377,7 +3377,7 @@
         {
             identityBindingsByDeployment.Clear();
             foreach (AppDeployment dep in deployments ?? [])
-                identityBindingsByDeployment[dep.Id] = await KeycloakService.GetIdentityBindingsForDeploymentAsync(dep.Id);
+                identityBindingsByDeployment[dep.Id] = await KeycloakService.GetIdentityBindingsForDeploymentAsync(TenantId, dep.Id);
             identityBindingsLoaded = true;
         }
         catch (Exception ex)

@@ -564,13 +564,18 @@ public class RedisService(
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose deployment. A binding row names the Kubernetes Secret the credentials land in and
+    /// the backing cluster, so listing them for an arbitrary deployment id describes another
+    /// tenant's wiring. <c>PortalSecretsDetail</c> — a customer-facing panel — calls this by id.
+    /// </param>
     public async Task<List<CacheBinding>> GetCacheBindingsForDeploymentAsync(
-        Guid appDeploymentId, CancellationToken ct = default)
+        Guid tenantId, Guid appDeploymentId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.CacheBindings
             .Include(b => b.RedisCluster).ThenInclude(c => c.KubernetesCluster)
-            .Where(b => b.AppDeploymentId == appDeploymentId)
+            .Where(b => b.AppDeploymentId == appDeploymentId && b.TenantId == tenantId)
             .OrderBy(b => b.RedisCluster.Name)
             .ToListAsync(ct);
     }

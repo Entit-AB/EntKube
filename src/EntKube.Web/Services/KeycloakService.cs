@@ -1712,13 +1712,20 @@ public class KeycloakService(
 
     // ── Identity bindings ─────────────────────────────────────────────────────
 
+    /// <param name="tenantId">
+    /// Whose deployment. A binding row names the Kubernetes Secret the credentials land in and
+    /// the backing cluster, so listing them for an arbitrary deployment id describes another
+    /// tenant's wiring. <c>PortalSecretsDetail</c> — a customer-facing panel — calls this by id.
+    /// </param>
     public async Task<List<IdentityBinding>> GetIdentityBindingsForDeploymentAsync(
-        Guid appDeploymentId, CancellationToken ct = default)
+        Guid tenantId, Guid appDeploymentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.IdentityBindings
             .Include(b => b.KeycloakRealm)
-            .Where(b => b.AppDeploymentId == appDeploymentId)
+            // IdentityBinding carries no TenantId, so the scope travels through the deployment.
+            .Where(b => b.AppDeploymentId == appDeploymentId
+                     && b.AppDeployment.App.Customer.TenantId == tenantId)
             .OrderBy(b => b.ClientId)
             .ToListAsync(ct);
     }
