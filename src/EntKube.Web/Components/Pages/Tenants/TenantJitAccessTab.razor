@@ -331,7 +331,7 @@
         busy = grant.Id;
         try
         {
-            await Jit.DenyAsync(grant.Id, userDisplay);
+            await Jit.DenyAsync(TenantId, grant.Id, userDisplay);
             Toasts.Success("Request denied.");
             await LoadAsync();
         }

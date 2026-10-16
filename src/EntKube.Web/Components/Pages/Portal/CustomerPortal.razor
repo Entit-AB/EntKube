@@ -171,7 +171,8 @@ else
             {
                 @* Env-scoped like the service panels, because a grant is to one namespace and the
                    namespace is a property of the app in an environment, not of the app. *@
-                <PortalJitAccessPanel App="selectedPortalApp"
+                <PortalJitAccessPanel TenantId="selectedCustomer.TenantId"
+                                      App="selectedPortalApp"
                                       EnvironmentId="selectedPortalEnvironment.Id"
                                       @key="(selectedPortalApp.Id, selectedPortalEnvironment.Id)" />
             }

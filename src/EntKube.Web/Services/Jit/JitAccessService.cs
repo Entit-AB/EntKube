@@ -90,8 +90,13 @@ public class JitAccessService(
     /// Public so the UI can warn before anyone fills in a request, and called again at approval
     /// because governance can re-point an app in between.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose apps may be named. An input: this method's refusal <b>lists the apps sharing the
+    /// namespace by name</b>, so an unscoped sweep reports another tenant's application names to
+    /// whoever asked.
+    /// </param>
     public async Task<NamespaceExclusivityResult> CheckNamespaceExclusivityAsync(
-        Guid appId, Guid clusterId, string ns, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid clusterId, string ns, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(ns))
             return NamespaceExclusivityResult.Refused("The app has no namespace on this cluster.");
@@ -102,13 +107,15 @@ public class JitAccessService(
         // governance lock points here — an app can be locked to a namespace before it has
         // deployed into it, and it would still be sharing.
         List<Guid> byDeployment = await db.AppDeployments
-            .Where(d => d.ClusterId == clusterId && d.Namespace == ns && d.AppId != appId)
+            .Where(d => d.App.Customer.TenantId == tenantId
+                     && d.ClusterId == clusterId && d.Namespace == ns && d.AppId != appId)
             .Select(d => d.AppId)
             .Distinct()
             .ToListAsync(ct);
 
         List<Guid> byGovernance = await db.AppEnvironments
-            .Where(ae => ae.Namespace == ns && ae.AppId != appId)
+            .Where(ae => ae.App.Customer.TenantId == tenantId
+                      && ae.Namespace == ns && ae.AppId != appId)
             .Select(ae => ae.AppId)
             .Distinct()
             .ToListAsync(ct);
@@ -117,7 +124,7 @@ public class JitAccessService(
         if (others.Count == 0) return NamespaceExclusivityResult.Ok;
 
         List<string> names = await db.Apps
-            .Where(a => others.Contains(a.Id))
+            .Where(a => others.Contains(a.Id) && a.Customer.TenantId == tenantId)
             .Select(a => a.Name)
             .OrderBy(n => n)
             .ToListAsync(ct);
@@ -134,18 +141,24 @@ public class JitAccessService(
     /// ambiguous and the caller has to say which. Returning the candidates rather than picking
     /// one keeps that decision with the approver.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose app. An input — this returns the cluster and namespace a grant would point at, which
+    /// is the shape of another tenant's deployment if the app id is theirs.
+    /// </param>
     public async Task<List<JitTarget>> ResolveTargetsAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         string? lockedNs = await db.AppEnvironments
-            .Where(ae => ae.AppId == appId && ae.EnvironmentId == environmentId)
+            .Where(ae => ae.AppId == appId && ae.EnvironmentId == environmentId
+                      && ae.App.Customer.TenantId == tenantId)
             .Select(ae => ae.Namespace)
             .FirstOrDefaultAsync(ct);
 
         var deployments = await db.AppDeployments
-            .Where(d => d.AppId == appId && d.EnvironmentId == environmentId)
+            .Where(d => d.AppId == appId && d.EnvironmentId == environmentId
+                     && d.App.Customer.TenantId == tenantId)
             .Select(d => new { d.ClusterId, ClusterName = d.Cluster.Name, d.Namespace })
             .ToListAsync(ct);
 
@@ -172,7 +185,18 @@ public class JitAccessService(
     /// email as the subject is the one mistake this signature invites, so it is refused below
     /// rather than left to surface as a foreign-key violation.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose app the access is for, and the tenant the grant is <b>recorded under</b>.
+    ///
+    /// <para>⚠️ This used to be derived: the row was written with
+    /// <c>TenantId = app.TenantId</c>, read off the app the caller named. So naming another
+    /// tenant's app filed a pending request <em>inside that tenant</em>, where their own approver
+    /// — whose approve path is correctly scoped and would therefore accept it — could grant
+    /// namespace access to any <paramref name="subjectUserId"/>. Approval is the act that mints
+    /// access, and it was being handed a request nobody in that tenant had made.</para>
+    /// </param>
     public async Task<JitGrant> RequestAsync(
+        Guid tenantId,
         Guid appId,
         Guid environmentId,
         string subjectUserId,
@@ -187,7 +211,24 @@ public class JitAccessService(
         if (string.IsNullOrWhiteSpace(reason))
             throw new InvalidOperationException("A reason is required — an unexplained grant is not reviewable.");
 
-        List<JitTarget> targets = await ResolveTargetsAsync(appId, environmentId, ct);
+        // ⚠️ First, and on its own. ResolveTargetsAsync below is tenant-scoped too, so a stranger
+        // was already refused — but with "this app has no deployment in this environment", which
+        // is both the wrong reason and a security property resting on another method's predicate.
+        // Whether the app is the caller's is this method's own question, so it is asked here,
+        // before any work, and the refusal says what is actually wrong.
+        await using (ApplicationDbContext own = await dbFactory.CreateDbContextAsync(ct))
+        {
+            bool appIsTenants = await own.Apps
+                .AnyAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct);
+
+            if (!appIsTenants)
+            {
+                throw new InvalidOperationException(
+                    "App not found, or it does not belong to this tenant.");
+            }
+        }
+
+        List<JitTarget> targets = await ResolveTargetsAsync(tenantId, appId, environmentId, ct);
 
         if (targets.Count == 0)
             throw new InvalidOperationException(
@@ -210,17 +251,18 @@ public class JitAccessService(
         }
 
         NamespaceExclusivityResult exclusivity =
-            await CheckNamespaceExclusivityAsync(appId, target.ClusterId, target.Namespace, ct);
+            await CheckNamespaceExclusivityAsync(tenantId, appId, target.ClusterId, target.Namespace, ct);
         if (!exclusivity.IsExclusive)
             throw new InvalidOperationException(exclusivity.Reason);
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         var app = await db.Apps
-            .Where(a => a.Id == appId)
+            .Where(a => a.Id == appId && a.Customer.TenantId == tenantId)
             .Select(a => new { a.CustomerId, a.Customer.TenantId })
             .FirstOrDefaultAsync(ct)
-            ?? throw new InvalidOperationException("App not found.");
+            ?? throw new InvalidOperationException(
+                "App not found, or it does not belong to this tenant.");
 
         var subject = await db.Users
             .Where(u => u.Id == subjectUserId)
@@ -235,7 +277,10 @@ public class JitAccessService(
         JitGrant grant = new()
         {
             Id = Guid.NewGuid(),
-            TenantId = app.TenantId,
+            // The caller's tenant, not the app's. They are the same value now — the app lookup
+            // above refuses anything else — and writing the input is what makes that true rather
+            // than incidental.
+            TenantId = tenantId,
             CustomerId = app.CustomerId,
             AppId = appId,
             EnvironmentId = environmentId,
@@ -325,8 +370,10 @@ public class JitAccessService(
             throw new InvalidOperationException(
                 "Approving JIT access needs the 'JIT cluster access' permission at Manage in this tenant.");
 
+        // tenantId, the approver's own, not grant.TenantId — they are equal because the grant was
+        // fetched with that predicate, and using the input keeps it that way by construction.
         NamespaceExclusivityResult exclusivity = await CheckNamespaceExclusivityAsync(
-            grant.AppId, grant.KubernetesClusterId, grant.Namespace, ct);
+            tenantId, grant.AppId, grant.KubernetesClusterId, grant.Namespace, ct);
         if (!exclusivity.IsExclusive)
             throw new InvalidOperationException(exclusivity.Reason);
 
@@ -408,13 +455,21 @@ public class JitAccessService(
     // ── Deny / revoke ─────────────────────────────────────────────────────────
 
     /// <summary>Refuses a pending request. The row is kept — a refusal is part of the trail.</summary>
+    /// <param name="tenantId">
+    /// Whose grant. An input: denying had no tenant and no ownership check at all, only a test
+    /// that the grant was still pending, so any pending request in the installation could be
+    /// denied — and the denial records <c>DeniedBy</c> against it.
+    /// </param>
     public async Task<JitGrant> DenyAsync(
-        Guid grantId, string deniedBy, string? reason = null, CancellationToken ct = default)
+        Guid tenantId, Guid grantId, string deniedBy, string? reason = null,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        JitGrant grant = await db.JitGrants.FirstOrDefaultAsync(g => g.Id == grantId, ct)
-            ?? throw new InvalidOperationException("Grant not found.");
+        JitGrant grant = await db.JitGrants
+            .FirstOrDefaultAsync(g => g.Id == grantId && g.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Grant not found, or it does not belong to this tenant.");
 
         if (grant.StatusAt(DateTime.UtcNow) != JitGrantStatus.Pending)
             throw new InvalidOperationException("Only a pending request can be denied.");
@@ -445,16 +500,23 @@ public class JitAccessService(
     /// definition; a customer is not, and the portal renders its own rows, so an id arriving here
     /// for a grant belonging to somebody else did not come from the page.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose grant. The ownership test below is the real defence here and was already correct;
+    /// this narrows the lookup as well, so a grant id from another tenant does not resolve at all
+    /// rather than resolving and then being refused for the wrong reason.
+    /// </param>
     public async Task<JitGrant> EndOwnGrantAsync(
-        Guid grantId, string subjectUserId, string endedBy, CancellationToken ct = default)
+        Guid tenantId, Guid grantId, string subjectUserId, string endedBy,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         JitGrant grant = await db.JitGrants
             .Include(g => g.KubernetesCluster)
             .Include(g => g.User)
-            .FirstOrDefaultAsync(g => g.Id == grantId, ct)
-            ?? throw new InvalidOperationException("Grant not found.");
+            .FirstOrDefaultAsync(g => g.Id == grantId && g.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Grant not found, or it does not belong to this tenant.");
 
         bool isOwn = string.Equals(grant.UserId, subjectUserId, StringComparison.OrdinalIgnoreCase)
                      || string.Equals(grant.RequestedBy, endedBy, StringComparison.OrdinalIgnoreCase);
@@ -594,29 +656,36 @@ public class JitAccessService(
             .ToListAsync(ct);
     }
 
-    /// <summary>A user's own grants, newest first — what the portal shows them.</summary>
+    /// <summary>
+    /// A user's own grants in one tenant, newest first — what the portal shows them.
+    ///
+    /// <para>Scoped by tenant as well as by user because an account can hold access in more than
+    /// one: without it, a portal rendered for one customer lists the grants that person holds
+    /// everywhere, each row naming an app and a cluster.</para>
+    /// </summary>
     public async Task<List<JitGrant>> ListForUserAsync(
-        string userId, int limit = 50, CancellationToken ct = default)
+        Guid tenantId, string userId, int limit = 50, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.JitGrants
             .Include(g => g.App)
             .Include(g => g.KubernetesCluster)
             .Include(g => g.Environment)
-            .Where(g => g.UserId == userId)
+            .Where(g => g.UserId == userId && g.TenantId == tenantId)
             .OrderByDescending(g => g.RequestedAt)
             .Take(limit)
             .ToListAsync(ct);
     }
 
-    public async Task<JitGrant?> GetAsync(Guid grantId, CancellationToken ct = default)
+    public async Task<JitGrant?> GetAsync(
+        Guid tenantId, Guid grantId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.JitGrants
             .Include(g => g.App)
             .Include(g => g.KubernetesCluster)
             .Include(g => g.Environment)
-            .FirstOrDefaultAsync(g => g.Id == grantId, ct);
+            .FirstOrDefaultAsync(g => g.Id == grantId && g.TenantId == tenantId, ct);
     }
 }
 
