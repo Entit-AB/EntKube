@@ -468,7 +468,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         foreach (VaultSecret secret in secrets)
         {
-            await vaultService.DeleteSecretAsync(secret.Id, ct);
+            await vaultService.DeleteSecretAsync(tenantId, secret.Id, ct);
         }
 
         db.StorageLinks.Remove(link);
@@ -1603,7 +1603,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         foreach (VaultSecret secret in secrets)
         {
-            await vaultService.DeleteSecretAsync(secret.Id, ct);
+            await vaultService.DeleteSecretAsync(tenantId, secret.Id, ct);
         }
 
         db.OpenStackConnections.Remove(connection);
@@ -1847,7 +1847,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         foreach (VaultSecret secret in secrets)
         {
-            await vaultService.ConfigureKubernetesSyncAsync(secret.Id, true, secretName, ns, ct);
+            await vaultService.ConfigureKubernetesSyncAsync(tenantId, secret.Id, true, secretName, ns, ct);
         }
     }
 
@@ -1861,7 +1861,7 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         foreach (VaultSecret secret in secrets)
         {
-            await vaultService.ConfigureKubernetesSyncAsync(secret.Id, false, null, null, ct);
+            await vaultService.ConfigureKubernetesSyncAsync(tenantId, secret.Id, false, null, null, ct);
         }
     }
 

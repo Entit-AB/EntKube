@@ -227,11 +227,18 @@ public class TenantService(
         return environment;
     }
 
-    public async Task<bool> DeleteEnvironmentAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose environment. The <c>ExecuteDeleteAsync</c> below drops every
+    /// <c>CustomerEnvironment</c> for the id, so an unscoped delete removes another tenant's
+    /// deployment stage and every customer's membership of it.
+    /// </param>
+    public async Task<bool> DeleteEnvironmentAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        Data.Environment? environment = await db.Environments.FindAsync([id], ct);
+        Data.Environment? environment = await db.Environments
+            .FirstOrDefaultAsync(e => e.Id == id && e.TenantId == tenantId, ct);
 
         if (environment is null)
         {
@@ -305,9 +312,22 @@ public class TenantService(
     /// <summary>
     /// Adds a customer to an environment. Idempotent — an existing membership is left alone.
     /// </summary>
-    public async Task<bool> AddCustomerToEnvironmentAsync(Guid customerId, Guid environmentId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose customer and whose environment — both, because this is a pairing.</param>
+    public async Task<bool> AddCustomerToEnvironmentAsync(
+        Guid tenantId, Guid customerId, Guid environmentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        bool customerIsTenants = await db.Customers
+            .AnyAsync(c => c.Id == customerId && c.TenantId == tenantId, ct);
+        bool environmentIsTenants = await db.Environments
+            .AnyAsync(e => e.Id == environmentId && e.TenantId == tenantId, ct);
+
+        if (!customerIsTenants || !environmentIsTenants)
+        {
+            throw new InvalidOperationException(
+                "The customer or the environment does not belong to this tenant.");
+        }
 
         bool exists = await db.CustomerEnvironments
             .AnyAsync(ce => ce.CustomerId == customerId && ce.EnvironmentId == environmentId, ct);
@@ -326,9 +346,20 @@ public class TenantService(
     /// Removes a customer from an environment. Refuses while the customer still has apps
     /// deployed there — dropping the membership would hide those apps from the tree.
     /// </summary>
-    public async Task<bool> RemoveCustomerFromEnvironmentAsync(Guid customerId, Guid environmentId, CancellationToken ct = default)
+    public async Task<bool> RemoveCustomerFromEnvironmentAsync(
+        Guid tenantId, Guid customerId, Guid environmentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        bool pairIsTenants = await db.Customers
+            .AnyAsync(c => c.Id == customerId && c.TenantId == tenantId, ct)
+            && await db.Environments
+                .AnyAsync(e => e.Id == environmentId && e.TenantId == tenantId, ct);
+
+        if (!pairIsTenants)
+        {
+            return false;
+        }
 
         bool hasApps = await db.AppEnvironments
             .AnyAsync(ae => ae.EnvironmentId == environmentId && ae.App.CustomerId == customerId, ct);
@@ -400,9 +431,24 @@ public class TenantService(
             .ToDictionary(g => g.Key, g => g.ToList());
     }
 
-    public async Task<App> CreateAppAsync(Guid customerId, string name, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose customer. The customer is the only thing tying a new app to a tenant, so it is
+    /// checked before the row is written — otherwise an app lands under whichever customer the
+    /// caller named.
+    /// </param>
+    public async Task<App> CreateAppAsync(
+        Guid tenantId, Guid customerId, string name, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        bool customerIsTenants = await db.Customers
+            .AnyAsync(c => c.Id == customerId && c.TenantId == tenantId, ct);
+
+        if (!customerIsTenants)
+        {
+            throw new InvalidOperationException(
+                "Customer not found, or it does not belong to this tenant.");
+        }
 
         App app = new() { Id = Guid.NewGuid(), CustomerId = customerId, Name = name };
         db.Apps.Add(app);
@@ -410,11 +456,15 @@ public class TenantService(
         return app;
     }
 
-    public async Task<bool> RenameAppAsync(Guid id, string newName, CancellationToken ct = default)
+    public async Task<bool> RenameAppAsync(
+        Guid tenantId, Guid id, string newName, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        App? app = await db.Apps.FindAsync([id], ct);
+        // FindAsync cannot carry a predicate, which is how this stayed tenant-less: it takes a
+        // key and nothing else. A query can say whose app it is.
+        App? app = await db.Apps
+            .FirstOrDefaultAsync(a => a.Id == id && a.Customer.TenantId == tenantId, ct);
         if (app is null) return false;
 
         app.Name = newName.Trim();
@@ -422,11 +472,18 @@ public class TenantService(
         return true;
     }
 
-    public async Task<bool> DeleteAppAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose app. An input, and this is the one to read twice: the method deletes the app and
+    /// cascades, and the <c>ExecuteDeleteAsync</c> below removes <c>ConnectivityRules</c> that
+    /// <em>other</em> apps own, matched only on <c>PeerAppId</c>. Keyed by an id alone it would
+    /// delete another tenant's application and silently take their connectivity rules with it.
+    /// </param>
+    public async Task<bool> DeleteAppAsync(Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        App? app = await db.Apps.FindAsync([id], ct);
+        App? app = await db.Apps
+            .FirstOrDefaultAsync(a => a.Id == id && a.Customer.TenantId == tenantId, ct);
 
         if (app is null)
         {
@@ -443,9 +500,27 @@ public class TenantService(
         return true;
     }
 
-    public async Task LinkAppToEnvironmentAsync(Guid appId, Guid environmentId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose app and whose environment — <b>both</b> are checked. A link is a pairing, so an
+    /// unscoped version does not merely read the wrong row: it can attach one tenant's app to
+    /// another tenant's environment, and the branch below then adds a <c>CustomerEnvironment</c>,
+    /// writing that customer into the other tenant's tree.
+    /// </param>
+    public async Task LinkAppToEnvironmentAsync(
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        bool appIsTenants = await db.Apps
+            .AnyAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct);
+        bool environmentIsTenants = await db.Environments
+            .AnyAsync(e => e.Id == environmentId && e.TenantId == tenantId, ct);
+
+        if (!appIsTenants || !environmentIsTenants)
+        {
+            throw new InvalidOperationException(
+                "The app or the environment does not belong to this tenant.");
+        }
 
         bool exists = await db.AppEnvironments
             .AnyAsync(ae => ae.AppId == appId && ae.EnvironmentId == environmentId, ct);
@@ -470,12 +545,15 @@ public class TenantService(
         }
     }
 
-    public async Task UnlinkAppFromEnvironmentAsync(Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task UnlinkAppFromEnvironmentAsync(
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         AppEnvironment? link = await db.AppEnvironments
-            .FirstOrDefaultAsync(ae => ae.AppId == appId && ae.EnvironmentId == environmentId, ct);
+            .FirstOrDefaultAsync(
+                ae => ae.AppId == appId && ae.EnvironmentId == environmentId
+                   && ae.App.Customer.TenantId == tenantId, ct);
 
         if (link is not null)
         {

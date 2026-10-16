@@ -860,7 +860,7 @@ else
     private async Task LinkCustomer()
     {
         if (tenant is null || linkingCustomerEnv is not { } envId || linkCustomerId is not { } custId) return;
-        await TenantService.AddCustomerToEnvironmentAsync(custId, envId);
+        await TenantService.AddCustomerToEnvironmentAsync(tenant.Id, custId, envId);
         await LoadCustomerEnvironmentsAsync(tenant.Id);
         linkingCustomerEnv = null; linkCustomerId = null;
     }
@@ -869,7 +869,7 @@ else
     {
         if (tenant is null) return;
         // Refused server-side while apps remain, so the tree can't drop an app out of view.
-        await TenantService.RemoveCustomerFromEnvironmentAsync(custId, envId);
+        await TenantService.RemoveCustomerFromEnvironmentAsync(tenant.Id, custId, envId);
         await LoadCustomerEnvironmentsAsync(tenant.Id);
         expandedEnvCustomers.Remove($"{envId}:{custId}");
     }
@@ -889,8 +889,8 @@ else
     {
         string name = newAppName.Trim();
         if (name.Length == 0) return;
-        Data.App app = await TenantService.CreateAppAsync(custId, name);
-        await TenantService.LinkAppToEnvironmentAsync(app.Id, envId);
+        Data.App app = await TenantService.CreateAppAsync(tenant.Id, custId, name);
+        await TenantService.LinkAppToEnvironmentAsync(tenant.Id, app.Id, envId);
         appsByCustomer[custId] = await TenantService.GetAppsAsync(custId);
         if (tenant is not null) await LoadCustomerEnvironmentsAsync(tenant.Id);
         RebuildAppIndex();

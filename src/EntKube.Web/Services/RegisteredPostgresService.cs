@@ -457,7 +457,7 @@ public class RegisteredPostgresService(
         List<VaultSecret> vaultSecrets = await vaultService.GetRegisteredPostgresDatabaseSecretsAsync(tenantId, databaseId, ct);
         foreach (VaultSecret s in vaultSecrets)
         {
-            await vaultService.ConfigureKubernetesSyncAsync(s.Id, true, primarySecretName, instance.Namespace, ct);
+            await vaultService.ConfigureKubernetesSyncAsync(tenantId, s.Id, true, primarySecretName, instance.Namespace, ct);
         }
 
         List<DatabaseBinding> bindings = await db.DatabaseBindings
@@ -773,7 +773,7 @@ public class RegisteredPostgresService(
         List<VaultSecret> secrets = await vaultService.GetRegisteredPostgresDatabaseSecretsAsync(tenantId, databaseId, ct);
         foreach (VaultSecret s in secrets)
         {
-            await vaultService.DeleteSecretAsync(s.Id, ct);
+            await vaultService.DeleteSecretAsync(tenantId, s.Id, ct);
         }
     }
 

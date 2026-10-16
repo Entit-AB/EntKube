@@ -1299,7 +1299,7 @@ public class MongoService(
         // Mark vault secrets as synced.
         List<VaultSecret> vaultSecrets = await vaultService.GetMongoDatabaseSecretsAsync(tenantId, databaseId, ct);
         foreach (VaultSecret secret in vaultSecrets)
-            await vaultService.ConfigureKubernetesSyncAsync(secret.Id, true, secretName, mongo.Namespace, ct);
+            await vaultService.ConfigureKubernetesSyncAsync(tenantId, secret.Id, true, secretName, mongo.Namespace, ct);
 
         // Propagate to every app deployment bound to this database.
         List<DatabaseBinding> bindings = await db.DatabaseBindings
@@ -2390,7 +2390,7 @@ public class MongoService(
         {
             if (secret.Name == "ACCESS_KEY" || secret.Name == "SECRET_KEY")
             {
-                await vaultService.ConfigureKubernetesSyncAsync(secret.Id, true, secretName, ns, ct);
+                await vaultService.ConfigureKubernetesSyncAsync(tenantId, secret.Id, true, secretName, ns, ct);
             }
         }
 

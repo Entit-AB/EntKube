@@ -983,8 +983,7 @@ public class DeploymentImportService(
                     // DISABLED — the live Secret is likely owned by ArgoCD/Flux. EntKube holds
                     // the value in the vault (observe-only); the operator enables K8s sync per
                     // secret to take ownership, which re-reads the current live value first.
-                    await vaultService.ConfigureKubernetesSyncAsync(
-                        stored.Id, syncEnabled: false, secret.SecretName, secret.Namespace, ct, cluster.Id);
+                    await vaultService.ConfigureKubernetesSyncAsync(tenantId, stored.Id, syncEnabled: false, secret.SecretName, secret.Namespace, ct, cluster.Id);
 
                     result.SecretKeyCount++;
                 }

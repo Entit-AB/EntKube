@@ -343,7 +343,7 @@
         renameError = null;
         try
         {
-            bool ok = await TenantService.RenameAppAsync(App.Id, newName);
+            bool ok = await TenantService.RenameAppAsync(TenantId, App.Id, newName);
             if (ok)
             {
                 App.Name = newName;
@@ -371,7 +371,7 @@
         deleting = true;
         try
         {
-            await TenantService.DeleteAppAsync(App.Id);
+            await TenantService.DeleteAppAsync(TenantId, App.Id);
             Toasts.Success($"Unregistered {App.Name} from EntKube. Cluster workloads were left running.");
             confirmUnregister = false;
             await OnDeleted.InvokeAsync();
@@ -403,7 +403,7 @@
                 return;
             }
 
-            await TenantService.DeleteAppAsync(App.Id);
+            await TenantService.DeleteAppAsync(TenantId, App.Id);
             Toasts.Success($"Deleted {App.Name} from the cluster and unregistered it from EntKube.");
             confirmClusterDelete = false;
             await OnDeleted.InvokeAsync();
@@ -444,9 +444,9 @@
     private async Task ToggleEnvironment(Guid envId, bool currentlyLinked)
     {
         if (currentlyLinked)
-            await TenantService.UnlinkAppFromEnvironmentAsync(App.Id, envId);
+            await TenantService.UnlinkAppFromEnvironmentAsync(TenantId, App.Id, envId);
         else
-            await TenantService.LinkAppToEnvironmentAsync(App.Id, envId);
+            await TenantService.LinkAppToEnvironmentAsync(TenantId, App.Id, envId);
 
         await LoadEnvironments();
     }
