@@ -359,21 +359,17 @@ public class DisasterRecoveryTests
 /// </summary>
 public class VeleroStorageIntegrationTests
 {
-    private static StorageLink Link(
-        StorageProvider provider = StorageProvider.MinIO,
+    // The summary the contract returns, not the entity: BuildStorageValues takes
+    // StorageLinkSummary now that the storage link comes from IDataServicesApi. The provider
+    // parameter is the contract's enum, which mirrors the entity's member for member.
+    private static EntKube.Contracts.DataServices.StorageLinkSummary Link(
+        EntKube.Contracts.DataServices.StorageProviderKind provider
+            = EntKube.Contracts.DataServices.StorageProviderKind.Minio,
         string? bucket = "entkube-backups",
         string? endpoint = "https://minio.example.com:9000",
-        string? region = "eu-north-1") => new()
-    {
-        Id = Guid.NewGuid(),
-        TenantId = Guid.NewGuid(),
-        EnvironmentId = Guid.NewGuid(),
-        Name = "Production backups",
-        Provider = provider,
-        BucketName = bucket,
-        Endpoint = endpoint,
-        Region = region,
-    };
+        string? region = "eu-north-1")
+        => new(Guid.NewGuid(), Guid.NewGuid(), Guid.NewGuid(), provider,
+            "Production backups", endpoint, bucket, region);
 
     [Fact]
     public void Maps_the_link_onto_veleros_backup_storage_location()
@@ -391,7 +387,7 @@ public class VeleroStorageIntegrationTests
     {
         // The AWS plugin serves every S3-compatible backend; naming the provider after the
         // store would leave Velero looking for a plugin that is not installed.
-        VeleroService.BuildStorageValues(Link(StorageProvider.MinIO))
+        VeleroService.BuildStorageValues(Link(EntKube.Contracts.DataServices.StorageProviderKind.Minio))
             ["configuration.backupStorageLocation.0.provider"].Should().Be("aws");
     }
 
@@ -400,14 +396,14 @@ public class VeleroStorageIntegrationTests
     {
         // MinIO and Ceph RGW do not serve virtual-hosted-style bucket URLs; getting this
         // backwards produces DNS failures against a bucket-prefixed hostname.
-        VeleroService.BuildStorageValues(Link(StorageProvider.MinIO))
+        VeleroService.BuildStorageValues(Link(EntKube.Contracts.DataServices.StorageProviderKind.Minio))
             ["configuration.backupStorageLocation.0.config.s3ForcePathStyle"].Should().Be("true");
     }
 
     [Fact]
     public void Leaves_path_style_off_for_real_aws()
     {
-        VeleroService.BuildStorageValues(Link(StorageProvider.AwsS3))
+        VeleroService.BuildStorageValues(Link(EntKube.Contracts.DataServices.StorageProviderKind.AwsS3))
             ["configuration.backupStorageLocation.0.config.s3ForcePathStyle"].Should().Be("false");
     }
 
@@ -423,7 +419,7 @@ public class VeleroStorageIntegrationTests
     public void A_link_without_an_endpoint_writes_no_s3url()
     {
         // Real AWS needs no endpoint, and writing an empty one makes the plugin dial "".
-        VeleroService.BuildStorageValues(Link(StorageProvider.AwsS3, endpoint: null))
+        VeleroService.BuildStorageValues(Link(EntKube.Contracts.DataServices.StorageProviderKind.AwsS3, endpoint: null))
             .Should().NotContainKey("configuration.backupStorageLocation.0.config.s3Url");
     }
 

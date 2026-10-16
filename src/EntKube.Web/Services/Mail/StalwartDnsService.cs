@@ -49,7 +49,10 @@ public readonly record struct StalwartDnsFetch(
 /// at. That is the honest shape for a step whose answer nobody here has seen.</para>
 /// </summary>
 public class StalwartDnsService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    // Mail's own context: this service touches StalwartComponentConfigs and StalwartMailDomains,
+    // both Mail's, and nothing else. It was the only service in four modules whose table census
+    // was already clean — the swap was the context type and one helper signature.
+    IDbContextFactory<EntKube.Web.Data.Modules.MailDbContext> dbFactory,
     VaultService vault,
     KeycloakService keycloak,
     MailboxTokenProvider tokens,
@@ -70,7 +73,7 @@ public class StalwartDnsService(
     public async Task<IReadOnlyList<StalwartDnsFetch>> RefreshAsync(
         Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using EntKube.Web.Data.Modules.MailDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         StalwartComponentConfig? config = await db.StalwartComponentConfigs
             .Include(c => c.Domains)
@@ -279,7 +282,7 @@ public class StalwartDnsService(
     /// nothing to mint from and nothing this can do.</para>
     /// </summary>
     private async Task<string?> TokenAsync(
-        ApplicationDbContext db, StalwartComponentConfig config, Guid tenantId, Guid componentId,
+        EntKube.Web.Data.Modules.MailDbContext db, StalwartComponentConfig config, Guid tenantId, Guid componentId,
         CancellationToken ct)
     {
         if (config.AuthMode != StalwartAuthMode.Oidc || config.OidcKeycloakRealmId is not Guid realmId)
