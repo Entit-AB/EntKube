@@ -1027,7 +1027,7 @@ public class DeploymentImportService(
             // Reuse an AppRoute if the hostname already exists on this app (one AppRoute
             // per hostname; multiple deployments/paths attach as AppDeploymentRoutes).
             Dictionary<string, Guid> routeIdByHost = new(StringComparer.OrdinalIgnoreCase);
-            foreach (AppRoute existing in await appRouteService.GetRoutesForAppAsync(appId, ct))
+            foreach (AppRoute existing in await appRouteService.GetRoutesForAppAsync(tenantId, appId, ct))
             {
                 routeIdByHost[existing.Hostname] = existing.Id;
             }
@@ -1038,7 +1038,7 @@ public class DeploymentImportService(
                 {
                     if (!routeIdByHost.TryGetValue(route.Hostname, out Guid routeId))
                     {
-                        AppRoute created = await appRouteService.AddRouteAsync(appId, new AppRouteRequest
+                        AppRoute created = await appRouteService.AddRouteAsync(tenantId, appId, new AppRouteRequest
                         {
                             Hostname = route.Hostname,
                             TlsMode = route.TlsMode,

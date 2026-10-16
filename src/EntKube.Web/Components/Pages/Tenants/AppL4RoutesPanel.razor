@@ -289,7 +289,7 @@
 
     private async Task LoadAsync()
     {
-        List<AppL4Route> all = await L4RouteService.GetRoutesForAppAsync(App.Id);
+        List<AppL4Route> all = await L4RouteService.GetRoutesForAppAsync(TenantId, App.Id);
         List<AppDeployment> allDeployments = await DeploymentService.GetDeploymentsAsync(App.Id);
 
         if (EnvironmentId.HasValue)
@@ -399,7 +399,7 @@
         try
         {
             await K8sOps.DeleteL4RouteFromClusterAsync(TenantId, id);
-            await L4RouteService.DeleteRouteAsync(id);
+            await L4RouteService.DeleteRouteAsync(TenantId, id);
             await LoadAsync();
             Toasts.Success("Port deleted.");
         }

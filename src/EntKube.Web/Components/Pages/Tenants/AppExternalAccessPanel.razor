@@ -742,7 +742,7 @@
 
     private async Task LoadAsync()
     {
-        List<AppRoute> allRoutes = await AppRouteService.GetRoutesForAppAsync(App.Id);
+        List<AppRoute> allRoutes = await AppRouteService.GetRoutesForAppAsync(TenantId, App.Id);
         List<AppDeployment> allDeployments = await DeploymentService.GetDeploymentsAsync(App.Id);
 
         if (EnvironmentId.HasValue)
@@ -811,7 +811,7 @@
         addingRoute = true;
         try
         {
-            await AppRouteService.AddRouteAsync(App.Id, new AppRouteRequest
+            await AppRouteService.AddRouteAsync(TenantId, App.Id, new AppRouteRequest
             {
                 Hostname = newHostname,
                 TlsMode = newTlsMode,
@@ -843,7 +843,7 @@
 
     private async Task ToggleRouteEnabled(AppRoute route)
     {
-        await AppRouteService.UpdateRouteAsync(route.Id, new AppRouteRequest
+        await AppRouteService.UpdateRouteAsync(TenantId, route.Id, new AppRouteRequest
         {
             // Carried through: this call site only flips an unrelated field, and omitting these
             // would silently turn client-certificate authentication off.
@@ -897,7 +897,7 @@
     {
         try
         {
-            await AppRouteService.DeleteRouteAsync(routeId);
+            await AppRouteService.DeleteRouteAsync(TenantId, routeId);
             if (expandedRouteId == routeId) expandedRouteId = null;
             await LoadAsync();
             Toasts.Success("Hostname deleted.");
@@ -1031,7 +1031,7 @@
         try
         {
             await K8sOps.DeleteDeploymentRouteFromClusterAsync(TenantId, drId);
-            await AppRouteService.DeleteDeploymentRouteAsync(drId);
+            await AppRouteService.DeleteDeploymentRouteAsync(TenantId, drId);
             await LoadAsync();
             Toasts.Success("Deployment route removed.");
         }
@@ -1061,7 +1061,7 @@
 
         try
         {
-            await AppRouteService.UpdateDeploymentRouteTimeoutAsync(dr.Id, seconds);
+            await AppRouteService.UpdateDeploymentRouteTimeoutAsync(TenantId, dr.Id, seconds);
             await LoadAsync();
         }
         catch (Exception ex) { applyRouteError = ex.Message; }
@@ -1144,7 +1144,7 @@
     {
         try
         {
-            await AppRouteService.UpdateDeploymentRouteSessionAffinityAsync(dr.Id, mode, key, ttl);
+            await AppRouteService.UpdateDeploymentRouteSessionAffinityAsync(TenantId, dr.Id, mode, key, ttl);
             await LoadAsync();
         }
         catch (Exception ex) { applyRouteError = ex.Message; }
@@ -1162,7 +1162,7 @@
             // A newly named canary starts at 0% — naming it must never move traffic by
             // itself. The operator sets the share deliberately, as a second action.
             await AppRouteService.UpdateDeploymentRouteCanaryAsync(
-                dr.Id, service, service is null ? 0 : dr.CanaryWeight, dr.CanaryServicePort);
+                TenantId, dr.Id, service, service is null ? 0 : dr.CanaryWeight, dr.CanaryServicePort);
             await LoadAsync();
         }
         catch (Exception ex) { applyRouteError = ex.Message; }
@@ -1183,7 +1183,7 @@
         try
         {
             await AppRouteService.UpdateDeploymentRouteCanaryAsync(
-                dr.Id, dr.CanaryServiceName, weight, dr.CanaryServicePort);
+                TenantId, dr.Id, dr.CanaryServiceName, weight, dr.CanaryServicePort);
             await LoadAsync();
         }
         catch (Exception ex) { applyRouteError = ex.Message; }

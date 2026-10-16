@@ -3,6 +3,8 @@ using EntKube.Web.Data;
 using ICatalogApi = EntKube.Contracts.Catalog.ICatalogApi;
 using InstalledComponent = EntKube.Contracts.Catalog.InstalledComponent;
 using StorageLinkSummary = EntKube.Contracts.DataServices.StorageLinkSummary;
+using ContractComponentStatus = EntKube.Contracts.Catalog.ComponentStatus;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Dr;
@@ -16,7 +18,7 @@ namespace EntKube.Web.Services.Dr;
 /// feature that lies about what is restorable is worse than none at all.
 /// </summary>
 public class VeleroService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<FleetDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     StorageService storageService,
     EntKube.Contracts.DataServices.IDataServicesApi storage,
@@ -189,20 +191,26 @@ public class VeleroService(
     private async Task<Guid?> FindCubeFsComponentOnClusterAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        // ⚠️ This read was exempted from the contract, in a comment that justified itself: the
+        // query took the most recently CREATED match and InstalledComponent carries no CreatedAt,
+        // so "the contract cannot express it and converting it would silently change which
+        // component is picked". Every sentence of that was true, and the conclusion was still
+        // wrong, because nobody checked the schema: ClusterComponents has
+        // HasIndex(c => new { c.ClusterId, c.Name }).IsUnique(), present with unique: true in all
+        // three providers' migrations since the table was created. A cluster can hold at most ONE
+        // component named cubefs, so the OrderByDescending had nothing to order — it could never
+        // choose between two rows, and the missing CreatedAt could never matter.
+        //
+        // The lesson is about exemptions, not about CubeFS. An exemption is a claim that
+        // something is impossible, and it then sits in the code justifying itself. Before writing
+        // one, open the caller (#189) — and open the schema.
+        IReadOnlyList<InstalledComponent> components =
+            await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct);
 
-        // ⚠️ Still Catalog's table, and still read directly. Not FindComponentAsync: this filters
-        // on Status and takes the most recently CREATED match, and InstalledComponent carries no
-        // CreatedAt — one consumer does not earn a field on a shared DTO, so the contract cannot
-        // express it and converting it would silently change which component is picked. That
-        // decision is why this service still holds the god context; it is recorded rather than
-        // worked around.
-        ClusterComponent? cubefs = await db.ClusterComponents
-            .Where(c => c.ClusterId == clusterId && c.Cluster.TenantId == tenantId
-                && c.Name == "cubefs" && c.Status == ComponentStatus.Installed)
-            .OrderByDescending(c => c.CreatedAt)
-            .FirstOrDefaultAsync(ct);
-        return cubefs?.Id;
+        return components
+            .FirstOrDefault(c => c.Name == "cubefs"
+                              && c.Status == ContractComponentStatus.Installed)
+            ?.Id;
     }
 
     /// <summary>
@@ -336,7 +344,7 @@ public class VeleroService(
     /// <summary>Reads DR status for every cluster in a tenant.</summary>
     public async Task<List<ClusterDrStatus>> GetTenantStatusAsync(Guid tenantId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using FleetDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         var rows = await db.KubernetesClusters
             .AsNoTracking()

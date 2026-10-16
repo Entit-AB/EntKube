@@ -34,4 +34,22 @@ public class SecretsDbContext(DbContextOptions<SecretsDbContext> options) : Modu
 
     /// <summary>KubernetesCluster, read-only: this module may look one up, never write it.</summary>
     public IQueryable<KubernetesCluster> KubernetesClusters => Set<KubernetesCluster>().AsNoTracking();
+
+    /// <summary>
+    /// Environment, read-only: this module may look one up, never write it.
+    ///
+    /// <para>The fifth hub, and it was missing. <b>24 entities across 7 modules carry an
+    /// <c>EnvironmentId</c></b> — Fleet's clusters, Secrets' vault secrets, Identity's JIT
+    /// grants, DataServices' storage links, Catalog's certificate distributions, Connectivity's
+    /// network policies — which is the same concentration that earned Tenant, Customer, App and
+    /// KubernetesCluster their place here. The entity's own doc has said so since it was written:
+    /// "Clusters, services, and other resources are scoped to an environment within a tenant."
+    /// It is a tenant-scoped dimension row carrying an id, a tenant and a name.</para>
+    ///
+    /// <para>It was reachable only from <c>DeliveryDbContext</c>, which owns the table because
+    /// <c>AppEnvironment</c> and <c>CustomerEnvironment</c> live beside it. That ownership is
+    /// right and is unchanged; what was wrong was that every other module had to hold the
+    /// all-seeing context to ask which stage a row belonged to.</para>
+    /// </summary>
+    public IQueryable<Data.Environment> Environments => Set<Data.Environment>().AsNoTracking();
 }

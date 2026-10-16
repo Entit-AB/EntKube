@@ -403,8 +403,26 @@ public class CatalogContractAdoptionTests
     /// unmistakable: the DbSet property, the navigation (see <see cref="BaselineNavigation"/>), and
     /// <c>Set&lt;T&gt;()</c>. Every time, the fix was to stop listing what to look for and start
     /// deriving it.</para>
+    ///
+    /// <para><b>8 → 7: an exemption dissolved by the schema rather than by a DTO field.</b>
+    /// <c>VeleroService.FindCubeFsComponentOnClusterAsync</c> was exempted in a comment that
+    /// justified itself — the query takes the most recently <em>created</em> match and
+    /// <c>InstalledComponent</c> carries no <c>CreatedAt</c>, so "the contract cannot express it
+    /// and converting it would silently change which component is picked", and one consumer does
+    /// not earn a field on a shared DTO. Every sentence was true and the conclusion was still
+    /// wrong: <c>ClusterComponents</c> has
+    /// <c>HasIndex(c =&gt; new { c.ClusterId, c.Name }).IsUnique()</c>, written <c>unique: true</c>
+    /// in all three providers' migrations since the table was created. <b>A cluster can hold at
+    /// most one component named cubefs</b>, so the ordering could never choose between two rows
+    /// and the missing field could never matter.</para>
+    ///
+    /// <para>⚠️ That is the second exemption in this programme to be wrong about its own
+    /// impossibility — #189's was wrong about its caller, this one about its schema. An exemption
+    /// is a claim that something cannot be done, and it then sits in the code as its own
+    /// justification, which is why it has to be re-derived rather than re-read. Before writing
+    /// one: open the caller, and open the schema.</para>
     /// </summary>
-    private const int BaselineQueries = 8;
+    private const int BaselineQueries = 7;
 
     /// <summary>
     /// Tracked writes to a <c>ClusterComponent</c> from services Catalog does not own. Was 22,

@@ -525,17 +525,63 @@ public class ModuleContractTests
     /// is materialised and the detached-principal trap above cannot arise. That had to be read
     /// rather than assumed — compiling says nothing about it either way.</para>
     ///
+    /// <para><b>The fifth hub was missing, and finding it took Connectivity 4 → 3.</b> Four of
+    /// the services still on the all-seeing context read <c>db.Environments</c> and nothing else
+    /// foreign — and <c>Data.Environment</c> was reachable from <c>DeliveryDbContext</c> alone,
+    /// because Delivery owns the table (<c>AppEnvironment</c> and <c>CustomerEnvironment</c> live
+    /// beside it). That ownership is right. What was wrong is that <b>24 entities across 7
+    /// modules carry an <c>EnvironmentId</c></b> — Fleet's own <c>KubernetesCluster</c> among them
+    /// — so every other module had to hold the context that sees everything in order to ask which
+    /// stage a row belonged to.</para>
+    ///
+    /// <para>That is the same concentration §4.0 used to pick the original four: 70 of 164
+    /// cross-module foreign keys point at Tenant or Customer and another 40 at App or
+    /// KubernetesCluster. Environment belongs in that set on the same evidence, and the entity's
+    /// own doc comment has said so since it was written — "Clusters, services, and other
+    /// resources are scoped to an environment within a tenant". It is a tenant-scoped dimension
+    /// row carrying an id, a tenant and a name; nobody had read it as a hub.</para>
+    ///
+    /// <para><c>IngressDashboardService</c> came off immediately. The other three
+    /// (<c>CertificateDistributionService</c>, <c>OperationsAdvisorService</c>,
+    /// <c>TenantService</c>) still read other modules' tables, so the hub is necessary for them
+    /// but not sufficient — which is the honest way to describe a structural fix: it removed one
+    /// reason to hold the context, not every reason.</para>
+    ///
+    /// <para><b>Fleet 3 → 2.</b> <c>VeleroService</c>'s last two uses of the shared context were
+    /// a Catalog read it had been exempted from (see <c>CatalogContractAdoptionTests</c> — the
+    /// exemption was wrong about the schema) and a projection of <c>KubernetesClusters</c>, which
+    /// is <em>Fleet's own table</em>. Converting the first left nothing foreign, so the second
+    /// was a plain swap. The service held the all-seeing context for one query it was told it
+    /// could not give up.</para>
+    ///
     /// <para>⚠️ Two files resolve the context from a scope and are in no module at all:
     /// <c>KubeconfigResolver</c> and <c>TelemetrySegmentBlobStore</c>. They are absent from
     /// <c>ModuleServiceMap</c>, so this ratchet cannot see them however many spellings it learns —
     /// an unmapped service is invisible to every per-module count in this file. That is a
     /// different hole from this one and wants its own check on the map's completeness.</para>
     /// </summary>
+    /// <summary>
+    /// ⚠️ <b>A ratchet constant has no correct merge, and this one was merged anyway — for the
+    /// third time.</b> #246 (Mail 2 → 1) and #247 (the corrected count, Fleet 2 → 3) touched this
+    /// dictionary forty minutes apart. Both sides' <em>prose</em> survived: the correction
+    /// paragraph below still said "Fleet 2 → 3" while the constant above it said 2. The merge had
+    /// picked a side, main went red on <c>No_module_adds_another_service_on_the_all_seeing_context</c>
+    /// with <c>Fleet: 3 (was 2)</c>, and the file documented the number it was not holding.
+    ///
+    /// <para>Re-measured rather than resolved: Fleet is <c>KubernetesOperationsService</c> and
+    /// <c>VeleroService</c> by constructor plus <c>BootstrapRunnerService</c> by scope, so
+    /// <b>3</b>. Neither side's value was right to keep — #246's 2 predated the metric fix and
+    /// #247's 3 predated #246's conversions. Taking either on faith would have been luck.</para>
+    ///
+    /// <para>The rule, now stated where the constants are: when two branches both touch these
+    /// numbers, <b>run the measurement on the merge result</b>. A number here is a fact about the
+    /// tree, and a merge produces a tree neither author ever measured.</para>
+    /// </summary>
     private static readonly Dictionary<Module, int> Baseline = new()
     {
         [Module.DataServices] = 2,
         [Module.Telemetry] = 3,
-        [Module.Connectivity] = 4,
+        [Module.Connectivity] = 3,
         [Module.Support] = 7,
         [Module.Catalog] = 6,
         [Module.Delivery] = 3,

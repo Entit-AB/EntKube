@@ -1,6 +1,7 @@
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -22,7 +23,7 @@ namespace EntKube.Web.Services;
 /// <see cref="GetRouteTrafficAsync"/> so we don't hammer Prometheus for every row up front.
 /// </summary>
 public partial class IngressDashboardService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<ConnectivityDbContext> dbFactory,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     PrometheusService prometheus,
@@ -37,7 +38,7 @@ public partial class IngressDashboardService(
     /// </summary>
     public async Task<IngressDashboard> LoadAsync(Guid tenantId, CancellationToken ct = default)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        await using ConnectivityDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         // Only clusters whose kubeconfig is actually stored can be queried live.
         List<KubernetesCluster> clusters = await db.KubernetesClusters

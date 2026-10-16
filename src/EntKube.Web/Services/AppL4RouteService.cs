@@ -35,20 +35,26 @@ public class AppL4RouteService(
     /// </summary>
     private static readonly HashSet<int> ReservedPorts = [15000, 15001, 15006, 15008, 15020, 15021, 15090, 15012, 15443];
 
-    public async Task<List<AppL4Route>> GetRoutesForAppAsync(Guid appId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose routes. An input, never derived from the app id — an app id alone names a row in
+    /// every tenant's table equally well.
+    /// </param>
+    public async Task<List<AppL4Route>> GetRoutesForAppAsync(
+        Guid tenantId, Guid appId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         return await db.AppL4Routes
             .Include(r => r.AppDeployment)
                 .ThenInclude(d => d.Environment)
-            .Where(r => r.AppId == appId)
+            .Where(r => r.AppId == appId && r.AppDeployment.App.Customer.TenantId == tenantId)
             .OrderBy(r => r.Protocol)
             .ThenBy(r => r.ExternalPort)
             .ToListAsync(ct);
     }
 
-    public async Task<List<AppL4Route>> GetRoutesForCustomerAsync(Guid customerId, CancellationToken ct = default)
+    public async Task<List<AppL4Route>> GetRoutesForCustomerAsync(
+        Guid tenantId, Guid customerId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -57,7 +63,9 @@ public class AppL4RouteService(
                 .ThenInclude(d => d.App)
             .Include(r => r.AppDeployment)
                 .ThenInclude(d => d.Environment)
-            .Where(r => r.AppDeployment.App.CustomerId == customerId && r.IsEnabled)
+            .Where(r => r.AppDeployment.App.CustomerId == customerId
+                     && r.AppDeployment.App.Customer.TenantId == tenantId
+                     && r.IsEnabled)
             .OrderBy(r => r.AppDeployment.App.Name)
             .ThenBy(r => r.Protocol)
             .ThenBy(r => r.ExternalPort)
@@ -74,10 +82,12 @@ public class AppL4RouteService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // Scoped by tenant as well as id. Only ClusterId is read below, so the Include of the
+        // cluster that used to be here was dead weight left over from the Catalog conversion.
         AppDeployment deployment = await db.AppDeployments
-            .Include(d => d.Cluster)
-            .FirstOrDefaultAsync(d => d.Id == deploymentId, ct)
-            ?? throw new InvalidOperationException("Deployment not found.");
+            .FirstOrDefaultAsync(d => d.Id == deploymentId && d.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Deployment not found, or it does not belong to this tenant.");
 
         ValidatePorts(request);
 
@@ -117,14 +127,17 @@ public class AppL4RouteService(
         return route;
     }
 
-    public async Task UpdateRouteAsync(Guid routeId, AppL4RouteRequest request, CancellationToken ct = default)
+    public async Task UpdateRouteAsync(
+        Guid tenantId, Guid routeId, AppL4RouteRequest request, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         AppL4Route route = await db.AppL4Routes
             .Include(r => r.AppDeployment)
-            .FirstOrDefaultAsync(r => r.Id == routeId, ct)
-            ?? throw new InvalidOperationException("L4 route not found.");
+            .FirstOrDefaultAsync(
+                r => r.Id == routeId && r.AppDeployment.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "L4 route not found, or it does not belong to this tenant.");
 
         ValidatePorts(request);
         await EnsurePortFreeAsync(db, route.AppDeployment.ClusterId, request.Protocol, request.ExternalPort, excludeRouteId: routeId, ct);
@@ -140,12 +153,15 @@ public class AppL4RouteService(
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task DeleteRouteAsync(Guid routeId, CancellationToken ct = default)
+    public async Task DeleteRouteAsync(Guid tenantId, Guid routeId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        AppL4Route route = await db.AppL4Routes.FirstOrDefaultAsync(r => r.Id == routeId, ct)
-            ?? throw new InvalidOperationException("L4 route not found.");
+        AppL4Route route = await db.AppL4Routes
+            .FirstOrDefaultAsync(
+                r => r.Id == routeId && r.AppDeployment.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "L4 route not found, or it does not belong to this tenant.");
 
         db.AppL4Routes.Remove(route);
         await db.SaveChangesAsync(ct);
@@ -154,14 +170,17 @@ public class AppL4RouteService(
     }
 
     /// <summary>Generates the TCPRoute/UDPRoute manifest for a route (for preview / manual apply).</summary>
-    public async Task<string> GenerateManifestYamlAsync(Guid routeId, CancellationToken ct = default)
+    public async Task<string> GenerateManifestYamlAsync(
+        Guid tenantId, Guid routeId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         AppL4Route route = await db.AppL4Routes
             .Include(r => r.AppDeployment)
-            .FirstOrDefaultAsync(r => r.Id == routeId, ct)
-            ?? throw new InvalidOperationException("L4 route not found.");
+            .FirstOrDefaultAsync(
+                r => r.Id == routeId && r.AppDeployment.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "L4 route not found, or it does not belong to this tenant.");
 
         return GenerateRouteYaml(route, route.AppDeployment.Namespace);
     }
