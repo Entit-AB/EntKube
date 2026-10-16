@@ -568,6 +568,31 @@ public class ModuleContractTests
     /// exist — the hazard <c>EfTableNameTests</c> was written for, in a context where the name
     /// comes from a base class rather than from a <c>DbSet</c> property.</para>
     ///
+    /// <para><b>Support 7 → 6, and the eighth contract method was an interval.</b>
+    /// <c>MonthlyReportService</c> read three of Delivery's and Fleet's tables; two of the three
+    /// questions already had contract methods (deployments, and the health samples added for
+    /// <c>ErrorBudgetService</c> — this was the second of the three row-shaped callers that method
+    /// was written from). The third did not, and the reason is worth keeping:
+    /// <c>IFleetApi</c>'s maintenance methods answer about an <b>instant</b>, which is what a
+    /// suppression check asks. A month cannot be assembled from instants — a window that opened in
+    /// August and closed in September is active at no instant the report names, and it still
+    /// excludes the downtime it covered. <c>GetMaintenanceWindowsOverlappingAsync</c> states
+    /// <c>StartsAt &lt; to &amp;&amp; EndsAt &gt; from</c> once.</para>
+    ///
+    /// <para><c>MaintenanceWindowSummary</c> went from four fields to eight, and <b>the four it
+    /// gained are the four the first draft was refused for carrying "for nobody"</b> — the title,
+    /// the creator, the announcement and the kind. That is the rule working in both directions
+    /// rather than being bent: a field needs a reader, and these have one now. <c>Description</c>
+    /// is still absent, because nothing reads it.</para>
+    ///
+    /// <para>⚠️ The announcement is resolved <em>at the boundary</em>: the entity holds
+    /// <c>AnnouncedAt</c> and <c>CreatedAt</c> and the rule is "the recorded announcement, else
+    /// the moment the window was created, which is the only announcement the system can vouch
+    /// for". The contract carries one non-nullable <c>AnnouncedAt</c> rather than both columns,
+    /// because two fields let a consumer read <c>CreatedAt</c> and call it the announcement — the
+    /// same value by a different name only when nobody recorded one. A contract that hands over
+    /// the columns hands over the rule as well.</para>
+    ///
     /// <para>⚠️ Two files resolve the context from a scope and are in no module at all:
     /// <c>KubeconfigResolver</c> and <c>TelemetrySegmentBlobStore</c>. They are absent from
     /// <c>ModuleServiceMap</c>, so this ratchet cannot see them however many spellings it learns —
@@ -596,7 +621,7 @@ public class ModuleContractTests
         [Module.DataServices] = 2,
         [Module.Telemetry] = 3,
         [Module.Connectivity] = 3,
-        [Module.Support] = 7,
+        [Module.Support] = 6,
         [Module.Catalog] = 6,
         [Module.Delivery] = 3,
         [Module.Identity] = 3,

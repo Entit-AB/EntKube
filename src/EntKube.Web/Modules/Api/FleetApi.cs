@@ -58,16 +58,69 @@ public sealed class FleetApi(IDbContextFactory<FleetDbContext> dbFactory) : IFle
     {
         await using FleetDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        return await db.MaintenanceWindows
+        List<WindowRow> rows = await db.MaintenanceWindows
             .AsNoTracking()
             .Where(w => w.TenantId == tenantId && w.StartsAt <= at && w.EndsAt >= at)
             .OrderBy(w => w.StartsAt)
-            .Select(ToWindow)
+            .Select(ToRow)
             .ToListAsync(ct);
+
+        return [.. rows.Select(ToWindow)];
     }
 
-    private static readonly Expression<Func<Data.MaintenanceWindow, MaintenanceWindowSummary>> ToWindow =
-        w => new MaintenanceWindowSummary(w.Id, w.ClusterId, w.StartsAt, w.EndsAt);
+    public async Task<IReadOnlyList<MaintenanceWindowSummary>> GetMaintenanceWindowsOverlappingAsync(
+        Guid tenantId, DateTime from, DateTime to, CancellationToken ct = default)
+    {
+        await using FleetDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        // Overlap, not containment: a window that opened before the interval and closed inside it
+        // covered downtime the interval has to account for.
+        List<WindowRow> rows = await db.MaintenanceWindows
+            .AsNoTracking()
+            .Where(w => w.TenantId == tenantId && w.StartsAt < to && w.EndsAt > from)
+            .OrderBy(w => w.StartsAt)
+            .Select(ToRow)
+            .ToListAsync(ct);
+
+        return [.. rows.Select(ToWindow)];
+    }
+
+    /// <summary>
+    /// The window's columns as the database has them, before the contract's two rules are applied.
+    /// </summary>
+    private sealed record WindowRow(
+        Guid Id, Guid? ClusterId, DateTime StartsAt, DateTime EndsAt, string Title,
+        DateTime? AnnouncedAt, DateTime CreatedAt, string CreatedBy, Data.MaintenanceKind Kind);
+
+    private static readonly Expression<Func<Data.MaintenanceWindow, WindowRow>> ToRow =
+        w => new WindowRow(
+            w.Id, w.ClusterId, w.StartsAt, w.EndsAt, w.Title,
+            w.AnnouncedAt, w.CreatedAt, w.CreatedBy, w.Kind);
+
+    /// <summary>
+    /// Applies the two things the contract promises that the row does not: the announcement is
+    /// <c>AnnouncedAt ?? CreatedAt</c>, and the kind is the contract's enum.
+    /// </summary>
+    private static MaintenanceWindowSummary ToWindow(WindowRow r) =>
+        new(r.Id, r.ClusterId, r.StartsAt, r.EndsAt, r.Title,
+            r.AnnouncedAt ?? r.CreatedAt, r.CreatedBy, ToKind(r.Kind));
+
+    /// <summary>
+    /// Entity enum in, contract enum out, by an explicit switch rather than a cast.
+    ///
+    /// <para>This column is stored as an <c>int</c>, so a cast would work today and would keep
+    /// working silently if a member were inserted into one enum and not the other — relabelling
+    /// every stored row. The switch stops compiling instead, and
+    /// <c>ApiMaintenanceKindTests</c> fails if the two drift. Same reason
+    /// <c>RolloutVerdictStatus</c> is switched and not cast.</para>
+    /// </summary>
+    private static MaintenanceKind ToKind(Data.MaintenanceKind kind) => kind switch
+    {
+        Data.MaintenanceKind.Planned => MaintenanceKind.Planned,
+        Data.MaintenanceKind.Emergency => MaintenanceKind.Emergency,
+        _ => throw new ArgumentOutOfRangeException(
+            nameof(kind), kind, "Unmapped MaintenanceKind — add it to the contract enum too."),
+    };
 
     private static IQueryable<Data.KubernetesCluster> Scoped(FleetDbContext db, Guid tenantId)
         => db.KubernetesClusters.AsNoTracking().Where(c => c.TenantId == tenantId);

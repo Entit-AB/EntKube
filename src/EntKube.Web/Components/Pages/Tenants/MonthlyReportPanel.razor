@@ -293,6 +293,8 @@
 </LoadingPanel>
 
 @code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
     [Parameter, EditorRequired] public Guid CustomerId { get; set; }
 
     /// <summary>
@@ -326,7 +328,7 @@
 
         try
         {
-            report = await Reports.BuildAsync(CustomerId, month);
+            report = await Reports.BuildAsync(TenantId, CustomerId, month);
         }
         catch (Exception ex)
         {

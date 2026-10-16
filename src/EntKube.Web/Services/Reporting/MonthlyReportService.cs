@@ -1,4 +1,8 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
+using EntKube.Contracts.Delivery;
+using EntKube.Contracts.Fleet;
+using ContractHealthStatus = EntKube.Contracts.Delivery.HealthStatus;
 using EntKube.Web.Services.Contracts;
 using EntKube.Web.Services.Support;
 using EntKube.Web.Services.Tickets;
@@ -142,11 +146,37 @@ public readonly record struct MonthlyReport(
 /// snapshotting something that could drift from its own sources.</para>
 /// </summary>
 public class MonthlyReportService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<SupportDbContext> dbFactory,
     TicketService tickets,
     TimeService time,
-    ContractService contracts)
+    ContractService contracts,
+    EntKube.Contracts.Delivery.IDeliveryApi delivery,
+    EntKube.Contracts.Fleet.IFleetApi fleet)
 {
+    /// <summary>
+    /// The tenant's deployments that belong to one customer.
+    ///
+    /// <para><c>DeploymentSummary</c> carries no customer — and deliberately does not grow one —
+    /// so the customer comes from Delivery's app list, which already has <c>CustomerId</c>. Same
+    /// join <c>ErrorBudgetService</c> and <c>MessagingTab</c> make, for the same reason.</para>
+    /// </summary>
+    private async Task<IReadOnlyList<DeploymentSummary>> CustomerDeploymentsAsync(
+        Guid tenantId, Guid customerId, CancellationToken ct)
+    {
+        HashSet<Guid> customerApps =
+        [
+            .. (await delivery.GetAppsAsync(tenantId, ct))
+                .Where(a => a.CustomerId == customerId)
+                .Select(a => a.Id)
+        ];
+
+        return
+        [
+            .. (await delivery.GetDeploymentsForTenantAsync(tenantId, ct))
+                .Where(d => customerApps.Contains(d.AppId))
+        ];
+    }
+
     /// <summary>The day of the following month by which §16.1 requires the report.</summary>
     public const int DueOnDayOfMonth = 5;
 
@@ -157,15 +187,22 @@ public class MonthlyReportService(
         return from.AddMonths(1).AddDays(DueOnDayOfMonth - 1);
     }
 
+    /// <param name="tenantId">
+    /// Whose customer. An input, not <c>customer.TenantId</c> read back off the row this method
+    /// loads by id — which is what it used to do, so a customer id from anywhere in the
+    /// installation produced that customer's full report: availability, ticket counts, timebank,
+    /// penalties and the maintenance that touched their clusters. Both call sites have the tenant
+    /// (each renders from a <c>selectedCustomer</c>), so nothing had to be plumbed to supply it.
+    /// </param>
     public async Task<MonthlyReport> BuildAsync(
-        Guid customerId, DateTime month, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, DateTime month, CancellationToken ct = default)
     {
         (DateTime from, DateTime to) = TimeService.MonthBounds(month);
 
-        using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Customer? customer = await db.Customers.AsNoTracking()
-            .FirstOrDefaultAsync(c => c.Id == customerId, ct);
+            .FirstOrDefaultAsync(c => c.Id == customerId && c.TenantId == tenantId, ct);
 
         if (customer is null)
         {
@@ -216,29 +253,30 @@ public class MonthlyReportService(
         // and this report goes to one of them — so the windows below are narrowed to the
         // ones that could have touched them, or a customer's own monthly report would
         // name maintenance on somebody else's cluster.
-        HashSet<Guid> clusters =
-        [
-            .. await db.AppDeployments.AsNoTracking()
-                .Where(d => d.App.CustomerId == customerId)
-                .Select(d => d.ClusterId)
-                .Distinct()
-                .ToListAsync(ct)
-        ];
+        IReadOnlyList<DeploymentSummary> customerDeployments =
+            await CustomerDeploymentsAsync(tenantId, customerId, ct);
+
+        HashSet<Guid> clusters = [.. customerDeployments.Select(d => d.ClusterId).Distinct()];
 
         // Loaded once: availability needs them to drop covered samples, and the report
         // needs the planned ones that went ahead on short notice. A window with no
         // cluster is tenant-wide and reaches everyone.
-        List<MaintenanceWindow> maintenance = await db.MaintenanceWindows.AsNoTracking()
-            .Where(w => w.TenantId == customer.TenantId
-                && w.StartsAt < to && w.EndsAt > from
-                && (w.ClusterId == null || clusters.Contains(w.ClusterId.Value)))
-            .OrderBy(w => w.StartsAt)
-            .ToListAsync(ct);
+        //
+        // Asked of Fleet over the INTERVAL. The two older contract methods answer about an
+        // instant, which a month cannot be assembled from: a window that opened in August and
+        // closed in September is active at no instant this report names, and it still excludes
+        // the downtime it covered. Narrowing to this customer's clusters stays here — the
+        // contract hands over the tenant's windows and the null-cluster ones belong to everybody.
+        List<MaintenanceWindowSummary> maintenance =
+        [
+            .. (await fleet.GetMaintenanceWindowsOverlappingAsync(tenantId, from, to, ct))
+                .Where(w => w.ClusterId == null || clusters.Contains(w.ClusterId.Value))
+        ];
 
         return new MonthlyReport(
             customer.Name,
             from,
-            await AvailabilityAsync(db, customerId, from, to, maintenance, ct),
+            await AvailabilityAsync(db, tenantId, customerId, customerDeployments, from, to, maintenance, ct),
             byPriority,
             await db.Tickets.CountAsync(t =>
                 t.CustomerId == customerId
@@ -263,7 +301,7 @@ public class MonthlyReportService(
     /// closed ticket is out of the queue, so this is the last place it can be noticed.</para>
     /// </summary>
     private static async Task<List<OutstandingIncidentReport>> OutstandingReportsAsync(
-        ApplicationDbContext db, Guid customerId, DateTime to, CancellationToken ct)
+        SupportDbContext db, Guid customerId, DateTime to, CancellationToken ct)
     {
         List<Ticket> closed = await db.Tickets.AsNoTracking()
             .Where(t => t.CustomerId == customerId
@@ -289,11 +327,11 @@ public class MonthlyReportService(
     /// Planned maintenance in the month that went ahead on less than the agreed notice.
     /// Emergency windows are not listed: they owe none.
     /// </summary>
-    private static List<ShortNoticeWindow> ShortNotice(List<MaintenanceWindow> windows)
+    private static List<ShortNoticeWindow> ShortNotice(List<MaintenanceWindowSummary> windows)
     {
         List<ShortNoticeWindow> rows = [];
 
-        foreach (MaintenanceWindow window in windows)
+        foreach (MaintenanceWindowSummary window in windows)
         {
             NoticeGiven notice = MaintenanceNotice.Assess(window);
 
@@ -319,26 +357,24 @@ public class MonthlyReportService(
     /// month where most of the samples were excluded cannot present itself as a clean
     /// hundred percent.</para>
     /// </summary>
-    private static async Task<List<AvailabilityRow>> AvailabilityAsync(
-        ApplicationDbContext db, Guid customerId, DateTime from, DateTime to,
-        List<MaintenanceWindow> maintenance, CancellationToken ct)
+    private async Task<List<AvailabilityRow>> AvailabilityAsync(
+        SupportDbContext db, Guid tenantId, Guid customerId,
+        IReadOnlyList<DeploymentSummary> deployments, DateTime from, DateTime to,
+        List<MaintenanceWindowSummary> maintenance, CancellationToken ct)
     {
-        var deployments = await db.AppDeployments.AsNoTracking()
-            .Where(d => d.App.CustomerId == customerId)
-            .Select(d => new { d.Id, d.AppId, d.ClusterId, AppName = d.App.Name })
-            .ToListAsync(ct);
-
         if (deployments.Count == 0)
         {
             return [];
         }
 
-        HashSet<Guid> ids = [.. deployments.Select(d => d.Id)];
+        List<Guid> ids = [.. deployments.Select(d => d.Id)];
 
-        var samples = await db.DeploymentHealthSnapshots.AsNoTracking()
-            .Where(s => ids.Contains(s.DeploymentId) && s.SnapshotAt >= from && s.SnapshotAt < to)
-            .Select(s => new { s.DeploymentId, s.HealthStatus, s.SnapshotAt })
-            .ToListAsync(ct);
+        // Delivery's samples, over the half-open month: >= from and < to, which is what the
+        // contract's optional exclusive upper bound exists for. §14.1 samples every five minutes,
+        // so this is the caller the row-shaped method was written for — it re-slices per
+        // application below and drops the ones a maintenance window covered.
+        IReadOnlyList<DeploymentHealthSample> samples =
+            await delivery.GetHealthSamplesAsync(tenantId, ids, from, to, ct);
 
         Dictionary<Guid, Guid> clusterOf = deployments.ToDictionary(d => d.Id, d => d.ClusterId);
 
@@ -366,7 +402,7 @@ public class MonthlyReportService(
 
             double? uptime = taken.Count == 0
                 ? null
-                : 100.0 * taken.Count(s => s.HealthStatus == HealthStatus.Healthy) / taken.Count;
+                : 100.0 * taken.Count(s => s.Health == ContractHealthStatus.Healthy) / taken.Count;
 
             // The most specific target wins: one for the application, else the customer's.
             SlaTarget? target = targets.FirstOrDefault(t => t.AppId == group.Key.AppId)
