@@ -39,4 +39,14 @@ public class FleetDbContext(DbContextOptions<FleetDbContext> options) : ModuleDb
 
     /// <summary>App, read-only: this module may look one up, never write it.</summary>
     public IQueryable<App> Apps => Set<App>().AsNoTracking();
+
+    /// <summary>
+    /// Environment, read-only: this module may look one up, never write it.
+    ///
+    /// <para>The fifth hub — see the identical note on the other module contexts. Fleet is the
+    /// clearest case for it: <c>KubernetesCluster</c> itself carries an <c>EnvironmentId</c>, so
+    /// the module that owns clusters could not say which stage one belonged to without the
+    /// all-seeing context.</para>
+    /// </summary>
+    public IQueryable<Data.Environment> Environments => Set<Data.Environment>().AsNoTracking();
 }
