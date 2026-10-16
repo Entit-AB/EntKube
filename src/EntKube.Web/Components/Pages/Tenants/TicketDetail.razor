@@ -456,6 +456,8 @@
 </LoadingPanel>
 
 @code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
     [Parameter, EditorRequired] public Guid TicketId { get; set; }
     [Parameter] public EventCallback OnBack { get; set; }
     [Parameter] public EventCallback OnChanged { get; set; }
@@ -645,7 +647,7 @@
         try
         {
             now = DateTime.UtcNow;
-            ticket = await Tickets.GetAsync(TicketId);
+            ticket = await Tickets.GetAsync(TenantId, TicketId);
 
             if (ticket is not null)
             {
@@ -685,7 +687,7 @@
     /// </summary>
     private async Task RecordIncidentReportAsync()
     {
-        await Tickets.RecordIncidentReportAsync(TicketId, Actor, DateTime.UtcNow);
+        await Tickets.RecordIncidentReportAsync(TenantId, TicketId, Actor, DateTime.UtcNow);
         Toasts.Success("Recorded. §14.6's report is no longer outstanding for this ticket.");
         await LoadAsync();
         await OnChanged.InvokeAsync();
@@ -706,8 +708,7 @@
             .Cast<SupportTechnician?>()
             .FirstOrDefault(t => t!.Value.Name == Actor);
 
-        await Tickets.AssignAsync(
-            TicketId, Actor, Actor, DateTime.UtcNow, me?.UserId, me?.Email);
+        await Tickets.AssignAsync(TenantId, TicketId, Actor, Actor, DateTime.UtcNow, me?.UserId, me?.Email);
 
         Toasts.Success(
             me?.Email is null
@@ -737,8 +738,7 @@
             return;
         }
 
-        await Tickets.AssignAsync(
-            TicketId, technician.Name, Actor, DateTime.UtcNow,
+        await Tickets.AssignAsync(TenantId, TicketId, technician.Name, Actor, DateTime.UtcNow,
             technician.UserId, technician.Email);
 
         Toasts.Success($"{technician.Name} has it, and has been told by mail.");
@@ -748,7 +748,7 @@
 
     private async Task ReleaseAsync()
     {
-        await Tickets.AssignAsync(TicketId, null, Actor, DateTime.UtcNow);
+        await Tickets.AssignAsync(TenantId, TicketId, null, Actor, DateTime.UtcNow);
         Toasts.Info("Back in the queue.");
         await LoadAsync();
         await OnChanged.InvokeAsync();
@@ -756,7 +756,7 @@
 
     private async Task RespondAsync()
     {
-        await Tickets.RecordResponseAsync(TicketId, Actor, DateTime.UtcNow);
+        await Tickets.RecordResponseAsync(TenantId, TicketId, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Response recorded.");
     }
 
@@ -768,7 +768,7 @@
             return;
         }
 
-        await Tickets.ConfirmPriorityAsync(TicketId, formPriority, formReason, Actor, DateTime.UtcNow);
+        await Tickets.ConfirmPriorityAsync(TenantId, TicketId, formPriority, formReason, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Priority recorded.");
     }
 
@@ -780,14 +780,13 @@
             return;
         }
 
-        await Tickets.StartPauseAsync(
-            TicketId, formWaitingOn, formParty, formReason, Actor, DateTime.UtcNow);
+        await Tickets.StartPauseAsync(TenantId, TicketId, formWaitingOn, formParty, formReason, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Clock paused.");
     }
 
     private async Task EndPauseAsync()
     {
-        await Tickets.EndPauseAsync(TicketId, Actor, DateTime.UtcNow);
+        await Tickets.EndPauseAsync(TenantId, TicketId, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Clock resumed.");
     }
 
@@ -799,7 +798,7 @@
             return;
         }
 
-        await Tickets.ResolveAsync(TicketId, formReason, Actor, DateTime.UtcNow);
+        await Tickets.ResolveAsync(TenantId, TicketId, formReason, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Resolved.");
     }
 
@@ -811,13 +810,13 @@
             return;
         }
 
-        await Tickets.RejectAsync(TicketId, formReason, Actor, DateTime.UtcNow);
+        await Tickets.RejectAsync(TenantId, TicketId, formReason, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Rejected and handed back.");
     }
 
     private async Task CloseAsync()
     {
-        await Tickets.CloseAsync(TicketId, Actor, DateTime.UtcNow);
+        await Tickets.CloseAsync(TenantId, TicketId, Actor, DateTime.UtcNow);
         await AfterChangeAsync("Closed.");
     }
 
@@ -828,8 +827,7 @@
             return;
         }
 
-        await Tickets.AddEventAsync(
-            TicketId, TicketEventKind.Note, formReason, Actor, DateTime.UtcNow, formCustomerVisible);
+        await Tickets.AddEventAsync(TenantId, TicketId, TicketEventKind.Note, formReason, Actor, DateTime.UtcNow, formCustomerVisible);
         await AfterChangeAsync("Note added.");
     }
 

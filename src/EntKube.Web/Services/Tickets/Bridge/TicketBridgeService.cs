@@ -192,8 +192,7 @@ public class TicketBridgeService(
         // Said out loud on the ticket rather than left to be inferred from the channel:
         // which system, which reference, and — where it matters most — that the priority
         // is theirs and has not been confirmed.
-        await tickets.AddEventAsync(
-            ticket.Id, TicketEventKind.Note,
+        await tickets.AddEventAsync(connection.TenantId, ticket.Id, TicketEventKind.Note,
             Provenance(connection, report, proposed),
             actor: Actor(connection), at: at, customerVisible: true, ct: ct);
 
@@ -231,8 +230,7 @@ public class TicketBridgeService(
             _ => $"{Reference(connection, report)} was updated in {connection.Instance}.",
         };
 
-        await tickets.AddEventAsync(
-            link.TicketId, TicketEventKind.Note, detail,
+        await tickets.AddEventAsync(connection.TenantId, link.TicketId, TicketEventKind.Note, detail,
             actor: Actor(connection), at: at, customerVisible: true, ct: ct);
 
         return new BridgeDelivery(

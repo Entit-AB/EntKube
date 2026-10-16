@@ -123,8 +123,16 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
     /// Rendered as the queue renders it: an id and two callbacks, and no actor — which is
     /// exactly the wiring that filed everything under nobody.
     /// </summary>
+    /// <summary>
+    /// ⚠️ Passes TenantId as well, and must: every ticket operation is tenant-scoped now, so a
+    /// detail view rendered without one loads no ticket and renders nothing. These tests failed
+    /// with empty markup rather than a wrong assertion, which is the right way for a required
+    /// parameter to go missing.
+    /// </summary>
     private IRenderedComponent<TicketDetail> RenderDetail(Guid ticketId) =>
-        Render<TicketDetail>(p => p.Add(c => c.TicketId, ticketId));
+        Render<TicketDetail>(p => p
+            .Add(c => c.TenantId, tenantId)
+            .Add(c => c.TicketId, ticketId));
 
     private static IElement ButtonSaying(IRenderedComponent<TicketDetail> detail, string text) =>
         detail.FindAll("button")
@@ -242,8 +250,8 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
     public async Task A_closed_P1_offers_to_record_that_the_report_went()
     {
         Ticket ticket = await Raise(TicketPriority.P1);
-        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
-        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+        await tickets.ResolveAsync(tenantId, ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(tenantId, ticket.Id, "nils", Tue(12));
 
         IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
 
@@ -262,10 +270,10 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
     public async Task Delivering_the_report_is_recorded_where_the_customer_can_see_it()
     {
         Ticket ticket = await Raise(TicketPriority.P1);
-        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
-        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+        await tickets.ResolveAsync(tenantId, ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(tenantId, ticket.Id, "nils", Tue(12));
 
-        await tickets.RecordIncidentReportAsync(ticket.Id, "nils", Tue(13));
+        await tickets.RecordIncidentReportAsync(tenantId, ticket.Id, "nils", Tue(13));
 
         db.ChangeTracker.Clear();
 
@@ -279,11 +287,11 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
     public async Task Recording_the_report_again_changes_nothing()
     {
         Ticket ticket = await Raise(TicketPriority.P1);
-        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
-        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+        await tickets.ResolveAsync(tenantId, ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(tenantId, ticket.Id, "nils", Tue(12));
 
-        await tickets.RecordIncidentReportAsync(ticket.Id, "nils", Tue(13));
-        await tickets.RecordIncidentReportAsync(ticket.Id, "karin", Tue(15));
+        await tickets.RecordIncidentReportAsync(tenantId, ticket.Id, "nils", Tue(13));
+        await tickets.RecordIncidentReportAsync(tenantId, ticket.Id, "karin", Tue(15));
 
         db.ChangeTracker.Clear();
 
@@ -319,7 +327,7 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
     public async Task A_ticket_can_be_put_back_from_the_screen()
     {
         Ticket ticket = await Raise();
-        await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(10));
+        await tickets.AssignAsync(tenantId, ticket.Id, "nils", "nils", Tue(10));
 
         IRenderedComponent<TicketDetail> detail = RenderDetail(ticket.Id);
 
@@ -337,7 +345,7 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
     public async Task A_ticket_somebody_else_holds_says_whose_it_is()
     {
         Ticket ticket = await Raise();
-        await tickets.AssignAsync(ticket.Id, "karin", "karin", Tue(10));
+        await tickets.AssignAsync(tenantId, ticket.Id, "karin", "karin", Tue(10));
 
         RenderDetail(ticket.Id).Markup.Should().Contain("Take it from karin");
     }
@@ -368,14 +376,13 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
         Ticket ticket = await Raise(TicketPriority.P1);
 
         TicketSlaStatus before = TicketService.StatusOf(
-            (await tickets.GetAsync(ticket.Id))!, Tue(10));
+            (await tickets.GetAsync(tenantId, ticket.Id))!, Tue(10));
 
-        await tickets.AddEventAsync(
-            ticket.Id, TicketEventKind.Note, "Still working on it.", "nils", Tue(10),
+        await tickets.AddEventAsync(tenantId, ticket.Id, TicketEventKind.Note, "Still working on it.", "nils", Tue(10),
             customerVisible: true);
 
         TicketSlaStatus after = TicketService.StatusOf(
-            (await tickets.GetAsync(ticket.Id))!, Tue(10));
+            (await tickets.GetAsync(tenantId, ticket.Id))!, Tue(10));
 
         after.UpdateDue.Should().BeAfter(before.UpdateDue!.Value);
         after.LastUpdateAt.Should().Be(Tue(10));
@@ -392,8 +399,7 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
     {
         Ticket ticket = await Raise(TicketPriority.P1);
 
-        await tickets.AddEventAsync(
-            ticket.Id, TicketEventKind.Note, "Still working on it.", "nils", Tue(11),
+        await tickets.AddEventAsync(tenantId, ticket.Id, TicketEventKind.Note, "Still working on it.", "nils", Tue(11),
             customerVisible: true);
 
         TicketSlaStatus fromQueue = (await tickets.GetOpenQueueAsync(customerId, Tue(12)))
@@ -414,14 +420,13 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
         Ticket ticket = await Raise(TicketPriority.P1);
 
         TicketSlaStatus before = TicketService.StatusOf(
-            (await tickets.GetAsync(ticket.Id))!, Tue(10));
+            (await tickets.GetAsync(tenantId, ticket.Id))!, Tue(10));
 
-        await tickets.AddEventAsync(
-            ticket.Id, TicketEventKind.Note, "Asked the supplier.", "nils", Tue(10),
+        await tickets.AddEventAsync(tenantId, ticket.Id, TicketEventKind.Note, "Asked the supplier.", "nils", Tue(10),
             customerVisible: false);
 
         TicketSlaStatus after = TicketService.StatusOf(
-            (await tickets.GetAsync(ticket.Id))!, Tue(10));
+            (await tickets.GetAsync(tenantId, ticket.Id))!, Tue(10));
 
         after.UpdateDue.Should().Be(before.UpdateDue);
     }

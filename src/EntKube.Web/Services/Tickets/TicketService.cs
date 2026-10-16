@@ -234,7 +234,7 @@ public class TicketService(
             }
 
             await AssignAsync(
-                ticket.Id, technician.Name, SupportDutyService.RoundRobinActor,
+                ticket.TenantId, ticket.Id, technician.Name, SupportDutyService.RoundRobinActor,
                 DateTime.UtcNow, technician.UserId, technician.Email, window, responseDue, ct);
 
             ticket.Assignee = technician.Name;
@@ -456,13 +456,17 @@ public class TicketService(
     /// The first assessment: confirms the priority or changes it, with the written reason
     /// §14.3 requires. A change restarts the targets from this moment.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task<Ticket?> ConfirmPriorityAsync(
-        Guid ticketId, TicketPriority priority, string reason, string? actor,
+        Guid tenantId, Guid ticketId, TicketPriority priority, string reason, string? actor,
         DateTime at, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
         if (ticket is null)
         {
             return null;
@@ -510,8 +514,12 @@ public class TicketService(
     /// is left running because the customer is still waiting.</para>
     /// </summary>
     /// <param name="said">What goes to the customer. Already cut to what was meant for them.</param>
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task<Ticket?> ReplyToCustomerAsync(
-        Guid ticketId, string said, string? actor, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid ticketId, string said, string? actor, DateTime at, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(said))
         {
@@ -522,7 +530,7 @@ public class TicketService(
 
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
 
         if (ticket is null)
         {
@@ -568,12 +576,16 @@ public class TicketService(
     /// Records the first response — confirmed, assessed, work begun (§14.4). Only the first
     /// one counts; calling it again leaves the original timestamp alone.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task<Ticket?> RecordResponseAsync(
-        Guid ticketId, string? actor, DateTime at, string? note = null, CancellationToken ct = default)
+        Guid tenantId, Guid ticketId, string? actor, DateTime at, string? note = null, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
         if (ticket is null || ticket.FirstResponseAt is not null)
         {
             return ticket;
@@ -594,8 +606,12 @@ public class TicketService(
     /// Stops the resolution clock because the ticket is waiting on somebody we do not
     /// control. §14.4 requires the wait to be documented with its time and the party.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task<TicketPause?> StartPauseAsync(
-        Guid ticketId, WaitingOn waitingOn, string? party, string reason, string? actor,
+        Guid tenantId, Guid ticketId, WaitingOn waitingOn, string? party, string reason, string? actor,
         DateTime at, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
@@ -605,7 +621,7 @@ public class TicketService(
             // §14.4's update clock reads the customer-visible events; without them
             // every ticket looks as though nobody has said anything since it arrived.
             .Include(t => t.Events)
-            .FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+            .FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
 
         if (ticket is null || ticket.Pauses.Any(p => p.EndedAt is null))
         {
@@ -636,8 +652,12 @@ public class TicketService(
     }
 
     /// <summary>Restarts the resolution clock — the party answered.</summary>
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task<Ticket?> EndPauseAsync(
-        Guid ticketId, string? actor, DateTime at, string? note = null, CancellationToken ct = default)
+        Guid tenantId, Guid ticketId, string? actor, DateTime at, string? note = null, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
@@ -646,7 +666,7 @@ public class TicketService(
             // §14.4's update clock reads the customer-visible events; without them
             // every ticket looks as though nobody has said anything since it arrived.
             .Include(t => t.Events)
-            .FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+            .FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
 
         TicketPause? open = ticket?.Pauses.FirstOrDefault(p => p.EndedAt is null);
         if (ticket is null || open is null)
@@ -670,8 +690,12 @@ public class TicketService(
     /// (§14.4). Any open pause is closed at the same instant, since nothing is being waited
     /// for any more.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task<Ticket?> ResolveAsync(
-        Guid ticketId, string resolution, string? actor, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid ticketId, string resolution, string? actor, DateTime at, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
@@ -680,7 +704,7 @@ public class TicketService(
             // §14.4's update clock reads the customer-visible events; without them
             // every ticket looks as though nobody has said anything since it arrived.
             .Include(t => t.Events)
-            .FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+            .FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
 
         if (ticket is null)
         {
@@ -703,12 +727,16 @@ public class TicketService(
         return ticket;
     }
 
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task<Ticket?> CloseAsync(
-        Guid ticketId, string? actor, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid ticketId, string? actor, DateTime at, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
         if (ticket is null)
         {
             return null;
@@ -729,12 +757,16 @@ public class TicketService(
     /// §14.4: the fault lies in a system outside the agreement. The investigation is
     /// documented, the time is still billable, and it does not count as an SLA deviation.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task<Ticket?> RejectAsync(
-        Guid ticketId, string reason, string? actor, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid ticketId, string reason, string? actor, DateTime at, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
         if (ticket is null)
         {
             return null;
@@ -761,12 +793,16 @@ public class TicketService(
     /// it. The resolution clock resumes from where it stopped rather than restarting: the
     /// time already spent was still spent.</para>
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task<Ticket?> ReopenAsync(
-        Guid ticketId, string reason, string? actor, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid ticketId, string reason, string? actor, DateTime at, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
         if (ticket is null)
         {
             return null;
@@ -785,11 +821,26 @@ public class TicketService(
     }
 
     /// <summary>Adds a note or a status update to the record.</summary>
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task AddEventAsync(
-        Guid ticketId, TicketEventKind kind, string detail, string? actor, DateTime at,
+        Guid tenantId, Guid ticketId, TicketEventKind kind, string detail, string? actor, DateTime at,
         bool customerVisible = true, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        // ⚠️ This writes without reading, which is why there was no lookup here to scope — and
+        // why a scan for by-id LOOKUPS could never have found it. The event is customer-visible
+        // by default, so unscoped it appended text to any ticket in the installation.
+        bool ticketIsTenants = await db.Tickets
+            .AnyAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
+
+        if (!ticketIsTenants)
+        {
+            return;
+        }
 
         db.TicketEvents.Add(Event(ticketId, kind, at, actor, detail, customerVisible));
         await db.SaveChangesAsync(ct);
@@ -799,12 +850,16 @@ public class TicketService(
     /// Notes that a ticket is not to be counted as a deviation, with the reason §14.6
     /// requires — waiting time, force majeure, or one of the §14.7 exemptions.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task<Ticket?> ExcludeFromSlaAsync(
-        Guid ticketId, string reason, string? actor, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid ticketId, string reason, string? actor, DateTime at, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
         if (ticket is null)
         {
             return null;
@@ -844,15 +899,19 @@ public class TicketService(
     /// so the common caller does not have to know it.
     /// </param>
     /// <param name="responseDue">§14.4's response target, likewise.</param>
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task<Ticket?> AssignAsync(
-        Guid ticketId, string? assignee, string actor, DateTime at,
+        Guid tenantId, Guid ticketId, string? assignee, string actor, DateTime at,
         string? assigneeUserId = null, string? assigneeEmail = null,
         SupportWindow? window = null, DateTime? responseDue = null,
         CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
 
         if (ticket is null)
         {
@@ -909,12 +968,16 @@ public class TicketService(
     /// could not be discharged, only ignored. The report itself is a deliverable to the
     /// customer, so the event is theirs to see.</para>
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
     public async Task<Ticket?> RecordIncidentReportAsync(
-        Guid ticketId, string actor, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid ticketId, string actor, DateTime at, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
 
         if (ticket is null || ticket.IncidentReportDeliveredAt is not null)
         {
@@ -932,7 +995,11 @@ public class TicketService(
         return ticket;
     }
 
-    public async Task<Ticket?> GetAsync(Guid ticketId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose ticket. An input: a ticket carries customer correspondence, and
+    /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
+    /// </param>
+    public async Task<Ticket?> GetAsync(Guid tenantId, Guid ticketId, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
@@ -941,7 +1008,7 @@ public class TicketService(
             .Include(t => t.Pauses)
             .Include(t => t.AffectedApps)
             .AsNoTracking()
-            .FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+            .FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
     }
 
     /// <summary>Where a ticket stands against every §14 clock.</summary>
