@@ -326,7 +326,14 @@ public class SupportMailService(
 
         if (customer is not null)
         {
-            TimebankStatement bank = await time.GetTimebankAsync(customer.Id, message.SentAt, ct);
+            // ⚠️ The CUSTOMER's tenant, not the message's. A message can legitimately be placed
+            // with a customer in another tenant — a support address takes what it is sent, and
+            // the operator says where it belongs (see SupportMailTests). The timebank belongs to
+            // the customer being billed, so the customer is the subject of this question and its
+            // tenant is the right scope. Passing message.TenantId here broke two tests that
+            // exist to protect that behaviour.
+            TimebankStatement bank = await time.GetTimebankAsync(
+                customer.TenantId, customer.Id, message.SentAt, ct);
             bankSpent = bank.IsExhausted;
         }
 

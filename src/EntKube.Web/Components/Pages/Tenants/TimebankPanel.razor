@@ -150,6 +150,8 @@
 </LoadingPanel>
 
 @code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
     [Parameter, EditorRequired] public Guid CustomerId { get; set; }
 
     private bool loading = true;
@@ -174,10 +176,10 @@
 
         try
         {
-            bank = await Time.GetTimebankAsync(CustomerId, month);
+            bank = await Time.GetTimebankAsync(TenantId, CustomerId, month);
 
             (DateTime from, DateTime to) = TimeService.MonthBounds(month);
-            committed = await Time.GetCommittedHoursAsync(CustomerId, from, to);
+            committed = await Time.GetCommittedHoursAsync(TenantId, CustomerId, from, to);
         }
         catch (Exception ex)
         {
