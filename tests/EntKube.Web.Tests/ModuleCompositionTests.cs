@@ -87,6 +87,27 @@ public class ModuleCompositionTests
             + "drifting away from the module map — pick one and correct the other");
     }
 
+    /// <summary>
+    /// Owned by a module, yet impossible for the container to construct — so "mapped" and
+    /// "registered" come apart here, and they are different facts.
+    ///
+    /// <para><c>TelemetrySegmentBlobStore</c> takes a <c>Guid tenantId</c> in its constructor and
+    /// is built by hand in <c>SegmentManagerRegistry</c>, one instance per tenant. No
+    /// registration can express that, so no test of the container could ever have found it — and
+    /// it reaches <see cref="ApplicationDbContext"/> out of a scope, which is exactly the thing
+    /// the module contexts exist to stop.</para>
+    ///
+    /// <para>⚠️ It was unmapped for that reason, and being unmapped made it <b>invisible to every
+    /// per-module count</b> rather than counted as zero. Keeping the mapping and exempting it
+    /// here is the honest arrangement: ownership says whose code it is, registration says how it
+    /// is built, and conflating the two is what hid it. This list may only hold types the
+    /// container genuinely cannot build.</para>
+    /// </summary>
+    private static readonly IReadOnlySet<Type> CannotBeContainerRegistered = new HashSet<Type>
+    {
+        typeof(EntKube.Web.Services.Telemetry.TelemetrySegmentBlobStore),
+    };
+
     [Fact]
     public void Every_mapped_service_is_actually_registered_by_its_module()
     {
@@ -104,6 +125,7 @@ public class ModuleCompositionTests
         [
             .. ModuleMap.Services.Keys
                 .Where(t => !registered.Contains(t))
+                .Where(t => !CannotBeContainerRegistered.Contains(t))
                 .Select(t => t.Name)
                 .Order()
         ];

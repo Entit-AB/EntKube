@@ -45,6 +45,24 @@ public sealed record ClusterSummary(
 /// A window during which a cluster's alerts are expected to be noisy, as everyone outside Fleet
 /// sees it.
 /// </summary>
+/// <summary>
+/// Whether a maintenance window owed the customer notice.
+///
+/// <para>Mirrors <c>Data.MaintenanceKind</c> member for member. <c>ApiMaintenanceKindTests</c>
+/// holds the two together: the entity's copy is stored as an <b>int</b>, so inserting a member in
+/// the middle of one enum and not the other would silently relabel every stored row — a planned
+/// window reported as an emergency owes no notice, and the short-notice list would quietly empty
+/// itself.</para>
+/// </summary>
+public enum MaintenanceKind
+{
+    /// <summary>Arranged in advance, and therefore owed notice.</summary>
+    Planned = 0,
+
+    /// <summary>Something had to be done at once. No notice is owed.</summary>
+    Emergency = 1,
+}
+
 /// <param name="Id">The window's id.</param>
 /// <param name="ClusterId">
 /// The cluster it covers, or null for every cluster the tenant has — which is the clause each of
@@ -52,20 +70,37 @@ public sealed record ClusterSummary(
 /// </param>
 /// <param name="StartsAt">When it opens (UTC).</param>
 /// <param name="EndsAt">When it closes (UTC).</param>
+/// <param name="Title">What the window is for. Read by the monthly report.</param>
+/// <param name="AnnouncedAt">
+/// When the customer was told, <b>already resolved</b>: the entity's <c>AnnouncedAt</c> when
+/// someone recorded one — for a window entered after the customer was already told — and otherwise
+/// the moment the window was created, which is the only announcement the system can vouch for.
+///
+/// <para>That <c>?? CreatedAt</c> fallback is a rule about what counts as an announcement, and it
+/// is applied once here rather than carried as two nullable fields for every consumer to combine.
+/// Two fields would let a caller read <c>CreatedAt</c> and call it the announcement, which is the
+/// same value by a different name only when nobody recorded one.</para>
+/// </param>
+/// <param name="CreatedBy">Who recorded it. Read by the monthly report's short-notice list.</param>
+/// <param name="Kind">Emergency maintenance owes no notice; planned maintenance does.</param>
 /// <remarks>
-/// Four fields, because four fields are read. The entity also carries a title, a description and
-/// a creator, and the first draft of this record carried two of them — for nobody: the three
-/// suppression callers need only the answer and the evaluator needs only
-/// <paramref name="ClusterId"/>. A field on a shared DTO has to have a reader, or the contract
-/// becomes a second name for the table (see <c>DeploymentSummary.CustomerName</c>, refused for the
-/// same reason). The page that renders windows still reads the entity; when it moves, it brings
-/// the fields it displays with it.
+/// It carried four fields, because four were read. It carries eight now, because the monthly
+/// report reads eight — and the four it gained are the four the first draft was <em>refused</em>
+/// for carrying "for nobody". That is the rule working in both directions rather than being
+/// bent: a field needs a reader, and these now have one. The three suppression callers and the
+/// alert evaluator still read only the original four and simply receive a wider row.
+///
+/// <para>The entity's <c>Description</c> is still absent. Nothing reads it.</para>
 /// </remarks>
 public sealed record MaintenanceWindowSummary(
     Guid Id,
     Guid? ClusterId,
     DateTime StartsAt,
-    DateTime EndsAt);
+    DateTime EndsAt,
+    string Title,
+    DateTime AnnouncedAt,
+    string CreatedBy,
+    MaintenanceKind Kind);
 
 public interface IFleetApi
 {
@@ -94,6 +129,25 @@ public interface IFleetApi
     /// input to the question rather than a filter applied to everyone's rows afterwards
     /// (§4.0.1.2).</para>
     /// </summary>
+    /// <summary>
+    /// Every window of a tenant's that <b>overlaps</b> an interval, oldest first.
+    ///
+    /// <para>The two methods beside this one answer about an <em>instant</em> — "is this cluster
+    /// in maintenance now" — which is the question a suppression check asks. A report over a month
+    /// cannot be assembled from those: a window that opened before the month began and closed
+    /// inside it is not active at any instant the report cares to name, and it still excludes the
+    /// downtime it covered. Overlap is <c>StartsAt &lt; to &amp;&amp; EndsAt &gt; from</c>, and
+    /// stating it once here is better than the four hand-written copies that preceded
+    /// <see cref="IsInMaintenanceAsync"/>.</para>
+    ///
+    /// <para>It does not take a cluster filter. A window with a null cluster covers the whole
+    /// tenant, so a caller interested in some clusters still needs those rows, and the set for one
+    /// month is small enough that narrowing it is the caller's business — the alternative is a
+    /// parameter whose only correct value is "and also the nulls".</para>
+    /// </summary>
+    Task<IReadOnlyList<MaintenanceWindowSummary>> GetMaintenanceWindowsOverlappingAsync(
+        Guid tenantId, DateTime from, DateTime to, CancellationToken ct = default);
+
     Task<IReadOnlyList<MaintenanceWindowSummary>> GetActiveMaintenanceWindowsAsync(
         Guid tenantId, DateTime at, CancellationToken ct = default);
 

@@ -328,7 +328,7 @@ else
                     <span class="bi bi-file-earmark-bar-graph fs-4 me-2 text-primary"></span>
                     <h4 class="mb-0">Service report — @selectedCustomer.Name</h4>
                 </div>
-                <MonthlyReportPanel CustomerId="selectedCustomer.Id" Customer="true" />
+                <MonthlyReportPanel TenantId="selectedCustomer.TenantId" CustomerId="selectedCustomer.Id" Customer="true" />
             }
             else if (selectedCustomerOp == "subconsultants")
             {

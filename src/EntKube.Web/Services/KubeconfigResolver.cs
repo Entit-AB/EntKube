@@ -1,5 +1,6 @@
 using System.Collections.Concurrent;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -35,16 +36,26 @@ public sealed class KubeconfigResolver(IServiceProvider services, VaultEncryptio
             return cached;
         }
 
+        // ⚠️ Resolved OUTSIDE the catch below, deliberately. The catch degrades any failure to
+        // "no kubeconfig", which is right for a data problem — a missing secret, ciphertext that
+        // will not decrypt — and badly wrong for a container that cannot supply a context. That
+        // is a wiring fault, and swallowing it would turn one bad registration into every cluster
+        // in the installation silently losing its kubeconfig, reported as
+        // "no kubeconfig configured" per operation. GetRequiredService throwing here is the loud
+        // failure that belongs at startup. (Found the hard way: moving this off
+        // ApplicationDbContext failed ten tests with that exact misleading message, because the
+        // test harness registered only the one factory.)
+        IDbContextFactory<SecretsDbContext> factory =
+            services.GetRequiredService<IDbContextFactory<SecretsDbContext>>();
+
         try
         {
             // A fresh context (its own connection) — safe to query from inside the
             // materialization of a different context. No KubernetesCluster is materialized
             // here, so the interceptor is a no-op and there is no re-entrancy.
-            using ApplicationDbContext db = services
-                .GetRequiredService<IDbContextFactory<ApplicationDbContext>>()
-                .CreateDbContext();
+            using SecretsDbContext db = factory.CreateDbContext();
 
-            VaultSecret? secret = db.Set<VaultSecret>()
+            VaultSecret? secret = db.VaultSecrets
                 .AsNoTracking()
                 .FirstOrDefault(s => s.Id == secretId && s.SecretType == VaultSecretType.Kubeconfig);
             if (secret is null)
@@ -72,14 +83,14 @@ public sealed class KubeconfigResolver(IServiceProvider services, VaultEncryptio
     /// <summary>Drops the cached plaintext for a secret so the next load re-decrypts it.</summary>
     public void Invalidate(Guid secretId) => planCache.TryRemove(secretId, out _);
 
-    private byte[] GetDataKey(ApplicationDbContext db, Guid tenantId)
+    private byte[] GetDataKey(SecretsDbContext db, Guid tenantId)
     {
         if (dekCache.TryGetValue(tenantId, out byte[]? dek))
         {
             return dek;
         }
 
-        SecretVault vault = db.Set<SecretVault>()
+        SecretVault vault = db.SecretVaults
             .AsNoTracking()
             .First(v => v.TenantId == tenantId);
         dek = encryption.UnsealDataKey(vault.EncryptedDataKey, vault.Nonce);

@@ -46,6 +46,7 @@ public sealed class CertificateDistributionServiceTests : IDisposable
             dbFactory, vault,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(
                 dbFactory, new Mock<IKubernetesClientFactory>().Object),
+            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory),
             NullLogger<CertificateDistributionService>.Instance);
     }
 

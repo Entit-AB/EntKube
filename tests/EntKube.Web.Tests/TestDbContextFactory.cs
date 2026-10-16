@@ -200,8 +200,14 @@ public sealed class InterceptingTestDb : IDisposable
         Encryption = new VaultEncryptionService(rootKey);
 
         PlainFactory plain = new(ConnectionString);
+
+        // Every module factory, not just ApplicationDbContext's. Production registers them all
+        // (ModuleContextRegistration), and a harness that offers only one makes a service moving
+        // onto its module's context fail here while working in the product — which is the wrong
+        // way round for a test to be wrong.
         ServiceProvider sp = new ServiceCollection()
             .AddSingleton<IDbContextFactory<ApplicationDbContext>>(plain)
+            .AddSingleton<IDbContextFactory<SecretsDbContext>>(plain)
             .BuildServiceProvider();
 
         Resolver = new KubeconfigResolver(sp, Encryption);
@@ -241,15 +247,32 @@ public sealed class InterceptingTestDb : IDisposable
 
     public void Dispose() => keepAlive.Dispose();
 
-    private sealed class PlainFactory(string connectionString) : IDbContextFactory<ApplicationDbContext>
+    /// <summary>
+    /// A factory with NO kubeconfig interceptor — this is the one the resolver itself holds, and
+    /// giving it the interceptor would make resolving a kubeconfig re-enter the resolver.
+    ///
+    /// <para>It satisfies <see cref="SecretsDbContext"/> as well as
+    /// <see cref="ApplicationDbContext"/> because that is the context the resolver reads the vault
+    /// through, and production registers every module factory.</para>
+    /// </summary>
+    private sealed class PlainFactory(string connectionString)
+        : IDbContextFactory<ApplicationDbContext>, IDbContextFactory<SecretsDbContext>
     {
-        public ApplicationDbContext CreateDbContext() =>
-            new(new DbContextOptionsBuilder<ApplicationDbContext>()
-                .UseSqlite(connectionString)
-                // Each test class builds its own interceptor instance, so the full suite creates many
-                // EF internal service providers — expected in tests, not a leak.
-                .ConfigureWarnings(w => w.Ignore(CoreEventId.ManyServiceProvidersCreatedWarning))
-                .Options);
+        public ApplicationDbContext CreateDbContext() => Build<ApplicationDbContext>();
+
+        SecretsDbContext IDbContextFactory<SecretsDbContext>.CreateDbContext()
+            => Build<SecretsDbContext>();
+
+        private TContext Build<TContext>()
+            where TContext : DbContext
+            => (TContext)Activator.CreateInstance(
+                typeof(TContext),
+                new DbContextOptionsBuilder<TContext>()
+                    .UseSqlite(connectionString)
+                    // Each test class builds its own interceptor instance, so the full suite
+                    // creates many EF internal service providers — expected in tests, not a leak.
+                    .ConfigureWarnings(w => w.Ignore(CoreEventId.ManyServiceProvidersCreatedWarning))
+                    .Options)!;
     }
 
     /// <summary>

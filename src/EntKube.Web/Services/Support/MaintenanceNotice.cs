@@ -107,4 +107,25 @@ public static class MaintenanceNotice
             window.StartsAt,
             window.Kind,
             requiredWorkingDays);
+
+    /// <summary>
+    /// The same assessment for a window that arrived over <c>IFleetApi</c> rather than from the
+    /// database.
+    ///
+    /// <para>It needs no <c>?? CreatedAt</c>: the contract resolves the announcement at the
+    /// boundary, which is the whole reason <c>MaintenanceWindowSummary.AnnouncedAt</c> is a single
+    /// non-nullable field. This overload sits beside its entity twin so the one place that knows
+    /// how the two enums line up is here, next to the rule they serve, rather than at a call
+    /// site.</para>
+    /// </summary>
+    public static NoticeGiven Assess(
+        EntKube.Contracts.Fleet.MaintenanceWindowSummary window,
+        int requiredWorkingDays = DefaultWorkingDays) =>
+        Assess(
+            window.AnnouncedAt,
+            window.StartsAt,
+            window.Kind == EntKube.Contracts.Fleet.MaintenanceKind.Emergency
+                ? MaintenanceKind.Emergency
+                : MaintenanceKind.Planned,
+            requiredWorkingDays);
 }

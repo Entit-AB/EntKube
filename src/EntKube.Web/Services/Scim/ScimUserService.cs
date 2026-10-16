@@ -1,5 +1,6 @@
 using System.Text.Json.Nodes;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.AspNetCore.Identity;
 using Microsoft.EntityFrameworkCore;
 
@@ -36,7 +37,7 @@ public sealed record ScimResult
 /// SSO, while keeping all of that intact.
 /// </summary>
 public class ScimUserService(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<IdentityDbContext> dbFactory,
     UserManager<ApplicationUser> userManager,
     ILogger<ScimUserService> logger)
 {
@@ -84,8 +85,8 @@ public class ScimUserService(
             return ScimResult.BadRequest(parsed.Error!);
         }
 
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-        IQueryable<ApplicationUser> query = db.Users.AsNoTracking();
+        await using IdentityDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        IQueryable<ApplicationUser> query = db.ApplicationUsers.AsNoTracking();
 
         if (!parsed.IsEmpty)
         {
@@ -125,8 +126,8 @@ public class ScimUserService(
 
     public async Task<ScimResult> GetAsync(string id, CancellationToken ct)
     {
-        await using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
-        ApplicationUser? user = await db.Users.AsNoTracking().FirstOrDefaultAsync(u => u.Id == id, ct);
+        await using IdentityDbContext db = await dbFactory.CreateDbContextAsync(ct);
+        ApplicationUser? user = await db.ApplicationUsers.AsNoTracking().FirstOrDefaultAsync(u => u.Id == id, ct);
 
         return user is null ? ScimResult.NotFound($"No user with id '{id}'.") : ScimResult.Ok(ToScim(user));
     }
