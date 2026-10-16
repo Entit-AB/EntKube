@@ -554,6 +554,20 @@ public class ModuleContractTests
     /// was a plain swap. The service held the all-seeing context for one query it was told it
     /// could not give up.</para>
     ///
+    /// <para><b>Identity 4 → 3</b>, and the only thing in the way was a property name.
+    /// <c>ScimUserService</c> reads <c>db.Users</c> and nothing else — ASP.NET Identity's own
+    /// DbSet, which exists on <c>ApplicationDbContext</c> because that context derives from
+    /// <c>IdentityDbContext&lt;ApplicationUser&gt;</c>. The module context does not, and spells the
+    /// same table <c>ApplicationUsers</c>. One rename.</para>
+    ///
+    /// <para>⚠️ Checked rather than assumed, because the compiler cannot see it: both contexts
+    /// resolve <c>ApplicationUser</c> to the <em>same table name</em>
+    /// (<c>Model.FindEntityType(typeof(ApplicationUser)).GetTableName()</c> compared across the
+    /// two). Had the module context fallen back to convention while the real table is
+    /// <c>AspNetUsers</c>, the swap would have compiled and then queried a table that does not
+    /// exist — the hazard <c>EfTableNameTests</c> was written for, in a context where the name
+    /// comes from a base class rather than from a <c>DbSet</c> property.</para>
+    ///
     /// <para>⚠️ Two files resolve the context from a scope and are in no module at all:
     /// <c>KubeconfigResolver</c> and <c>TelemetrySegmentBlobStore</c>. They are absent from
     /// <c>ModuleServiceMap</c>, so this ratchet cannot see them however many spellings it learns —
@@ -585,7 +599,7 @@ public class ModuleContractTests
         [Module.Support] = 7,
         [Module.Catalog] = 6,
         [Module.Delivery] = 3,
-        [Module.Identity] = 4,
+        [Module.Identity] = 3,
         [Module.Fleet] = 2,
         [Module.Mail] = 1,
         [Module.Cost] = 0,
