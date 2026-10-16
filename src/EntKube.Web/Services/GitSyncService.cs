@@ -150,12 +150,15 @@ public class GitSyncService(
         if (deployment.GitUrl is not null)
         {
             CustomerGitCredential? cred = await gitService.FindMatchingCredentialAsync(
-                deployment.App.CustomerId, deployment.EnvironmentId, deployment.GitUrl, ct);
+                tenantId, deployment.App.CustomerId, deployment.EnvironmentId, deployment.GitUrl, ct);
             credentialId = cred?.Id;
             repo = new GitRepository
             {
                 Id = deployment.Id,
-                TenantId = cred?.TenantId ?? Guid.Empty,
+                // The credential is now matched as `tenantId`, so its own column can only ever
+                // repeat it — and when there is no credential at all, Guid.Empty was a repository
+                // belonging to nobody. The caller's tenant is the honest answer in both cases.
+                TenantId = tenantId,
                 Name = deployment.Name,
                 Url = deployment.GitUrl,
                 AuthType = cred?.AuthType ?? GitAuthType.None,
@@ -167,7 +170,7 @@ public class GitSyncService(
         {
             repo = deployment.GitRepository;
             CustomerGitCredential? envCredential = await gitService.FindMatchingCredentialAsync(
-                deployment.App.CustomerId, deployment.EnvironmentId, repo.Url, ct);
+                tenantId, deployment.App.CustomerId, deployment.EnvironmentId, repo.Url, ct);
             credentialId = envCredential?.Id;
         }
         else
