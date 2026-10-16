@@ -2,6 +2,7 @@ using System.Text.Json;
 using EntKube.Web.Data;
 using ICatalogApi = EntKube.Contracts.Catalog.ICatalogApi;
 using InstalledComponent = EntKube.Contracts.Catalog.InstalledComponent;
+using StorageLinkSummary = EntKube.Contracts.DataServices.StorageLinkSummary;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Dr;
@@ -18,6 +19,7 @@ public class VeleroService(
     IDbContextFactory<ApplicationDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     StorageService storageService,
+    EntKube.Contracts.DataServices.IDataServicesApi storage,
     VaultService vaultService,
     ICatalogApi catalog,
     ILogger<VeleroService> logger)
@@ -49,13 +51,12 @@ public class VeleroService(
     public async Task WriteStorageHelmValuesAsync(
         Guid tenantId, Guid clusterComponentId, Guid storageLinkId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-
         InstalledComponent component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
-        StorageLink link = await db.StorageLinks
-            .FirstOrDefaultAsync(s => s.Id == storageLinkId && s.TenantId == tenantId, ct)
+        // Asked of DataServices, which owns storage links. The same lookup by id and tenant, and
+        // the four fields used below — bucket, endpoint, region, name — are all on the summary.
+        StorageLinkSummary link = await storage.GetStorageLinkAsync(tenantId, storageLinkId, ct)
             ?? throw new InvalidOperationException("Storage link not found.");
 
         if (string.IsNullOrWhiteSpace(link.BucketName))
@@ -117,17 +118,16 @@ public class VeleroService(
 
         try
         {
-            Guid clusterId;
-            Guid environmentId;
-            using (ApplicationDbContext db = dbFactory.CreateDbContext())
-            {
-                InstalledComponent velero = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
-                    ?? throw new InvalidOperationException("Velero component not found.");
-                clusterId = velero.ClusterId;
-                environmentId = velero.EnvironmentId;
-            }
+            // The context this used to open was never queried — the component comes from
+            // ICatalogApi. An EF context opens no connection until it is asked something, so it
+            // cost nothing and showed up as nothing; only a count of who holds the god context
+            // could see it.
+            InstalledComponent velero = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct)
+                ?? throw new InvalidOperationException("Velero component not found.");
+            Guid clusterId = velero.ClusterId;
+            Guid environmentId = velero.EnvironmentId;
 
-            Guid? cubefsComponentId = await FindCubeFsComponentOnClusterAsync(clusterId, ct);
+            Guid? cubefsComponentId = await FindCubeFsComponentOnClusterAsync(tenantId, clusterId, ct);
             if (cubefsComponentId is null)
             {
                 logger.LogInformation(
@@ -173,7 +173,7 @@ public class VeleroService(
     public async Task<Guid?> GetStorageLinkIdForComponentAsync(
         Guid tenantId, Guid clusterComponentId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        // Likewise dead: nothing here queries a context.
         InstalledComponent? component = await catalog.GetComponentAsync(tenantId, clusterComponentId, ct);
         return component is null ? null : TryReadConfig(component.Configuration)?.StorageLinkId;
     }
@@ -181,14 +181,25 @@ public class VeleroService(
     /// <summary>Bucket minted for a cluster that has no S3 of its own yet.</summary>
     private const string AutoBucketName = "velero-backups";
 
-    private async Task<Guid?> FindCubeFsComponentOnClusterAsync(Guid clusterId, CancellationToken ct)
+    /// <param name="tenantId">
+    /// Whose cluster. This read had no tenant at all, so a cluster id from anywhere in the
+    /// installation answered with that cluster's CubeFS component — which then became the backup
+    /// target written into a Velero config. The caller has always had a tenant.
+    /// </param>
+    private async Task<Guid?> FindCubeFsComponentOnClusterAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        // Not FindComponentAsync: this one filters on Status and takes the most recently created
-        // match, neither of which the contract expresses — converting it would change which
-        // component is picked.
+
+        // ⚠️ Still Catalog's table, and still read directly. Not FindComponentAsync: this filters
+        // on Status and takes the most recently CREATED match, and InstalledComponent carries no
+        // CreatedAt — one consumer does not earn a field on a shared DTO, so the contract cannot
+        // express it and converting it would silently change which component is picked. That
+        // decision is why this service still holds the god context; it is recorded rather than
+        // worked around.
         ClusterComponent? cubefs = await db.ClusterComponents
-            .Where(c => c.ClusterId == clusterId && c.Name == "cubefs" && c.Status == ComponentStatus.Installed)
+            .Where(c => c.ClusterId == clusterId && c.Cluster.TenantId == tenantId
+                && c.Name == "cubefs" && c.Status == ComponentStatus.Installed)
             .OrderByDescending(c => c.CreatedAt)
             .FirstOrDefaultAsync(ct);
         return cubefs?.Id;
@@ -199,7 +210,7 @@ public class VeleroService(
     /// mapping can be checked without a database — an endpoint written into the wrong key
     /// produces a component that installs cleanly and cannot back anything up.
     /// </summary>
-    public static Dictionary<string, string> BuildStorageValues(StorageLink link)
+    public static Dictionary<string, string> BuildStorageValues(StorageLinkSummary link)
     {
         Dictionary<string, string> values = new()
         {
@@ -219,8 +230,12 @@ public class VeleroService(
 
         // AWS proper serves virtual-hosted-style URLs; everything else needs path style.
         // Getting this backwards yields DNS failures against a bucket-prefixed hostname.
+        // The CONTRACT's enum now, not the entity's. The two mirror member for member and
+        // ModuleApiTests pins the ordinals, because DataServicesApi casts between them — so a
+        // member inserted in one and not the other would flip path-style addressing for every
+        // provider after it, and DNS failures against a bucket-prefixed hostname are the symptom.
         values["configuration.backupStorageLocation.0.config.s3ForcePathStyle"] =
-            link.Provider == StorageProvider.AwsS3 ? "false" : "true";
+            link.Provider == EntKube.Contracts.DataServices.StorageProviderKind.AwsS3 ? "false" : "true";
 
         return values;
     }
