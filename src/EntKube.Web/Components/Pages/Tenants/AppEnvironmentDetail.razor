@@ -3345,7 +3345,7 @@
         storageBindingError = null; addingStorageBinding = true;
         try
         {
-            await StorageService.BindStorageToDeploymentAsync(attachStorageModel.StorageLinkId!.Value, attachStorageModel.DeploymentId!.Value, attachStorageModel.SecretName.Trim());
+            await StorageService.BindStorageToDeploymentAsync(TenantId, attachStorageModel.StorageLinkId!.Value, attachStorageModel.DeploymentId!.Value, attachStorageModel.SecretName.Trim());
             attachStorageModel = new();
             await LoadAppStorageBindings();
             Toasts.Success("Storage attached.");
@@ -3358,7 +3358,7 @@
     {
         confirmUnbindStorageId = null;
         storageBindingSyncErrors.Remove(bindingId);
-        await StorageService.UnbindStorageAsync(bindingId);
+        await StorageService.UnbindStorageAsync(TenantId, bindingId);
         await LoadAppStorageBindings();
     }
 

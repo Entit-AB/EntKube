@@ -1623,10 +1623,32 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     /// When the binding is created, any existing vault secrets for the storage link
     /// are configured for K8s sync (setting the target secret name and namespace).
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose storage and whose deployment. A binding is what makes the credentials appear as a
+    /// Secret in a namespace, and this took two bare ids: our link with their deployment projects
+    /// our credentials into their namespace, and their link with our deployment is the same act in
+    /// reverse. Both sides are checked before the row is written, because the row is the grant.
+    /// </param>
     public async Task<StorageBinding> BindStorageToDeploymentAsync(
-        Guid storageLinkId, Guid deploymentId, string kubernetesSecretName, CancellationToken ct = default)
+        Guid tenantId, Guid storageLinkId, Guid deploymentId, string kubernetesSecretName,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        StorageLink? link = await db.StorageLinks
+            .FirstOrDefaultAsync(l => l.Id == storageLinkId && l.TenantId == tenantId, ct);
+
+        // The deployment's tenant travels through its app's customer — AppDeployment has no
+        // TenantId of its own.
+        AppDeployment? deployment = await db.AppDeployments
+            .FirstOrDefaultAsync(
+                d => d.Id == deploymentId && d.App.Customer.TenantId == tenantId, ct);
+
+        if (link is null || deployment is null)
+        {
+            throw new InvalidOperationException(
+                "The storage link or the deployment does not belong to this tenant.");
+        }
 
         // Create the binding record linking storage → deployment.
 
@@ -1641,21 +1663,11 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
         db.Set<StorageBinding>().Add(binding);
         await db.SaveChangesAsync(ct);
 
-        // Configure the storage link's vault secrets for K8s sync.
-        // We need the deployment's namespace to know where the K8s Secret goes.
+        // Configure the storage link's vault secrets for K8s sync. Both rows were loaded by the
+        // guard above, so the namespace this writes into is one this tenant owns.
 
-        AppDeployment? deployment = await db.AppDeployments.FindAsync([deploymentId], ct);
-
-        if (deployment is not null)
-        {
-            StorageLink? link = await db.StorageLinks.FindAsync([storageLinkId], ct);
-
-            if (link is not null)
-            {
-                await ConfigureSecretsForSyncAsync(
-                    link.TenantId, storageLinkId, kubernetesSecretName, deployment.Namespace, ct);
-            }
-        }
+        await ConfigureSecretsForSyncAsync(
+            tenantId, storageLinkId, kubernetesSecretName, deployment.Namespace, ct);
 
         return binding;
     }
@@ -1664,10 +1676,29 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     /// Binds a storage link to a cluster component. The credentials will be
     /// projected as a Kubernetes Secret in the component's namespace.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose storage. The component read below was already scoped — by the link's own tenant,
+    /// which it had to load the link to learn. Now that the caller says whose tenant it is, the
+    /// link itself is checked too, and the catalog read uses the caller's tenant rather than one
+    /// derived from the row it is authorizing.
+    ///
+    /// <para>⚠️ That last part is a tidy-up and not a fix: with the link guarded, its tenant and
+    /// the caller's are the same value, and putting the derived form back leaves every test green.
+    /// The load-bearing change here is the link check — a derived tenant inherits its caller's
+    /// scoping, so it was redundant rather than exploitable.</para>
+    /// </param>
     public async Task<StorageBinding> BindStorageToComponentAsync(
-        Guid storageLinkId, Guid componentId, string kubernetesSecretName, CancellationToken ct = default)
+        Guid tenantId, Guid storageLinkId, Guid componentId, string kubernetesSecretName,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.StorageLinks.AnyAsync(
+                l => l.Id == storageLinkId && l.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException(
+                "The storage link does not belong to this tenant.");
+        }
 
         // Create the binding record linking storage → component.
 
@@ -1684,23 +1715,18 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         // Configure vault secrets for K8s sync using the component's namespace.
         //
-        // The link is loaded first now, because its tenant is what the component is then asked for.
-        // This read used to be FindAsync(componentId) with no tenant at all, so a component id from
-        // any tenant in the installation resolved — and its namespace decided where this tenant's
-        // storage credentials were synced to. Scoped by the link's tenant it is a cross-row check
-        // (the link's tenant against the component's cluster), which can actually fail.
-        StorageLink? link = await db.StorageLinks.FindAsync([storageLinkId], ct);
+        // This read used to be FindAsync(componentId) with no tenant at all, so a component id
+        // from any tenant in the installation resolved — and its namespace decided where this
+        // tenant's storage credentials were synced to. A component that is not this tenant's
+        // resolves to nothing, so no sync is configured; the binding row is still written,
+        // because that is the caller's own record and not a cluster-facing act.
+        EntKube.Contracts.Catalog.InstalledComponent? component =
+            await catalog.GetComponentAsync(tenantId, componentId, ct);
 
-        if (link is not null)
+        if (component?.Namespace is not null)
         {
-            EntKube.Contracts.Catalog.InstalledComponent? component =
-                await catalog.GetComponentAsync(link.TenantId, componentId, ct);
-
-            if (component?.Namespace is not null)
-            {
-                await ConfigureSecretsForSyncAsync(
-                    link.TenantId, storageLinkId, kubernetesSecretName, component.Namespace, ct);
-            }
+            await ConfigureSecretsForSyncAsync(
+                tenantId, storageLinkId, kubernetesSecretName, component.Namespace, ct);
         }
 
         return binding;
@@ -1732,13 +1758,30 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     /// <summary>
     /// Returns all storage bindings for a cluster component.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose component. The subject here is the component, and whose a component is belongs to
+    /// Catalog — so it is asked, not joined.
+    ///
+    /// <para>⚠️ The first draft scoped this with <c>b.Component!.Cluster.TenantId == tenantId</c>
+    /// and <c>CatalogContractAdoptionTests</c> rejected it: a navigation into
+    /// <c>ClusterComponents</c> is the same coupling as querying that table directly, and this
+    /// service is not Catalog. A tenant predicate written through another module's tables buys
+    /// authorization at the price of the seam. Asking the contract gives the same refusal and
+    /// leaves the module boundary intact.</para>
+    /// </param>
     public async Task<List<StorageBinding>> GetBindingsForComponentAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
+        if (await catalog.GetComponentAsync(tenantId, componentId, ct) is null)
+        {
+            return [];
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<StorageBinding>()
             .Include(b => b.StorageLink)
+            // The component was resolved as this tenant above, so its bindings are theirs.
             .Where(b => b.ComponentId == componentId)
             .OrderBy(b => b.CreatedAt)
             .ToListAsync(ct);
@@ -1749,13 +1792,20 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     /// link have their K8s sync disabled — the platform will no longer project
     /// credentials into the workload's namespace.
     /// </summary>
-    public async Task<bool> UnbindStorageAsync(Guid bindingId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose binding. Unbinding disables the K8s sync on the link's secrets, so with a bare id
+    /// one tenant could cut the credential projection out from under another's workload — a
+    /// deletion dressed as a configuration change, and the page the id comes from is the portal.
+    /// </param>
+    public async Task<bool> UnbindStorageAsync(
+        Guid tenantId, Guid bindingId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         StorageBinding? binding = await db.Set<StorageBinding>()
             .Include(b => b.StorageLink)
-            .FirstOrDefaultAsync(b => b.Id == bindingId, ct);
+            .FirstOrDefaultAsync(
+                b => b.Id == bindingId && b.StorageLink.TenantId == tenantId, ct);
 
         if (binding is null)
         {
