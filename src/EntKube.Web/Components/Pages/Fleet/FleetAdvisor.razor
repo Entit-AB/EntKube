@@ -429,7 +429,7 @@
             incidentRow = r;
             incident = null;
             loadingIncident = true;
-            incident = await Incidents.GetByIdAsync(incidentId);
+            incident = await Incidents.GetByIdAsync(r.Tenant.Id, incidentId);
             loadingIncident = false;
             return;
         }
@@ -444,8 +444,8 @@
     {
         if (incident is null) return;
         incidentBusy = true;
-        await Incidents.AcknowledgeAsync(incident.Id, currentUser);
-        incident = await Incidents.GetByIdAsync(incident.Id);
+        await Incidents.AcknowledgeAsync(incidentRow!.Tenant.Id, incident.Id, currentUser);
+        incident = await Incidents.GetByIdAsync(incidentRow!.Tenant.Id, incident.Id);
         incidentBusy = false;
         await Reload();
     }
@@ -454,7 +454,7 @@
     {
         if (incident is null) return;
         incidentBusy = true;
-        await Incidents.ResolveAsync(incident.Id, currentUser);
+        await Incidents.ResolveAsync(incidentRow!.Tenant.Id, incident.Id, currentUser);
         incidentBusy = false;
         CloseIncident();
         await Reload();

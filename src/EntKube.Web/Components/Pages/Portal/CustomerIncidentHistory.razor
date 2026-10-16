@@ -112,6 +112,8 @@ else
 }
 
 @code {
+    [Parameter] public required Guid TenantId { get; set; }
+
     [Parameter] public required List<AppDeployment> Deployments { get; set; }
     [Parameter] public int WindowDays { get; set; } = 30;
 
@@ -128,7 +130,7 @@ else
     {
         if (Deployments.Count == 0) { isLoading = false; return; }
         isLoading = true;
-        incidents = await IncidentService.GetIncidentsForDeploymentsAsync(Deployments, WindowDays);
+        incidents = await IncidentService.GetIncidentsForDeploymentsAsync(TenantId, Deployments, WindowDays);
         ApplyFilter();
         isLoading = false;
     }

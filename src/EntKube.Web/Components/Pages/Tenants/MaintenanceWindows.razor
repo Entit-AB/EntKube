@@ -357,7 +357,7 @@ else
     {
         try
         {
-            await IncidentService.DeleteMaintenanceWindowAsync(id);
+            await IncidentService.DeleteMaintenanceWindowAsync(TenantId, id);
             await Load();
             Toasts.Success("Maintenance window deleted.");
         }
