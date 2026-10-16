@@ -1171,6 +1171,31 @@ Nothing moves. The monolith becomes modular.
    all-seeing context the whole time. A zero that could never have been anything else is worse
    than a large number, because nobody revisits a module that is done.
 
+   **And correcting it found the cheapest work left in the programme.** Eight of the ten
+   newly-visible sweeps came off the all-seeing context immediately, as pure context swaps with
+   no contract, no tidying and no behaviour change: `AlertSyncService` and
+   `TelemetryAlertEvaluator` (Telemetry 6 → 3), `DeploymentSyncService`, `GitSyncService` and
+   `RolloutWatcherService` (Delivery 6 → 3), `AppL4RouteHealthService` and
+   `HeadscaleCertSyncService` (Connectivity 6 → 4), and `ResourceUsageCollectorService`
+   (Cost 1 → 0). Running total **44 → 35**. Every one of them had been swappable since the day
+   the module contexts were written; the only thing standing in the way was a metric that said
+   they were not there.
+
+   Only `BootstrapRunnerService` stayed behind, and the compiler is what established that rather
+   than a grep: it writes `CnpgClusters`, `RabbitMQClusters` and `RedisClusters`, so the narrower
+   context refuses it. That is the right adjudicator for a swap — a scan for `db.Table` cannot
+   see a read that arrives through a navigation, which is the error §4.1 has now recorded three
+   times.
+
+   ⚠️ One hazard the swaps introduce is **not type-visible**, so compiling says nothing about it.
+   A module context exposes the four hubs `AsNoTracking`, so a row read through one comes back
+   *detached* where `ApplicationDbContext`'s `DbSet` returned it tracked — and attaching a
+   detached principal to a *tracked* dependent is how EF is persuaded to insert a row that
+   already exists. `AlertSyncService` does exactly that with a cluster, to render
+   `incident.Cluster?.Name`, and is correct only because every write in the method happens above
+   that line. Every hub read in the other seven is a scalar projection, so the trap cannot arise
+   there. All of that had to be read rather than inferred.
+
    The exemption was not random: it removed precisely the code with the widest reach — the
    unattended sweeps that cross every tenant and that §4.0 exists to govern. `ModuleContractTests`
    now derives both spellings from the source instead of asking reflection one question, and
