@@ -613,7 +613,7 @@ public class StorageServiceTests : IDisposable
         // to a K8s Secret named "invoice-storage" in the deployment's namespace.
 
         StorageBinding binding = await sut.BindStorageToDeploymentAsync(
-            link.Id, deployment.Id, "invoice-storage");
+            tenant.Id, link.Id, deployment.Id, "invoice-storage");
 
         // Assert — the binding exists and references both sides correctly.
 
@@ -672,7 +672,7 @@ public class StorageServiceTests : IDisposable
         // Act — bind storage to the component.
 
         StorageBinding binding = await sut.BindStorageToComponentAsync(
-            link.Id, component.Id, "loki-s3-credentials");
+            tenant.Id, link.Id, component.Id, "loki-s3-credentials");
 
         // Assert
 
@@ -732,7 +732,7 @@ public class StorageServiceTests : IDisposable
         await vaultService.SetStorageLinkSecretAsync(tenant.Id, link.Id, "SECRET_KEY", "s3cr3t");
 
         StorageBinding binding = await sut.BindStorageToComponentAsync(
-            link.Id, theirComponent.Id, "loki-s3-credentials");
+            tenant.Id, link.Id, theirComponent.Id, "loki-s3-credentials");
 
         binding.Should().NotBeNull("the binding row is this tenant's own record");
 
@@ -782,7 +782,7 @@ public class StorageServiceTests : IDisposable
         await vaultService.InitializeVaultAsync(tenant.Id);
         await vaultService.SetStorageLinkSecretAsync(tenant.Id, link.Id, "ACCESS_KEY", "AKIAEXAMPLE");
 
-        await sut.BindStorageToComponentAsync(link.Id, component.Id, "loki-s3-credentials");
+        await sut.BindStorageToComponentAsync(tenant.Id, link.Id, component.Id, "loki-s3-credentials");
 
         List<VaultSecret> secrets = await vaultService.GetStorageLinkSecretsAsync(tenant.Id, link.Id);
         secrets.Should().ContainSingle().Which.Should().BeEquivalentTo(
@@ -811,8 +811,8 @@ public class StorageServiceTests : IDisposable
         db.StorageLinks.Add(link2);
         await db.SaveChangesAsync();
 
-        await sut.BindStorageToDeploymentAsync(link.Id, deployment.Id, "invoices");
-        await sut.BindStorageToDeploymentAsync(link2.Id, deployment.Id, "logs");
+        await sut.BindStorageToDeploymentAsync(tenant.Id, link.Id, deployment.Id, "invoices");
+        await sut.BindStorageToDeploymentAsync(tenant.Id, link2.Id, deployment.Id, "logs");
 
         // Act
 
@@ -835,11 +835,11 @@ public class StorageServiceTests : IDisposable
         (_, AppDeployment deployment, StorageLink link) = CreateDeploymentWithStorageLink(tenant, env);
 
         StorageBinding binding = await sut.BindStorageToDeploymentAsync(
-            link.Id, deployment.Id, "temp-storage");
+            tenant.Id, link.Id, deployment.Id, "temp-storage");
 
         // Act — unbind the storage.
 
-        bool removed = await sut.UnbindStorageAsync(binding.Id);
+        bool removed = await sut.UnbindStorageAsync(tenant.Id, binding.Id);
 
         // Assert
 
@@ -853,7 +853,7 @@ public class StorageServiceTests : IDisposable
     {
         // Act
 
-        bool removed = await sut.UnbindStorageAsync(Guid.NewGuid());
+        bool removed = await sut.UnbindStorageAsync(Guid.NewGuid(), Guid.NewGuid());
 
         // Assert
 
@@ -877,7 +877,7 @@ public class StorageServiceTests : IDisposable
         // Act — bind the storage, which should mark vault secrets for K8s sync.
 
         StorageBinding binding = await sut.BindStorageToDeploymentAsync(
-            link.Id, deployment.Id, "invoice-storage");
+            tenant.Id, link.Id, deployment.Id, "invoice-storage");
 
         // Assert — the storage link's secrets should now have K8s sync configured
         // targeting the deployment's namespace and the binding's secret name.
@@ -905,11 +905,11 @@ public class StorageServiceTests : IDisposable
         await vaultService.SetStorageLinkSecretAsync(tenant.Id, link.Id, "SECRET_KEY", "s3cr3t");
 
         StorageBinding binding = await sut.BindStorageToDeploymentAsync(
-            link.Id, deployment.Id, "invoice-storage");
+            tenant.Id, link.Id, deployment.Id, "invoice-storage");
 
         // Act — unbind.
 
-        await sut.UnbindStorageAsync(binding.Id);
+        await sut.UnbindStorageAsync(tenant.Id, binding.Id);
 
         // Assert — secrets should no longer be marked for K8s sync.
 
@@ -940,7 +940,7 @@ public class StorageServiceTests : IDisposable
         (_, AppDeployment deployment, StorageLink link) = CreateDeploymentWithStorageLink(tenant, env);
         await db.SaveChangesAsync();
 
-        await sut.BindStorageToDeploymentAsync(link.Id, deployment.Id, "invoices");
+        await sut.BindStorageToDeploymentAsync(tenant.Id, link.Id, deployment.Id, "invoices");
 
         (Tenant stranger, _) = CreateTenantWithEnvironment();
         await db.SaveChangesAsync();
@@ -950,5 +950,124 @@ public class StorageServiceTests : IDisposable
 
         (await sut.GetBindingsForDeploymentAsync(stranger.Id, deployment.Id))
             .Should().BeEmpty("StorageBinding has no TenantId, so this is the navigation path");
+    }
+
+    /// <summary>
+    /// A binding is what makes storage credentials appear as a Secret in a namespace, and the two
+    /// bind calls took nothing but ids. Both directions are a breach and they are different acts:
+    /// our link with their deployment writes our credentials into their namespace, and their link
+    /// with our deployment attaches a backing store we do not own to a workload we do. Nothing may
+    /// be written in either case — the row <em>is</em> the grant, so a refused call that still
+    /// leaves the row behind has granted it.
+    /// </summary>
+    [Fact]
+    public async Task A_binding_cannot_cross_a_tenant_in_either_direction()
+    {
+        (Tenant tenant, Data.Environment env) = CreateTenantWithEnvironment();
+        (_, AppDeployment deployment, StorageLink link) = CreateDeploymentWithStorageLink(tenant, env);
+
+        (Tenant stranger, Data.Environment strangerEnv) = CreateTenantWithEnvironment();
+        (_, AppDeployment theirDeployment, StorageLink theirLink) =
+            CreateDeploymentWithStorageLink(stranger, strangerEnv);
+        await db.SaveChangesAsync();
+
+        // Our link, their deployment.
+        Func<Task> intoTheirNamespace = () => sut.BindStorageToDeploymentAsync(
+            tenant.Id, link.Id, theirDeployment.Id, "stolen");
+        // Their link, our deployment.
+        Func<Task> theirStorage = () => sut.BindStorageToDeploymentAsync(
+            tenant.Id, theirLink.Id, deployment.Id, "theirs");
+        // Their link, bound to a component — the other entry point.
+        Func<Task> theirStorageToComponent = () => sut.BindStorageToComponentAsync(
+            tenant.Id, theirLink.Id, Guid.NewGuid(), "theirs");
+
+        await intoTheirNamespace.Should().ThrowAsync<InvalidOperationException>();
+        await theirStorage.Should().ThrowAsync<InvalidOperationException>();
+        await theirStorageToComponent.Should().ThrowAsync<InvalidOperationException>();
+
+        db.Set<StorageBinding>().Should().BeEmpty("the row is the grant");
+
+        // The owner's own binding goes through, so the refusals are about the crossing.
+        StorageBinding ours = await sut.BindStorageToDeploymentAsync(
+            tenant.Id, link.Id, deployment.Id, "ours");
+        ours.AppDeploymentId.Should().Be(deployment.Id);
+    }
+
+    /// <summary>
+    /// Unbinding disables the K8s sync on the link's secrets, so a bare binding id let one tenant
+    /// cut the credential projection out from under another's running workload — a deletion
+    /// dressed as a configuration change.
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_unbind_another_tenants_storage()
+    {
+        (Tenant tenant, Data.Environment env) = CreateTenantWithEnvironment();
+        (_, AppDeployment deployment, StorageLink link) = CreateDeploymentWithStorageLink(tenant, env);
+        (Tenant stranger, _) = CreateTenantWithEnvironment();
+        await db.SaveChangesAsync();
+
+        await vaultService.InitializeVaultAsync(tenant.Id);
+        await vaultService.SetStorageLinkSecretAsync(tenant.Id, link.Id, "ACCESS_KEY", "AKIAEXAMPLE");
+
+        StorageBinding binding = await sut.BindStorageToDeploymentAsync(
+            tenant.Id, link.Id, deployment.Id, "invoice-storage");
+
+        (await sut.UnbindStorageAsync(stranger.Id, binding.Id)).Should().BeFalse();
+
+        db.Set<StorageBinding>().Any(b => b.Id == binding.Id).Should().BeTrue(
+            "a false return with the row gone would be the same answer for the wrong reason");
+
+        // ⚠️ The sync flags are what the unbind actually turns off, so a refusal that returned
+        // false while still disabling them would pass the assertion above.
+        List<VaultSecret> secrets = await vaultService.GetStorageLinkSecretsAsync(tenant.Id, link.Id);
+        secrets.Should().AllSatisfy(s => s.SyncToKubernetes.Should().BeTrue(
+            "the workload's credentials are still being projected"));
+
+        // And the owner can still unbind, so "false" above was a refusal.
+        (await sut.UnbindStorageAsync(tenant.Id, binding.Id)).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The component-side reader. <c>StorageBinding</c> has no <c>TenantId</c> and the subject is
+    /// the component, so the scope travels <c>Component → Cluster</c>.
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_list_the_bindings_on_another_tenants_component()
+    {
+        (Tenant tenant, Data.Environment env) = CreateTenantWithEnvironment();
+
+        KubernetesCluster cluster = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenant.Id, EnvironmentId = env.Id,
+            Name = "infra-cluster", ApiServerUrl = "https://k8s.infra.example.com",
+        };
+        db.KubernetesClusters.Add(cluster);
+
+        ClusterComponent component = new()
+        {
+            Id = Guid.NewGuid(), ClusterId = cluster.Id,
+            Name = "loki", ComponentType = "helm", Namespace = "monitoring",
+        };
+        db.ClusterComponents.Add(component);
+
+        StorageLink link = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenant.Id, EnvironmentId = env.Id,
+            Provider = StorageProvider.CleuraS3, Name = "Loki Chunks",
+            Endpoint = "https://s3-kna1.citycloud.com", BucketName = "loki-chunks", Region = "Kna1",
+        };
+        db.StorageLinks.Add(link);
+        await db.SaveChangesAsync();
+
+        await sut.BindStorageToComponentAsync(tenant.Id, link.Id, component.Id, "loki-s3");
+
+        (Tenant stranger, _) = CreateTenantWithEnvironment();
+        await db.SaveChangesAsync();
+
+        (await sut.GetBindingsForComponentAsync(tenant.Id, component.Id))
+            .Should().ContainSingle("the owner still sees its own binding");
+
+        (await sut.GetBindingsForComponentAsync(stranger.Id, component.Id))
+            .Should().BeEmpty("the row exists, so this is a refusal");
     }
 }
