@@ -223,6 +223,8 @@
 </div>
 
 @code {
+    [Parameter] public required Guid TenantId { get; set; }
+
     [Parameter] public required Data.App App { get; set; }
     [Parameter] public required Guid EnvironmentId { get; set; }
 
@@ -258,7 +260,7 @@
             userId = state.User.FindFirst(System.Security.Claims.ClaimTypes.NameIdentifier)?.Value ?? "";
             userDisplay = state.User.Identity?.Name ?? userId;
 
-            targets = await Jit.ResolveTargetsAsync(App.Id, EnvironmentId);
+            targets = await Jit.ResolveTargetsAsync(TenantId, App.Id, EnvironmentId);
             if (targets.Count > 0 && selectedClusterId == Guid.Empty)
                 selectedClusterId = targets[0].ClusterId;
 
@@ -267,9 +269,9 @@
             exclusivity = targets.Count == 0
                 ? null
                 : await Jit.CheckNamespaceExclusivityAsync(
-                    App.Id, targets[0].ClusterId, targets[0].Namespace);
+                    TenantId, App.Id, targets[0].ClusterId, targets[0].Namespace);
 
-            grants = (await Jit.ListForUserAsync(userId))
+            grants = (await Jit.ListForUserAsync(TenantId, userId))
                 .Where(g => g.AppId == App.Id && g.EnvironmentId == EnvironmentId)
                 .ToList();
         }
@@ -286,7 +288,7 @@
         try
         {
             await Jit.RequestAsync(
-                App.Id, EnvironmentId, userId, reason, userDisplay,
+                TenantId, App.Id, EnvironmentId, userId, reason, userDisplay,
                 clusterId: targets.Count > 1 ? selectedClusterId : null,
                 ticketRef: ticketRef,
                 requestedLevel: requestedLevel,
@@ -314,7 +316,7 @@
         ending = grant.Id;
         try
         {
-            await Jit.EndOwnGrantAsync(grant.Id, userId, userDisplay);
+            await Jit.EndOwnGrantAsync(TenantId, grant.Id, userId, userDisplay);
             Toasts.Success(wasPending ? "Request withdrawn." : "Access handed back.");
             await LoadAsync();
         }
