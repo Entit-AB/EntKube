@@ -531,6 +531,23 @@ public class ModuleContractTests
     /// an unmapped service is invisible to every per-module count in this file. That is a
     /// different hole from this one and wants its own check on the map's completeness.</para>
     /// </summary>
+    /// <summary>
+    /// ⚠️ <b>A ratchet constant has no correct merge, and this one was merged anyway — for the
+    /// third time.</b> #246 (Mail 2 → 1) and #247 (the corrected count, Fleet 2 → 3) touched this
+    /// dictionary forty minutes apart. Both sides' <em>prose</em> survived: the correction
+    /// paragraph below still said "Fleet 2 → 3" while the constant above it said 2. The merge had
+    /// picked a side, main went red on <c>No_module_adds_another_service_on_the_all_seeing_context</c>
+    /// with <c>Fleet: 3 (was 2)</c>, and the file documented the number it was not holding.
+    ///
+    /// <para>Re-measured rather than resolved: Fleet is <c>KubernetesOperationsService</c> and
+    /// <c>VeleroService</c> by constructor plus <c>BootstrapRunnerService</c> by scope, so
+    /// <b>3</b>. Neither side's value was right to keep — #246's 2 predated the metric fix and
+    /// #247's 3 predated #246's conversions. Taking either on faith would have been luck.</para>
+    ///
+    /// <para>The rule, now stated where the constants are: when two branches both touch these
+    /// numbers, <b>run the measurement on the merge result</b>. A number here is a fact about the
+    /// tree, and a merge produces a tree neither author ever measured.</para>
+    /// </summary>
     private static readonly Dictionary<Module, int> Baseline = new()
     {
         [Module.DataServices] = 2,
@@ -540,7 +557,7 @@ public class ModuleContractTests
         [Module.Catalog] = 6,
         [Module.Delivery] = 3,
         [Module.Identity] = 4,
-        [Module.Fleet] = 2,
+        [Module.Fleet] = 3,
         [Module.Mail] = 1,
         [Module.Cost] = 0,
         [Module.Advisor] = 1,
