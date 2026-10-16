@@ -3075,7 +3075,7 @@
     {
         dbBindingsByDeployment.Clear();
         foreach (AppDeployment dep in deployments ?? [])
-            dbBindingsByDeployment[dep.Id] = await CnpgService.GetDatabaseBindingsAsync(dep.Id);
+            dbBindingsByDeployment[dep.Id] = await CnpgService.GetDatabaseBindingsAsync(TenantId, dep.Id);
         dbBindingsLoaded = true;
         if (availableCnpgDatabases is null)
         {
@@ -3151,13 +3151,13 @@
             var mongoMatch = availableMongoDatabases?.FirstOrDefault(x => x.Database.Id == databaseId);
             if (mongoMatch is { Database: not null })
             {
-                await MongoService.AddMongoDatabaseBindingAsync(deploymentId, databaseId, secretName);
+                await MongoService.AddMongoDatabaseBindingAsync(TenantId, deploymentId, databaseId, secretName);
                 try { await MongoService.SyncDatabaseCredentialsToK8sAsync(TenantId, mongoMatch.Value.Cluster.Id, databaseId); }
                 catch (Exception syncEx) { bindingWarning = $"Database attached, but credential sync failed: {syncEx.Message}"; }
             }
             else
             {
-                await CnpgService.AddCnpgDatabaseBindingAsync(deploymentId, databaseId, secretName);
+                await CnpgService.AddCnpgDatabaseBindingAsync(TenantId, deploymentId, databaseId, secretName);
                 var cnpgMatch = availableCnpgDatabases?.FirstOrDefault(x => x.Database.Id == databaseId);
                 if (cnpgMatch is { Database: not null })
                 {
@@ -3182,7 +3182,7 @@
         confirmRemoveBindingId = null; bindingError = null;
         try
         {
-            await CnpgService.RemoveDatabaseBindingAsync(id);
+            await CnpgService.RemoveDatabaseBindingAsync(TenantId, id);
             await LoadAppDatabaseBindings();
         }
         catch (Exception ex) { bindingError = $"Failed to detach: {ex.Message}"; }

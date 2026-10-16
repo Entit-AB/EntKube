@@ -41,7 +41,8 @@ public class CnpgServiceTests : IDisposable
         // existing k8sFactory assertions keep working and additionally prove the delegation.
         sut = new CnpgService(dbFactory, vaultService,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory.Object),
-            new EntKube.Web.Modules.Api.CatalogApi(dbFactory));
+            new EntKube.Web.Modules.Api.CatalogApi(dbFactory),
+            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory));
     }
 
     public void Dispose()
@@ -52,9 +53,15 @@ public class CnpgServiceTests : IDisposable
 
     // ──────── Helpers ────────
 
-    private async Task<(Tenant tenant, KubernetesCluster cluster, StorageLink storageLink)> SeedTenantWithClusterAsync()
+    /// <param name="slug">
+    /// ⚠️ Distinct per call. <c>Tenants.Slug</c> is UNIQUE, so seeding a second tenant with the
+    /// default collides — which is how the first draft of the pairing tests below failed, on the
+    /// fixture rather than on the thing under test.
+    /// </param>
+    private async Task<(Tenant tenant, KubernetesCluster cluster, StorageLink storageLink)> SeedTenantWithClusterAsync(
+        string slug = "testco")
     {
-        Tenant tenant = new() { Id = Guid.NewGuid(), Name = "TestCo", Slug = "testco" };
+        Tenant tenant = new() { Id = Guid.NewGuid(), Name = $"TestCo-{slug}", Slug = slug };
         db.Tenants.Add(tenant);
 
         Data.Environment env = new()
@@ -1101,5 +1108,128 @@ public class CnpgServiceTests : IDisposable
         Func<Task> act = () => sut.ReapplyClusterSpecAsync(tenant.Id, Guid.NewGuid());
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*not found*");
+    }
+    // ──────── Tenancy of the binding pairing ────────
+
+    /// <summary>
+    /// A database binding joins a deployment to a database, and it is what syncs the database
+    /// credentials into that deployment's namespace. <c>AddCnpgDatabaseBindingAsync</c> wrote the
+    /// row from two caller-supplied ids with <b>no validation at all</b> — not a tenant, not even
+    /// that either id existed.
+    ///
+    /// <para>⚠️ Both directions are tested separately, because a pairing scoped on one end still
+    /// crosses from the other: our deployment to their database, and their deployment to our
+    /// database. A one-half fix passes a test that only tries one side.</para>
+    ///
+    /// <para>The assertion is on the stored rows: a method that refuses and still writes is the
+    /// failure that matters.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_database_binding_cannot_be_written_across_a_tenant_boundary()
+    {
+        (Tenant ours, KubernetesCluster ourCluster, _) = await SeedTenantWithClusterAsync();
+        (Tenant theirs, KubernetesCluster theirCluster, _) = await SeedTenantWithClusterAsync("stranger");
+
+        Guid ourDatabase = SeedDatabase(ourCluster, ours.Id, "ours-db");
+        Guid theirDatabase = SeedDatabase(theirCluster, theirs.Id, "theirs-db");
+        Guid ourDeployment = SeedDeployment(ours.Id, ourCluster);
+        Guid theirDeployment = SeedDeployment(theirs.Id, theirCluster);
+        await db.SaveChangesAsync();
+
+        // Our deployment, their database.
+        Func<Task> theirDb = () => sut.AddCnpgDatabaseBindingAsync(
+            ours.Id, ourDeployment, theirDatabase, "creds");
+        await theirDb.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*does not belong to this tenant*");
+
+        // Their deployment, our database — the same pairing from the other side.
+        Func<Task> theirDeploy = () => sut.AddCnpgDatabaseBindingAsync(
+            ours.Id, theirDeployment, ourDatabase, "creds");
+        await theirDeploy.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*does not belong to this tenant*");
+
+        using ApplicationDbContext check = testDb.CreateContext();
+        check.Set<DatabaseBinding>().Should().BeEmpty("neither pairing may be written");
+
+        DatabaseBinding ok = await sut.AddCnpgDatabaseBindingAsync(
+            ours.Id, ourDeployment, ourDatabase, "creds");
+        ok.Should().NotBeNull("the legitimate pairing still works");
+    }
+
+    [Fact]
+    public async Task A_stranger_cannot_list_or_remove_another_tenants_bindings()
+    {
+        (Tenant ours, KubernetesCluster ourCluster, _) = await SeedTenantWithClusterAsync();
+        (Tenant theirs, _, _) = await SeedTenantWithClusterAsync("stranger");
+
+        Guid database = SeedDatabase(ourCluster, ours.Id, "ours-db");
+        Guid deployment = SeedDeployment(ours.Id, ourCluster);
+        await db.SaveChangesAsync();
+
+        DatabaseBinding binding = await sut.AddCnpgDatabaseBindingAsync(
+            ours.Id, deployment, database, "creds");
+
+        (await sut.GetDatabaseBindingsAsync(ours.Id, deployment)).Should().ContainSingle();
+        (await sut.GetDatabaseBindingsAsync(theirs.Id, deployment)).Should().BeEmpty(
+            "a binding row names the Kubernetes Secret the credentials land in");
+
+        Func<Task> remove = () => sut.RemoveDatabaseBindingAsync(theirs.Id, binding.Id);
+        await remove.Should().ThrowAsync<InvalidOperationException>();
+
+        using ApplicationDbContext check = testDb.CreateContext();
+        check.Set<DatabaseBinding>().Should().ContainSingle(b => b.Id == binding.Id);
+
+        await sut.RemoveDatabaseBindingAsync(ours.Id, binding.Id);
+        using ApplicationDbContext after = testDb.CreateContext();
+        after.Set<DatabaseBinding>().Should().BeEmpty("the owner can remove it");
+    }
+
+    /// <summary>A CNPG database on a cluster, returned by id.</summary>
+    private Guid SeedDatabase(KubernetesCluster cluster, Guid tenantId, string name)
+    {
+        CnpgCluster cnpg = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            KubernetesClusterId = cluster.Id,
+            Name = $"{name}-cluster",
+            Namespace = "databases",
+            PostgresVersion = "16",
+            StorageSize = "10Gi",
+            Status = CnpgClusterStatus.Running,
+        };
+        db.CnpgClusters.Add(cnpg);
+
+        CnpgDatabase database = new()
+        {
+            Id = Guid.NewGuid(),
+            CnpgClusterId = cnpg.Id,
+            Name = name,
+            Owner = "app",
+        };
+        db.Set<CnpgDatabase>().Add(database);
+        return database.Id;
+    }
+
+    /// <summary>An app deployment for a tenant, returned by id.</summary>
+    private Guid SeedDeployment(Guid tenantId, KubernetesCluster cluster)
+    {
+        Guid customerId = Guid.NewGuid();
+        Guid appId = Guid.NewGuid();
+
+        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = $"C{customerId:N}" });
+        db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "App" });
+
+        AppDeployment deployment = new()
+        {
+            Id = Guid.NewGuid(),
+            AppId = appId,
+            ClusterId = cluster.Id,
+            EnvironmentId = cluster.EnvironmentId,
+            Name = "prod",
+            Namespace = "app",
+        };
+        db.AppDeployments.Add(deployment);
+        return deployment.Id;
     }
 }

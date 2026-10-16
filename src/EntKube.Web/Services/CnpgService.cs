@@ -20,7 +20,8 @@ public class CnpgService(
     IDbContextFactory<DataServicesDbContext> dbFactory,
     VaultService vaultService,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
-    EntKube.Contracts.Catalog.ICatalogApi catalog)
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
+    EntKube.Contracts.Delivery.IDeliveryApi delivery)
 {
     /// <summary>
     /// A client for one of the tenant's clusters, or a refusal that says why.
@@ -1587,7 +1588,7 @@ public class CnpgService(
     /// CNPG and MongoDB database navigation properties populated.
     /// </summary>
     public async Task<List<DatabaseBinding>> GetDatabaseBindingsAsync(
-        Guid appDeploymentId, CancellationToken ct = default)
+        Guid tenantId, Guid appDeploymentId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
@@ -1597,7 +1598,10 @@ public class CnpgService(
             .Include(b => b.MongoDatabase)
                 .ThenInclude(d => d!.MongoCluster)
             .Include(b => b.RegisteredPostgresDatabase)
-            .Where(b => b.AppDeploymentId == appDeploymentId)
+            // DatabaseBinding carries no TenantId of its own, so the scope travels through the
+            // deployment it belongs to.
+            .Where(b => b.AppDeploymentId == appDeploymentId
+                     && b.AppDeployment.App.Customer.TenantId == tenantId)
             .OrderBy(b => b.CreatedAt)
             .ToListAsync(ct);
     }
@@ -1606,11 +1610,40 @@ public class CnpgService(
     /// Creates a binding between a CNPG database and an app deployment. Does not
     /// sync immediately — call SyncDatabaseCredentialsToK8sAsync to push credentials.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose deployment and whose database — <b>both</b> are checked. A binding is a pairing, so
+    /// scoping one end still lets the other cross: unscoped this wrote a row joining any
+    /// deployment to any database, and the binding is what syncs the database credentials into
+    /// the application's namespace.
+    ///
+    /// <para>⚠️ It wrote with <em>no</em> validation at all — not even that either id existed —
+    /// so there was no lookup here to be missing a predicate. The sibling services
+    /// (Redis, RabbitMQ, Elasticsearch, Kafka) already take a <c>tenantId</c> and stamp it on the
+    /// row; <c>DatabaseBinding</c> and <c>StorageBinding</c> have no tenant column, which is
+    /// likely why nobody added the parameter to these. The schema shape predicted the gap.</para>
+    /// </param>
     public async Task<DatabaseBinding> AddCnpgDatabaseBindingAsync(
-        Guid appDeploymentId, Guid cnpgDatabaseId, string kubernetesSecretName,
+        Guid tenantId, Guid appDeploymentId, Guid cnpgDatabaseId, string kubernetesSecretName,
         CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        bool databaseIsTenants = await db.CnpgDatabases
+            .AnyAsync(d => d.Id == cnpgDatabaseId && d.CnpgCluster.TenantId == tenantId, ct);
+
+        if (!databaseIsTenants)
+        {
+            throw new InvalidOperationException(
+                "Database not found, or it does not belong to this tenant.");
+        }
+
+        // The deployment is Delivery's, so it is asked of Delivery — which is also how the
+        // sibling services reach deployments since the module contexts landed.
+        if (await delivery.GetDeploymentAsync(tenantId, appDeploymentId, ct) is null)
+        {
+            throw new InvalidOperationException(
+                "Deployment not found, or it does not belong to this tenant.");
+        }
 
         DatabaseBinding binding = new()
         {
@@ -1629,13 +1662,16 @@ public class CnpgService(
     /// Removes a database binding. Does not delete the Kubernetes Secret from the
     /// app's namespace — that must be cleaned up manually if desired.
     /// </summary>
-    public async Task RemoveDatabaseBindingAsync(Guid bindingId, CancellationToken ct = default)
+    public async Task RemoveDatabaseBindingAsync(
+        Guid tenantId, Guid bindingId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         DatabaseBinding binding = await db.DatabaseBindings
-            .FirstOrDefaultAsync(b => b.Id == bindingId, ct)
-            ?? throw new InvalidOperationException("Binding not found.");
+            .FirstOrDefaultAsync(
+                b => b.Id == bindingId && b.AppDeployment.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Binding not found, or it does not belong to this tenant.");
 
         db.DatabaseBindings.Remove(binding);
         await db.SaveChangesAsync(ct);
