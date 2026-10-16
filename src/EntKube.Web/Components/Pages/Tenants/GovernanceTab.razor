@@ -984,7 +984,7 @@ else
         copying = true; copyMessage = null;
         try
         {
-            await GovernanceService.CopyFromEnvironmentAsync(AppId, copyFromEnvId, EnvironmentId);
+            await GovernanceService.CopyFromEnvironmentAsync(TenantId, AppId, copyFromEnvId, EnvironmentId);
             await LoadAsync();
             copyOk = true;
             copyMessage = "Governance copied and loaded.";
@@ -1153,7 +1153,7 @@ else
 
     private async Task DeleteNetworkPolicy(Guid id)
     {
-        await GovernanceService.DeleteNetworkPolicyAsync(id);
+        await GovernanceService.DeleteNetworkPolicyAsync(TenantId, id);
         networkPolicies.RemoveAll(p => p.Id == id);
         confirmDeleteNpId = null;
     }
@@ -1200,7 +1200,7 @@ else
         try
         {
             AppRbacRule rule = await GovernanceService.AddRbacRuleAsync(
-                rbacPolicy.Id, apiGroups, resources, verbs);
+                TenantId, rbacPolicy.Id, apiGroups, resources, verbs);
             rbacPolicy.Rules.Add(rule);
             rbacMessage = null;
             return true;
@@ -1225,7 +1225,7 @@ else
 
     private async Task DeleteRbacRule(Guid id)
     {
-        await GovernanceService.DeleteRbacRuleAsync(id);
+        await GovernanceService.DeleteRbacRuleAsync(TenantId, id);
         rbacPolicy?.Rules.Remove(rbacPolicy.Rules.First(r => r.Id == id));
     }
 
@@ -1322,7 +1322,7 @@ else
         try
         {
             AppAllowedDatabase entry = await GovernanceService.AddAllowedDatabaseAsync(
-                AppId, EnvironmentId, opt.CnpgId, opt.MongoId, opt.RegPostgresId);
+                TenantId, AppId, EnvironmentId, opt.CnpgId, opt.MongoId, opt.RegPostgresId);
             allowedDatabases.Add(entry);
             showAddDb = false;
             newDbOptionId = Guid.Empty;
@@ -1333,7 +1333,7 @@ else
 
     private async Task DeleteAllowedDatabase(Guid id)
     {
-        await GovernanceService.DeleteAllowedDatabaseAsync(id);
+        await GovernanceService.DeleteAllowedDatabaseAsync(TenantId, id);
         allowedDatabases.RemoveAll(a => a.Id == id);
         confirmDeleteDbId = null;
     }
@@ -1384,7 +1384,7 @@ else
         addingCache = true;
         try
         {
-            AppAllowedCache entry = await GovernanceService.AddAllowedCacheAsync(AppId, EnvironmentId, newCacheId);
+            AppAllowedCache entry = await GovernanceService.AddAllowedCacheAsync(TenantId, AppId, EnvironmentId, newCacheId);
             allowedCaches.Add(entry);
             showAddCache = false;
             newCacheId = Guid.Empty;
@@ -1395,7 +1395,7 @@ else
 
     private async Task DeleteAllowedCache(Guid id)
     {
-        await GovernanceService.DeleteAllowedCacheAsync(id);
+        await GovernanceService.DeleteAllowedCacheAsync(TenantId, id);
         allowedCaches.RemoveAll(a => a.Id == id);
         confirmDeleteCacheId = null;
     }
@@ -1423,7 +1423,7 @@ else
         addingStorage = true;
         try
         {
-            AppAllowedStorage entry = await GovernanceService.AddAllowedStorageAsync(AppId, EnvironmentId, newStorageId);
+            AppAllowedStorage entry = await GovernanceService.AddAllowedStorageAsync(TenantId, AppId, EnvironmentId, newStorageId);
             allowedStorages.Add(entry);
             showAddStorage = false;
             newStorageId = Guid.Empty;
@@ -1434,7 +1434,7 @@ else
 
     private async Task DeleteAllowedStorage(Guid id)
     {
-        await GovernanceService.DeleteAllowedStorageAsync(id);
+        await GovernanceService.DeleteAllowedStorageAsync(TenantId, id);
         allowedStorages.RemoveAll(a => a.Id == id);
         confirmDeleteStorageId = null;
     }
