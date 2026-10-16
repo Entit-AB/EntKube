@@ -516,11 +516,11 @@ else
             {
                 case DbKind.Cnpg:
                     CnpgDatabase created = await CnpgService.CreateDatabaseAsync(TenantId, server.Id, newDbName);
-                    await Scope.GrantDatabaseAsync(App.Id, Environment.Id, cnpgDatabaseId: created.Id);
+                    await Scope.GrantDatabaseAsync(TenantId, App.Id, Environment.Id, cnpgDatabaseId: created.Id);
                     break;
                 case DbKind.Mongo:
                     MongoDatabase createdMongo = await MongoService.CreateDatabaseAsync(TenantId, server.Id, newDbName);
-                    await Scope.GrantDatabaseAsync(App.Id, Environment.Id, mongoDatabaseId: createdMongo.Id);
+                    await Scope.GrantDatabaseAsync(TenantId, App.Id, Environment.Id, mongoDatabaseId: createdMongo.Id);
                     break;
                 default:
                     createError = "This server does not support creating databases from the portal.";

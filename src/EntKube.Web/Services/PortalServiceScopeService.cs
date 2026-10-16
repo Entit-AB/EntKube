@@ -96,12 +96,54 @@ public class PortalServiceScopeService(IDbContextFactory<ApplicationDbContext> d
     /// environment, so it stays in scope before anything has been bound to it.
     /// Idempotent — a second call for the same database is a no-op.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose app, whose environment and whose database. An input, and the only method in this
+    /// service that lacked one — <see cref="GetDatabaseScopeAsync"/>,
+    /// <see cref="GetMessagingScopeAsync"/> and <see cref="GetCacheScopeAsync"/> have all taken a
+    /// tenant from the start.
+    ///
+    /// <para>⚠️ This writes an <c>AppAllowedDatabase</c> — the allow-list row that decides what a
+    /// customer may see and bind — and it validated <b>none</b> of its four ids. The checks below
+    /// mirror what <see cref="GetDatabaseScopeAsync"/> filters on, which is the right rule for a
+    /// grant: it may only allow what that method would be willing to show. Each database kind
+    /// reaches its tenant by its own path, exactly as the read does.</para>
+    /// </param>
     public async Task GrantDatabaseAsync(
-        Guid appId, Guid environmentId,
+        Guid tenantId, Guid appId, Guid environmentId,
         Guid? cnpgDatabaseId = null, Guid? mongoDatabaseId = null,
         Guid? registeredPostgresDatabaseId = null, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.Apps.AnyAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException(
+                "App not found, or it does not belong to this tenant.");
+        }
+
+        if (!await db.Environments.AnyAsync(e => e.Id == environmentId && e.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException(
+                "Environment not found, or it does not belong to this tenant.");
+        }
+
+        // Whichever kind was named, reached by the same path GetDatabaseScopeAsync filters on.
+        bool databaseIsTenants = cnpgDatabaseId is { } cnpg
+            ? await db.CnpgDatabases.AnyAsync(
+                d => d.Id == cnpg && d.CnpgCluster.TenantId == tenantId, ct)
+            : mongoDatabaseId is { } mongo
+                ? await db.MongoDatabases.AnyAsync(
+                    d => d.Id == mongo && d.MongoCluster.TenantId == tenantId, ct)
+                : registeredPostgresDatabaseId is { } registered
+                    && await db.RegisteredPostgresDatabases.AnyAsync(
+                        d => d.Id == registered
+                          && d.RegisteredPostgresInstance.TenantId == tenantId, ct);
+
+        if (!databaseIsTenants)
+        {
+            throw new InvalidOperationException(
+                "Database not found, or it does not belong to this tenant.");
+        }
 
         bool exists = await db.AppAllowedDatabases.AnyAsync(a =>
             a.AppId == appId && a.EnvironmentId == environmentId

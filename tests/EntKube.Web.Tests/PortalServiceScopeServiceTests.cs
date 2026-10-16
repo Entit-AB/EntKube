@@ -276,7 +276,7 @@ public class PortalServiceScopeServiceTests : IDisposable
         CnpgCluster cluster = AddCnpgCluster("shared-pg");
         CnpgDatabase granted = AddCnpgDatabase(cluster, "shop");
 
-        await sut.GrantDatabaseAsync(appId, environmentId, cnpgDatabaseId: granted.Id);
+        await sut.GrantDatabaseAsync(tenantId, appId, environmentId, cnpgDatabaseId: granted.Id);
         PortalDatabaseScope scope = await sut.GetDatabaseScopeAsync(tenantId, appId, environmentId);
 
         // Nothing is bound yet, but the grant is what lets a freshly created database
@@ -291,8 +291,8 @@ public class PortalServiceScopeServiceTests : IDisposable
     {
         CnpgDatabase granted = AddCnpgDatabase(AddCnpgCluster("shared-pg"), "shop");
 
-        await sut.GrantDatabaseAsync(appId, environmentId, cnpgDatabaseId: granted.Id);
-        await sut.GrantDatabaseAsync(appId, environmentId, cnpgDatabaseId: granted.Id);
+        await sut.GrantDatabaseAsync(tenantId, appId, environmentId, cnpgDatabaseId: granted.Id);
+        await sut.GrantDatabaseAsync(tenantId, appId, environmentId, cnpgDatabaseId: granted.Id);
 
         db.AppAllowedDatabases.Count(a => a.CnpgDatabaseId == granted.Id).Should().Be(1);
     }
@@ -409,5 +409,66 @@ public class PortalServiceScopeServiceTests : IDisposable
 
         scope.Clusters.Should().ContainSingle(c => c.Id == cluster.Id);
         scope.Bindings.Should().BeEmpty();
+    }
+    /// <summary>
+    /// <c>GrantDatabaseAsync</c> writes the <c>AppAllowedDatabase</c> row that decides what a
+    /// customer may see and bind — and it validated <b>none</b> of its four ids while the three
+    /// read methods beside it had taken a tenant from the start.
+    ///
+    /// <para>There are three ways to cross here, so all three are asserted: a foreign database,
+    /// a foreign app, and a foreign environment. A grant may only allow what
+    /// <see cref="PortalServiceScopeService.GetDatabaseScopeAsync"/> would be willing to show.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_grant_cannot_allow_another_tenants_database_app_or_environment()
+    {
+        CnpgCluster ours = AddCnpgCluster("ours-pg");
+        CnpgDatabase ourDb = AddCnpgDatabase(ours, "shop");
+
+        CnpgCluster theirs = AddCnpgCluster("theirs-pg", forTenantId: otherTenantId);
+        CnpgDatabase theirDb = AddCnpgDatabase(theirs, "their-shop");
+
+        // Their database, our app and environment.
+        Func<Task> foreignDb = () => sut.GrantDatabaseAsync(
+            tenantId, appId, environmentId, cnpgDatabaseId: theirDb.Id);
+        await foreignDb.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*Database*does not belong to this tenant*");
+
+        // ⚠️ otherAppId and otherEnvironmentId in this fixture belong to THIS tenant — they mean
+        // "another app/environment of ours", and granting across them is legitimate. The first
+        // draft of this test used them and the app case correctly did not throw. Genuinely
+        // foreign ones have to be seeded.
+        Guid theirCustomerId = Guid.NewGuid();
+        Guid theirAppId = Guid.NewGuid();
+        Guid theirEnvironmentId = Guid.NewGuid();
+        db.Customers.Add(new Customer
+        {
+            Id = theirCustomerId, TenantId = otherTenantId, Name = "Elsewhere",
+        });
+        db.Apps.Add(new App { Id = theirAppId, CustomerId = theirCustomerId, Name = "theirs" });
+        db.Environments.Add(new Data.Environment
+        {
+            Id = theirEnvironmentId, TenantId = otherTenantId, Name = "their-prod",
+        });
+        db.SaveChanges();
+
+        // Their app, our database.
+        Func<Task> foreignApp = () => sut.GrantDatabaseAsync(
+            tenantId, theirAppId, environmentId, cnpgDatabaseId: ourDb.Id);
+        await foreignApp.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*App*does not belong to this tenant*");
+
+        // Their environment, our app and database.
+        Func<Task> foreignEnv = () => sut.GrantDatabaseAsync(
+            tenantId, appId, theirEnvironmentId, cnpgDatabaseId: ourDb.Id);
+        await foreignEnv.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*Environment*does not belong to this tenant*");
+
+        db.ChangeTracker.Clear();
+        db.AppAllowedDatabases.Should().BeEmpty("no grant may be written by any of the three");
+
+        await sut.GrantDatabaseAsync(tenantId, appId, environmentId, cnpgDatabaseId: ourDb.Id);
+        db.ChangeTracker.Clear();
+        db.AppAllowedDatabases.Should().ContainSingle("the legitimate grant still works");
     }
 }
