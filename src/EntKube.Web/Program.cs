@@ -228,8 +228,8 @@ public class Program
         // cluster is materialized, so consumers can keep reading cluster.Kubeconfig even
         // though it is no longer a database column. Registered as singletons and attached
         // to every DbContext below (both the derived contexts and the factory-created ones).
-        builder.Services.AddSingleton<KubeconfigResolver>();
         builder.Services.AddSingleton<KubeconfigMaterializationInterceptor>();
+        builder.Services.AddSingleton<KubeconfigResolver>();
 
         // Register both AddDbContext (for Identity/migrations — needs derived type mapping)
         // and a DbContext factory for Blazor Server concurrency safety.

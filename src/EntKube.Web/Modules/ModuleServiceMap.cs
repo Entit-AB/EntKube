@@ -200,6 +200,7 @@ public static partial class ModuleMap
         [typeof(SegmentLogService)] = Module.Telemetry,
         [typeof(SegmentRumService)] = Module.Telemetry,
         [typeof(SegmentTelemetryStore)] = Module.Telemetry,
+        [typeof(EntKube.Web.Services.Telemetry.TelemetrySegmentBlobStore)] = Module.Telemetry,
         [typeof(SegmentTraceService)] = Module.Telemetry,
         [typeof(StormSuppressionService)] = Module.Telemetry,
         [typeof(TelemetryAlertEvaluator)] = Module.Telemetry,

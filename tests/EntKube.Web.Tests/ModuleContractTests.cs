@@ -96,6 +96,13 @@ public class ModuleContractTests
     /// </summary>
     private static IReadOnlySet<string> ScopeResolvers(IReadOnlySet<string> mapped)
     {
+        // Two categories legitimately reach the context while belonging to no module, and both
+        // are declared rather than inferred. PlatformServices is the product's own list of
+        // cross-cutting wiring — presence, toasts, the backup bundle, kubeconfig materialisation
+        // — and Program.cs is the composition root, which wires everything and owns nothing.
+        // Anything else that reaches the context and has no module is a gap, not an exemption.
+        HashSet<string> platform = [.. ModuleMap.PlatformServices.Select(t => t.Name)];
+
         string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, Src));
 
         Directory.Exists(root).Should().BeTrue(
@@ -129,13 +136,31 @@ public class ModuleContractTests
                 continue;
             }
 
-            List<string> declared =
+            List<string> allDeclared =
             [
                 .. Regex.Matches(code, @"\b(?:class|record)\s+(\w+)")
                     .Select(m => m.Groups[1].Value)
-                    .Where(mapped.Contains)
                     .Distinct()
             ];
+
+            List<string> declared = [.. allDeclared.Where(mapped.Contains)];
+
+            // ⚠️ A file that reaches the all-seeing context and owns NO mapped service is
+            // invisible to every per-module count in this file — there is no module to count it
+            // against, so it is not "zero", it is unmeasured. This used to be a silent skip, and
+            // it hid two: KubeconfigResolver, registered in Program.cs where
+            // ModuleCompositionTests cannot see it, and TelemetrySegmentBlobStore, which takes a
+            // tenant id in its constructor and so is never DI-registered at all. Neither could be
+            // caught by a registration check; both are caught by this one.
+            if (Path.GetFileName(path) != "Program.cs" && !allDeclared.Any(platform.Contains))
+            {
+                declared.Should().NotBeEmpty(
+                    $"{Path.GetFileName(path)} resolves the all-seeing context out of a scope and "
+                    + $"declares no service in ModuleServiceMap (it declares: "
+                    + $"{string.Join(", ", allDeclared)}). Give the type an owning module, or add "
+                    + "it to ModuleMap.PlatformServices if it really is cross-cutting wiring — an "
+                    + "unmapped service is counted by nothing, which reads as compliance");
+            }
 
             declared.Count.Should().BeLessThanOrEqualTo(1,
                 $"{Path.GetFileName(path)} resolves the all-seeing context out of a scope and "
@@ -619,11 +644,38 @@ public class ModuleContractTests
     /// wrongly included receives another tenant's trust anchors, and one wrongly left out silently
     /// never gets the CA it needs. Moving a rule is the moment to cover it, not to assume it.</para>
     ///
-    /// <para>⚠️ Two files resolve the context from a scope and are in no module at all:
-    /// <c>KubeconfigResolver</c> and <c>TelemetrySegmentBlobStore</c>. They are absent from
-    /// <c>ModuleServiceMap</c>, so this ratchet cannot see them however many spellings it learns —
-    /// an unmapped service is invisible to every per-module count in this file. That is a
-    /// different hole from this one and wants its own check on the map's completeness.</para>
+    /// <para><b>The two unmapped files are mapped, and the hole they came through is closed.</b>
+    /// <c>KubeconfigResolver</c> and <c>TelemetrySegmentBlobStore</c> reached the all-seeing
+    /// context from a scope while belonging to no module — so no per-module count could see
+    /// them, and that reads as compliance rather than as a gap. <see cref="ScopeResolvers"/> now
+    /// <em>fails</em> on an unmapped declarer instead of skipping it.</para>
+    ///
+    /// <para>⚠️ Neither was reachable by a registration check, and for two different reasons.
+    /// <c>KubeconfigResolver</c> was registered in <c>Program.cs</c>, which
+    /// <c>ModuleCompositionTests</c> does not read — that test walks the <c>{Module}Services</c>
+    /// classes, so the one registration no module owned was outside the ownership check written
+    /// to enforce exactly that. <c>TelemetrySegmentBlobStore</c> takes a tenant id in its
+    /// constructor, so it is <em>never</em> DI-registered: it is built by hand in
+    /// <c>SegmentManagerRegistry</c>, and no test of the container could ever have found it.
+    /// A check on registrations and a check on the source are not the same check.</para>
+    ///
+    /// <para><c>KubeconfigResolver</c> came off the context in the same change — it reads
+    /// <c>VaultSecret</c> and <c>SecretVault</c>, both Secrets' own, so it takes
+    /// <c>SecretsDbContext</c> and Secrets stays at 0. ⚠️ It reached them through
+    /// <c>db.Set&lt;VaultSecret&gt;()</c> and <c>db.Set&lt;SecretVault&gt;()</c>, and
+    /// <b>nothing counted those</b>: the <c>Set&lt;T&gt;()</c> rule in
+    /// <c>CatalogContractAdoptionTests</c> is written for <c>ClusterComponent</c>, so the hole is
+    /// measured for one entity and open for the other 164. They are real DbSet properties on the
+    /// module context now, but the measurement gap is worth stating.</para>
+    ///
+    /// <para><c>TelemetrySegmentBlobStore</c> stays, and <b>Telemetry goes 3 → 4</b> because it is
+    /// now counted rather than because anything regressed. It reads <c>StorageLinks</c> —
+    /// DataServices' — which <c>IDataServicesApi.GetStorageLinkAsync</c> already serves, but
+    /// <c>StorageLinkClientFactory.CreateClientAsync</c> takes the <em>entity</em>, and that
+    /// factory is one of the two credential-holding services waiting on the custody work. ⚠️ Its
+    /// tenant check is also the wrong way round: it loads the link by id and then compares
+    /// <c>link.TenantId</c>, so it reads another tenant's row before refusing it. A predicate
+    /// would not have to.</para>
     /// </summary>
     /// <summary>
     /// ⚠️ <b>A ratchet constant has no correct merge, and this one was merged anyway — for the
@@ -645,7 +697,7 @@ public class ModuleContractTests
     private static readonly Dictionary<Module, int> Baseline = new()
     {
         [Module.DataServices] = 2,
-        [Module.Telemetry] = 3,
+        [Module.Telemetry] = 4,
         [Module.Connectivity] = 3,
         [Module.Support] = 6,
         [Module.Catalog] = 5,
