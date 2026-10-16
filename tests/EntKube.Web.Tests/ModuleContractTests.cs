@@ -547,6 +547,13 @@ public class ModuleContractTests
     /// but not sufficient — which is the honest way to describe a structural fix: it removed one
     /// reason to hold the context, not every reason.</para>
     ///
+    /// <para><b>Fleet 3 → 2.</b> <c>VeleroService</c>'s last two uses of the shared context were
+    /// a Catalog read it had been exempted from (see <c>CatalogContractAdoptionTests</c> — the
+    /// exemption was wrong about the schema) and a projection of <c>KubernetesClusters</c>, which
+    /// is <em>Fleet's own table</em>. Converting the first left nothing foreign, so the second
+    /// was a plain swap. The service held the all-seeing context for one query it was told it
+    /// could not give up.</para>
+    ///
     /// <para>⚠️ Two files resolve the context from a scope and are in no module at all:
     /// <c>KubeconfigResolver</c> and <c>TelemetrySegmentBlobStore</c>. They are absent from
     /// <c>ModuleServiceMap</c>, so this ratchet cannot see them however many spellings it learns —
@@ -579,7 +586,7 @@ public class ModuleContractTests
         [Module.Catalog] = 6,
         [Module.Delivery] = 3,
         [Module.Identity] = 4,
-        [Module.Fleet] = 3,
+        [Module.Fleet] = 2,
         [Module.Mail] = 1,
         [Module.Cost] = 0,
         [Module.Advisor] = 1,
