@@ -354,7 +354,7 @@ public class VaultService(
         List<TenantCertificateInfo> result = [];
         foreach (VaultSecret s in secrets)
         {
-            CertificateBundle? bundle = await GetCertificateBundleByIdAsync(s.Id, ct);
+            CertificateBundle? bundle = await GetCertificateBundleByIdAsync(tenantId, s.Id, ct);
             CertificateInfo? info = bundle is null ? null : CertificateParser.TryParse(bundle.Certificate);
             result.Add(new TenantCertificateInfo(
                 s.Id, s.Name,
@@ -482,20 +482,35 @@ public class VaultService(
     /// Decrypts a certificate secret and returns its parsed bundle, or null when the
     /// secret does not exist or is not a certificate.
     /// </summary>
-    public async Task<CertificateBundle?> GetCertificateBundleByIdAsync(Guid secretId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose secret. An input, and it scopes BOTH the row and the key.
+    ///
+    /// <para>⚠️ This read used to take a secret id alone and then unseal the vault with
+    /// <c>secret.Vault.TenantId</c> — the tenant of the row the caller had just named — so the
+    /// derived tenant handed over the correct data key and naming any secret id in the
+    /// installation returned its plaintext. <b>The predicate is the fix</b>; unsealing with the
+    /// caller's tenant is a clarity change, because once the row is scoped the two expressions
+    /// are the same value (verified: putting the derived key back alone changes no behaviour).
+    /// Nothing in the product reaches this with an attacker-chosen id today — every caller passes
+    /// an id from a list the server rendered for one tenant — so this is hardening rather than a
+    /// breach. The contract was the problem: "name a secret and I will decrypt it" is what a REST
+    /// route, an MCP tool or an in-cluster agent would have inherited.</para>
+    /// </param>
+    public async Task<CertificateBundle?> GetCertificateBundleByIdAsync(
+        Guid tenantId, Guid secretId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
-        VaultSecret? secret = await db.Set<VaultSecret>()
+        VaultSecret? secret = await db.VaultSecrets
             .Include(s => s.Vault)
-            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+            .FirstOrDefaultAsync(s => s.Id == secretId && s.Vault.TenantId == tenantId, ct);
 
         if (secret is null || secret.SecretType != VaultSecretType.Certificate)
         {
             return null;
         }
 
-        byte[] dataKey = await UnsealVaultAsync(secret.Vault.TenantId, ct);
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
         string json = encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
         return DeserializeBundle(json);
     }
@@ -505,9 +520,11 @@ public class VaultService(
     /// certificate (subject, validity, etc.), or null when it is not a parseable
     /// certificate secret. Used to show expiry status in lists.
     /// </summary>
-    public async Task<CertificateInfo?> GetCertificateInfoByIdAsync(Guid secretId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose secret — passed straight through to the bundle read.</param>
+    public async Task<CertificateInfo?> GetCertificateInfoByIdAsync(
+        Guid tenantId, Guid secretId, CancellationToken ct = default)
     {
-        CertificateBundle? bundle = await GetCertificateBundleByIdAsync(secretId, ct);
+        CertificateBundle? bundle = await GetCertificateBundleByIdAsync(tenantId, secretId, ct);
         return bundle is null ? null : CertificateParser.TryParse(bundle.Certificate);
     }
 
@@ -587,20 +604,35 @@ public class VaultService(
     /// Decrypts an OAuth client secret and returns its full bundle (including the
     /// client secret), or null when the secret does not exist or is not an OAuth client.
     /// </summary>
-    public async Task<OAuthClientBundle?> GetOAuthClientBundleByIdAsync(Guid secretId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose secret. An input, and it scopes BOTH the row and the key.
+    ///
+    /// <para>⚠️ This read used to take a secret id alone and then unseal the vault with
+    /// <c>secret.Vault.TenantId</c> — the tenant of the row the caller had just named — so the
+    /// derived tenant handed over the correct data key and naming any secret id in the
+    /// installation returned its plaintext. <b>The predicate is the fix</b>; unsealing with the
+    /// caller's tenant is a clarity change, because once the row is scoped the two expressions
+    /// are the same value (verified: putting the derived key back alone changes no behaviour).
+    /// Nothing in the product reaches this with an attacker-chosen id today — every caller passes
+    /// an id from a list the server rendered for one tenant — so this is hardening rather than a
+    /// breach. The contract was the problem: "name a secret and I will decrypt it" is what a REST
+    /// route, an MCP tool or an in-cluster agent would have inherited.</para>
+    /// </param>
+    public async Task<OAuthClientBundle?> GetOAuthClientBundleByIdAsync(
+        Guid tenantId, Guid secretId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
-        VaultSecret? secret = await db.Set<VaultSecret>()
+        VaultSecret? secret = await db.VaultSecrets
             .Include(s => s.Vault)
-            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+            .FirstOrDefaultAsync(s => s.Id == secretId && s.Vault.TenantId == tenantId, ct);
 
         if (secret is null || secret.SecretType != VaultSecretType.OAuthClient)
         {
             return null;
         }
 
-        byte[] dataKey = await UnsealVaultAsync(secret.Vault.TenantId, ct);
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
         string json = encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
         return DeserializeOAuthBundle(json);
     }
@@ -609,9 +641,11 @@ public class VaultService(
     /// Decrypts an OAuth client secret and returns its non-secret metadata (provider,
     /// client id, issuer, scopes, expiry) for list display. Excludes the client secret.
     /// </summary>
-    public async Task<OAuthClientInfo?> GetOAuthClientInfoByIdAsync(Guid secretId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose secret — passed straight through to the bundle read.</param>
+    public async Task<OAuthClientInfo?> GetOAuthClientInfoByIdAsync(
+        Guid tenantId, Guid secretId, CancellationToken ct = default)
     {
-        OAuthClientBundle? bundle = await GetOAuthClientBundleByIdAsync(secretId, ct);
+        OAuthClientBundle? bundle = await GetOAuthClientBundleByIdAsync(tenantId, secretId, ct);
         return bundle?.ToInfo();
     }
 
@@ -717,20 +751,35 @@ public class VaultService(
     /// Decrypts a cluster kubeconfig secret and returns its full bundle (including the
     /// kubeconfig YAML), or null when the secret does not exist or is not a kubeconfig.
     /// </summary>
-    public async Task<KubeconfigBundle?> GetKubeconfigBundleByIdAsync(Guid secretId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose secret. An input, and it scopes BOTH the row and the key.
+    ///
+    /// <para>⚠️ This read used to take a secret id alone and then unseal the vault with
+    /// <c>secret.Vault.TenantId</c> — the tenant of the row the caller had just named — so the
+    /// derived tenant handed over the correct data key and naming any secret id in the
+    /// installation returned its plaintext. <b>The predicate is the fix</b>; unsealing with the
+    /// caller's tenant is a clarity change, because once the row is scoped the two expressions
+    /// are the same value (verified: putting the derived key back alone changes no behaviour).
+    /// Nothing in the product reaches this with an attacker-chosen id today — every caller passes
+    /// an id from a list the server rendered for one tenant — so this is hardening rather than a
+    /// breach. The contract was the problem: "name a secret and I will decrypt it" is what a REST
+    /// route, an MCP tool or an in-cluster agent would have inherited.</para>
+    /// </param>
+    public async Task<KubeconfigBundle?> GetKubeconfigBundleByIdAsync(
+        Guid tenantId, Guid secretId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
-        VaultSecret? secret = await db.Set<VaultSecret>()
+        VaultSecret? secret = await db.VaultSecrets
             .Include(s => s.Vault)
-            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+            .FirstOrDefaultAsync(s => s.Id == secretId && s.Vault.TenantId == tenantId, ct);
 
         if (secret is null || secret.SecretType != VaultSecretType.Kubeconfig)
         {
             return null;
         }
 
-        byte[] dataKey = await UnsealVaultAsync(secret.Vault.TenantId, ct);
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
         string json = encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
         return KubeconfigBundle.Deserialize(json);
     }
@@ -739,9 +788,11 @@ public class VaultService(
     /// Decrypts a cluster kubeconfig secret and returns its non-secret metadata (context,
     /// API server, expiry) for list/badge display. Excludes the kubeconfig YAML.
     /// </summary>
-    public async Task<KubeconfigInfo?> GetKubeconfigInfoByIdAsync(Guid secretId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose secret — passed straight through to the bundle read.</param>
+    public async Task<KubeconfigInfo?> GetKubeconfigInfoByIdAsync(
+        Guid tenantId, Guid secretId, CancellationToken ct = default)
     {
-        KubeconfigBundle? bundle = await GetKubeconfigBundleByIdAsync(secretId, ct);
+        KubeconfigBundle? bundle = await GetKubeconfigBundleByIdAsync(tenantId, secretId, ct);
         return bundle?.ToInfo();
     }
 
@@ -1959,20 +2010,35 @@ public class VaultService(
     /// Decrypts and returns the value of any secret by its ID, regardless of scope.
     /// Used by the UI to reveal a secret value on demand.
     /// </summary>
-    public async Task<string?> GetSecretValueByIdAsync(Guid secretId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose secret. An input, and it scopes BOTH the row and the key.
+    ///
+    /// <para>⚠️ This read used to take a secret id alone and then unseal the vault with
+    /// <c>secret.Vault.TenantId</c> — the tenant of the row the caller had just named — so the
+    /// derived tenant handed over the correct data key and naming any secret id in the
+    /// installation returned its plaintext. <b>The predicate is the fix</b>; unsealing with the
+    /// caller's tenant is a clarity change, because once the row is scoped the two expressions
+    /// are the same value (verified: putting the derived key back alone changes no behaviour).
+    /// Nothing in the product reaches this with an attacker-chosen id today — every caller passes
+    /// an id from a list the server rendered for one tenant — so this is hardening rather than a
+    /// breach. The contract was the problem: "name a secret and I will decrypt it" is what a REST
+    /// route, an MCP tool or an in-cluster agent would have inherited.</para>
+    /// </param>
+    public async Task<string?> GetSecretValueByIdAsync(
+        Guid tenantId, Guid secretId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
-        VaultSecret? secret = await db.Set<VaultSecret>()
+        VaultSecret? secret = await db.VaultSecrets
             .Include(s => s.Vault)
-            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+            .FirstOrDefaultAsync(s => s.Id == secretId && s.Vault.TenantId == tenantId, ct);
 
         if (secret is null)
         {
             return null;
         }
 
-        byte[] dataKey = await UnsealVaultAsync(secret.Vault.TenantId, ct);
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
         return encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
     }
 
@@ -2101,18 +2167,34 @@ public class VaultService(
     /// <summary>
     /// Decrypts and returns the value of a specific historical version.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose secret. An input, and it scopes BOTH the row and the key.
+    ///
+    /// <para>⚠️ This read used to take a secret id alone and then unseal the vault with
+    /// <c>secret.Vault.TenantId</c> — the tenant of the row the caller had just named — so the
+    /// derived tenant handed over the correct data key and naming any secret id in the
+    /// installation returned its plaintext. <b>The predicate is the fix</b>; unsealing with the
+    /// caller's tenant is a clarity change, because once the row is scoped the two expressions
+    /// are the same value (verified: putting the derived key back alone changes no behaviour).
+    /// Nothing in the product reaches this with an attacker-chosen id today — every caller passes
+    /// an id from a list the server rendered for one tenant — so this is hardening rather than a
+    /// breach. The contract was the problem: "name a secret and I will decrypt it" is what a REST
+    /// route, an MCP tool or an in-cluster agent would have inherited.</para>
+    /// </param>
     public async Task<string?> GetSecretVersionValueAsync(
-        Guid secretId, Guid versionId, CancellationToken ct = default)
+        Guid tenantId, Guid secretId, Guid versionId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
         VaultSecretVersion? version = await db.Set<VaultSecretVersion>()
             .Include(v => v.Secret).ThenInclude(s => s.Vault)
-            .FirstOrDefaultAsync(v => v.Id == versionId && v.SecretId == secretId, ct);
+            .FirstOrDefaultAsync(
+                v => v.Id == versionId && v.SecretId == secretId
+                  && v.Secret.Vault.TenantId == tenantId, ct);
 
         if (version is null) return null;
 
-        byte[] dataKey = await UnsealVaultAsync(version.Secret.Vault.TenantId, ct);
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
         return encryption.Decrypt(dataKey, version.EncryptedValue, version.Nonce);
     }
 

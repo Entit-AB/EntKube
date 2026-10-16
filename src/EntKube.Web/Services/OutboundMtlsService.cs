@@ -52,8 +52,13 @@ public class OutboundMtlsService(
         return await db.OutboundMtlsCredentials.FirstOrDefaultAsync(c => c.Id == id, ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose vault to read the client certificate from. The credential entity carries an app and
+    /// a vault secret id but no tenant, so without this the certificate for ANY secret id would
+    /// be fetched — and <c>VaultService</c> used to unseal whichever tenant owned it.
+    /// </param>
     public async Task<OutboundMtlsCredential> CreateAsync(
-        OutboundMtlsCredential credential, CancellationToken ct = default)
+        Guid tenantId, OutboundMtlsCredential credential, CancellationToken ct = default)
     {
         Validate(credential);
 
@@ -67,7 +72,7 @@ public class OutboundMtlsService(
 
         // The vault secret must actually carry a client certificate *and* its key — a cert-only
         // secret produces a Secret the partner's handshake can never complete with.
-        CertificateBundle? bundle = await vault.GetCertificateBundleByIdAsync(credential.VaultSecretId, ct);
+        CertificateBundle? bundle = await vault.GetCertificateBundleByIdAsync(tenantId, credential.VaultSecretId, ct);
         if (bundle is null || !bundle.HasCertificate)
             throw new InvalidOperationException("The selected vault secret has no certificate.");
         if (!bundle.HasPrivateKey)

@@ -172,7 +172,7 @@ public class StalwartService(
             // them here means the two components cannot drift apart through a typo, and the derived
             // values are stored rather than recomputed so the UI shows exactly what will be applied.
             await ResolveOpenLdapLinkAsync(db, existing, ct);
-            await ResolveOidcRegistrationAsync(db, existing, ct);
+            await ResolveOidcRegistrationAsync(db, tenantId, existing, ct);
             await ResolveKeycloakRealmAsync(db, existing, ct);
 
             existing.UpdatedAt = DateTime.UtcNow;
@@ -367,14 +367,15 @@ public class StalwartService(
     }
 
     private async Task ResolveOidcRegistrationAsync(
-        ApplicationDbContext db, StalwartComponentConfig config, CancellationToken ct)
+        ApplicationDbContext db, Guid tenantId, StalwartComponentConfig config,
+        CancellationToken ct)
     {
         if (config.AuthMode != StalwartAuthMode.Oidc || config.OidcAppRegistrationSecretId is not Guid secretId)
         {
             return;
         }
 
-        OAuthClientBundle? bundle = await vaultService.GetOAuthClientBundleByIdAsync(secretId, ct);
+        OAuthClientBundle? bundle = await vaultService.GetOAuthClientBundleByIdAsync(tenantId, secretId, ct);
         if (bundle is null || OAuthClientHelper.Resolve(bundle) is not ResolvedOidc resolved)
         {
             return;
@@ -407,7 +408,7 @@ public class StalwartService(
         List<OidcRegistration> result = [];
         foreach (VaultSecret secret in secrets)
         {
-            OAuthClientInfo? info = await vaultService.GetOAuthClientInfoByIdAsync(secret.Id, ct);
+            OAuthClientInfo? info = await vaultService.GetOAuthClientInfoByIdAsync(tenantId, secret.Id, ct);
             result.Add(new OidcRegistration(secret.Id, secret.Name, info?.Provider ?? OAuthProvider.GenericOidc));
         }
         return result;
@@ -3018,7 +3019,7 @@ public class StalwartService(
         string? value = await Secret(tenantId, clusterComponentId, registrationSecret, ct);
         if (!Guid.TryParse(value, out Guid secretId)) return;
 
-        OAuthClientBundle? bundle = await vaultService.GetOAuthClientBundleByIdAsync(secretId, ct);
+        OAuthClientBundle? bundle = await vaultService.GetOAuthClientBundleByIdAsync(tenantId, secretId, ct);
         if (bundle is null || OAuthClientHelper.Resolve(bundle) is not ResolvedOidc resolved)
         {
             logger.LogWarning(

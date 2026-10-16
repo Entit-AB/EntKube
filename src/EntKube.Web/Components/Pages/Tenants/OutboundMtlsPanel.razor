@@ -200,7 +200,7 @@
         busy = true;
         try
         {
-            await OutboundMtls.CreateAsync(new OutboundMtlsCredential
+            await OutboundMtls.CreateAsync(TenantId, new OutboundMtlsCredential
             {
                 TenantId = TenantId,
                 AppId = AppId,
