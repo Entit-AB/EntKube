@@ -209,6 +209,7 @@ public class VaultServiceTests : IDisposable
         await sut.InitializeVaultAsync(tenant.Id);
 
         ClusterComponent component = await sut.CreateComponentAsync(
+            tenant.Id,
             cluster.Id, "minio", "HelmChart");
 
         VaultSecret secret = await sut.SetComponentSecretAsync(
@@ -225,6 +226,7 @@ public class VaultServiceTests : IDisposable
         await sut.InitializeVaultAsync(tenant.Id);
 
         ClusterComponent component = await sut.CreateComponentAsync(
+            tenant.Id,
             cluster.Id, "postgres", "HelmChart");
 
         await sut.SetComponentSecretAsync(
@@ -242,7 +244,7 @@ public class VaultServiceTests : IDisposable
         (Tenant tenant, KubernetesCluster cluster) = CreateTenantWithCluster();
         await sut.InitializeVaultAsync(tenant.Id);
 
-        ClusterComponent comp = await sut.CreateComponentAsync(cluster.Id, "redis", "HelmChart");
+        ClusterComponent comp = await sut.CreateComponentAsync(tenant.Id, cluster.Id, "redis", "HelmChart");
 
         await sut.SetComponentSecretAsync(tenant.Id, comp.Id, "REDIS_PASSWORD", "r3dis");
         await sut.SetComponentSecretAsync(tenant.Id, comp.Id, "REDIS_TLS_CERT", "cert-data");
@@ -290,9 +292,10 @@ public class VaultServiceTests : IDisposable
     [Fact]
     public async Task CreateComponentAsync_CreatesComponent()
     {
-        (_, KubernetesCluster cluster) = CreateTenantWithCluster();
+        (Tenant tenant, KubernetesCluster cluster) = CreateTenantWithCluster();
 
         ClusterComponent component = await sut.CreateComponentAsync(
+            tenant.Id,
             cluster.Id, "keycloak", "HelmChart");
 
         component.Name.Should().Be("keycloak");
@@ -303,12 +306,12 @@ public class VaultServiceTests : IDisposable
     [Fact]
     public async Task GetComponentsAsync_ReturnsComponentsForCluster()
     {
-        (_, KubernetesCluster cluster) = CreateTenantWithCluster();
+        (Tenant tenant, KubernetesCluster cluster) = CreateTenantWithCluster();
 
-        await sut.CreateComponentAsync(cluster.Id, "minio", "HelmChart");
-        await sut.CreateComponentAsync(cluster.Id, "cnpg", "Operator");
+        await sut.CreateComponentAsync(tenant.Id, cluster.Id, "minio", "HelmChart");
+        await sut.CreateComponentAsync(tenant.Id, cluster.Id, "cnpg", "Operator");
 
-        List<ClusterComponent> components = await sut.GetComponentsAsync(cluster.Id);
+        List<ClusterComponent> components = await sut.GetComponentsAsync(tenant.Id, cluster.Id);
 
         components.Should().HaveCount(2);
     }
@@ -316,13 +319,13 @@ public class VaultServiceTests : IDisposable
     [Fact]
     public async Task DeleteComponentAsync_RemovesComponent()
     {
-        (_, KubernetesCluster cluster) = CreateTenantWithCluster();
-        ClusterComponent component = await sut.CreateComponentAsync(cluster.Id, "temp", "Deployment");
+        (Tenant tenant, KubernetesCluster cluster) = CreateTenantWithCluster();
+        ClusterComponent component = await sut.CreateComponentAsync(tenant.Id, cluster.Id, "temp", "Deployment");
 
-        bool deleted = await sut.DeleteComponentAsync(component.Id);
+        bool deleted = await sut.DeleteComponentAsync(tenant.Id, component.Id);
 
         deleted.Should().BeTrue();
-        List<ClusterComponent> remaining = await sut.GetComponentsAsync(cluster.Id);
+        List<ClusterComponent> remaining = await sut.GetComponentsAsync(tenant.Id, cluster.Id);
         remaining.Should().BeEmpty();
     }
 
@@ -930,4 +933,59 @@ public class VaultServiceTests : IDisposable
             req.CreateSelfSigned(DateTimeOffset.UtcNow.AddDays(-1), DateTimeOffset.UtcNow.AddDays(365));
         return (cert.ExportCertificatePem(), rsa.ExportPkcs8PrivateKeyPem());
     }
+
+    // ── Component CRUD is tenant-scoped ──────────────────────────────────────
+
+    /// <summary>
+    /// ⚠️ The one that mattered. <c>DeleteComponentAsync</c> found its row with
+    /// <c>FindAsync(componentId)</c> — by primary key alone — so a component id was the entire
+    /// authorization for destroying it <em>and</em> its secrets by cascade. It is also the only
+    /// production delete of a <c>ClusterComponent</c> row in the product, and two pages call it.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenant_cannot_delete_a_component()
+    {
+        (Tenant tenant, KubernetesCluster cluster) = CreateTenantWithCluster();
+        Tenant stranger = CreateTenant("StrangerCo", "strangerco");
+
+        ClusterComponent component = await sut.CreateComponentAsync(
+            tenant.Id, cluster.Id, "keycloak", "HelmChart");
+
+        (await sut.DeleteComponentAsync(stranger.Id, component.Id)).Should().BeFalse(
+            "a component the asking tenant does not own answers false, exactly as a missing one does");
+        (await sut.GetComponentsAsync(tenant.Id, cluster.Id)).Should().ContainSingle(
+            "and it is still there");
+
+        (await sut.DeleteComponentAsync(tenant.Id, component.Id)).Should().BeTrue(
+            "the owner still deletes it — or the refusal above would prove nothing");
+    }
+
+    [Fact]
+    public async Task Another_tenant_cannot_list_a_clusters_components()
+    {
+        (Tenant tenant, KubernetesCluster cluster) = CreateTenantWithCluster();
+        Tenant stranger = CreateTenant("StrangerCo", "strangerco");
+
+        await sut.CreateComponentAsync(tenant.Id, cluster.Id, "minio", "HelmChart");
+
+        (await sut.GetComponentsAsync(stranger.Id, cluster.Id)).Should().BeEmpty();
+        (await sut.GetComponentsAsync(tenant.Id, cluster.Id)).Should().ContainSingle();
+    }
+
+    /// <summary>
+    /// Creating is refused loudly rather than silently, because the caller is about to show the
+    /// operator a component that would not exist.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenant_cannot_create_a_component_on_a_cluster()
+    {
+        (_, KubernetesCluster cluster) = CreateTenantWithCluster();
+        Tenant stranger = CreateTenant("StrangerCo", "strangerco");
+
+        Func<Task> act = () => sut.CreateComponentAsync(stranger.Id, cluster.Id, "redis", "HelmChart");
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*not this tenant's*");
+    }
+
 }

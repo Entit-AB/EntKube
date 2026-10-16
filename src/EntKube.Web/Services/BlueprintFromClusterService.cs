@@ -34,15 +34,22 @@ public class BlueprintFromClusterService(
         ClusterBlueprint Blueprint, int ComponentSteps, int ServiceSteps,
         int VariablesCreated, IReadOnlyList<string> Skipped);
 
+    /// <param name="tenantId">
+    /// Whose cluster to capture. ⚠️ This used to be DERIVED: the method loaded the cluster by id
+    /// with no tenant predicate and read <c>cluster.TenantId</c> off it, so every tenant-scoped
+    /// query below compared that row to itself and a blueprint could be generated from another
+    /// tenant's cluster — its components, its Keycloak and Harbor configuration, its variables.
+    /// The page has always had a tenant.
+    /// </param>
     public async Task<GenerateResult> GenerateAsync(
-        Guid clusterId, string name, string? description, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, string name, string? description, CancellationToken ct = default)
     {
-        Guid tenantId;
         Guid environmentId;
         await using (FleetDbContext db = await dbFactory.CreateDbContextAsync(ct))
         {
-            KubernetesCluster cluster = await db.KubernetesClusters.FirstAsync(c => c.Id == clusterId, ct);
-            tenantId = cluster.TenantId;
+            KubernetesCluster cluster = await db.KubernetesClusters
+                .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct)
+                ?? throw new InvalidOperationException("That cluster is not this tenant's.");
             environmentId = cluster.EnvironmentId;
         }
 
@@ -120,7 +127,7 @@ public class BlueprintFromClusterService(
 
         // ── Component steps ──
         int componentSteps = 0;
-        List<ClusterComponent> components = await vaultService.GetComponentsAsync(clusterId, ct);
+        List<ClusterComponent> components = await vaultService.GetComponentsAsync(tenantId, clusterId, ct);
 
         Dictionary<Guid, KeycloakComponentConfig> keycloakConfigs;
         Dictionary<Guid, HarborComponentConfig> harborConfigs;

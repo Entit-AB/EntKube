@@ -203,7 +203,7 @@
 
     private async Task LoadComponents()
     {
-        components = await VaultService.GetComponentsAsync(ClusterId);
+        components = await VaultService.GetComponentsAsync(TenantId, ClusterId);
     }
 
     private async Task AddComponent()
@@ -212,7 +212,7 @@
 
         try
         {
-            await VaultService.CreateComponentAsync(ClusterId, newComponentName.Trim(), newComponentType);
+            await VaultService.CreateComponentAsync(TenantId, ClusterId, newComponentName.Trim(), newComponentType);
             newComponentName = "";
             await LoadComponents();
         }
@@ -227,7 +227,7 @@
         string? name = components?.FirstOrDefault(c => c.Id == componentId)?.Name;
         try
         {
-            await VaultService.DeleteComponentAsync(componentId);
+            await VaultService.DeleteComponentAsync(TenantId, componentId);
 
             if (expandedComponentId == componentId)
             {
