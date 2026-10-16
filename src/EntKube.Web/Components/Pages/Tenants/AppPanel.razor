@@ -133,7 +133,7 @@
 
         try
         {
-            await TenantService.CreateAppAsync(Customer.Id, newAppName.Trim());
+            await TenantService.CreateAppAsync(TenantId, Customer.Id, newAppName.Trim());
             newAppName = "";
             await Load();
         }
@@ -147,7 +147,7 @@
     {
         try
         {
-            await TenantService.DeleteAppAsync(id);
+            await TenantService.DeleteAppAsync(TenantId, id);
             await Load();
             Toasts.Success($"Unregistered app \"{name}\" from EntKube.");
         }
@@ -167,11 +167,11 @@
     {
         if (currentlyLinked)
         {
-            await TenantService.UnlinkAppFromEnvironmentAsync(appId, envId);
+            await TenantService.UnlinkAppFromEnvironmentAsync(TenantId, appId, envId);
         }
         else
         {
-            await TenantService.LinkAppToEnvironmentAsync(appId, envId);
+            await TenantService.LinkAppToEnvironmentAsync(TenantId, appId, envId);
         }
 
         await Load();

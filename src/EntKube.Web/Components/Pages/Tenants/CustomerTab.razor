@@ -577,7 +577,7 @@ else
 
         try
         {
-            await TenantService.CreateAppAsync(selectedCustomer!.Id, newAppName.Trim());
+            await TenantService.CreateAppAsync(TenantId, selectedCustomer!.Id, newAppName.Trim());
             newAppName = "";
             await LoadApps();
         }

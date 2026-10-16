@@ -341,7 +341,7 @@ else
     private async Task Delete(Guid id)
     {
         confirmDeleteEnvId = null;
-        await TenantService.DeleteEnvironmentAsync(id);
+        await TenantService.DeleteEnvironmentAsync(TenantId, id);
         await LoadEnvironments();
     }
 
