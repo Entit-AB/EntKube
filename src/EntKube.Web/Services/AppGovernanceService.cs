@@ -22,26 +22,70 @@ public class AppGovernanceService(
 {
     // ── Namespace ─────────────────────────────────────────────────────────────
 
-    public async Task<List<AppEnvironment>> GetAppEnvironmentsAsync(Guid appId, CancellationToken ct = default)
+    /// <summary>
+    /// Whether an app and an environment are both this tenant's.
+    ///
+    /// <para>Checked at each public entry point that takes them from a caller. Everything below
+    /// is keyed by the pair, so once it is proven the rest of the method is scoped by
+    /// construction — the same boundary-check shape <c>TimeService</c> uses, and cheaper than
+    /// threading a tenant into every query in a 31-method service.</para>
+    ///
+    /// <para>⚠️ Both ends, because this is a pairing: an app of ours with an environment of
+    /// theirs is as wrong as the reverse, and governance written against that pair would be
+    /// applied to a namespace in the wrong tenant.</para>
+    /// </summary>
+    private async Task<bool> PairBelongsToTenantAsync(
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct)
     {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.Apps.AnyAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct)
+            && await db.Environments.AnyAsync(e => e.Id == environmentId && e.TenantId == tenantId, ct);
+    }
+
+    /// <summary>Whether an app is this tenant's, for the entry points that take no environment.</summary>
+    private async Task<bool> AppBelongsToTenantAsync(Guid tenantId, Guid appId, CancellationToken ct)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        return await db.Apps.AnyAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct);
+    }
+
+
+    public async Task<List<AppEnvironment>> GetAppEnvironmentsAsync(
+        Guid tenantId, Guid appId, CancellationToken ct = default)
+    {
+        if (!await AppBelongsToTenantAsync(tenantId, appId, ct))
+        {
+            return [];
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.AppEnvironments
             .Where(ae => ae.AppId == appId)
             .ToListAsync(ct);
     }
 
-    public async Task<string?> GetNamespaceAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<string?> GetNamespaceAsync(Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            return null;
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         AppEnvironment? ae = await db.AppEnvironments
             .FirstOrDefaultAsync(e => e.AppId == appId && e.EnvironmentId == environmentId, ct);
         return ae?.Namespace;
     }
 
-    public async Task SaveNamespaceAsync(
-        Guid appId, Guid environmentId, string? ns, CancellationToken ct = default)
+    public async Task SaveNamespaceAsync(Guid tenantId, Guid appId, Guid environmentId, string? ns, CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            return;
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         AppEnvironment? ae = await db.AppEnvironments
             .FirstOrDefaultAsync(e => e.AppId == appId && e.EnvironmentId == environmentId, ct);
@@ -235,21 +279,30 @@ public class AppGovernanceService(
 
     // ── Quota ─────────────────────────────────────────────────────────────────
 
-    public async Task<AppQuota?> GetQuotaAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<AppQuota?> GetQuotaAsync(Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            return null;
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.AppQuotas
             .FirstOrDefaultAsync(q => q.AppId == appId && q.EnvironmentId == environmentId, ct);
     }
 
-    public async Task<AppQuota> SaveQuotaAsync(
-        Guid appId, Guid environmentId,
+    public async Task<AppQuota> SaveQuotaAsync(Guid tenantId, Guid appId, Guid environmentId,
         string? cpuRequest, string? cpuLimit,
         string? memRequest, string? memLimit,
         int? maxPods, int? maxPvcs,
         CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "The app or the environment does not belong to this tenant.");
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         AppQuota? existing = await db.AppQuotas
             .FirstOrDefaultAsync(q => q.AppId == appId && q.EnvironmentId == environmentId, ct);
@@ -272,9 +325,13 @@ public class AppGovernanceService(
         return existing;
     }
 
-    public async Task<bool> DeleteQuotaAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<bool> DeleteQuotaAsync(Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            return false;
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         AppQuota? q = await db.AppQuotas
             .FirstOrDefaultAsync(x => x.AppId == appId && x.EnvironmentId == environmentId, ct);
@@ -286,9 +343,13 @@ public class AppGovernanceService(
 
     // ── Network policies ──────────────────────────────────────────────────────
 
-    public async Task<List<AppNetworkPolicy>> GetNetworkPoliciesAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<List<AppNetworkPolicy>> GetNetworkPoliciesAsync(Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            return [];
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.AppNetworkPolicies
             .Where(p => p.AppId == appId && p.EnvironmentId == environmentId)
@@ -296,11 +357,16 @@ public class AppGovernanceService(
             .ToListAsync(ct);
     }
 
-    public async Task<AppNetworkPolicy> AddNetworkPolicyAsync(
-        Guid appId, Guid environmentId, string name, AppNetworkPolicyType type,
+    public async Task<AppNetworkPolicy> AddNetworkPolicyAsync(Guid tenantId, Guid appId, Guid environmentId, string name, AppNetworkPolicyType type,
         string? allowFromNs = null, string? customYaml = null,
         CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "The app or the environment does not belong to this tenant.");
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         AppNetworkPolicy policy = new()
         {
@@ -329,19 +395,28 @@ public class AppGovernanceService(
 
     // ── RBAC ──────────────────────────────────────────────────────────────────
 
-    public async Task<AppRbacPolicy?> GetRbacPolicyAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<AppRbacPolicy?> GetRbacPolicyAsync(Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            return null;
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.AppRbacPolicies
             .Include(p => p.Rules)
             .FirstOrDefaultAsync(p => p.AppId == appId && p.EnvironmentId == environmentId, ct);
     }
 
-    public async Task<AppRbacPolicy> SaveRbacPolicyAsync(
-        Guid appId, Guid environmentId, string serviceAccountName, bool autoMount,
+    public async Task<AppRbacPolicy> SaveRbacPolicyAsync(Guid tenantId, Guid appId, Guid environmentId, string serviceAccountName, bool autoMount,
         CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "The app or the environment does not belong to this tenant.");
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         AppRbacPolicy? existing = await db.AppRbacPolicies
             .FirstOrDefaultAsync(p => p.AppId == appId && p.EnvironmentId == environmentId, ct);
@@ -401,9 +476,13 @@ public class AppGovernanceService(
         return true;
     }
 
-    public async Task<bool> DeleteRbacPolicyAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<bool> DeleteRbacPolicyAsync(Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            return false;
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         AppRbacPolicy? p = await db.AppRbacPolicies
             .FirstOrDefaultAsync(x => x.AppId == appId && x.EnvironmentId == environmentId, ct);
@@ -415,19 +494,24 @@ public class AppGovernanceService(
 
     // ── Load all governance for an app+environment ────────────────────────────
 
-    public async Task<AppGovernanceData> LoadAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<AppGovernanceData> LoadAsync(Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "The app or the environment does not belong to this tenant.");
+        }
+
         return new AppGovernanceData
         {
             EnvironmentId    = environmentId,
-            Namespace        = await GetNamespaceAsync(appId, environmentId, ct),
-            Quota            = await GetQuotaAsync(appId, environmentId, ct),
-            NetworkPolicies  = await GetNetworkPoliciesAsync(appId, environmentId, ct),
-            RbacPolicy       = await GetRbacPolicyAsync(appId, environmentId, ct),
-            AllowedDatabases = await GetAllowedDatabasesAsync(appId, environmentId, ct),
-            AllowedCaches    = await GetAllowedCachesAsync(appId, environmentId, ct),
-            AllowedStorages  = await GetAllowedStoragesAsync(appId, environmentId, ct)
+            Namespace        = await GetNamespaceAsync(tenantId, appId, environmentId, ct),
+            Quota            = await GetQuotaAsync(tenantId, appId, environmentId, ct),
+            NetworkPolicies  = await GetNetworkPoliciesAsync(tenantId, appId, environmentId, ct),
+            RbacPolicy       = await GetRbacPolicyAsync(tenantId, appId, environmentId, ct),
+            AllowedDatabases = await GetAllowedDatabasesAsync(tenantId, appId, environmentId, ct),
+            AllowedCaches    = await GetAllowedCachesAsync(tenantId, appId, environmentId, ct),
+            AllowedStorages  = await GetAllowedStoragesAsync(tenantId, appId, environmentId, ct)
         };
     }
 
@@ -569,7 +653,7 @@ public class AppGovernanceService(
                      && d.ClusterId == cluster.Id)
             .FirstOrDefaultAsync(ct);
 
-        string? govNs = await GetNamespaceAsync(appId, environmentId, ct);
+        string? govNs = await GetNamespaceAsync(tenantId, appId, environmentId, ct);
         string? ns = govNs ?? deployment?.Namespace;
         if (string.IsNullOrWhiteSpace(ns))
             return (false, "No deployment found for this app in this environment on this cluster. Create a deployment first.");
@@ -580,7 +664,7 @@ public class AppGovernanceService(
         if (access is null)
             return (false, "Cluster is not this tenant's, or has no kubeconfig configured.");
 
-        AppGovernanceData data = await LoadAsync(appId, environmentId, ct);
+        AppGovernanceData data = await LoadAsync(tenantId, appId, environmentId, ct);
         string yaml = BuildManifest(data, ns);
 
         // The seam applies and acknowledges in one call. What this replaces was an acknowledgment
@@ -771,9 +855,13 @@ public class AppGovernanceService(
 
     // ── Allowed Databases ─────────────────────────────────────────────────────
 
-    public async Task<List<AppAllowedDatabase>> GetAllowedDatabasesAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<List<AppAllowedDatabase>> GetAllowedDatabasesAsync(Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            return [];
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.AppAllowedDatabases
             .Include(a => a.CnpgDatabase).ThenInclude(d => d!.CnpgCluster)
@@ -821,9 +909,13 @@ public class AppGovernanceService(
 
     // ── Allowed Caches ────────────────────────────────────────────────────────
 
-    public async Task<List<AppAllowedCache>> GetAllowedCachesAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<List<AppAllowedCache>> GetAllowedCachesAsync(Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            return [];
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.AppAllowedCaches
             .Include(a => a.RedisCluster)
@@ -863,9 +955,13 @@ public class AppGovernanceService(
 
     // ── Allowed Storages ──────────────────────────────────────────────────────
 
-    public async Task<List<AppAllowedStorage>> GetAllowedStoragesAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<List<AppAllowedStorage>> GetAllowedStoragesAsync(Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
+        if (!await PairBelongsToTenantAsync(tenantId, appId, environmentId, ct))
+        {
+            return [];
+        }
+
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.AppAllowedStorages
             .Include(a => a.StorageLink)

@@ -188,4 +188,97 @@ public class GovernanceClusterCallTests : IDisposable
                 "the check runs across a tenant's clusters, so one it cannot reach is a status on "
                 + "that cluster and not a failure of the whole answer");
     }
+    /// <summary>
+    /// Governance for an app in an environment — its namespace lock, resource quota, network
+    /// policies, RBAC and the allow-lists of databases, caches and storage. Fifteen read and
+    /// write entry points took an app id and an environment id with no tenant, while
+    /// <c>CheckNamespaceAsync</c>, <c>CreateNamespaceOnClusterAsync</c>, <c>ApplyToClusterAsync</c>
+    /// and the three <c>GetAvailable*</c> methods beside them had always taken one.
+    ///
+    /// <para>The guard is a <b>pairing</b> check, so both halves are exercised: an app of ours
+    /// with an environment of theirs is as wrong as the reverse, and governance written against
+    /// that pair would be applied to a namespace in the wrong tenant.</para>
+    /// </summary>
+    [Fact]
+    public async Task Governance_refuses_an_app_or_an_environment_that_is_not_this_tenants()
+    {
+        await SeedAsync();
+
+        Guid strangerTenant = Guid.NewGuid();
+        Guid strangerCustomer = Guid.NewGuid();
+        Guid strangerApp = Guid.NewGuid();
+        Guid strangerEnvironment = Guid.NewGuid();
+
+        db.Tenants.Add(new Tenant
+        {
+            Id = strangerTenant, Name = "Stranger", Slug = $"stranger-{strangerTenant:N}",
+        });
+        db.Customers.Add(new Customer
+        {
+            Id = strangerCustomer, TenantId = strangerTenant, Name = "Elsewhere",
+        });
+        db.Apps.Add(new App { Id = strangerApp, CustomerId = strangerCustomer, Name = "theirs" });
+        db.Set<Data.Environment>().Add(new Data.Environment
+        {
+            Id = strangerEnvironment, TenantId = strangerTenant, Name = "their-prod",
+        });
+        // ⚠️ The namespace lock lives on the AppEnvironment LINK row, so the owner case below
+        // needs one to exist — SeedAsync does not create it. Without this the owner assertion
+        // fails on a missing row and says nothing about scoping.
+        db.Set<AppEnvironment>().Add(new AppEnvironment
+        {
+            AppId = appId, EnvironmentId = environmentId,
+        });
+        await db.SaveChangesAsync();
+
+        // ⚠️ Every crossing needs a row that WOULD come back if the guard were missing.
+        // The first draft asserted .BeEmpty() for combinations with nothing seeded, so it passed
+        // whichever half of the guard was deleted — empty because the data was absent, not
+        // because the call was refused. An empty result only proves something when a row exists.
+        db.Set<AppNetworkPolicy>().AddRange(
+            new AppNetworkPolicy
+            {
+                Id = Guid.NewGuid(), AppId = appId, EnvironmentId = environmentId,
+                Name = "ours", AllowFromNamespace = "ours",
+            },
+            new AppNetworkPolicy
+            {
+                Id = Guid.NewGuid(), AppId = strangerApp, EnvironmentId = environmentId,
+                Name = "their-app-our-env", AllowFromNamespace = "their-app-our-env",
+            },
+            new AppNetworkPolicy
+            {
+                Id = Guid.NewGuid(), AppId = appId, EnvironmentId = strangerEnvironment,
+                Name = "our-app-their-env", AllowFromNamespace = "our-app-their-env",
+            });
+        await db.SaveChangesAsync();
+
+        // The owner sees its own row — so the assertions below are about refusal, not absence.
+        (await sut.GetNetworkPoliciesAsync(tenantId, appId, environmentId))
+            .Should().ContainSingle();
+
+        // Our app, asked as them.
+        (await sut.GetNetworkPoliciesAsync(strangerTenant, appId, environmentId))
+            .Should().BeEmpty("the row exists, so this is a refusal");
+        (await sut.GetQuotaAsync(strangerTenant, appId, environmentId)).Should().BeNull();
+        (await sut.GetAppEnvironmentsAsync(strangerTenant, appId)).Should().BeEmpty();
+
+        // Their app with our environment: only the APP half of the guard can refuse this, and a
+        // seeded row means a missing app check would hand it over.
+        (await sut.GetNetworkPoliciesAsync(tenantId, strangerApp, environmentId))
+            .Should().BeEmpty("their app, our environment");
+
+        // Our app with their environment: only the ENVIRONMENT half can refuse this.
+        (await sut.GetNetworkPoliciesAsync(tenantId, appId, strangerEnvironment))
+            .Should().BeEmpty("our app, their environment");
+
+        // A write must not land either.
+        await sut.SaveNamespaceAsync(strangerTenant, appId, environmentId, "stolen");
+        (await sut.GetNamespaceAsync(tenantId, appId, environmentId))
+            .Should().NotBe("stolen", "SaveNamespaceAsync returns void, so the row has to say it");
+
+        // And the owner still works.
+        await sut.SaveNamespaceAsync(tenantId, appId, environmentId, "ours");
+        (await sut.GetNamespaceAsync(tenantId, appId, environmentId)).Should().Be("ours");
+    }
 }

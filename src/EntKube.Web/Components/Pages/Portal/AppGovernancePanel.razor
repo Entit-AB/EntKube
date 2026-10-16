@@ -275,6 +275,8 @@ else
     [Parameter, EditorRequired] public Guid AppId { get; set; }
     [Parameter, EditorRequired] public string AppName { get; set; } = "";
     [Parameter, EditorRequired] public Guid EnvironmentId { get; set; }
+    [Parameter] public Guid TenantId { get; set; }
+
     [Parameter] public Guid CustomerId { get; set; }
 
     private AppGovernanceData? data;
@@ -284,7 +286,7 @@ else
     protected override async Task OnParametersSetAsync()
     {
         loading = true;
-        data = await GovernanceService.LoadAsync(AppId, EnvironmentId);
+        data = await GovernanceService.LoadAsync(TenantId, AppId, EnvironmentId);
         if (CustomerId != Guid.Empty)
             gitPolicies = await CustomerGitService.GetRepoPoliciesAsync(CustomerId, EnvironmentId);
         loading = false;

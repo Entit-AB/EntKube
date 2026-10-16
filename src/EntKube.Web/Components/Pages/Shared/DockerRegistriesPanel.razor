@@ -574,7 +574,7 @@ else
 
         Dictionary<Guid, string> names = (await TenantService.GetEnvironmentsAsync(TenantId))
             .ToDictionary(e => e.Id, e => e.Name);
-        List<AppEnvironment> appEnvs = await AppGovernanceService.GetAppEnvironmentsAsync(AppId);
+        List<AppEnvironment> appEnvs = await AppGovernanceService.GetAppEnvironmentsAsync(TenantId, AppId);
         appEnvironments = appEnvs
             .Select(ae => (names.GetValueOrDefault(ae.EnvironmentId, "Unknown env"), ae.EnvironmentId))
             .ToList();

@@ -942,7 +942,7 @@ else
 
     private async Task LoadAsync()
     {
-        AppGovernanceData data = await GovernanceService.LoadAsync(AppId, EnvironmentId);
+        AppGovernanceData data = await GovernanceService.LoadAsync(TenantId, AppId, EnvironmentId);
 
         nsValue = data.Namespace ?? "";
 
@@ -1000,7 +1000,7 @@ else
     private async Task SaveNamespace()
     {
         savingNs = true; nsMessage = null;
-        await GovernanceService.SaveNamespaceAsync(AppId, EnvironmentId, nsValue);
+        await GovernanceService.SaveNamespaceAsync(TenantId, AppId, EnvironmentId, nsValue);
         nsValue = nsValue.Trim().ToLowerInvariant();
         savingNs = false; nsOk = true; nsMessage = "Namespace saved.";
         await CheckNamespace();
@@ -1008,7 +1008,7 @@ else
 
     private async Task ClearNamespace()
     {
-        await GovernanceService.SaveNamespaceAsync(AppId, EnvironmentId, null);
+        await GovernanceService.SaveNamespaceAsync(TenantId, AppId, EnvironmentId, null);
         nsValue = ""; nsMessage = null;
         nsCheck = null; nsNameError = null; nsCreateMessage = null;
     }
@@ -1119,7 +1119,7 @@ else
     private async Task SaveQuota()
     {
         savingQuota = true; quotaMessage = null;
-        quota = await GovernanceService.SaveQuotaAsync(AppId, EnvironmentId,
+        quota = await GovernanceService.SaveQuotaAsync(TenantId, AppId, EnvironmentId,
             qCpuReq, qCpuLim, qMemReq, qMemLim, qMaxPods, qMaxPvcs);
         savingQuota = false; quotaOk = true;
         quotaMessage = "Quota saved to database. Click 'Apply to clusters' to push changes to Kubernetes.";
@@ -1127,7 +1127,7 @@ else
 
     private async Task DeleteQuota()
     {
-        await GovernanceService.DeleteQuotaAsync(AppId, EnvironmentId);
+        await GovernanceService.DeleteQuotaAsync(TenantId, AppId, EnvironmentId);
         quota = null;
         qCpuReq = qCpuLim = qMemReq = qMemLim = "";
         qMaxPods = qMaxPvcs = null;
@@ -1140,8 +1140,7 @@ else
         addingNp = true; npMessage = null;
         try
         {
-            AppNetworkPolicy p = await GovernanceService.AddNetworkPolicyAsync(
-                AppId, EnvironmentId, newNpName, newNpType,
+            AppNetworkPolicy p = await GovernanceService.AddNetworkPolicyAsync(TenantId, AppId, EnvironmentId, newNpName, newNpType,
                 newNpAllowNs, newNpCustomYaml);
             networkPolicies.Add(p);
             showAddNp = false;
@@ -1164,14 +1163,14 @@ else
     private async Task SaveRbac()
     {
         savingRbac = true; rbacMessage = null;
-        rbacPolicy = await GovernanceService.SaveRbacPolicyAsync(AppId, EnvironmentId, rbacSaName, rbacAutoMount);
+        rbacPolicy = await GovernanceService.SaveRbacPolicyAsync(TenantId, AppId, EnvironmentId, rbacSaName, rbacAutoMount);
         savingRbac = false; rbacOk = true;
         rbacMessage = "Saved.";
     }
 
     private async Task DeleteRbac()
     {
-        await GovernanceService.DeleteRbacPolicyAsync(AppId, EnvironmentId);
+        await GovernanceService.DeleteRbacPolicyAsync(TenantId, AppId, EnvironmentId);
         rbacPolicy = null; rbacSaName = ""; rbacAutoMount = false;
     }
 
@@ -1239,14 +1238,14 @@ else
 
         // Persist current form state before applying so the user doesn't have to
         // click the individual "Save" buttons first — apply is a single atomic step.
-        await GovernanceService.SaveNamespaceAsync(AppId, EnvironmentId, nsValue);
+        await GovernanceService.SaveNamespaceAsync(TenantId, AppId, EnvironmentId, nsValue);
         nsValue = string.IsNullOrWhiteSpace(nsValue) ? "" : nsValue.Trim().ToLowerInvariant();
 
-        quota = await GovernanceService.SaveQuotaAsync(AppId, EnvironmentId,
+        quota = await GovernanceService.SaveQuotaAsync(TenantId, AppId, EnvironmentId,
             qCpuReq, qCpuLim, qMemReq, qMemLim, qMaxPods, qMaxPvcs);
 
         if (!string.IsNullOrWhiteSpace(rbacSaName))
-            rbacPolicy = await GovernanceService.SaveRbacPolicyAsync(AppId, EnvironmentId, rbacSaName, rbacAutoMount);
+            rbacPolicy = await GovernanceService.SaveRbacPolicyAsync(TenantId, AppId, EnvironmentId, rbacSaName, rbacAutoMount);
 
         // Only apply to clusters that have a deployment for this app+environment.
         List<AppDeployment> envDeployments = (await DeploymentService.GetDeploymentsAsync(AppId))

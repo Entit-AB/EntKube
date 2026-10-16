@@ -1095,7 +1095,7 @@
 {
     @if (IsPortalView)
     {
-        <AppGovernancePanel AppId="App.Id" AppName="@App.Name" EnvironmentId="Environment.Id" CustomerId="App.CustomerId" />
+        <AppGovernancePanel TenantId="TenantId" AppId="App.Id" AppName="@App.Name" EnvironmentId="Environment.Id" CustomerId="App.CustomerId" />
     }
     else
     {
@@ -2632,7 +2632,7 @@
             newDeployClusterId = envClusters[0].Id;
         try
         {
-            governanceNamespace = await AppGovernanceService.GetNamespaceAsync(App.Id, Environment.Id);
+            governanceNamespace = await AppGovernanceService.GetNamespaceAsync(TenantId, App.Id, Environment.Id);
         }
         catch
         {
@@ -2648,7 +2648,7 @@
         if (deployments is null) await LoadDeployments();
         try
         {
-            governanceNamespace = await AppGovernanceService.GetNamespaceAsync(App.Id, Environment.Id);
+            governanceNamespace = await AppGovernanceService.GetNamespaceAsync(TenantId, App.Id, Environment.Id);
         }
         catch
         {

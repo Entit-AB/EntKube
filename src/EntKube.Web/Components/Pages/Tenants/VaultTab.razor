@@ -1310,7 +1310,7 @@ else
             secrets = await VaultService.GetAppSecretsAsync(TenantId, selectedAppId);
 
             // Offer only the environments this app is linked to (plus "shared").
-            List<AppEnvironment> appEnvs = await AppGovernanceService.GetAppEnvironmentsAsync(selectedAppId);
+            List<AppEnvironment> appEnvs = await AppGovernanceService.GetAppEnvironmentsAsync(TenantId, selectedAppId);
             appEnvironmentOptions = appEnvs
                 .Select(ae => (environmentNames.GetValueOrDefault(ae.EnvironmentId, "Unknown env"), ae.EnvironmentId))
                 .ToList();
