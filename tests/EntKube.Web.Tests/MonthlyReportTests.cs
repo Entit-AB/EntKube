@@ -77,7 +77,14 @@ public class MonthlyReportTests : IDisposable
         ContractService contracts = new(factory);
         tickets = new TicketService(factory, contracts, SilentTicketNotifier.For(factory));
         time = new TimeService(factory, contracts);
-        reports = new MonthlyReportService(factory, tickets, time, contracts);
+        // The real contract implementations over the same connection, not mocks: the report's
+        // deployments, health samples and maintenance windows now arrive through IDeliveryApi and
+        // IFleetApi, and a mock would assert that I called them rather than that the answer is
+        // right. One factory satisfies every module context, so this costs nothing.
+        reports = new MonthlyReportService(
+            factory, tickets, time, contracts,
+            new EntKube.Web.Modules.Api.DeliveryApi(factory),
+            new EntKube.Web.Modules.Api.FleetApi(factory));
     }
 
     public void Dispose()
@@ -116,7 +123,7 @@ public class MonthlyReportTests : IDisposable
         await Raise(TicketPriority.P3, Tue(10));
         await Raise(TicketPriority.P3, Tue(11));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.TotalRaised.Should().Be(3);
         report.ByPriority.Single(p => p.Priority == TicketPriority.P3).Raised.Should().Be(2);
@@ -131,7 +138,7 @@ public class MonthlyReportTests : IDisposable
         await tickets.ResolveAsync(first.Id, "Fixed.", "nils", Tue(11));
         await tickets.ResolveAsync(second.Id, "Fixed.", "nils", Tue(13));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
         PriorityRow row = report.ByPriority.Single(p => p.Priority == TicketPriority.P3);
 
         row.Resolved.Should().Be(2);
@@ -145,7 +152,7 @@ public class MonthlyReportTests : IDisposable
         await Raise(TicketPriority.P1, Swedish(2026, 8, 18, 9));
         await Raise(TicketPriority.P1, Tue(9));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.TotalRaised.Should().Be(1);
     }
@@ -157,7 +164,7 @@ public class MonthlyReportTests : IDisposable
         await tickets.CloseAsync(closed.Id, "nils", Tue(12));
         await Raise(TicketPriority.P3, Tue(10));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.OpenAtMonthEnd.Should().Be(1);
     }
@@ -174,7 +181,7 @@ public class MonthlyReportTests : IDisposable
     {
         await RaiseWithLateResponse(TicketPriority.P1, Tue(9));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.WindowFee.Should().Be(6_000m);
         report.PenaltyDeviations.Should().Be(1);
@@ -187,7 +194,7 @@ public class MonthlyReportTests : IDisposable
         await RaiseWithLateResponse(TicketPriority.P1, Tue(9));
         await RaiseWithLateResponse(TicketPriority.P2, Tue(9));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.PenaltyDeviations.Should().Be(2);
         report.PenaltyAmount.Should().Be(1_200m);
@@ -204,7 +211,7 @@ public class MonthlyReportTests : IDisposable
         await tickets.RecordResponseAsync(ticket.Id, "nils", Tue(10));
         await tickets.ResolveAsync(ticket.Id, "Took a while.", "nils", Swedish(2026, 9, 24, 16));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
         PriorityRow row = report.ByPriority.Single(p => p.Priority == TicketPriority.P1);
 
         row.ResolutionOverruns.Should().Be(1);
@@ -218,7 +225,7 @@ public class MonthlyReportTests : IDisposable
         Ticket ticket = await Raise(TicketPriority.P3, Tue(9));
         await tickets.RecordResponseAsync(ticket.Id, "nils", Swedish(2026, 9, 25, 9));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.PenaltyDeviations.Should().Be(0);
     }
@@ -230,7 +237,7 @@ public class MonthlyReportTests : IDisposable
         await tickets.ExcludeFromSlaAsync(
             ticket.Id, "Force majeure — regional power outage.", "nils", Tue(16));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.PenaltyDeviations.Should().Be(0);
         report.PenaltyAmount.Should().Be(0m);
@@ -247,7 +254,7 @@ public class MonthlyReportTests : IDisposable
         await RaiseWithLateResponse(TicketPriority.P1, Swedish(2026, 8, 18, 9));
         await RaiseWithLateResponse(TicketPriority.P1, Tue(9));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.PenaltiesAlreadyThisYear.Should().Be(2);
         report.PenaltyDeviations.Should().Be(1);
@@ -259,7 +266,7 @@ public class MonthlyReportTests : IDisposable
     {
         await RaiseWithLateResponse(TicketPriority.P1, Swedish(2025, 11, 18, 9));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.PenaltiesAlreadyThisYear.Should().Be(0);
     }
@@ -275,7 +282,7 @@ public class MonthlyReportTests : IDisposable
         await RaiseWithLateResponse(TicketPriority.P2, Swedish(2026, 8, 18, 9));
         await RaiseWithLateResponse(TicketPriority.P1, Tue(9));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.ActionPlanRequired.Should().BeTrue();
     }
@@ -286,7 +293,7 @@ public class MonthlyReportTests : IDisposable
         await RaiseWithLateResponse(TicketPriority.P1, Swedish(2026, 8, 18, 9));
         await RaiseWithLateResponse(TicketPriority.P1, Tue(9));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.ActionPlanRequired.Should().BeFalse();
     }
@@ -333,7 +340,7 @@ public class MonthlyReportTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
         AvailabilityRow row = report.Availability.Should().ContainSingle().Subject;
 
         row.AppName.Should().Be("Records portal");
@@ -369,7 +376,7 @@ public class MonthlyReportTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         AvailabilityRow row = report.Availability.Should().ContainSingle().Subject;
         row.UptimePercent.Should().BeNull();
@@ -412,7 +419,7 @@ public class MonthlyReportTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
         AvailabilityRow row = report.Availability.Should().ContainSingle().Subject;
 
         row.SampleCount.Should().Be(6);
@@ -450,7 +457,7 @@ public class MonthlyReportTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
         AvailabilityRow row = report.Availability.Should().ContainSingle().Subject;
 
         row.ExcludedSamples.Should().Be(1);
@@ -488,7 +495,7 @@ public class MonthlyReportTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
         AvailabilityRow row = report.Availability.Should().ContainSingle().Subject;
 
         row.ExcludedSamples.Should().Be(0);
@@ -510,7 +517,7 @@ public class MonthlyReportTests : IDisposable
         await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
         await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         OutstandingIncidentReport owed =
             report.OutstandingReports.Should().ContainSingle().Subject;
@@ -529,7 +536,7 @@ public class MonthlyReportTests : IDisposable
 
         await tickets.RecordIncidentReportAsync(ticket.Id, "nils", Tue(13));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.OutstandingReports.Should().BeEmpty();
     }
@@ -542,7 +549,7 @@ public class MonthlyReportTests : IDisposable
         await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
         await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.OutstandingReports.Should().BeEmpty();
     }
@@ -553,7 +560,7 @@ public class MonthlyReportTests : IDisposable
     {
         await Raise(TicketPriority.P1, Tue(9));
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.OutstandingReports.Should().BeEmpty();
     }
@@ -581,7 +588,7 @@ public class MonthlyReportTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
         ShortNoticeWindow row = report.ShortNoticeMaintenance.Should().ContainSingle().Subject;
 
         row.Title.Should().Be("Urgent index rebuild");
@@ -605,7 +612,7 @@ public class MonthlyReportTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.ShortNoticeMaintenance.Should().BeEmpty();
     }
@@ -635,7 +642,7 @@ public class MonthlyReportTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.ShortNoticeMaintenance.Should().BeEmpty();
     }
@@ -659,7 +666,7 @@ public class MonthlyReportTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.ShortNoticeMaintenance.Should().ContainSingle()
             .Which.Title.Should().Be("Platform upgrade");
@@ -682,7 +689,7 @@ public class MonthlyReportTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.ShortNoticeMaintenance.Should().BeEmpty();
     }
@@ -745,7 +752,7 @@ public class MonthlyReportTests : IDisposable
             tenantId, customerId, appId, null, Tue(9), Tue(13),
             WorkKind.Management, "Investigation", "nils");
 
-        MonthlyReport report = await reports.BuildAsync(customerId, September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
         report.Timebank.EntitledHours.Should().Be(20m);
         report.Timebank.DrawnHours.Should().Be(4m);
@@ -756,9 +763,36 @@ public class MonthlyReportTests : IDisposable
     [Fact]
     public async Task A_customer_that_does_not_exist_reports_nothing()
     {
-        MonthlyReport report = await reports.BuildAsync(Guid.NewGuid(), September);
+        MonthlyReport report = await reports.BuildAsync(tenantId, Guid.NewGuid(), September);
 
         report.TotalRaised.Should().Be(0);
         report.PenaltyAmount.Should().Be(0m);
+    }
+
+    /// <summary>
+    /// The report is a customer-facing document — availability per application, ticket counts,
+    /// timebank, penalties, and the maintenance that touched their clusters. It used to be built
+    /// from a customer id alone, with the tenant read back off the row that id loaded, so any
+    /// customer id in the installation produced that customer's report.
+    ///
+    /// <para>Asked as a stranger it must report nothing, and the tickets are the assertion that
+    /// bites: the fixture raises three for this customer, so a report that still counts them is
+    /// one that never consulted the tenant.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_asking_for_someone_else_s_customer_reports_nothing()
+    {
+        await Raise(TicketPriority.P1, Tue(9));
+        await Raise(TicketPriority.P3, Tue(10));
+
+        MonthlyReport mine = await reports.BuildAsync(tenantId, customerId, September);
+        mine.TotalRaised.Should().Be(2, "the owner still gets their report");
+
+        MonthlyReport theirs = await reports.BuildAsync(Guid.NewGuid(), customerId, September);
+
+        theirs.CustomerName.Should().BeEmpty();
+        theirs.TotalRaised.Should().Be(0);
+        theirs.Availability.Should().BeEmpty();
+        theirs.ShortNoticeMaintenance.Should().BeEmpty();
     }
 }
