@@ -138,7 +138,7 @@ public class TimeServiceTests : IDisposable
         Guid ticket = AddTicket();
         await Log(Tue(9), Tue(12), ticket);
 
-        TimebankStatement statement = await time.GetTimebankAsync(customerId, September);
+        TimebankStatement statement = await time.GetTimebankAsync(tenantId, customerId, September);
 
         statement.EntitledHours.Should().Be(20m);
         statement.DrawnHours.Should().Be(3m);
@@ -154,7 +154,7 @@ public class TimeServiceTests : IDisposable
         Guid ticket = AddTicket();
         await Log(Sat(10), Sat(12), ticket);
 
-        TimebankStatement statement = await time.GetTimebankAsync(customerId, September);
+        TimebankStatement statement = await time.GetTimebankAsync(tenantId, customerId, September);
 
         statement.DrawnHours.Should().Be(3m);
         statement.ByCategory[SupportTimeCategory.WeekendOrRedDay].Should().Be(3m);
@@ -172,9 +172,8 @@ public class TimeServiceTests : IDisposable
         Guid ticket = AddTicket();
         await Log(Swedish(2026, 8, 18, 9), Swedish(2026, 8, 18, 17), ticket);
 
-        TimebankStatement august = await time.GetTimebankAsync(
-            customerId, new DateTime(2026, 8, 15, 0, 0, 0, DateTimeKind.Utc));
-        TimebankStatement september = await time.GetTimebankAsync(customerId, September);
+        TimebankStatement august = await time.GetTimebankAsync(tenantId, customerId, new DateTime(2026, 8, 15, 0, 0, 0, DateTimeKind.Utc));
+        TimebankStatement september = await time.GetTimebankAsync(tenantId, customerId, September);
 
         august.DrawnHours.Should().Be(8m);
         september.DrawnHours.Should().Be(0m);
@@ -192,7 +191,7 @@ public class TimeServiceTests : IDisposable
         Guid ticket = AddTicket();
         await Log(Tue(9), Tue(14), ticket);
 
-        TimebankStatement statement = await time.GetTimebankAsync(customerId, September);
+        TimebankStatement statement = await time.GetTimebankAsync(tenantId, customerId, September);
 
         statement.ExpiringHours.Should().Be(15m);
     }
@@ -204,7 +203,7 @@ public class TimeServiceTests : IDisposable
         Guid ticket = AddTicket();
         await Log(Tue(9), Tue(14), ticket);
 
-        TimebankStatement statement = await time.GetTimebankAsync(customerId, September);
+        TimebankStatement statement = await time.GetTimebankAsync(tenantId, customerId, September);
 
         statement.DrawnHours.Should().Be(5m);
         statement.OverspillHours.Should().Be(3m);
@@ -219,7 +218,7 @@ public class TimeServiceTests : IDisposable
         Guid ticket = AddTicket();
         await Log(Tue(9), Tue(12), ticket);
 
-        TimebankStatement statement = await time.GetTimebankAsync(customerId, September);
+        TimebankStatement statement = await time.GetTimebankAsync(tenantId, customerId, September);
 
         statement.EntitledHours.Should().BeNull();
         statement.OverspillHours.Should().Be(0m);
@@ -235,9 +234,8 @@ public class TimeServiceTests : IDisposable
         UseHourBank(20m);
         await Log(Tue(9), Tue(13), null, WorkKind.Development);
 
-        TimebankStatement bank = await time.GetTimebankAsync(customerId, September);
-        CommittedHoursStatement committed = await time.GetCommittedHoursAsync(
-            customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+        TimebankStatement bank = await time.GetTimebankAsync(tenantId, customerId, September);
+        CommittedHoursStatement committed = await time.GetCommittedHoursAsync(tenantId, customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
 
         bank.DrawnHours.Should().Be(0m);
         committed.TotalHours.Should().Be(4m);
@@ -259,7 +257,7 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(16), Tue(18), ticket);
 
         (DateTime from, DateTime to) = TimeService.MonthBounds(September);
-        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(customerId, from, to);
+        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(tenantId, customerId, from, to);
 
         statement.Lines.Should().HaveCount(2);
         statement.Lines.Should().OnlyContain(l =>
@@ -284,7 +282,7 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(9), Tue(11));
 
         (DateTime from, DateTime to) = TimeService.MonthBounds(September);
-        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(customerId, from, to);
+        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(tenantId, customerId, from, to);
 
         statement.TotalHours.Should().Be(2m);
     }
@@ -326,7 +324,7 @@ public class TimeServiceTests : IDisposable
         stored.StartedAt.Kind.Should().Be(DateTimeKind.Unspecified,
             "the database does not preserve Kind — the calendar has to assume UTC");
 
-        TimebankStatement statement = await time.GetTimebankAsync(customerId, September);
+        TimebankStatement statement = await time.GetTimebankAsync(tenantId, customerId, September);
 
         statement.DrawnHours.Should().Be(3m);
         statement.ByCategory.Should().ContainKey(SupportTimeCategory.Ordinary);
@@ -347,7 +345,7 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(9), Tue(14), ticket);
 
         (DateTime from, DateTime to) = TimeService.MonthBounds(September);
-        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(customerId, from, to);
+        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(tenantId, customerId, from, to);
 
         statement.UnauthorisedHours.Should().Be(3m);
     }
@@ -366,7 +364,7 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(9), Tue(14), ticket);
 
         (DateTime from, DateTime to) = TimeService.MonthBounds(September);
-        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(customerId, from, to);
+        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(tenantId, customerId, from, to);
 
         statement.UnauthorisedHours.Should().Be(0m);
     }
@@ -388,7 +386,7 @@ public class TimeServiceTests : IDisposable
         });
 
         (DateTime from, DateTime to) = TimeService.MonthBounds(September);
-        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(customerId, from, to);
+        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(tenantId, customerId, from, to);
 
         statement.UnauthorisedHours.Should().Be(0m);
     }
@@ -410,7 +408,7 @@ public class TimeServiceTests : IDisposable
         });
 
         (DateTime from, DateTime to) = TimeService.MonthBounds(September);
-        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(customerId, from, to);
+        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(tenantId, customerId, from, to);
 
         statement.UnauthorisedHours.Should().Be(0m);
     }
@@ -423,7 +421,7 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(9), Tue(17), ticket);
 
         (DateTime from, DateTime to) = TimeService.MonthBounds(September);
-        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(customerId, from, to);
+        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(tenantId, customerId, from, to);
 
         statement.UnauthorisedHours.Should().Be(0m);
         statement.TotalHours.Should().Be(8m);
@@ -443,13 +441,13 @@ public class TimeServiceTests : IDisposable
         await Log(Sat(23), Sat(23, 30), ticket);
 
         (DateTime from, DateTime to) = TimeService.MonthBounds(September);
-        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(customerId, from, to);
+        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(tenantId, customerId, from, to);
 
         statement.Lines.Should().ContainSingle()
             .Which.Category.Should().Be(SupportTimeCategory.Callout);
         statement.TotalHours.Should().Be(2m);
 
-        TimebankStatement bank = await time.GetTimebankAsync(customerId, September);
+        TimebankStatement bank = await time.GetTimebankAsync(tenantId, customerId, September);
         bank.DrawnHours.Should().Be(4m);
     }
 
@@ -498,8 +496,7 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(9), Tue(12));          // three billable hours against a ceiling of two
 
         CommittedHoursStatement committed =
-            await time.GetCommittedHoursAsync(
-                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+            await time.GetCommittedHoursAsync(tenantId, customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
 
         committed.UnauthorisedHours.Should().Be(1m);
     }
@@ -513,8 +510,7 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(9), Tue(12));
 
         CommittedHoursStatement committed =
-            await time.GetCommittedHoursAsync(
-                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+            await time.GetCommittedHoursAsync(tenantId, customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
 
         committed.UnauthorisedHours.Should().Be(0m);
     }
@@ -528,8 +524,7 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(9), Tue(17));
 
         CommittedHoursStatement committed =
-            await time.GetCommittedHoursAsync(
-                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+            await time.GetCommittedHoursAsync(tenantId, customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
 
         committed.UnauthorisedHours.Should().Be(0m);
     }
@@ -547,8 +542,7 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(9), Tue(12), AddTicket(TicketPriority.P1));
 
         CommittedHoursStatement committed =
-            await time.GetCommittedHoursAsync(
-                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+            await time.GetCommittedHoursAsync(tenantId, customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
 
         committed.UnauthorisedHours.Should().Be(0m);
     }
@@ -568,8 +562,7 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(13), Tue(14), AddTicket(TicketPriority.P1));   // excused
 
         CommittedHoursStatement committed =
-            await time.GetCommittedHoursAsync(
-                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+            await time.GetCommittedHoursAsync(tenantId, customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
 
         committed.UnauthorisedHours.Should().Be(2m);
     }
@@ -588,8 +581,7 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(9), Tue(12));
 
         CommittedHoursStatement committed =
-            await time.GetCommittedHoursAsync(
-                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+            await time.GetCommittedHoursAsync(tenantId, customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
 
         committed.UnauthorisedHours.Should().Be(0m);
     }
@@ -608,8 +600,7 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(12), Tue(14));              // not
 
         CommittedHoursStatement committed =
-            await time.GetCommittedHoursAsync(
-                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+            await time.GetCommittedHoursAsync(tenantId, customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
 
         committed.UnauthorisedHours.Should().BeGreaterThan(0m);
     }
@@ -628,9 +619,37 @@ public class TimeServiceTests : IDisposable
         await Log(Tue(9), Tue(12));
 
         CommittedHoursStatement committed =
-            await time.GetCommittedHoursAsync(
-                customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
+            await time.GetCommittedHoursAsync(tenantId, customerId, TimeService.MonthBounds(September).From, TimeService.MonthBounds(September).To);
 
         committed.UnauthorisedHours.Should().Be(0m, "the bank has plenty left");
+    }
+    /// <summary>
+    /// The timebank and the committed-hours statement are billing figures — hours drawn against
+    /// an hour bank, hours committed against an agreement — and <c>CustomerHoursPanel</c> shows
+    /// them to a customer in the portal. Both were keyed by a customer id alone.
+    ///
+    /// <para>The check is at the boundary rather than threaded through the chain: everything
+    /// below is keyed by the customer id, so once that id is proven to be this tenant's, the
+    /// portfolio agreement, the work passes and the app names are all scoped by construction.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_read_another_tenants_timebank_or_committed_hours()
+    {
+        DateTime month = new(2026, 9, 1, 0, 0, 0, DateTimeKind.Utc);
+        Guid stranger = Guid.NewGuid();
+
+        Func<Task> bank = () => time.GetTimebankAsync(stranger, customerId, month);
+        await bank.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*does not belong to this tenant*");
+
+        Func<Task> committed = () => time.GetCommittedHoursAsync(
+            stranger, customerId, month, month.AddMonths(1));
+        await committed.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*does not belong to this tenant*");
+
+        // The owner still gets an answer.
+        (await time.GetTimebankAsync(tenantId, customerId, month)).Should().NotBeNull();
+        (await time.GetCommittedHoursAsync(tenantId, customerId, month, month.AddMonths(1)))
+            .Should().NotBeNull();
     }
 }

@@ -247,10 +247,10 @@
 
         try
         {
-            bank = await Time.GetTimebankAsync(Customer.Id, month);
+            bank = await Time.GetTimebankAsync(Customer.TenantId, Customer.Id, month);
 
             (DateTime from, DateTime to) = TimeService.MonthBounds(month);
-            committed = await Time.GetCommittedHoursAsync(Customer.Id, from, to);
+            committed = await Time.GetCommittedHoursAsync(Customer.TenantId, Customer.Id, from, to);
 
             // A blanket approval for the month is what clears the gate; the service treats
             // it the same way when it decides which hours went ahead unauthorised.

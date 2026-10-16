@@ -282,8 +282,8 @@ public class MonthlyReportService(
                 t.CustomerId == customerId
                 && t.ReportedAt < to
                 && (t.ClosedAt == null || t.ClosedAt >= to), ct),
-            await time.GetTimebankAsync(customerId, from, ct),
-            await time.GetCommittedHoursAsync(customerId, from, to, ct),
+            await time.GetTimebankAsync(tenantId, customerId, from, ct),
+            await time.GetCommittedHoursAsync(tenantId, customerId, from, to, ct),
             penaltyDeviations,
             penalty,
             fees.WindowFee,

@@ -94,6 +94,20 @@ public class TimeService(
     IDbContextFactory<SupportDbContext> dbFactory,
     ContractService contracts)
 {
+    /// <summary>
+    /// Whether a customer is this tenant's. One query, at the entry points that take a customer
+    /// id from a caller — the rest of this service is keyed by that id and needs no further
+    /// check once it has been proven.
+    /// </summary>
+    private async Task<bool> CustomerBelongsToTenantAsync(
+        Guid tenantId, Guid customerId, CancellationToken ct)
+    {
+        using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        return await db.Customers
+            .AnyAsync(c => c.Id == customerId && c.TenantId == tenantId, ct);
+    }
+
     /// <summary>Records a stretch of work.</summary>
     public async Task<TimeEntry> LogAsync(
         Guid tenantId,
@@ -168,9 +182,24 @@ public class TimeService(
     /// month's entries rather than stored, because §11.1 makes the bank non-rolling: every
     /// month starts again at the agreed number, and a counter would drift.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose customer. Checked once here, at the boundary: everything below is keyed by
+    /// <paramref name="customerId"/>, and once that id is proven to be this tenant's the chain
+    /// (the portfolio agreement, the work passes, the app names) is scoped by construction.
+    ///
+    /// <para>These are billing figures — hours drawn against an hour bank, and hours committed
+    /// against an agreement — shown to a customer in the portal, and they were keyed by a
+    /// customer id alone.</para>
+    /// </param>
     public async Task<TimebankStatement> GetTimebankAsync(
-        Guid customerId, DateTime month, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, DateTime month, CancellationToken ct = default)
     {
+        if (!await CustomerBelongsToTenantAsync(tenantId, customerId, ct))
+        {
+            throw new InvalidOperationException(
+                "Customer not found, or it does not belong to this tenant.");
+        }
+
         (DateTime from, DateTime to) = MonthBounds(month);
 
         PortfolioAgreement? agreement = await contracts.GetPortfolioAgreementAsync(customerId, from, ct);
@@ -202,9 +231,25 @@ public class TimeService(
     /// The hours committed in a period, at the granularity §20 requires so the customer can
     /// validate them.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose customer. Checked once here, at the boundary: everything below is keyed by
+    /// <paramref name="customerId"/>, and once that id is proven to be this tenant's the chain
+    /// (the portfolio agreement, the work passes, the app names) is scoped by construction.
+    ///
+    /// <para>These are billing figures — hours drawn against an hour bank, and hours committed
+    /// against an agreement — shown to a customer in the portal, and they were keyed by a
+    /// customer id alone.</para>
+    /// </param>
     public async Task<CommittedHoursStatement> GetCommittedHoursAsync(
-        Guid customerId, DateTime from, DateTime to, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, DateTime from, DateTime to,
+        CancellationToken ct = default)
     {
+        if (!await CustomerBelongsToTenantAsync(tenantId, customerId, ct))
+        {
+            throw new InvalidOperationException(
+                "Customer not found, or it does not belong to this tenant.");
+        }
+
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         Dictionary<Guid, string> appNames = await db.Apps.AsNoTracking()
