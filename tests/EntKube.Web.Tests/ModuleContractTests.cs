@@ -241,6 +241,43 @@ public class ModuleContractTests
     /// that renders windows still reads the entity and brings what it displays when it moves. Same
     /// rule that refused <c>DeploymentSummary.CustomerName</c>.</para>
     ///
+    /// <para><b>Mail 2 → 1.</b> <c>StalwartDnsService</c> touches <c>StalwartMailDomains</c> and
+    /// <c>StalwartComponentConfigs</c>, both Mail's own, and nothing else — the only service in
+    /// four modules whose table census was already clean. The swap was the context type and one
+    /// helper signature. <c>StalwartService</c> is the one left: six foreign read tables, six
+    /// signatures, and a <c>Set&lt;VaultSecret&gt;()</c> that would compile under
+    /// <c>MailDbContext</c> and throw at runtime, because <c>VaultSecret</c> is not in
+    /// <c>MailModel</c> — the <c>Set&lt;T&gt;()</c> hole again, failing late instead of
+    /// silently.</para>
+    ///
+    /// <para>⚠️ <b>The Delivery paragraph below was restored, not written: the merge of its PR kept
+    /// the constant and dropped the prose.</b> That is the second time a merge has done this — the
+    /// first dropped a whole section of <c>docs/decomposition.md</c> explaining an ungated delete.
+    /// The failure is worse than a wrong number, because a number that is wrong fails a test and a
+    /// paragraph that is missing fails nothing. When two branches both edit one doc-comment block,
+    /// check the prose survived, not just the figure.</para>
+    ///
+    /// <para><b>Delivery 6 → 3</b>, and all three were already eligible — nobody had looked.
+    /// <c>KedaScalerService</c> and <c>KyvernoPolicyService</c> touch only Delivery's own tables
+    /// plus the read-only cluster hub, so the swap was the context type and six private helper
+    /// signatures that named <c>ApplicationDbContext</c> explicitly. ⚠️ Those helpers are the part
+    /// a table census misses: every table was eligible and the file still would not compile, which
+    /// is worth knowing before trusting any measurement of "could swap today".</para>
+    ///
+    /// <para><c>GitOperationsService</c> took the context and <b>never used it</b> — the compiler
+    /// had been saying so for some time (<c>CS9113: Parameter 'dbFactory' is unread</c>). Deleting
+    /// the parameter moved this ratchet. A service counted as holding the god context while not
+    /// holding a database at all is the cheapest possible entry on this list, and it sat there
+    /// because the count was read and the warning was not.</para>
+    ///
+    /// <para>The three that remain each touch another module's table in a way no <em>read</em>
+    /// contract removes: <c>AppGovernanceService</c> does CRUD on Connectivity's
+    /// <c>AppNetworkPolicies</c> and reads five DataServices tables for its picker lists;
+    /// <c>PortalServiceScopeService</c> reads three binding tables, all set-valued restatements of
+    /// methods DataServices already owns per deployment; and <c>DeploymentImportService</c> inserts
+    /// a <c>DatabaseBinding</c> with <c>SyncEnabled = false</c>, which the owner-side twin cannot
+    /// express because it defaults that to true.</para>
+    ///
     /// <para><b>Connectivity 7 → 4</b>, and all three went off the same way the earlier ones did:
     /// their Catalog reads moved to <c>ICatalogApi</c> and their credential to the seam first, and
     /// then there was nothing left to hold the shared context for. <c>VpnService</c> touches only
@@ -324,7 +361,7 @@ public class ModuleContractTests
         [Module.Delivery] = 3,
         [Module.Identity] = 4,
         [Module.Fleet] = 2,
-        [Module.Mail] = 2,
+        [Module.Mail] = 1,
         [Module.Cost] = 0,
         [Module.Advisor] = 1,
         [Module.Secrets] = 0,

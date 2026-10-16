@@ -56,7 +56,9 @@ public class VeleroSeamTests : IDisposable
         sut = new VeleroService(
             testDb.Factory,
             new ClusterClientFactory(testDb.Factory, k8s.Object),
-            null!, vault,
+            null!,
+            new EntKube.Web.Modules.Api.DataServicesApi(testDb.Factory),
+            vault,
             new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             NullLogger<VeleroService>.Instance);
     }
