@@ -290,7 +290,7 @@
     private async Task LoadAsync()
     {
         List<AppL4Route> all = await L4RouteService.GetRoutesForAppAsync(TenantId, App.Id);
-        List<AppDeployment> allDeployments = await DeploymentService.GetDeploymentsAsync(App.Id);
+        List<AppDeployment> allDeployments = await DeploymentService.GetDeploymentsAsync(TenantId, App.Id);
 
         if (EnvironmentId.HasValue)
         {

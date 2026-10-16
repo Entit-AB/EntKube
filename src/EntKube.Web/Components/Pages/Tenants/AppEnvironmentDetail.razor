@@ -2658,7 +2658,7 @@
 
     private async Task LoadDeployments()
     {
-        List<AppDeployment> all = await DeploymentService.GetDeploymentsAsync(App.Id);
+        List<AppDeployment> all = await DeploymentService.GetDeploymentsAsync(TenantId, App.Id);
         deployments = all.Where(d => d.EnvironmentId == Environment.Id).ToList();
     }
 
@@ -2713,7 +2713,7 @@
         try
         {
             await DeploymentService.CreateDeploymentAsync(
-                App.Id, newDeployName, newDeployType,
+                TenantId, App.Id, newDeployName, newDeployType,
                 Environment.Id, newDeployClusterId, effectiveNs,
                 isHelm ? newHelmRepoUrl : null,
                 isHelm ? newHelmChartName : null,
@@ -2767,7 +2767,7 @@
         try
         {
             string name = selectedDeployment.Name;
-            await DeploymentService.DeleteDeploymentAsync(selectedDeployment.Id);
+            await DeploymentService.DeleteDeploymentAsync(TenantId, selectedDeployment.Id);
             selectedDeployment = null;
             confirmDeleteDeployment = false;
             await LoadDeployments();
@@ -2803,7 +2803,7 @@
                 return;
             }
 
-            await DeploymentService.DeleteDeploymentAsync(selectedDeployment.Id);
+            await DeploymentService.DeleteDeploymentAsync(TenantId, selectedDeployment.Id);
             selectedDeployment = null;
             confirmDeleteDeployment = false;
             await LoadDeployments();
@@ -2871,7 +2871,7 @@
             if (editGitUrlError is not null) { editGitError = editGitUrlError; return; }
 
             await DeploymentService.UpdateGitSettingsAsync(
-                selectedDeployment.Id,
+                TenantId, selectedDeployment.Id,
                 string.IsNullOrWhiteSpace(editGitUrl) ? null : editGitUrl.Trim(),
                 editGitPath, editGitRevision, editGitAutoSync);
             await LoadDeployments();
@@ -2891,7 +2891,7 @@
             string effectiveNs = !string.IsNullOrWhiteSpace(governanceNamespace) ? governanceNamespace : editDeployModel.Namespace;
             bool isHelm = selectedDeployment.Type is DeploymentType.HelmChart or DeploymentType.GitHelm;
             await DeploymentService.UpdateDeploymentAsync(
-                selectedDeployment.Id, editDeployModel.Name, effectiveNs,
+                TenantId, selectedDeployment.Id, editDeployModel.Name, effectiveNs,
                 isHelm ? editDeployModel.HelmRepoUrl : null,
                 isHelm ? editDeployModel.HelmChartName : null,
                 isHelm ? editDeployModel.HelmChartVersion : null);
@@ -2932,7 +2932,7 @@
     private async Task LoadManifests()
     {
         if (selectedDeployment is not null)
-            manifests = await DeploymentService.GetManifestsAsync(selectedDeployment.Id);
+            manifests = await DeploymentService.GetManifestsAsync(TenantId, selectedDeployment.Id);
     }
 
     private async Task AddManifest()
@@ -2942,7 +2942,7 @@
         try
         {
             await DeploymentService.AddManifestAsync(
-                selectedDeployment.Id, addManifestModel.Kind, addManifestModel.Name, addManifestModel.Yaml, addManifestModel.SortOrder);
+                TenantId, selectedDeployment.Id, addManifestModel.Kind, addManifestModel.Name, addManifestModel.Yaml, addManifestModel.SortOrder);
             showAddManifest = false; addManifestModel = new();
             await LoadManifests();
             Toasts.Success("Manifest added.");
@@ -2955,14 +2955,14 @@
     private async Task SaveManifest(Guid id)
     {
         savingManifest = true;
-        try { await DeploymentService.UpdateManifestAsync(id, editManifestYaml); editingManifestId = null; await LoadManifests(); }
+        try { await DeploymentService.UpdateManifestAsync(TenantId, id, editManifestYaml); editingManifestId = null; await LoadManifests(); }
         finally { savingManifest = false; }
     }
 
     private async Task DeleteManifest(Guid id)
     {
         confirmDeleteManifestId = null;
-        await DeploymentService.DeleteManifestAsync(id);
+        await DeploymentService.DeleteManifestAsync(TenantId, id);
         await LoadManifests();
     }
 
@@ -3027,7 +3027,7 @@
         {
             if (selectedDeployment is not null)
             {
-                await DeploymentService.UpdateHelmValuesAsync(selectedDeployment.Id, helmValuesYaml);
+                await DeploymentService.UpdateHelmValuesAsync(TenantId, selectedDeployment.Id, helmValuesYaml);
                 selectedDeployment.HelmValues = helmValuesYaml;
             }
             helmValuesSaved = true;
@@ -3052,7 +3052,7 @@
                 resourceTreeRefreshedAt = DateTime.UtcNow;
                 (SyncStatus sync, HealthStatus health) =
                     KubernetesOperationsService.ComputeStatusFromResources(resourceTree);
-                await DeploymentService.UpdateDeploymentStatusAsync(selectedDeployment.Id, sync, health);
+                await DeploymentService.UpdateDeploymentStatusAsync(TenantId, selectedDeployment.Id, sync, health);
                 selectedDeployment.SyncStatus = sync;
                 selectedDeployment.HealthStatus = health;
                 AppDeployment? listEntry = deployments?.FirstOrDefault(d => d.Id == selectedDeployment.Id);

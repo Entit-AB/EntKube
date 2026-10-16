@@ -21,6 +21,34 @@ public class DeploymentService(
     DeploymentStatusNotifier statusNotifier,
     ILogger<DeploymentService> logger)
 {
+    /// <summary>
+    /// Whether a deployment is this tenant's. <c>AppDeployment</c> has no <c>TenantId</c>, so the
+    /// scope travels through its app's customer — the same path every read below takes inline.
+    /// </summary>
+    private async Task<bool> DeploymentBelongsToTenantAsync(
+        Guid tenantId, Guid deploymentId, CancellationToken ct)
+    {
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
+
+        return await db.AppDeployments.AnyAsync(
+            d => d.Id == deploymentId && d.App.Customer.TenantId == tenantId, ct);
+    }
+
+    /// <summary>
+    /// Whether the app, the environment and the cluster a new deployment names are all this
+    /// tenant's. Three, not two: the cluster is where the manifests are actually applied, so a
+    /// deployment pointed at somebody else's cluster is the crossing that reaches a machine.
+    /// </summary>
+    private async Task<bool> TargetBelongsToTenantAsync(
+        Guid tenantId, Guid appId, Guid environmentId, Guid clusterId, CancellationToken ct)
+    {
+        using DeliveryDbContext db = dbFactory.CreateDbContext();
+
+        return await db.Apps.AnyAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct)
+            && await db.Environments.AnyAsync(e => e.Id == environmentId && e.TenantId == tenantId, ct)
+            && await db.KubernetesClusters.AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
+    }
+
     // ══════════════════════════════════════════════════════════════
     //  Deployment CRUD
     // ══════════════════════════════════════════════════════════════
@@ -53,7 +81,13 @@ public class DeploymentService(
                 $"Namespace '{ns}' is not allowed. Governance policy locks this environment to namespace '{locked}'.");
     }
 
+    /// <param name="tenantId">
+    /// Whose app, environment and cluster. A deployment is the record the sync loop acts on, so
+    /// creating one against another tenant's app is how work gets applied to their cluster under
+    /// our name.
+    /// </param>
     public async Task<AppDeployment> CreateDeploymentAsync(
+        Guid tenantId,
         Guid appId,
         string name,
         DeploymentType type,
@@ -71,6 +105,12 @@ public class DeploymentService(
         bool gitAutoSync = true,
         bool isManaged = true)
     {
+        if (!await TargetBelongsToTenantAsync(tenantId, appId, environmentId, clusterId, ct))
+        {
+            throw new InvalidOperationException(
+                "The app, the environment or the cluster does not belong to this tenant.");
+        }
+
         await EnforceNamespaceAsync(appId, environmentId, ns, ct);
 
         using DeliveryDbContext db = dbFactory.CreateDbContext();
@@ -110,14 +150,20 @@ public class DeploymentService(
     /// Returns all deployments for an app, including the related environment
     /// and cluster so the UI can show where each deployment targets.
     /// </summary>
-    public async Task<List<AppDeployment>> GetDeploymentsAsync(Guid appId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose app. A deployment row carries the namespace, the cluster and the git source, so
+    /// listing them for an arbitrary app id describes another tenant's estate — and
+    /// <c>CustomerPortal</c> is one of the eleven callers.
+    /// </param>
+    public async Task<List<AppDeployment>> GetDeploymentsAsync(
+        Guid tenantId, Guid appId, CancellationToken ct = default)
     {
         using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         return await db.AppDeployments
             .Include(d => d.Environment)
             .Include(d => d.Cluster)
-            .Where(d => d.AppId == appId)
+            .Where(d => d.AppId == appId && d.App.Customer.TenantId == tenantId)
             .OrderBy(d => d.CreatedAt)
             .ToListAsync(ct);
     }
@@ -126,7 +172,11 @@ public class DeploymentService(
     /// Updates the editable properties of a deployment. Type, environment, and cluster
     /// are structural and cannot change after creation.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose deployment. The namespace is editable here, and it decides where the next apply lands.
+    /// </param>
     public async Task UpdateDeploymentAsync(
+        Guid tenantId,
         Guid deploymentId,
         string name,
         string ns,
@@ -137,7 +187,9 @@ public class DeploymentService(
     {
         using DeliveryDbContext db = dbFactory.CreateDbContext();
 
-        AppDeployment? deployment = await db.AppDeployments.FindAsync([deploymentId], ct);
+        AppDeployment? deployment = await db.AppDeployments
+            .FirstOrDefaultAsync(
+                d => d.Id == deploymentId && d.App.Customer.TenantId == tenantId, ct);
 
         if (deployment is not null)
         {
@@ -155,7 +207,12 @@ public class DeploymentService(
     /// Updates the git source settings for a deployment. Resets sync state so the
     /// next sync cycle picks up the new configuration from scratch.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose deployment. The git URL is what the sync loop pulls from, so an edit here redirects
+    /// another tenant's workload at a repository of the editor's choosing.
+    /// </param>
     public async Task UpdateGitSettingsAsync(
+        Guid tenantId,
         Guid deploymentId,
         string? gitUrl,
         string? gitPath,
@@ -165,7 +222,9 @@ public class DeploymentService(
     {
         using DeliveryDbContext db = dbFactory.CreateDbContext();
 
-        AppDeployment? deployment = await db.AppDeployments.FindAsync([deploymentId], ct);
+        AppDeployment? deployment = await db.AppDeployments
+            .FirstOrDefaultAsync(
+                d => d.Id == deploymentId && d.App.Customer.TenantId == tenantId, ct);
 
         if (deployment is not null)
         {
@@ -184,11 +243,15 @@ public class DeploymentService(
     /// Deletes a deployment and all its manifests and tracked resources.
     /// EF cascade delete handles the child entities.
     /// </summary>
-    public async Task DeleteDeploymentAsync(Guid deploymentId, string? performedBy = null, CancellationToken ct = default)
+    /// <param name="tenantId">Whose deployment. The cascade takes its manifests and resources too.</param>
+    public async Task DeleteDeploymentAsync(
+        Guid tenantId, Guid deploymentId, string? performedBy = null, CancellationToken ct = default)
     {
         using DeliveryDbContext db = dbFactory.CreateDbContext();
 
-        AppDeployment? deployment = await db.AppDeployments.FindAsync([deploymentId], ct);
+        AppDeployment? deployment = await db.AppDeployments
+            .FirstOrDefaultAsync(
+                d => d.Id == deploymentId && d.App.Customer.TenantId == tenantId, ct);
 
         if (deployment is not null)
         {
@@ -210,7 +273,12 @@ public class DeploymentService(
     /// sequence — use lower numbers for foundational resources (PVCs, ConfigMaps)
     /// and higher numbers for workloads (Deployments, Services).
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose deployment. A manifest is raw YAML that will be applied to the deployment's cluster,
+    /// so adding one to a stranger's deployment is arbitrary cluster write access.
+    /// </param>
     public async Task<DeploymentManifest> AddManifestAsync(
+        Guid tenantId,
         Guid deploymentId,
         string kind,
         string name,
@@ -218,6 +286,11 @@ public class DeploymentService(
         int sortOrder,
         CancellationToken ct = default)
     {
+        if (!await DeploymentBelongsToTenantAsync(tenantId, deploymentId, ct))
+        {
+            throw new InvalidOperationException("The deployment does not belong to this tenant.");
+        }
+
         using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         DeploymentManifest manifest = new()
@@ -239,13 +312,16 @@ public class DeploymentService(
     /// Returns all manifests for a deployment, ordered by SortOrder so they
     /// can be applied to the cluster in the correct sequence.
     /// </summary>
+    /// <param name="tenantId">Whose deployment. A manifest is the YAML of a running workload.</param>
     public async Task<List<DeploymentManifest>> GetManifestsAsync(
-        Guid deploymentId, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentId, CancellationToken ct = default)
     {
         using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         return await db.DeploymentManifests
-            .Where(m => m.DeploymentId == deploymentId)
+            // DeploymentManifest has no TenantId; the scope runs manifest → deployment → app.
+            .Where(m => m.DeploymentId == deploymentId
+                     && m.Deployment.App.Customer.TenantId == tenantId)
             .OrderBy(m => m.SortOrder)
             .ToListAsync(ct);
     }
@@ -254,12 +330,19 @@ public class DeploymentService(
     /// Updates the YAML content of an existing manifest. Called when the user
     /// edits a manifest in the UI or re-imports updated YAML.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose manifest. Editing one rewrites what the next sync applies, so this is the write that
+    /// turns a stranger's deployment into whatever the editor pasted.
+    /// </param>
     public async Task UpdateManifestAsync(
-        Guid manifestId, string yamlContent, CancellationToken ct = default)
+        Guid tenantId, Guid manifestId, string yamlContent, CancellationToken ct = default)
     {
         using DeliveryDbContext db = dbFactory.CreateDbContext();
 
-        DeploymentManifest? manifest = await db.DeploymentManifests.FindAsync([manifestId], ct);
+        DeploymentManifest? manifest = await db.DeploymentManifests
+            .FirstOrDefaultAsync(
+                m => m.Id == manifestId
+                  && m.Deployment.App.Customer.TenantId == tenantId, ct);
 
         if (manifest is not null)
         {
@@ -272,11 +355,16 @@ public class DeploymentService(
     /// <summary>
     /// Removes a single manifest from a deployment.
     /// </summary>
-    public async Task DeleteManifestAsync(Guid manifestId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose manifest.</param>
+    public async Task DeleteManifestAsync(
+        Guid tenantId, Guid manifestId, CancellationToken ct = default)
     {
         using DeliveryDbContext db = dbFactory.CreateDbContext();
 
-        DeploymentManifest? manifest = await db.DeploymentManifests.FindAsync([manifestId], ct);
+        DeploymentManifest? manifest = await db.DeploymentManifests
+            .FirstOrDefaultAsync(
+                m => m.Id == manifestId
+                  && m.Deployment.App.Customer.TenantId == tenantId, ct);
 
         if (manifest is not null)
         {
@@ -293,12 +381,18 @@ public class DeploymentService(
     /// Stores the Helm values YAML for a Helm chart deployment. These values
     /// override the chart's defaults when the Helm release is installed/upgraded.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose deployment. Helm values are arbitrary chart input — image, replicas, mounted
+    /// secrets — so writing them into a stranger's release is remote control of their workload.
+    /// </param>
     public async Task UpdateHelmValuesAsync(
-        Guid deploymentId, string valuesYaml, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentId, string valuesYaml, CancellationToken ct = default)
     {
         using DeliveryDbContext db = dbFactory.CreateDbContext();
 
-        AppDeployment? deployment = await db.AppDeployments.FindAsync([deploymentId], ct);
+        AppDeployment? deployment = await db.AppDeployments
+            .FirstOrDefaultAsync(
+                d => d.Id == deploymentId && d.App.Customer.TenantId == tenantId, ct);
 
         if (deployment is not null)
         {
@@ -315,7 +409,12 @@ public class DeploymentService(
     /// Updates the overall sync and health status of a deployment. Called by
     /// the cluster watcher after reconciling live state against desired state.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose deployment. The caller is the sync sweep, which already walks one tenant at a time
+    /// and holds the tenant beside each deployment id — it simply never passed it.
+    /// </param>
     public async Task UpdateDeploymentStatusAsync(
+        Guid tenantId,
         Guid deploymentId,
         SyncStatus syncStatus,
         HealthStatus healthStatus,
@@ -324,7 +423,9 @@ public class DeploymentService(
     {
         using DeliveryDbContext db = dbFactory.CreateDbContext();
 
-        AppDeployment? deployment = await db.AppDeployments.FindAsync([deploymentId], ct);
+        AppDeployment? deployment = await db.AppDeployments
+            .FirstOrDefaultAsync(
+                d => d.Id == deploymentId && d.App.Customer.TenantId == tenantId, ct);
 
         if (deployment is not null)
         {
@@ -347,7 +448,13 @@ public class DeploymentService(
     /// If a matching resource already exists, its status is updated in place.
     /// This is how the cluster watcher reports live resource state.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose deployment. This is the watcher's write — the resource tree is what the UI shows as
+    /// live cluster state, so an unscoped upsert lets one tenant's reconciler post rows under
+    /// another's deployment and misreport their health.
+    /// </param>
     public async Task<DeploymentResource> UpsertResourceAsync(
+        Guid tenantId,
         Guid deploymentId,
         string group,
         string version,
@@ -360,6 +467,11 @@ public class DeploymentService(
         Guid? parentResourceId = null,
         CancellationToken ct = default)
     {
+        if (!await DeploymentBelongsToTenantAsync(tenantId, deploymentId, ct))
+        {
+            throw new InvalidOperationException("The deployment does not belong to this tenant.");
+        }
+
         using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         // Look for an existing resource with the same identity.
@@ -415,14 +527,19 @@ public class DeploymentService(
     /// eagerly loaded. This gives the UI the full resource tree for rendering
     /// the ArgoCD-style resource hierarchy.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose deployment. The tree names every live object and namespace the deployment owns.
+    /// </param>
     public async Task<List<DeploymentResource>> GetResourceTreeAsync(
-        Guid deploymentId, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentId, CancellationToken ct = default)
     {
         using DeliveryDbContext db = dbFactory.CreateDbContext();
 
         return await db.DeploymentResources
             .Include(r => r.ChildResources)
-            .Where(r => r.DeploymentId == deploymentId && r.ParentResourceId == null)
+            // DeploymentResource has no TenantId; the scope runs resource → deployment → app.
+            .Where(r => r.DeploymentId == deploymentId && r.ParentResourceId == null
+                     && r.Deployment.App.Customer.TenantId == tenantId)
             .OrderBy(r => r.Kind)
             .ThenBy(r => r.Name)
             .ToListAsync(ct);

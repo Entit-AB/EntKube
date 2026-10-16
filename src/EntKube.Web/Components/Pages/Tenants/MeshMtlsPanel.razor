@@ -139,7 +139,7 @@
         loading = true;
         try
         {
-            List<AppDeployment> deployments = await DeploymentService.GetDeploymentsAsync(AppId);
+            List<AppDeployment> deployments = await DeploymentService.GetDeploymentsAsync(TenantId, AppId);
             List<MeshMtlsPolicy> policies = await MeshMtls.GetPoliciesAsync(TenantId);
 
             // A single environment can span clusters, and two deployments can share a namespace —
