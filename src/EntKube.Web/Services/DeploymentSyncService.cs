@@ -39,7 +39,7 @@ public class DeploymentSyncService(
         using IDisposable unattended = scope.DeclareUnattended("deployment-sync");
 
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
-        var appDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var appDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
         var opsService = scope.ServiceProvider.GetRequiredService<KubernetesOperationsService>();
         var deploymentService = scope.ServiceProvider.GetRequiredService<DeploymentService>();
 
@@ -49,7 +49,7 @@ public class DeploymentSyncService(
         // cluster had a kubeconfig and then read each one's resources by id alone.
         List<(Guid TenantId, Guid DeploymentId)> targets = [];
 
-        using (ApplicationDbContext appDb = appDbFactory.CreateDbContext())
+        using (DeliveryDbContext appDb = appDbFactory.CreateDbContext())
         using (DeliveryDbContext db = dbFactory.CreateDbContext())
         {
             foreach (Guid tenantId in await appDb.Tenants.Select(t => t.Id).ToListAsync(ct))

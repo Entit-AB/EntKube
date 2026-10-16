@@ -460,6 +460,34 @@ public class ModuleContractTests
     /// method happens above that line; the comment there says so, in the imperative, because the
     /// next person to add a <c>SaveChanges</c> is who it is for.</para>
     ///
+    /// <para><b>Then six more came off at once, and every one of them was a sweep the metric had
+    /// been hiding: Delivery 6 → 3, Connectivity 6 → 4, Cost 1 → 0.</b>
+    /// <c>DeploymentSyncService</c>, <c>GitSyncService</c> and <c>RolloutWatcherService</c> touch
+    /// only <c>AppDeployments</c>, <c>DeploymentManifests</c>, <c>DeploymentRollouts</c>,
+    /// <c>RolloutPolicies</c> and <c>GitRepositories</c>; <c>AppL4RouteHealthService</c> and
+    /// <c>HeadscaleCertSyncService</c> only <c>AppL4Routes</c> and <c>ExternalRoutes</c>;
+    /// <c>ResourceUsageCollectorService</c> only <c>ResourceUsageSnapshots</c>. All own tables,
+    /// plus scalar reads of two hubs. No contract, no tidying, no behaviour change — six context
+    /// swaps that were available from the day the module contexts were written.</para>
+    ///
+    /// <para><b>Cost is now 0 for real, and this is the second time this module's zero has meant
+    /// two different things.</b> It read 0 while a collector swept every tenant on the all-seeing
+    /// context; it reads 0 now because that collector takes <c>CostDbContext</c>. The number did
+    /// not change. What it measures did.</para>
+    ///
+    /// <para>⚠️ The compiler is the adjudicator for a swap like this, not a grep. A scan for
+    /// <c>db.Table</c> cannot see a read that arrives through a navigation — the mistake this
+    /// file has recorded three times — whereas the narrower context simply fails to compile on a
+    /// table it does not expose, which is how <c>BootstrapRunnerService</c> stayed behind: it
+    /// writes <c>CnpgClusters</c>, <c>RabbitMQClusters</c> and <c>RedisClusters</c>, three
+    /// DataServices tables, so it is a contract's worth of work rather than a swap.</para>
+    ///
+    /// <para>The six were checked for one thing beyond compiling, because the hub change is not
+    /// type-visible: every hub read in them is a <em>scalar projection</em>
+    /// (<c>Select(t =&gt; t.Id)</c>, <c>Select(a =&gt; a.Customer.TenantId)</c>), so no hub entity
+    /// is materialised and the detached-principal trap above cannot arise. That had to be read
+    /// rather than assumed — compiling says nothing about it either way.</para>
+    ///
     /// <para>⚠️ Two files resolve the context from a scope and are in no module at all:
     /// <c>KubeconfigResolver</c> and <c>TelemetrySegmentBlobStore</c>. They are absent from
     /// <c>ModuleServiceMap</c>, so this ratchet cannot see them however many spellings it learns —
@@ -470,14 +498,14 @@ public class ModuleContractTests
     {
         [Module.DataServices] = 2,
         [Module.Telemetry] = 3,
-        [Module.Connectivity] = 6,
+        [Module.Connectivity] = 4,
         [Module.Support] = 7,
         [Module.Catalog] = 6,
-        [Module.Delivery] = 6,
+        [Module.Delivery] = 3,
         [Module.Identity] = 4,
         [Module.Fleet] = 3,
         [Module.Mail] = 2,
-        [Module.Cost] = 1,
+        [Module.Cost] = 0,
         [Module.Advisor] = 1,
         [Module.Secrets] = 0,
     };

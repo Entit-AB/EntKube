@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Services.ClusterChanges;
 
@@ -36,7 +37,7 @@ public class HeadscaleCertSyncService(
     {
         using IServiceScope scope = scopeFactory.CreateScope();
         using IDisposable unattended = scope.DeclareUnattended("headscale-cert-sync");
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ConnectivityDbContext>>();
         var headscaleService = scope.ServiceProvider.GetRequiredService<HeadscaleService>();
 
         var catalog = scope.ServiceProvider.GetRequiredService<EntKube.Contracts.Catalog.ICatalogApi>();
@@ -46,7 +47,7 @@ public class HeadscaleCertSyncService(
         // used to select cluster ids across the whole installation and then act on them, so every
         // check downstream compared a row against itself. CostScanService is the precedent.
         List<Guid> tenantIds;
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (ConnectivityDbContext db = dbFactory.CreateDbContext())
         {
             tenantIds = await db.Tenants.Select(t => t.Id).ToListAsync(ct);
         }
@@ -54,7 +55,7 @@ public class HeadscaleCertSyncService(
         foreach (Guid tenantId in tenantIds)
         {
             List<Guid> clusterIds;
-            using (ApplicationDbContext db = dbFactory.CreateDbContext())
+            using (ConnectivityDbContext db = dbFactory.CreateDbContext())
             {
                 // The headscale installs this tenant owns, from Catalog; then the ones published
                 // with TLS passthrough, which is the only reason this sweep exists. The alias is

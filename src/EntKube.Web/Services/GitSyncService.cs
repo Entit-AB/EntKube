@@ -66,14 +66,14 @@ public class GitSyncService(
         using IDisposable unattended = scope.DeclareUnattended("git-sync");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
 
-        var appDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var appDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
 
         // One tenant at a time (docs/decomposition.md §4.0.1.2). A git sync APPLIES to a cluster,
         // so the tenant it acts as decides which cluster it may reach — this used to select every
         // auto-syncing deployment in the installation and apply each one by id.
         List<(Guid TenantId, Guid DeploymentId)> targets = [];
 
-        using (ApplicationDbContext appDb = appDbFactory.CreateDbContext())
+        using (DeliveryDbContext appDb = appDbFactory.CreateDbContext())
         using (DeliveryDbContext db = dbFactory.CreateDbContext())
         {
             DeploymentType[] gitTypes =
