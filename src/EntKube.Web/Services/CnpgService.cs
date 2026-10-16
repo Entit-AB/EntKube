@@ -1232,7 +1232,7 @@ public class CnpgService(
 
         foreach (VaultSecret secret in vaultSecrets)
         {
-            await vaultService.ConfigureKubernetesSyncAsync(secret.Id, true, primarySecretName, cnpg.Namespace, ct);
+            await vaultService.ConfigureKubernetesSyncAsync(tenantId, secret.Id, true, primarySecretName, cnpg.Namespace, ct);
         }
 
         // Propagate to every app deployment bound to this database.
@@ -2037,7 +2037,7 @@ public class CnpgService(
         {
             if (secret.Name == "ACCESS_KEY" || secret.Name == "SECRET_KEY")
             {
-                await vaultService.ConfigureKubernetesSyncAsync(secret.Id, true, secretName, ns, ct);
+                await vaultService.ConfigureKubernetesSyncAsync(tenantId, secret.Id, true, secretName, ns, ct);
             }
         }
 

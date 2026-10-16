@@ -302,8 +302,7 @@ public class HarborService(
 
             VaultSecret adminPwSecret = await vaultService.SetComponentSecretAsync(
                 tenantId, clusterComponentId, "HARBOR_ADMIN_PASSWORD", adminPassword, ct);
-            await vaultService.ConfigureKubernetesSyncAsync(
-                adminPwSecret.Id, true, credSecretName, harborNs, ct);
+            await vaultService.ConfigureKubernetesSyncAsync(tenantId, adminPwSecret.Id, true, credSecretName, harborNs, ct);
         }
 
         // Inject CNPG and S3 connection details into Helm values.

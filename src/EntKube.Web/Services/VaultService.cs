@@ -216,7 +216,8 @@ public class VaultService(
             return (ok, error);
         }
 
-        await ConfigureKubernetesSyncAsync(stored.Id, syncEnabled: false, secretName, ns, ct, clusterId);
+        await ConfigureKubernetesSyncAsync(
+            tenantId, stored.Id, syncEnabled: false, secretName, ns, ct, clusterId);
         return (true, null);
     }
 
@@ -367,14 +368,24 @@ public class VaultService(
     }
 
     /// <summary>Deletes a tenant-scoped certificate. No-op if the id is not an app-less certificate.</summary>
-    public async Task DeleteTenantCertificateAsync(Guid secretId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose secret. #251 scoped the reads that decrypt; this is the other half of the same
+    /// surface — the calls that overwrite, roll back, re-scope, re-sync or destroy. Same
+    /// reasoning: no caller reaches these with an attacker-chosen id today, and the contract
+    /// ("name a secret and I will delete it") is what a REST route or an agent would inherit.
+    /// </param>
+    public async Task DeleteTenantCertificateAsync(
+        Guid tenantId, Guid secretId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
-        VaultSecret? secret = await db.Set<VaultSecret>()
-            .FirstOrDefaultAsync(s => s.Id == secretId
+
+        // It already narrowed by shape — app-less, and a certificate — which reads like scoping
+        // and is not: every tenant has app-less certificates.
+        VaultSecret? secret = await db.VaultSecrets
+            .FirstOrDefaultAsync(s => s.Id == secretId && s.Vault.TenantId == tenantId
                 && s.AppId == null && s.SecretType == VaultSecretType.Certificate, ct);
         if (secret is null) return;
-        db.Set<VaultSecret>().Remove(secret);
+        db.VaultSecrets.Remove(secret);
         await db.SaveChangesAsync(ct);
     }
 
@@ -2046,21 +2057,28 @@ public class VaultService(
     /// Updates the encrypted value of an existing secret by its ID.
     /// Archives the previous value as a version before overwriting.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose secret. #251 scoped the reads that decrypt; this is the other half of the same
+    /// surface — the calls that overwrite, roll back, re-scope, re-sync or destroy. Same
+    /// reasoning: no caller reaches these with an attacker-chosen id today, and the contract
+    /// ("name a secret and I will delete it") is what a REST route or an agent would inherit.
+    /// </param>
     public async Task<bool> UpdateSecretValueAsync(
-        Guid secretId, string newValue, string? updatedBy = null, CancellationToken ct = default)
+        Guid tenantId, Guid secretId, string newValue, string? updatedBy = null,
+        CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
-        VaultSecret? secret = await db.Set<VaultSecret>()
+        VaultSecret? secret = await db.VaultSecrets
             .Include(s => s.Vault)
-            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+            .FirstOrDefaultAsync(s => s.Id == secretId && s.Vault.TenantId == tenantId, ct);
 
         if (secret is null)
         {
             return false;
         }
 
-        byte[] dataKey = await UnsealVaultAsync(secret.Vault.TenantId, ct);
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
 
         await ArchiveVersionAsync(db, secret, ct);
 
@@ -2085,13 +2103,19 @@ public class VaultService(
     /// occupies the target scope (the unique (VaultId, AppId, EnvironmentId, Name)
     /// index would be violated).
     /// </returns>
+    /// <param name="tenantId">
+    /// Whose secret. #251 scoped the reads that decrypt; this is the other half of the same
+    /// surface — the calls that overwrite, roll back, re-scope, re-sync or destroy. Same
+    /// reasoning: no caller reaches these with an attacker-chosen id today, and the contract
+    /// ("name a secret and I will delete it") is what a REST route or an agent would inherit.
+    /// </param>
     public async Task<(bool Ok, string? Reason)> ChangeAppSecretScopeAsync(
-        Guid secretId, Guid? environmentId, CancellationToken ct = default)
+        Guid tenantId, Guid secretId, Guid? environmentId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
-        VaultSecret? secret = await db.Set<VaultSecret>()
-            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+        VaultSecret? secret = await db.VaultSecrets
+            .FirstOrDefaultAsync(s => s.Id == secretId && s.Vault.TenantId == tenantId, ct);
 
         if (secret is null)
         {
@@ -2153,13 +2177,19 @@ public class VaultService(
     /// Returns the version history for a secret (metadata only — values remain encrypted).
     /// Ordered newest first.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose secret. #251 scoped the reads that decrypt; this is the other half of the same
+    /// surface — the calls that overwrite, roll back, re-scope, re-sync or destroy. Same
+    /// reasoning: no caller reaches these with an attacker-chosen id today, and the contract
+    /// ("name a secret and I will delete it") is what a REST route or an agent would inherit.
+    /// </param>
     public async Task<List<VaultSecretVersion>> GetSecretVersionsAsync(
-        Guid secretId, CancellationToken ct = default)
+        Guid tenantId, Guid secretId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
         return await db.Set<VaultSecretVersion>()
-            .Where(v => v.SecretId == secretId)
+            .Where(v => v.SecretId == secretId && v.Secret.Vault.TenantId == tenantId)
             .OrderByDescending(v => v.VersionNumber)
             .ToListAsync(ct);
     }
@@ -2202,17 +2232,26 @@ public class VaultService(
     /// Restores a secret's value to a specific historical version.
     /// Archives the current value before overwriting.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose secret. #251 scoped the reads that decrypt; this is the other half of the same
+    /// surface — the calls that overwrite, roll back, re-scope, re-sync or destroy. Same
+    /// reasoning: no caller reaches these with an attacker-chosen id today, and the contract
+    /// ("name a secret and I will delete it") is what a REST route or an agent would inherit.
+    /// </param>
     public async Task<bool> RollbackToVersionAsync(
-        Guid secretId, Guid versionId, string? updatedBy = null, CancellationToken ct = default)
+        Guid tenantId, Guid secretId, Guid versionId, string? updatedBy = null,
+        CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
-        VaultSecret? secret = await db.Set<VaultSecret>()
+        VaultSecret? secret = await db.VaultSecrets
             .Include(s => s.Vault)
-            .FirstOrDefaultAsync(s => s.Id == secretId, ct);
+            .FirstOrDefaultAsync(s => s.Id == secretId && s.Vault.TenantId == tenantId, ct);
 
         VaultSecretVersion? version = await db.Set<VaultSecretVersion>()
-            .FirstOrDefaultAsync(v => v.Id == versionId && v.SecretId == secretId, ct);
+            .FirstOrDefaultAsync(
+                v => v.Id == versionId && v.SecretId == secretId
+                  && v.Secret.Vault.TenantId == tenantId, ct);
 
         if (secret is null || version is null) return false;
 
@@ -2231,12 +2270,21 @@ public class VaultService(
     /// deletion when it belongs to a StorageLink that has active StorageBindings
     /// (i.e. a workload depends on those credentials being available).
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose secret. #251 scoped the reads that decrypt; this is the other half of the same
+    /// surface — the calls that overwrite, roll back, re-scope, re-sync or destroy. Same
+    /// reasoning: no caller reaches these with an attacker-chosen id today, and the contract
+    /// ("name a secret and I will delete it") is what a REST route or an agent would inherit.
+    /// </param>
     public async Task<(bool CanDelete, string? Reason)> CanDeleteSecretAsync(
-        Guid secretId, CancellationToken ct = default)
+        Guid tenantId, Guid secretId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
-        VaultSecret? secret = await db.Set<VaultSecret>().FindAsync([secretId], ct);
+        // FindAsync takes a key and cannot carry a predicate, which is part of why these stayed
+        // tenant-less: there was nowhere to put the tenant without making it a query.
+        VaultSecret? secret = await db.VaultSecrets
+            .FirstOrDefaultAsync(s => s.Id == secretId && s.Vault.TenantId == tenantId, ct);
 
         if (secret is null)
         {
@@ -2264,18 +2312,26 @@ public class VaultService(
     /// <summary>
     /// Deletes a secret by ID regardless of its scope.
     /// </summary>
-    public async Task<bool> DeleteSecretAsync(Guid secretId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose secret. #251 scoped the reads that decrypt; this is the other half of the same
+    /// surface — the calls that overwrite, roll back, re-scope, re-sync or destroy. Same
+    /// reasoning: no caller reaches these with an attacker-chosen id today, and the contract
+    /// ("name a secret and I will delete it") is what a REST route or an agent would inherit.
+    /// </param>
+    public async Task<bool> DeleteSecretAsync(
+        Guid tenantId, Guid secretId, CancellationToken ct = default)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
-        VaultSecret? secret = await db.Set<VaultSecret>().FindAsync([secretId], ct);
+        VaultSecret? secret = await db.VaultSecrets
+            .FirstOrDefaultAsync(s => s.Id == secretId && s.Vault.TenantId == tenantId, ct);
 
         if (secret is null)
         {
             return false;
         }
 
-        db.Set<VaultSecret>().Remove(secret);
+        db.VaultSecrets.Remove(secret);
         await db.SaveChangesAsync(ct);
         return true;
     }
@@ -2286,13 +2342,20 @@ public class VaultService(
     /// Pass <paramref name="clusterId"/> for app-scoped secrets where the cluster
     /// cannot be derived from the secret's owner relationship.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose secret. #251 scoped the reads that decrypt; this is the other half of the same
+    /// surface — the calls that overwrite, roll back, re-scope, re-sync or destroy. Same
+    /// reasoning: no caller reaches these with an attacker-chosen id today, and the contract
+    /// ("name a secret and I will delete it") is what a REST route or an agent would inherit.
+    /// </param>
     public async Task ConfigureKubernetesSyncAsync(
-        Guid secretId, bool syncEnabled, string? secretName, string? ns,
+        Guid tenantId, Guid secretId, bool syncEnabled, string? secretName, string? ns,
         CancellationToken ct = default, Guid? clusterId = null)
     {
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
-        VaultSecret? secret = await db.Set<VaultSecret>().FindAsync([secretId], ct);
+        VaultSecret? secret = await db.VaultSecrets
+            .FirstOrDefaultAsync(s => s.Id == secretId && s.Vault.TenantId == tenantId, ct);
 
         if (secret is null)
         {

@@ -1517,7 +1517,7 @@ else
         {
             // Check if deletion is blocked by active storage bindings.
 
-            (bool canDelete, string? reason) = await VaultService.CanDeleteSecretAsync(secretId);
+            (bool canDelete, string? reason) = await VaultService.CanDeleteSecretAsync(TenantId, secretId);
 
             if (!canDelete)
             {
@@ -1526,7 +1526,7 @@ else
                 return;
             }
 
-            await VaultService.DeleteSecretAsync(secretId);
+            await VaultService.DeleteSecretAsync(TenantId, secretId);
             revealedSecretId = null;
             editSecretId = null;
             await LoadSecrets();
@@ -1610,7 +1610,7 @@ else
 
         errorMessage = null;
 
-        bool updated = await VaultService.UpdateSecretValueAsync(editSecretId.Value, editSecretValue.Trim());
+        bool updated = await VaultService.UpdateSecretValueAsync(TenantId, editSecretId.Value, editSecretValue.Trim());
 
         if (updated)
         {
@@ -1651,7 +1651,7 @@ else
         try
         {
             Guid? environmentId = Guid.TryParse(scopeEditValue, out Guid id) ? id : (Guid?)null;
-            (bool ok, string? reason) = await VaultService.ChangeAppSecretScopeAsync(secret.Id, environmentId);
+            (bool ok, string? reason) = await VaultService.ChangeAppSecretScopeAsync(TenantId, secret.Id, environmentId);
             if (ok)
             {
                 scopeEditSecretId = null;
@@ -1737,7 +1737,7 @@ else
 
     private async Task DisableSync(Guid secretId)
     {
-        await VaultService.ConfigureKubernetesSyncAsync(secretId, syncEnabled: false, secretName: null, ns: null);
+        await VaultService.ConfigureKubernetesSyncAsync(TenantId, secretId, syncEnabled: false, secretName: null, ns: null);
         await LoadSecrets();
     }
 
@@ -1750,8 +1750,7 @@ else
 
         Guid? clusterId = (scope == "app" && syncClusterId != Guid.Empty) ? syncClusterId : (Guid?)null;
 
-        await VaultService.ConfigureKubernetesSyncAsync(
-            syncConfigSecretId.Value,
+        await VaultService.ConfigureKubernetesSyncAsync(TenantId, syncConfigSecretId.Value,
             syncEnabled: true,
             secretName: syncSecretName.Trim(),
             ns: syncNamespace.Trim(),
@@ -1802,7 +1801,7 @@ else
         revealedVersionId = null;
         revealedVersionValue = null;
         secretVersions = null;
-        secretVersions = await VaultService.GetSecretVersionsAsync(secretId);
+        secretVersions = await VaultService.GetSecretVersionsAsync(TenantId, secretId);
     }
 
     private async Task RevealVersion(Guid secretId, VaultSecretVersion version)
@@ -1824,7 +1823,7 @@ else
     private async Task RollbackToVersion(Guid secretId, Guid versionId)
     {
         errorMessage = null;
-        bool ok = await VaultService.RollbackToVersionAsync(secretId, versionId);
+        bool ok = await VaultService.RollbackToVersionAsync(TenantId, secretId, versionId);
 
         if (ok)
         {

@@ -396,13 +396,11 @@ public class KeycloakService(
 
         VaultSecret adminUserSecret = await vaultService.SetComponentSecretAsync(
             tenantId, clusterComponentId, "KC_BOOTSTRAP_ADMIN_USERNAME", adminUsername, ct);
-        await vaultService.ConfigureKubernetesSyncAsync(
-            adminUserSecret.Id, true, credSecretName, keycloakNs, ct);
+        await vaultService.ConfigureKubernetesSyncAsync(tenantId, adminUserSecret.Id, true, credSecretName, keycloakNs, ct);
 
         VaultSecret adminPwSecret = await vaultService.SetComponentSecretAsync(
             tenantId, clusterComponentId, "KC_BOOTSTRAP_ADMIN_PASSWORD", adminPassword, ct);
-        await vaultService.ConfigureKubernetesSyncAsync(
-            adminPwSecret.Id, true, credSecretName, keycloakNs, ct);
+        await vaultService.ConfigureKubernetesSyncAsync(tenantId, adminPwSecret.Id, true, credSecretName, keycloakNs, ct);
 
         // DB credentials are only synced when a managed CNPG database is linked.
         // For imported instances backed by non-CNPG Postgres, the DB secrets already
@@ -415,13 +413,11 @@ public class KeycloakService(
 
             VaultSecret dbUrlSecret = await vaultService.SetComponentSecretAsync(
                 tenantId, clusterComponentId, "KC_DB_URL", jdbcUrl, ct);
-            await vaultService.ConfigureKubernetesSyncAsync(
-                dbUrlSecret.Id, true, credSecretName, keycloakNs, ct);
+            await vaultService.ConfigureKubernetesSyncAsync(tenantId, dbUrlSecret.Id, true, credSecretName, keycloakNs, ct);
 
             VaultSecret dbUserSecret = await vaultService.SetComponentSecretAsync(
                 tenantId, clusterComponentId, "KC_DB_USERNAME", cnpgDb.Owner, ct);
-            await vaultService.ConfigureKubernetesSyncAsync(
-                dbUserSecret.Id, true, credSecretName, keycloakNs, ct);
+            await vaultService.ConfigureKubernetesSyncAsync(tenantId, dbUserSecret.Id, true, credSecretName, keycloakNs, ct);
 
             string? dbPassword = await vaultService.GetCnpgDatabasePasswordAsync(tenantId, cnpgDatabaseId!.Value, ct);
 
@@ -429,8 +425,7 @@ public class KeycloakService(
             {
                 VaultSecret dbPwSecret = await vaultService.SetComponentSecretAsync(
                     tenantId, clusterComponentId, "KC_DB_PASSWORD", dbPassword, ct);
-                await vaultService.ConfigureKubernetesSyncAsync(
-                    dbPwSecret.Id, true, credSecretName, keycloakNs, ct);
+                await vaultService.ConfigureKubernetesSyncAsync(tenantId, dbPwSecret.Id, true, credSecretName, keycloakNs, ct);
             }
         }
         else if (regPgDb is not null)
@@ -441,13 +436,11 @@ public class KeycloakService(
 
             VaultSecret dbUrlSecret = await vaultService.SetComponentSecretAsync(
                 tenantId, clusterComponentId, "KC_DB_URL", jdbcUrl, ct);
-            await vaultService.ConfigureKubernetesSyncAsync(
-                dbUrlSecret.Id, true, credSecretName, keycloakNs, ct);
+            await vaultService.ConfigureKubernetesSyncAsync(tenantId, dbUrlSecret.Id, true, credSecretName, keycloakNs, ct);
 
             VaultSecret dbUserSecret = await vaultService.SetComponentSecretAsync(
                 tenantId, clusterComponentId, "KC_DB_USERNAME", regPgDb.Owner, ct);
-            await vaultService.ConfigureKubernetesSyncAsync(
-                dbUserSecret.Id, true, credSecretName, keycloakNs, ct);
+            await vaultService.ConfigureKubernetesSyncAsync(tenantId, dbUserSecret.Id, true, credSecretName, keycloakNs, ct);
 
             string? dbPassword = await vaultService.GetRegisteredPostgresDatabasePasswordAsync(
                 tenantId, registeredPostgresDatabaseId!.Value, ct);
@@ -456,8 +449,7 @@ public class KeycloakService(
             {
                 VaultSecret dbPwSecret = await vaultService.SetComponentSecretAsync(
                     tenantId, clusterComponentId, "KC_DB_PASSWORD", dbPassword, ct);
-                await vaultService.ConfigureKubernetesSyncAsync(
-                    dbPwSecret.Id, true, credSecretName, keycloakNs, ct);
+                await vaultService.ConfigureKubernetesSyncAsync(tenantId, dbPwSecret.Id, true, credSecretName, keycloakNs, ct);
             }
         }
 
@@ -599,21 +591,18 @@ public class KeycloakService(
 
         VaultSecret dbUrlSecret = await vaultService.SetComponentSecretAsync(
             tenantId, clusterComponentId, "KC_DB_URL", jdbcUrl, ct);
-        await vaultService.ConfigureKubernetesSyncAsync(
-            dbUrlSecret.Id, true, credSecretName, keycloakNs, ct);
+        await vaultService.ConfigureKubernetesSyncAsync(tenantId, dbUrlSecret.Id, true, credSecretName, keycloakNs, ct);
 
         VaultSecret dbUserSecret = await vaultService.SetComponentSecretAsync(
             tenantId, clusterComponentId, "KC_DB_USERNAME", cnpgDb.Owner, ct);
-        await vaultService.ConfigureKubernetesSyncAsync(
-            dbUserSecret.Id, true, credSecretName, keycloakNs, ct);
+        await vaultService.ConfigureKubernetesSyncAsync(tenantId, dbUserSecret.Id, true, credSecretName, keycloakNs, ct);
 
         string? dbPassword = await vaultService.GetCnpgDatabasePasswordAsync(tenantId, cnpgDatabaseId, ct);
         if (dbPassword is not null)
         {
             VaultSecret dbPwSecret = await vaultService.SetComponentSecretAsync(
                 tenantId, clusterComponentId, "KC_DB_PASSWORD", dbPassword, ct);
-            await vaultService.ConfigureKubernetesSyncAsync(
-                dbPwSecret.Id, true, credSecretName, keycloakNs, ct);
+            await vaultService.ConfigureKubernetesSyncAsync(tenantId, dbPwSecret.Id, true, credSecretName, keycloakNs, ct);
         }
     }
 
@@ -2126,7 +2115,7 @@ public class KeycloakService(
         string prefix = $"named-theme-{themeId}-";
         foreach (VaultSecret s in secrets.Where(s => s.Name.StartsWith(prefix, StringComparison.Ordinal)))
         {
-            await vaultService.DeleteSecretAsync(s.Id, ct);
+            await vaultService.DeleteSecretAsync(tenantId, s.Id, ct);
         }
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
@@ -2317,7 +2306,7 @@ public class KeycloakService(
         string key = $"named-theme-{themeId}-resource-{filename}";
         VaultSecret? secret = secrets.FirstOrDefault(s => s.Name == key);
         if (secret is not null)
-            await vaultService.DeleteSecretAsync(secret.Id, ct);
+            await vaultService.DeleteSecretAsync(tenantId, secret.Id, ct);
     }
 
     /// <summary>Returns a CSS data URI (<c>data:image/png;base64,…</c>) for a stored resource, or null.</summary>
