@@ -220,6 +220,7 @@ public static partial class ModuleMap
         [typeof(ResourceUsageCollectorService)] = Module.Cost,
 
         // ---- Support ---------------------------------------------------------------
+        [typeof(Api.SupportApi)] = Module.Support,
         [typeof(EntKube.Web.Services.Contracts.ContractService)] = Module.Support,
         [typeof(JiraAdapter)] = Module.Support,
         [typeof(EntKube.Web.Services.Knowledge.KnowledgeService)] = Module.Support,

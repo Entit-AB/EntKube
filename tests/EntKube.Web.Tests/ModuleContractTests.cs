@@ -1,4 +1,5 @@
 using System.Reflection;
+using System.Text.RegularExpressions;
 using EntKube.Contracts.Advisor;
 using EntKube.Web.Data;
 using EntKube.Web.Modules;
@@ -67,20 +68,108 @@ public class ModuleContractTests
         string.Join("; ", leaks).Should().BeEmpty("a contract must carry its own types");
     }
 
-    /// <summary>Services still taking the all-seeing context, by module.</summary>
+    private const string Src = "../../../../../src";
+
+    /// <summary>
+    /// Mapped services whose source pulls the all-seeing context <em>out of a scope</em> rather
+    /// than taking it as a constructor parameter.
+    ///
+    /// <para>⚠️ <b>This is the half of the metric reflection cannot see, and it was missing.</b>
+    /// A singleton cannot take a scoped <see cref="ApplicationDbContext"/> in its constructor —
+    /// that is a captive dependency and the container refuses it — so every
+    /// <c>BackgroundService</c> in the product takes <c>IServiceScopeFactory</c> and resolves
+    /// <c>IDbContextFactory&lt;ApplicationDbContext&gt;</c> inside its loop. A constructor-only
+    /// count therefore does not under-report the sweeps a little: it excludes <em>all</em> of
+    /// them, by construction. Twelve files resolve it that way and <b>not one</b> of them was
+    /// counted.</para>
+    ///
+    /// <para>That is the broadest reach in the product going unmeasured. A sweep runs unattended,
+    /// crosses every tenant, and is precisely the code §4.0 governs — so the one category the
+    /// ratchet silently exempted is the one with the most to gain from a narrower context.</para>
+    ///
+    /// <para>The reason is the same one that has now bitten this programme six times, and it is
+    /// worth naming rather than fixing quietly: <b>the metric listed one spelling of the thing it
+    /// names.</b> DbSet versus navigation versus <c>Set&lt;T&gt;()</c>, a wrapper call, a
+    /// filename-keyed map, a log string — and here, constructor injection versus scope
+    /// resolution. Each time the fix was to make the measurement <em>derive</em> what it looks
+    /// for. This scan reads the source for both spellings; it does not hold a list of sweeps.</para>
+    /// </summary>
+    private static IReadOnlySet<string> ScopeResolvers(IReadOnlySet<string> mapped)
+    {
+        string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, Src));
+
+        Directory.Exists(root).Should().BeTrue(
+            "this test reads the source of every project under src/, not just the web project — "
+            + "the segment services live in EntKube.Telemetry and are mapped services too");
+
+        HashSet<string> found = [];
+
+        foreach (string path in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
+        {
+            if (path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}", StringComparison.Ordinal)
+                || path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            string body = File.ReadAllText(path);
+
+            // Comments first. A header paragraph saying a service NO LONGER resolves the context
+            // out of a scope contains the call it is disclaiming, and LokiService's does almost
+            // exactly that — the custody ratchet already shipped a count whose only match was a
+            // log message, and that is the same mistake one layer down.
+            string code = string.Join('\n', body.Split('\n')
+                .Select(line => Regex.Replace(line, @"//.*$", string.Empty)));
+
+            // Both ways a scope hands one over: the factory (what every sweep uses) and the
+            // context itself. Derived from the resolution call, not from a list of service names.
+            if (!code.Contains("Service<IDbContextFactory<ApplicationDbContext>>", StringComparison.Ordinal)
+                && !code.Contains("Service<ApplicationDbContext>", StringComparison.Ordinal))
+            {
+                continue;
+            }
+
+            List<string> declared =
+            [
+                .. Regex.Matches(code, @"\b(?:class|record)\s+(\w+)")
+                    .Select(m => m.Groups[1].Value)
+                    .Where(mapped.Contains)
+                    .Distinct()
+            ];
+
+            declared.Count.Should().BeLessThanOrEqualTo(1,
+                $"{Path.GetFileName(path)} resolves the all-seeing context out of a scope and "
+                + "declares more than one mapped service, so this scan cannot say which of them "
+                + "does it. Every such file declares exactly one today. Split the file, or teach "
+                + "this test to attribute the call to its enclosing type — do not let it guess");
+
+            found.UnionWith(declared);
+        }
+
+        return found;
+    }
+
+    /// <summary>Services still reaching the all-seeing context, by module — either spelling.</summary>
     private static Dictionary<Module, int> GodContextUsers()
     {
+        HashSet<string> mapped = [.. ModuleMap.Services.Keys.Select(t => t.Name)];
+        IReadOnlySet<string> fromScope = ScopeResolvers(mapped);
+
+        fromScope.Should().NotBeEmpty(
+            "the scope spelling is the half of this metric reflection cannot see; an empty "
+            + "result means this scan stopped working, not that the product came clean");
+
         Dictionary<Module, int> counts = [];
 
         foreach ((Type service, Module module) in ModuleMap.Services)
         {
-            bool takesIt = service.GetConstructors().Any(c => c.GetParameters().Any(p =>
+            bool byConstructor = service.GetConstructors().Any(c => c.GetParameters().Any(p =>
                 p.ParameterType == typeof(ApplicationDbContext)
                 || (p.ParameterType.IsGenericType
                     && p.ParameterType.GetGenericArguments().Length == 1
                     && p.ParameterType.GetGenericArguments()[0] == typeof(ApplicationDbContext))));
 
-            if (takesIt)
+            if (byConstructor || fromScope.Contains(service.Name))
             {
                 counts[module] = counts.GetValueOrDefault(module) + 1;
             }
@@ -350,6 +439,97 @@ public class ModuleContractTests
     /// went from the largest block on this ratchet to the smallest in three changes, and none of
     /// them needed a new contract — only an existing one, a field with four readers, and a delete
     /// put back where it belonged.</para>
+    ///
+    /// <para>⚠️⚠️ <b>Correction: every number above was measured with half the metric. 34 was
+    /// really 44.</b> <see cref="ScopeResolvers"/> explains the mechanism; this is what it costs.
+    /// The count read constructor parameters by reflection, and a singleton cannot take a scoped
+    /// context in its constructor, so <b>every background sweep in the product was exempt by
+    /// construction</b> — twelve files, ten of them mapped services, none of them counted. The
+    /// corrected baselines: <c>Telemetry 3 → 6</c> (<c>AlertSyncService</c>,
+    /// <c>TelemetryAlertEvaluator</c>, <c>UptimeTrackingService</c>), <c>Delivery 3 → 6</c>
+    /// (<c>DeploymentSyncService</c>, <c>GitSyncService</c>, <c>RolloutWatcherService</c>),
+    /// <c>Connectivity 4 → 6</c> (<c>AppL4RouteHealthService</c>,
+    /// <c>HeadscaleCertSyncService</c>), <c>Fleet 2 → 3</c> (<c>BootstrapRunnerService</c>) and
+    /// <c>Cost 0 → 1</c> (<c>ResourceUsageCollectorService</c>).</para>
+    ///
+    /// <para><b>Cost is the one to read twice.</b> It was recorded as <c>0</c> — a finished module,
+    /// quoted as such — while its usage collector swept every tenant's clusters on the all-seeing
+    /// context the whole time. A zero that was never capable of being anything else is worse than
+    /// a high number, because nobody goes back to a module that is done.</para>
+    ///
+    /// <para><b>Telemetry 6 → 5, and it took the sixth module contract.</b>
+    /// <c>ErrorBudgetService</c> owns no table at all: its deployments and their health samples
+    /// are Delivery's, its objectives are Support's, and holding the all-seeing context was the
+    /// only way it had to read any of them. It takes <c>IDeliveryApi</c> and the new
+    /// <c>ISupportApi</c> now, and the file is the decomposition's shape in miniature — a
+    /// computation over three other modules' rows, with no rows of its own.</para>
+    ///
+    /// <para><c>DeploymentHealthSample</c> is the contract that was missing, and it was written
+    /// from the callers backwards: three re-slice the rows per deployment and per window, so it
+    /// returns rows, while the two that want only a ratio (<c>IncidentService.GetUptimeAsync</c>
+    /// and <c>SlaTargetManager</c>) are deliberately <em>not</em> served by it — §14.1 samples
+    /// every five minutes, about 8,600 rows per deployment per month, and pulling all of them to
+    /// compute two integers is not a boundary, it is a bill.</para>
+    ///
+    /// <para>⚠️ <c>DeploymentSummary</c> did <b>not</b> grow a customer for this, though
+    /// <c>ErrorBudgetStatus</c> exposes <c>CustomerId</c> and <c>CustomerName</c> and
+    /// <c>OperationsAdvisor</c> reads both. <c>AppSummary</c> already carries them and a
+    /// deployment already carries its <c>AppId</c>, so the service joins the two — one extra call
+    /// against a small set, and the same route <c>MessagingTab</c> was given when
+    /// <c>CustomerName</c> was refused a place on the DTO for having one reader.</para>
+    ///
+    /// <para><b>Telemetry 5 → 3, and the two that moved were the ones the ratchet had never
+    /// counted.</b> <c>AlertSyncService</c> and <c>TelemetryAlertEvaluator</c> needed no contract
+    /// and no tidying: between them they touch <c>AlertIncidents</c>,
+    /// <c>AlertRoutingRules</c>, <c>NotificationChannels</c> and <c>TelemetryAlertRules</c> — all
+    /// Telemetry's own — plus <c>Tenants</c> and <c>KubernetesClusters</c>, which every module
+    /// context has exposed read-only from the start. They were a context swap the whole time, and
+    /// the only reason nobody did it is that the metric said they were not there. Correcting a
+    /// measurement is not bookkeeping; it is how work gets found.</para>
+    ///
+    /// <para>⚠️ The swap is not quite free, and the reason is worth keeping: a module context
+    /// exposes the four hubs as <c>IQueryable</c> with <c>AsNoTracking</c>, so a cluster read
+    /// through one comes back <b>detached</b> where <c>ApplicationDbContext</c>'s <c>DbSet</c>
+    /// returned it tracked. <c>AlertSyncService</c> assigns that cluster onto each incident's
+    /// navigation so <c>NotificationService</c> can render <c>incident.Cluster?.Name</c>, and
+    /// attaching a detached principal to a <em>tracked</em> dependent is how EF is persuaded to
+    /// insert a row that already exists. It is correct today only because every write in the
+    /// method happens above that line; the comment there says so, in the imperative, because the
+    /// next person to add a <c>SaveChanges</c> is who it is for.</para>
+    ///
+    /// <para><b>Then six more came off at once, and every one of them was a sweep the metric had
+    /// been hiding: Delivery 6 → 3, Connectivity 6 → 4, Cost 1 → 0.</b>
+    /// <c>DeploymentSyncService</c>, <c>GitSyncService</c> and <c>RolloutWatcherService</c> touch
+    /// only <c>AppDeployments</c>, <c>DeploymentManifests</c>, <c>DeploymentRollouts</c>,
+    /// <c>RolloutPolicies</c> and <c>GitRepositories</c>; <c>AppL4RouteHealthService</c> and
+    /// <c>HeadscaleCertSyncService</c> only <c>AppL4Routes</c> and <c>ExternalRoutes</c>;
+    /// <c>ResourceUsageCollectorService</c> only <c>ResourceUsageSnapshots</c>. All own tables,
+    /// plus scalar reads of two hubs. No contract, no tidying, no behaviour change — six context
+    /// swaps that were available from the day the module contexts were written.</para>
+    ///
+    /// <para><b>Cost is now 0 for real, and this is the second time this module's zero has meant
+    /// two different things.</b> It read 0 while a collector swept every tenant on the all-seeing
+    /// context; it reads 0 now because that collector takes <c>CostDbContext</c>. The number did
+    /// not change. What it measures did.</para>
+    ///
+    /// <para>⚠️ The compiler is the adjudicator for a swap like this, not a grep. A scan for
+    /// <c>db.Table</c> cannot see a read that arrives through a navigation — the mistake this
+    /// file has recorded three times — whereas the narrower context simply fails to compile on a
+    /// table it does not expose, which is how <c>BootstrapRunnerService</c> stayed behind: it
+    /// writes <c>CnpgClusters</c>, <c>RabbitMQClusters</c> and <c>RedisClusters</c>, three
+    /// DataServices tables, so it is a contract's worth of work rather than a swap.</para>
+    ///
+    /// <para>The six were checked for one thing beyond compiling, because the hub change is not
+    /// type-visible: every hub read in them is a <em>scalar projection</em>
+    /// (<c>Select(t =&gt; t.Id)</c>, <c>Select(a =&gt; a.Customer.TenantId)</c>), so no hub entity
+    /// is materialised and the detached-principal trap above cannot arise. That had to be read
+    /// rather than assumed — compiling says nothing about it either way.</para>
+    ///
+    /// <para>⚠️ Two files resolve the context from a scope and are in no module at all:
+    /// <c>KubeconfigResolver</c> and <c>TelemetrySegmentBlobStore</c>. They are absent from
+    /// <c>ModuleServiceMap</c>, so this ratchet cannot see them however many spellings it learns —
+    /// an unmapped service is invisible to every per-module count in this file. That is a
+    /// different hole from this one and wants its own check on the map's completeness.</para>
     /// </summary>
     private static readonly Dictionary<Module, int> Baseline = new()
     {

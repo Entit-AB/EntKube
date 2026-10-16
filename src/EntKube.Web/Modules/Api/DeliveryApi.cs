@@ -130,6 +130,41 @@ public sealed class DeliveryApi(IDbContextFactory<DeliveryDbContext> dbFactory) 
             _ => RolloutVerdictStatus.Watching,
         };
 
+    public async Task<IReadOnlyList<DeploymentHealthSample>> GetHealthSamplesAsync(
+        Guid tenantId, IReadOnlyCollection<Guid> deploymentIds, DateTime from,
+        DateTime? to = null, CancellationToken ct = default)
+    {
+        if (deploymentIds.Count == 0) return [];
+
+        await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        // The tenant predicate is the deployment's, reached the way every other read here reaches
+        // it — so a deployment id from another tenant contributes no samples rather than throwing.
+        // The table's only index is (DeploymentId, SnapshotAt), which is exactly this shape.
+        IQueryable<Data.DeploymentHealthSnapshot> q = db.DeploymentHealthSnapshots
+            .AsNoTracking()
+            .Where(s => deploymentIds.Contains(s.DeploymentId)
+                && s.Deployment.App.Customer.TenantId == tenantId
+                && s.SnapshotAt >= from);
+
+        if (to is DateTime upper)
+        {
+            q = q.Where(s => s.SnapshotAt < upper);
+        }
+
+        // Entity enum in, contract enum out, cast IN MEMORY after materialising — the same
+        // convention ToDeployment uses for this exact pair below, and for the same reason: these
+        // are string-stored columns, so a cast inside the expression becomes
+        // CAST('Healthy' AS integer) on Postgres and a silent 0 on SQLite.
+        var rows = await q
+            .OrderBy(s => s.SnapshotAt)
+            .Select(s => new { s.DeploymentId, s.HealthStatus, s.SnapshotAt })
+            .ToListAsync(ct);
+
+        return [.. rows.Select(r => new DeploymentHealthSample(
+            r.DeploymentId, (ContractHealthStatus)(int)r.HealthStatus, r.SnapshotAt))];
+    }
+
     private static IQueryable<Data.App> ScopedApps(DeliveryDbContext db, Guid tenantId)
         => db.Apps.AsNoTracking().Where(a => a.Customer.TenantId == tenantId);
 

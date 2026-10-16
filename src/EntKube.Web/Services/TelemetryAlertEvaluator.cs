@@ -1,5 +1,6 @@
 using System.Text.Json;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.Telemetry;
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Services.ClusterChanges;
@@ -41,8 +42,8 @@ public sealed class TelemetryAlertEvaluator(
         ITelemetryIngest store = scope.ServiceProvider.GetRequiredService<ITelemetryIngest>();
         if (!store.IsEnabled) return;
 
-        using ApplicationDbContext db = scope.ServiceProvider
-            .GetRequiredService<IDbContextFactory<ApplicationDbContext>>().CreateDbContext();
+        using TelemetryDbContext db = scope.ServiceProvider
+            .GetRequiredService<IDbContextFactory<TelemetryDbContext>>().CreateDbContext();
 
         if (!await db.TelemetryAlertRules.AnyAsync(r => r.IsEnabled, ct)) return;
 
@@ -161,7 +162,7 @@ public sealed class TelemetryAlertEvaluator(
     /// only the clusters that actually carry telemetry for this signal — idle clusters are skipped so
     /// they don't cost an aggregate scan every cycle.</summary>
     private static async Task<List<Guid>> ResolveClustersAsync(
-        ApplicationDbContext db, Guid tenantId, TelemetryAlertRule rule, ITraceQueryService trace,
+        TelemetryDbContext db, Guid tenantId, TelemetryAlertRule rule, ITraceQueryService trace,
         ILogBackend log, CancellationToken ct)
     {
         if (rule.ClusterId is Guid cid) return [cid];

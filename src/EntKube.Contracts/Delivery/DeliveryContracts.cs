@@ -189,6 +189,24 @@ public sealed record DeploymentSummary(
     bool IsManaged);
 
 /// <summary>
+/// One health sample of one deployment.
+/// </summary>
+/// <param name="DeploymentId">Which deployment it describes.</param>
+/// <param name="Health">What the workload looked like at that moment.</param>
+/// <param name="SnapshotAt">When the sample was taken (UTC).</param>
+/// <remarks>
+/// Three fields, because three are read. The entity also carries a sync status, ready/total
+/// replica counts, its own id and a navigation: the replica counts are read only by Delivery's own
+/// rollout analyser, and the sync status by nobody outside the writer. §14.1 samples every five
+/// minutes — about 8,600 rows per deployment per month — so what this record leaves out is paid
+/// for on every call.
+/// </remarks>
+public sealed record DeploymentHealthSample(
+    Guid DeploymentId,
+    HealthStatus Health,
+    DateTime SnapshotAt);
+
+/// <summary>
 /// What Delivery offers the rest of EntKube.
 ///
 /// <para>Read-only: 22 services across other modules read <c>AppDeployment</c> and none of
@@ -223,6 +241,28 @@ public interface IDeliveryApi
     /// </summary>
     Task<IReadOnlyList<RolloutSummary>> GetRolloutsAsync(
         Guid tenantId, int limit = 100, CancellationToken ct = default);
+
+    /// <summary>
+    /// Health samples for a set of deployments over an interval, oldest first.
+    ///
+    /// <para><b>Why rows and not a ratio.</b> Three callers outside Delivery read this table and
+    /// all three slice the samples again after fetching them: the error-budget service carves each
+    /// deployment's own SLA window and a one-day burn window out of one wide fetch, the monthly
+    /// report drops individual samples that fall inside a maintenance window and reports how many
+    /// it dropped, and the customer status dashboard carves 7 days out of 30. A pre-computed
+    /// percentage cannot answer any of them.</para>
+    ///
+    /// <para>⚠️ Two <em>other</em> callers want only a ratio, and this method is deliberately not
+    /// for them: at five-minute sampling that is ~8,600 rows per deployment per month to compute
+    /// two integers. They keep their own counting shape until a count-returning method earns its
+    /// place — putting them behind this one would lock the waste in behind a contract.</para>
+    ///
+    /// <para><paramref name="to"/> is exclusive and optional: the monthly report needs a closed
+    /// calendar month, the other two want "up to now".</para>
+    /// </summary>
+    Task<IReadOnlyList<DeploymentHealthSample>> GetHealthSamplesAsync(
+        Guid tenantId, IReadOnlyCollection<Guid> deploymentIds, DateTime from,
+        DateTime? to = null, CancellationToken ct = default);
 
     /// <summary>Everything deployed to one cluster.</summary>
     Task<IReadOnlyList<DeploymentSummary>> GetDeploymentsForClusterAsync(

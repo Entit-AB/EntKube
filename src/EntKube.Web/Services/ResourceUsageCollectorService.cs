@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.ClusterChanges;
 
 namespace EntKube.Web.Services;
@@ -48,7 +49,7 @@ public class ResourceUsageCollectorService(
     {
         using IServiceScope scope = scopeFactory.CreateScope();
         using IDisposable unattended = scope.DeclareUnattended("resource-usage-collector");
-        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<CostDbContext>>();
         var prometheus = scope.ServiceProvider.GetRequiredService<PrometheusService>();
 
         var catalog = scope.ServiceProvider.GetRequiredService<EntKube.Contracts.Catalog.ICatalogApi>();
@@ -61,7 +62,7 @@ public class ResourceUsageCollectorService(
         // move that turns a check into a tautology. This was half converted for three steps while
         // PrometheusService still took a cluster id and no tenant.
         List<(Guid TenantId, Guid ClusterId)> targets = [];
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (CostDbContext db = dbFactory.CreateDbContext())
         {
             foreach (Guid tenantId in await db.Tenants.Select(t => t.Id).ToListAsync(ct))
             {
@@ -120,14 +121,14 @@ public class ResourceUsageCollectorService(
             }
 
             if (batch.Count == 0) continue;
-            using ApplicationDbContext db = dbFactory.CreateDbContext();
+            using CostDbContext db = dbFactory.CreateDbContext();
             db.ResourceUsageSnapshots.AddRange(batch);
             await db.SaveChangesAsync(ct);
             written += batch.Count;
         }
 
         // Prune history so the table stays bounded.
-        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        using (CostDbContext db = dbFactory.CreateDbContext())
         {
             int pruned = await db.ResourceUsageSnapshots
                 .Where(s => s.SnapshotAt < now - Retention)

@@ -46,7 +46,7 @@ public class AppL4RouteHealthService(
         using IServiceScope scope = scopeFactory.CreateScope();
         using IDisposable unattended = scope.DeclareUnattended("app-l4-route-health");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ConnectivityDbContext>>();
-        var appDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var appDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ConnectivityDbContext>>();
         var k8sOps = scope.ServiceProvider.GetRequiredService<KubernetesOperationsService>();
 
         // Only TCP routes are actively probed (UDP is connectionless — see class remarks).
@@ -55,7 +55,7 @@ public class AppL4RouteHealthService(
         // the cluster, so the read is authorized as the tenant whose route is being probed. The
         // tenant travels with each route rather than being recovered from it later.
         List<(Guid TenantId, Guid Id, Guid ClusterId, int Port)> routes = [];
-        using (ApplicationDbContext appDb = appDbFactory.CreateDbContext())
+        using (ConnectivityDbContext appDb = appDbFactory.CreateDbContext())
         using (ConnectivityDbContext db = dbFactory.CreateDbContext())
         {
             foreach (Guid tenantId in await appDb.Tenants.Select(t => t.Id).ToListAsync(ct))

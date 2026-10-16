@@ -79,7 +79,7 @@ public class RolloutWatcherService(
         using IServiceScope scope = scopeFactory.CreateScope();
         using IDisposable unattended = scope.DeclareUnattended("rollout-watcher");
         var dbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
-        var appDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
+        var appDbFactory = scope.ServiceProvider.GetRequiredService<IDbContextFactory<DeliveryDbContext>>();
         var rollouts = scope.ServiceProvider.GetRequiredService<RolloutService>();
         var notifications = scope.ServiceProvider.GetRequiredService<NotificationService>();
 
@@ -88,7 +88,7 @@ public class RolloutWatcherService(
         // tenant. Selecting every due rollout installation-wide and then reading a tenant back
         // off the rollout would make the check compare a row against itself.
         List<Guid> tenantIds;
-        await using (ApplicationDbContext appDb = await appDbFactory.CreateDbContextAsync(ct))
+        await using (DeliveryDbContext appDb = await appDbFactory.CreateDbContextAsync(ct))
         {
             tenantIds = await appDb.Tenants.Select(t => t.Id).ToListAsync(ct);
         }
