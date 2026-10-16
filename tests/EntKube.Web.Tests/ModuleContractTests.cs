@@ -450,7 +450,7 @@ public class ModuleContractTests
     private static readonly Dictionary<Module, int> Baseline = new()
     {
         [Module.DataServices] = 2,
-        [Module.Telemetry] = 6,
+        [Module.Telemetry] = 5,
         [Module.Connectivity] = 6,
         [Module.Support] = 7,
         [Module.Catalog] = 6,

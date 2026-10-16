@@ -1158,6 +1158,38 @@ Nothing moves. The monolith becomes modular.
 
    This repeats §4.0's lesson exactly: a big coupling number usually has one structural cause,
    and it is rarely the one the number's name suggests.
+
+   **⚠️ Correction: the headline count for this ratchet was measured with half the metric.**
+   "Services still on the all-seeing context" was read off constructor parameters by
+   reflection — and a singleton cannot take a scoped `DbContext` in its constructor, because
+   that is a captive dependency the container refuses. Every `BackgroundService` in the product
+   therefore takes `IServiceScopeFactory` and resolves `IDbContextFactory<ApplicationDbContext>`
+   inside its loop, and **not one of them was ever counted.** Twelve files do it; ten are mapped
+   services. The real total was **44, not 34**, and the corrected per-module figures are
+   Telemetry 6, Delivery 6, Connectivity 6, Fleet 3 and Cost **1** — Cost having been recorded
+   as a finished module at 0 while its usage collector swept every tenant's clusters on the
+   all-seeing context the whole time. A zero that could never have been anything else is worse
+   than a large number, because nobody revisits a module that is done.
+
+   The exemption was not random: it removed precisely the code with the widest reach — the
+   unattended sweeps that cross every tenant and that §4.0 exists to govern. `ModuleContractTests`
+   now derives both spellings from the source instead of asking reflection one question, and
+   this is the sixth time a ratchet in this programme turned out to be counting **one spelling**
+   of the thing it names (`DbSet` vs navigation vs `Set<T>()`, a wrapper call, a filename-keyed
+   map, a log string, and now constructor injection vs scope resolution). The fix has been the
+   same every time: make the measurement derive what it looks for.
+
+   **`ISupportApi` is the sixth contract, and it is one method.** `ErrorBudgetService` owns no
+   table — deployments and health samples are Delivery's, availability objectives are Support's —
+   so the all-seeing context was the only way it could read anything at all. It now takes two
+   contracts and no context. The write side was left out on purpose, because looking for it
+   turned up something worth fixing separately: **the product's SLA-target CRUD lives in
+   `IncidentService`, a Telemetry service**, operating on Support's table and handing the EF
+   entity to three Razor pages, one of which also adds and removes rows straight off the
+   `DbSet`. Resolution was left out for a sharper reason — there are two implementations of
+   most-specific-wins and they are not the same predicate, differing in a branch no caller
+   currently reaches, so publishing either as *the* resolution would be a behaviour change
+   wearing the costume of a move.
 3. **An architecture test that fails the build when the boundaries erode.** ☑ **Done.**
    `ModuleMap` assigns all 165 entities to a module and `ModuleBoundaryTests` holds it to the
    EF model in both directions — an unassigned table fails the build, and so does a mapping
