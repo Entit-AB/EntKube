@@ -273,7 +273,7 @@
     {
         try
         {
-            await VaultService.DeleteSecretAsync(secretId);
+            await VaultService.DeleteSecretAsync(TenantId, secretId);
             componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, componentId);
             Toasts.Success("Deleted secret.");
         }
@@ -320,7 +320,7 @@
 
     private async Task DisableSync(VaultSecret secret)
     {
-        await VaultService.ConfigureKubernetesSyncAsync(secret.Id, syncEnabled: false, secretName: null, ns: null);
+        await VaultService.ConfigureKubernetesSyncAsync(TenantId, secret.Id, syncEnabled: false, secretName: null, ns: null);
         componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, expandedComponentId!.Value);
     }
 
@@ -331,8 +331,7 @@
             return;
         }
 
-        await VaultService.ConfigureKubernetesSyncAsync(
-            syncConfigSecretId.Value, syncEnabled: true, secretName: syncSecretName.Trim(), ns: syncNamespace.Trim());
+        await VaultService.ConfigureKubernetesSyncAsync(TenantId, syncConfigSecretId.Value, syncEnabled: true, secretName: syncSecretName.Trim(), ns: syncNamespace.Trim());
 
         syncConfigSecretId = null;
         componentSecrets = await VaultService.GetComponentSecretsAsync(TenantId, componentId);

@@ -193,7 +193,7 @@ public class VaultServiceTests : IDisposable
         await sut.InitializeVaultAsync(tenant.Id);
 
         VaultSecret secret = await sut.SetAppSecretAsync(tenant.Id, app.Id, "TEMP", "delete-me");
-        bool deleted = await sut.DeleteSecretAsync(secret.Id);
+        bool deleted = await sut.DeleteSecretAsync(tenant.Id, secret.Id);
 
         deleted.Should().BeTrue();
         List<VaultSecret> remaining = await sut.GetAppSecretsAsync(tenant.Id, app.Id);
@@ -264,8 +264,7 @@ public class VaultServiceTests : IDisposable
 
         VaultSecret secret = await sut.SetAppSecretAsync(tenant.Id, app.Id, "DB_URL", "postgres://...");
 
-        await sut.ConfigureKubernetesSyncAsync(
-            secret.Id, syncEnabled: true, secretName: "myapp-db", ns: "production");
+        await sut.ConfigureKubernetesSyncAsync(tenant.Id, secret.Id, syncEnabled: true, secretName: "myapp-db", ns: "production");
 
         VaultSecret? reloaded = await db.VaultSecrets.FindAsync(secret.Id);
         reloaded!.SyncToKubernetes.Should().BeTrue();
@@ -280,8 +279,8 @@ public class VaultServiceTests : IDisposable
         await sut.InitializeVaultAsync(tenant.Id);
 
         VaultSecret secret = await sut.SetAppSecretAsync(tenant.Id, app.Id, "KEY", "val");
-        await sut.ConfigureKubernetesSyncAsync(secret.Id, syncEnabled: true, secretName: "s", ns: "ns");
-        await sut.ConfigureKubernetesSyncAsync(secret.Id, syncEnabled: false, secretName: null, ns: null);
+        await sut.ConfigureKubernetesSyncAsync(tenant.Id, secret.Id, syncEnabled: true, secretName: "s", ns: "ns");
+        await sut.ConfigureKubernetesSyncAsync(tenant.Id, secret.Id, syncEnabled: false, secretName: null, ns: null);
 
         VaultSecret? reloaded = await db.VaultSecrets.FindAsync(secret.Id);
         reloaded!.SyncToKubernetes.Should().BeFalse();
@@ -374,7 +373,7 @@ public class VaultServiceTests : IDisposable
 
         // Act
 
-        bool updated = await sut.UpdateSecretValueAsync(secret.Id, "new-password");
+        bool updated = await sut.UpdateSecretValueAsync(tenant.Id, secret.Id, "new-password");
 
         // Assert
 
@@ -388,7 +387,7 @@ public class VaultServiceTests : IDisposable
     {
         // Act
 
-        bool updated = await sut.UpdateSecretValueAsync(Guid.NewGuid(), "anything");
+        bool updated = await sut.UpdateSecretValueAsync(Guid.NewGuid(), Guid.NewGuid(), "anything");
 
         // Assert
 
@@ -408,7 +407,7 @@ public class VaultServiceTests : IDisposable
 
         // Act
 
-        (bool canDelete, string? reason) = await sut.CanDeleteSecretAsync(secret.Id);
+        (bool canDelete, string? reason) = await sut.CanDeleteSecretAsync(tenant.Id, secret.Id);
 
         // Assert
 
@@ -471,7 +470,7 @@ public class VaultServiceTests : IDisposable
 
         // Act
 
-        (bool canDelete, string? reason) = await sut.CanDeleteSecretAsync(secret.Id);
+        (bool canDelete, string? reason) = await sut.CanDeleteSecretAsync(tenant.Id, secret.Id);
 
         // Assert
 
@@ -532,7 +531,7 @@ public class VaultServiceTests : IDisposable
 
         // Act
 
-        (bool canDelete, string? reason) = await sut.CanDeleteSecretAsync(secret.Id);
+        (bool canDelete, string? reason) = await sut.CanDeleteSecretAsync(tenant.Id, secret.Id);
 
         // Assert — disabled binding should not block deletion.
 
@@ -768,8 +767,7 @@ public class VaultServiceTests : IDisposable
         foreach ((string key, string val) in new[] { ("tls.crt", certPem), ("tls.key", keyPem) })
         {
             VaultSecret s = await sut.SetAppSecretAsync(tenant.Id, app.Id, key, val);
-            await sut.ConfigureKubernetesSyncAsync(
-                s.Id, syncEnabled: false, secretName: "legacy-tls", ns: "prod", clusterId: cluster.Id);
+            await sut.ConfigureKubernetesSyncAsync(tenant.Id, s.Id, syncEnabled: false, secretName: "legacy-tls", ns: "prod", clusterId: cluster.Id);
         }
 
         int converted = await sut.ConvertImportedTlsSecretsToCertificatesAsync();
@@ -812,8 +810,7 @@ public class VaultServiceTests : IDisposable
         await sut.InitializeVaultAsync(tenant.Id);
 
         VaultSecret s = await sut.SetAppSecretAsync(tenant.Id, app.Id, "tls.crt", "not-a-certificate");
-        await sut.ConfigureKubernetesSyncAsync(
-            s.Id, syncEnabled: false, secretName: "weird", ns: "prod", clusterId: cluster.Id);
+        await sut.ConfigureKubernetesSyncAsync(tenant.Id, s.Id, syncEnabled: false, secretName: "weird", ns: "prod", clusterId: cluster.Id);
 
         (await sut.ConvertImportedTlsSecretsToCertificatesAsync()).Should().Be(0);
 
@@ -894,7 +891,7 @@ public class VaultServiceTests : IDisposable
         (string certPem, string keyPem) = MakeSelfSignedCert("x.example.com");
         (_, _, Guid? id) = await sut.SetTenantCertificateAsync(tenant.Id, "x", TryBuild(certPem, keyPem).Bundle);
 
-        await sut.DeleteTenantCertificateAsync(id!.Value);
+        await sut.DeleteTenantCertificateAsync(tenant.Id, id!.Value);
 
         (await sut.GetTenantCertificatesAsync(tenant.Id)).Should().BeEmpty();
     }
@@ -1065,12 +1062,12 @@ public class VaultServiceTests : IDisposable
         (Tenant tenant, App app) = CreateTenantWithApp();
         await sut.InitializeVaultAsync(tenant.Id);
         VaultSecret secret = await sut.SetAppSecretAsync(tenant.Id, app.Id, "API_KEY", "first");
-        await sut.UpdateSecretValueAsync(secret.Id, "second");
+        await sut.UpdateSecretValueAsync(tenant.Id, secret.Id, "second");
 
         Tenant stranger = CreateTenant("Stranger", "stranger");
         await sut.InitializeVaultAsync(stranger.Id);
 
-        List<VaultSecretVersion> versions = await sut.GetSecretVersionsAsync(secret.Id);
+        List<VaultSecretVersion> versions = await sut.GetSecretVersionsAsync(tenant.Id, secret.Id);
         versions.Should().NotBeEmpty("the update archived the previous value");
 
         (await sut.GetSecretVersionValueAsync(tenant.Id, secret.Id, versions[0].Id))
@@ -1078,5 +1075,98 @@ public class VaultServiceTests : IDisposable
 
         (await sut.GetSecretVersionValueAsync(stranger.Id, secret.Id, versions[0].Id))
             .Should().BeNull();
+    }
+    /// <summary>
+    /// The write half of the same surface #251 scoped for reads: overwrite, roll back, re-scope,
+    /// re-sync, destroy. Every one took a secret id alone.
+    ///
+    /// <para>The assertions are on the <b>stored row</b>, not only on the return value. A method
+    /// that refuses and still writes is the failure that matters, and three of these return
+    /// <c>false</c> or <c>void</c> on not-found, so a return value alone proves very little.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_overwrite_or_destroy_another_tenants_secret()
+    {
+        (Tenant tenant, App app) = CreateTenantWithApp();
+        await sut.InitializeVaultAsync(tenant.Id);
+        VaultSecret secret = await sut.SetAppSecretAsync(tenant.Id, app.Id, "API_KEY", "original");
+
+        Tenant stranger = CreateTenant("Stranger", "stranger");
+        await sut.InitializeVaultAsync(stranger.Id);
+
+        (await sut.UpdateSecretValueAsync(stranger.Id, secret.Id, "overwritten"))
+            .Should().BeFalse();
+        (await sut.DeleteSecretAsync(stranger.Id, secret.Id)).Should().BeFalse();
+        (await sut.ChangeAppSecretScopeAsync(stranger.Id, secret.Id, null)).Ok.Should().BeFalse();
+        await sut.ConfigureKubernetesSyncAsync(stranger.Id, secret.Id, true, "stolen", "theirs");
+
+        using ApplicationDbContext check = dbFactory.CreateDbContext();
+        VaultSecret after = await check.VaultSecrets.FirstAsync(v => v.Id == secret.Id);
+        after.KubernetesSecretName.Should().NotBe("stolen",
+            "ConfigureKubernetesSyncAsync returns void, so only the row can say it was refused");
+
+        (await sut.GetSecretValueByIdAsync(tenant.Id, secret.Id))
+            .Should().Be("original", "the owner's value is untouched");
+
+        (await sut.UpdateSecretValueAsync(tenant.Id, secret.Id, "updated"))
+            .Should().BeTrue("the owner can still write");
+    }
+
+    /// <summary>
+    /// Rolling back changes the live value, so it is the version equivalent of a write. Both the
+    /// secret and the version are scoped — the version through its secret.
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_roll_another_tenants_secret_back()
+    {
+        (Tenant tenant, App app) = CreateTenantWithApp();
+        await sut.InitializeVaultAsync(tenant.Id);
+        VaultSecret secret = await sut.SetAppSecretAsync(tenant.Id, app.Id, "API_KEY", "first");
+        await sut.UpdateSecretValueAsync(tenant.Id, secret.Id, "second");
+
+        Tenant stranger = CreateTenant("Stranger", "stranger");
+        await sut.InitializeVaultAsync(stranger.Id);
+
+        List<VaultSecretVersion> versions = await sut.GetSecretVersionsAsync(tenant.Id, secret.Id);
+        versions.Should().NotBeEmpty();
+
+        (await sut.GetSecretVersionsAsync(stranger.Id, secret.Id)).Should().BeEmpty(
+            "the version list is reached through the secret, so the scope travels with it");
+
+        (await sut.RollbackToVersionAsync(stranger.Id, secret.Id, versions[0].Id))
+            .Should().BeFalse();
+
+        (await sut.GetSecretValueByIdAsync(tenant.Id, secret.Id))
+            .Should().Be("second", "still the current value, not the rolled-back one");
+    }
+
+    /// <summary>
+    /// ⚠️ <c>DeleteTenantCertificateAsync</c> already narrowed its lookup — app-less, and of type
+    /// Certificate — which <em>reads</em> like scoping and is not: every tenant has app-less
+    /// certificates. A filter that is not a tenant filter is the easiest kind to mistake for one.
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_delete_another_tenants_tenant_certificate()
+    {
+        Tenant tenant = CreateTenant();
+        await sut.InitializeVaultAsync(tenant.Id);
+        (string certPem, string keyPem) = MakeSelfSignedCert("tenant.example.com");
+        await sut.SetTenantCertificateAsync(tenant.Id, "tenant-cert", TryBuild(certPem, keyPem).Bundle);
+
+        Tenant stranger = CreateTenant("Stranger", "stranger");
+        await sut.InitializeVaultAsync(stranger.Id);
+
+        using ApplicationDbContext before = dbFactory.CreateDbContext();
+        VaultSecret cert = await before.VaultSecrets.FirstAsync(v => v.Name == "tenant-cert");
+
+        await sut.DeleteTenantCertificateAsync(stranger.Id, cert.Id);
+
+        using ApplicationDbContext check = dbFactory.CreateDbContext();
+        check.VaultSecrets.Should().Contain(v => v.Id == cert.Id,
+            "the certificate is app-less and of the right type for the stranger's query too");
+
+        await sut.DeleteTenantCertificateAsync(tenant.Id, cert.Id);
+        using ApplicationDbContext after = dbFactory.CreateDbContext();
+        after.VaultSecrets.Should().NotContain(v => v.Id == cert.Id, "the owner can delete it");
     }
 }

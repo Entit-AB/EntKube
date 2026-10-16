@@ -380,7 +380,7 @@ else
             // Remove delivery targets first (also clears the mirrored secrets), then the cert.
             foreach (CertificateDistribution t in await DistService.GetDistributionsForCertAsync(TenantId, certId))
                 await DistService.DeleteDistributionAsync(TenantId, t.Id);
-            await VaultService.DeleteTenantCertificateAsync(certId);
+            await VaultService.DeleteTenantCertificateAsync(TenantId, certId);
             Toasts.Success("Certificate deleted.");
             confirmDeleteCertId = null;
             if (expandedCertId == certId) expandedCertId = null;
