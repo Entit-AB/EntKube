@@ -60,7 +60,12 @@ public class AppRouteService(
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     ILogger<AppRouteService> logger)
 {
-    public async Task<List<AppRoute>> GetRoutesForAppAsync(Guid appId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose routes. An input, never derived from the app id — an app id on its own names a row
+    /// in every tenant's table equally well, and these rows carry hostnames and TLS material.
+    /// </param>
+    public async Task<List<AppRoute>> GetRoutesForAppAsync(
+        Guid tenantId, Guid appId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -69,12 +74,13 @@ public class AppRouteService(
             .Include(r => r.DeploymentRoutes)
                 .ThenInclude(dr => dr.AppDeployment)
                     .ThenInclude(d => d.Environment)
-            .Where(r => r.AppId == appId)
+            .Where(r => r.AppId == appId && r.App.Customer.TenantId == tenantId)
             .OrderBy(r => r.Hostname)
             .ToListAsync(ct);
     }
 
-    public async Task<List<AppRoute>> GetRoutesForCustomerAsync(Guid customerId, CancellationToken ct = default)
+    public async Task<List<AppRoute>> GetRoutesForCustomerAsync(
+        Guid tenantId, Guid customerId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -84,15 +90,27 @@ public class AppRouteService(
             .Include(r => r.DeploymentRoutes)
                 .ThenInclude(dr => dr.AppDeployment)
                     .ThenInclude(d => d.Environment)
-            .Where(r => r.App.CustomerId == customerId && r.IsEnabled)
+            .Where(r => r.App.CustomerId == customerId
+                     && r.App.Customer.TenantId == tenantId
+                     && r.IsEnabled)
             .OrderBy(r => r.App.Name)
             .ThenBy(r => r.Hostname)
             .ToListAsync(ct);
     }
 
-    public async Task<AppRoute> AddRouteAsync(Guid appId, AppRouteRequest request, CancellationToken ct = default)
+    public async Task<AppRoute> AddRouteAsync(
+        Guid tenantId, Guid appId, AppRouteRequest request, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        // The app is the only thing tying this new row to a tenant, so it is checked before
+        // anything is validated or written. Without this, a hostname and its TLS material would
+        // be attached to whichever app the caller named.
+        bool appIsTenants = await db.Apps
+            .AnyAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct);
+        if (!appIsTenants)
+            throw new InvalidOperationException(
+                "App not found, or it does not belong to this tenant.");
 
         if (string.IsNullOrWhiteSpace(request.Hostname))
             throw new InvalidOperationException("Hostname is required.");
@@ -110,7 +128,7 @@ public class AppRouteService(
         if (duplicate)
             throw new InvalidOperationException($"Hostname '{hostname}' is already configured for this app.");
 
-        await ValidateClientCertificateAsync(db, appId, request, ct);
+        await ValidateClientCertificateAsync(db, tenantId, request, ct);
 
         AppRoute route = new()
         {
@@ -136,12 +154,15 @@ public class AppRouteService(
         return route;
     }
 
-    public async Task UpdateRouteAsync(Guid routeId, AppRouteRequest request, CancellationToken ct = default)
+    public async Task UpdateRouteAsync(
+        Guid tenantId, Guid routeId, AppRouteRequest request, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        AppRoute route = await db.AppRoutes.FirstOrDefaultAsync(r => r.Id == routeId, ct)
-            ?? throw new InvalidOperationException("Route not found.");
+        AppRoute route = await db.AppRoutes
+            .FirstOrDefaultAsync(r => r.Id == routeId && r.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Route not found, or it does not belong to this tenant.");
 
         if (string.IsNullOrWhiteSpace(request.Hostname))
             throw new InvalidOperationException("Hostname is required.");
@@ -153,7 +174,7 @@ public class AppRouteService(
         if (duplicate)
             throw new InvalidOperationException($"Hostname '{hostname}' is already configured for this app.");
 
-        await ValidateClientCertificateAsync(db, route.AppId, request, ct);
+        await ValidateClientCertificateAsync(db, tenantId, request, ct);
 
         route.Hostname = hostname;
         route.TlsMode = request.TlsMode;
@@ -174,7 +195,7 @@ public class AppRouteService(
     /// publish it on that anchor's listener port and accept that tenant's client certificates.
     /// </summary>
     private static async Task ValidateClientCertificateAsync(
-        ApplicationDbContext db, Guid appId, AppRouteRequest request, CancellationToken ct)
+        ApplicationDbContext db, Guid tenantId, AppRouteRequest request, CancellationToken ct)
     {
         if (!request.RequireClientCertificate) return;
 
@@ -182,16 +203,15 @@ public class AppRouteService(
             throw new InvalidOperationException(
                 "Pick the CA that signs your clients' certificates — mTLS can't be enabled without a trust anchor.");
 
-        Guid tenantId = await db.Apps
-            .Where(a => a.Id == appId)
-            .Select(a => a.Customer.TenantId)
-            .FirstOrDefaultAsync(ct);
-
+        // The tenant is the CALLER's, passed in. It used to be read back off the app id the
+        // caller supplied — so naming another tenant's app produced that tenant's id, and an
+        // anchor belonging to the same foreign tenant then compared equal and passed. The check
+        // was comparing the request to itself.
         ClientCaBundle? bundle = await db.ClientCaBundles
             .Include(b => b.Certificates)
-            .FirstOrDefaultAsync(b => b.Id == bundleId, ct);
+            .FirstOrDefaultAsync(b => b.Id == bundleId && b.TenantId == tenantId, ct);
 
-        if (bundle is null || bundle.TenantId != tenantId)
+        if (bundle is null)
             throw new InvalidOperationException("Trust anchor not found for this tenant.");
 
         // An anchor with no CA yields an empty trust store; Istio rejects the Gateway outright,
@@ -202,12 +222,14 @@ public class AppRouteService(
                 "requiring client certificates.");
     }
 
-    public async Task DeleteRouteAsync(Guid routeId, CancellationToken ct = default)
+    public async Task DeleteRouteAsync(Guid tenantId, Guid routeId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        AppRoute route = await db.AppRoutes.FirstOrDefaultAsync(r => r.Id == routeId, ct)
-            ?? throw new InvalidOperationException("Route not found.");
+        AppRoute route = await db.AppRoutes
+            .FirstOrDefaultAsync(r => r.Id == routeId && r.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Route not found, or it does not belong to this tenant.");
 
         db.AppRoutes.Remove(route);
         await db.SaveChangesAsync(ct);
@@ -226,13 +248,18 @@ public class AppRouteService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        AppRoute appRoute = await db.AppRoutes.FirstOrDefaultAsync(r => r.Id == appRouteId, ct)
-            ?? throw new InvalidOperationException("App route not found.");
+        // Both of these used to resolve on id alone, while the tenant sat in scope being used
+        // for the Catalog call below and nothing else — a tenant that is an input is not an
+        // authorization check until something is filtered by it.
+        AppRoute appRoute = await db.AppRoutes
+            .FirstOrDefaultAsync(r => r.Id == appRouteId && r.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "App route not found, or it does not belong to this tenant.");
 
         AppDeployment deployment = await db.AppDeployments
-            .Include(d => d.Cluster)
-            .FirstOrDefaultAsync(d => d.Id == deploymentId, ct)
-            ?? throw new InvalidOperationException("Deployment not found.");
+            .FirstOrDefaultAsync(d => d.Id == deploymentId && d.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Deployment not found, or it does not belong to this tenant.");
 
         // A deployment may be linked to the same hostname multiple times — one Helm release can
         // expose several services that each need their own path. What can't collide is the path
@@ -272,13 +299,16 @@ public class AppRouteService(
     }
 
     public async Task UpdateDeploymentRouteAsync(
-        Guid deploymentRouteId, AppDeploymentRouteRequest request, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentRouteId, AppDeploymentRouteRequest request,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         AppDeploymentRoute dr = await db.AppDeploymentRoutes
-            .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct)
-            ?? throw new InvalidOperationException("Deployment route not found.");
+            .FirstOrDefaultAsync(
+                r => r.Id == deploymentRouteId && r.AppRoute.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Deployment route not found, or it does not belong to this tenant.");
 
         string pathPrefix = string.IsNullOrWhiteSpace(request.PathPrefix) ? "/" : request.PathPrefix.Trim();
 
@@ -305,13 +335,16 @@ public class AppRouteService(
     /// HTTPRoute, not before. Null restores the platform default; 0 disables the timeout.
     /// </summary>
     public async Task UpdateDeploymentRouteTimeoutAsync(
-        Guid deploymentRouteId, int? requestTimeoutSeconds, CancellationToken ct = default)
+        Guid tenantId, Guid deploymentRouteId, int? requestTimeoutSeconds,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         AppDeploymentRoute dr = await db.AppDeploymentRoutes
-            .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct)
-            ?? throw new InvalidOperationException("Deployment route not found.");
+            .FirstOrDefaultAsync(
+                r => r.Id == deploymentRouteId && r.AppRoute.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Deployment route not found, or it does not belong to this tenant.");
 
         dr.RequestTimeoutSeconds = ValidateTimeout(requestTimeoutSeconds);
         dr.ClusterAppliedAt = null;
@@ -328,8 +361,8 @@ public class AppRouteService(
     /// claim sessions were pinned when they were still being spread across pods.
     /// </summary>
     public async Task UpdateDeploymentRouteSessionAffinityAsync(
-        Guid deploymentRouteId, SessionAffinityMode mode, string? key, int? ttlSeconds,
-        CancellationToken ct = default)
+        Guid tenantId, Guid deploymentRouteId, SessionAffinityMode mode, string? key,
+        int? ttlSeconds, CancellationToken ct = default)
     {
         if (ExternalRouteService.ValidateSessionAffinity(mode, key) is string error)
         {
@@ -345,8 +378,10 @@ public class AppRouteService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         AppDeploymentRoute dr = await db.AppDeploymentRoutes
-            .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct)
-            ?? throw new InvalidOperationException("Deployment route not found.");
+            .FirstOrDefaultAsync(
+                r => r.Id == deploymentRouteId && r.AppRoute.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Deployment route not found, or it does not belong to this tenant.");
 
         dr.SessionAffinity = mode;
         dr.SessionAffinityKey = ExternalRouteService.NormalizeAffinityKey(mode, key);
@@ -365,7 +400,7 @@ public class AppRouteService(
     /// claiming traffic had moved when it had not.
     /// </summary>
     public async Task UpdateDeploymentRouteCanaryAsync(
-        Guid deploymentRouteId, string? canaryServiceName, int canaryWeight,
+        Guid tenantId, Guid deploymentRouteId, string? canaryServiceName, int canaryWeight,
         int? canaryServicePort = null, CancellationToken ct = default)
     {
         if (canaryWeight is < 0 or > 100)
@@ -376,8 +411,10 @@ public class AppRouteService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         AppDeploymentRoute dr = await db.AppDeploymentRoutes
-            .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct)
-            ?? throw new InvalidOperationException("Deployment route not found.");
+            .FirstOrDefaultAsync(
+                r => r.Id == deploymentRouteId && r.AppRoute.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Deployment route not found, or it does not belong to this tenant.");
 
         string? service = string.IsNullOrWhiteSpace(canaryServiceName) ? null : canaryServiceName.Trim();
 
@@ -405,13 +442,16 @@ public class AppRouteService(
             ? throw new InvalidOperationException("Request timeout cannot be negative. Use 0 for no timeout.")
             : requestTimeoutSeconds;
 
-    public async Task DeleteDeploymentRouteAsync(Guid deploymentRouteId, CancellationToken ct = default)
+    public async Task DeleteDeploymentRouteAsync(
+        Guid tenantId, Guid deploymentRouteId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         AppDeploymentRoute dr = await db.AppDeploymentRoutes
-            .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct)
-            ?? throw new InvalidOperationException("Deployment route not found.");
+            .FirstOrDefaultAsync(
+                r => r.Id == deploymentRouteId && r.AppRoute.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Deployment route not found, or it does not belong to this tenant.");
 
         db.AppDeploymentRoutes.Remove(dr);
         await db.SaveChangesAsync(ct);
@@ -421,7 +461,8 @@ public class AppRouteService(
     /// Generates the full Kubernetes manifest (HTTPRoute + Certificate) for a deployment route.
     /// Apply this YAML to the target cluster to expose the app.
     /// </summary>
-    public async Task<string> GenerateManifestYamlAsync(Guid deploymentRouteId, CancellationToken ct = default)
+    public async Task<string> GenerateManifestYamlAsync(
+        Guid tenantId, Guid deploymentRouteId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -429,8 +470,10 @@ public class AppRouteService(
             .Include(r => r.AppRoute)
                 .ThenInclude(r => r.ClientCaBundle)
             .Include(r => r.AppDeployment)
-            .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct)
-            ?? throw new InvalidOperationException("Deployment route not found.");
+            .FirstOrDefaultAsync(
+                r => r.Id == deploymentRouteId && r.AppRoute.App.Customer.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Deployment route not found, or it does not belong to this tenant.");
 
         return GenerateManifestYaml(dr);
     }

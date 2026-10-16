@@ -412,7 +412,7 @@ else
         loadError = null;
         try
         {
-            routes = await AppRouteService.GetRoutesForAppAsync(App.Id);
+            routes = await AppRouteService.GetRoutesForAppAsync(TenantId, App.Id);
             deployments = await DeploymentService.GetDeploymentsAsync(App.Id);
         }
         catch (Exception ex)
@@ -513,7 +513,7 @@ else
                 PathPrefix = newDrPath
             });
             CancelAdd();
-            routes = await AppRouteService.GetRoutesForAppAsync(App.Id);
+            routes = await AppRouteService.GetRoutesForAppAsync(TenantId, App.Id);
         }
         catch (Exception ex)
         {
@@ -587,7 +587,7 @@ else
         saving = true;
         try
         {
-            await AppRouteService.UpdateDeploymentRouteAsync(drId, new AppDeploymentRouteRequest
+            await AppRouteService.UpdateDeploymentRouteAsync(TenantId, drId, new AppDeploymentRouteRequest
             {
                 ServiceName = editService,
                 ServicePort = editPort,
@@ -596,7 +596,7 @@ else
                 RequestTimeoutSeconds = editTimeoutSeconds
             });
             CancelEdit();
-            routes = await AppRouteService.GetRoutesForAppAsync(App.Id);
+            routes = await AppRouteService.GetRoutesForAppAsync(TenantId, App.Id);
         }
         catch (Exception ex)
         {
@@ -612,8 +612,8 @@ else
     {
         try
         {
-            await AppRouteService.DeleteDeploymentRouteAsync(drId);
-            routes = await AppRouteService.GetRoutesForAppAsync(App.Id);
+            await AppRouteService.DeleteDeploymentRouteAsync(TenantId, drId);
+            routes = await AppRouteService.GetRoutesForAppAsync(TenantId, App.Id);
             Toasts.Success("Removed path.");
         }
         catch (Exception ex)

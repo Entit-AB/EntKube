@@ -757,7 +757,7 @@ else
 
             try
             {
-                List<AppRoute> routes = await AppRouteService.GetRoutesForAppAsync(app.Id);
+                List<AppRoute> routes = await AppRouteService.GetRoutesForAppAsync(customer.TenantId, app.Id);
                 if (routes.Count > 0) appRoutes[app.Id] = routes;
             }
             catch
