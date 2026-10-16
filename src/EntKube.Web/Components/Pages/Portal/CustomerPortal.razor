@@ -1059,7 +1059,7 @@ else
         if (editingAppId is null || string.IsNullOrWhiteSpace(editAppName)) return;
 
         savingAppName = true;
-        await TenantService.RenameAppAsync(editingAppId.Value, editAppName);
+        await TenantService.RenameAppAsync(selectedCustomer!.TenantId, editingAppId.Value, editAppName);
 
         Data.App? appInList = selectedCustomer!.Apps.FirstOrDefault(a => a.Id == editingAppId.Value);
         if (appInList is not null) appInList.Name = editAppName.Trim();
@@ -1089,7 +1089,7 @@ else
         deleteAppError = null;
 
         await K8sOps.DeleteAppFromClusterAsync(selectedCustomer!.TenantId, appId, currentUserId);
-        await TenantService.DeleteAppAsync(appId);
+        await TenantService.DeleteAppAsync(selectedCustomer!.TenantId, appId);
 
         Data.App? appToRemove = selectedCustomer!.Apps.FirstOrDefault(a => a.Id == appId);
         if (appToRemove is not null) selectedCustomer.Apps.Remove(appToRemove);
