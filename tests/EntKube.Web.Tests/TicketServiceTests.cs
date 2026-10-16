@@ -27,9 +27,13 @@ public class TicketServiceTests : IDisposable
 
     private readonly SqliteConnection connection;
     private readonly ApplicationDbContext db;
+    private readonly TestDbContextFactory factory;
     private readonly TicketService tickets;
 
     private readonly Guid tenantId = Guid.NewGuid();
+
+    /// <summary>A second tenant that owns no ticket here — the stranger asking the questions.</summary>
+    private readonly Guid strangerTenant = Guid.NewGuid();
     private readonly Guid customerId = Guid.NewGuid();
     private readonly Guid s1AppId = Guid.NewGuid();
     private readonly Guid s4AppId = Guid.NewGuid();
@@ -45,6 +49,7 @@ public class TicketServiceTests : IDisposable
         db.Database.EnsureCreated();
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
+        db.Tenants.Add(new Tenant { Id = strangerTenant, Name = "Stranger", Slug = "stranger" });
         db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Entit AB" });
         db.Apps.AddRange(
             new App { Id = s1AppId, CustomerId = customerId, Name = "Booking" },
@@ -55,7 +60,7 @@ public class TicketServiceTests : IDisposable
         AddContract(s4AppId, SupportWindow.S4);
         db.SaveChanges();
 
-        TestDbContextFactory factory = new(connection);
+        factory = new TestDbContextFactory(connection);
         tickets = new TicketService(
             factory, new ContractService(factory), SilentTicketNotifier.For(factory));
     }
@@ -182,7 +187,7 @@ public class TicketServiceTests : IDisposable
     public async Task An_application_with_no_contract_is_assumed_to_be_S1_and_says_so()
     {
         Ticket ticket = await Raise(unmanagedAppId, TicketPriority.P2, Tue(10));
-        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+        Ticket? loaded = await tickets.GetAsync(tenantId, ticket.Id);
 
         ticket.SupportWindow.Should().Be(SupportWindow.S1);
         loaded!.Events.Should().Contain(e => e.Detail.Contains("No support window in force"));
@@ -205,10 +210,9 @@ public class TicketServiceTests : IDisposable
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
 
-        await tickets.ConfirmPriorityAsync(
-            ticket.Id, TicketPriority.P1, "Agreed — the service is down for everyone.", "nils", Tue(9, 20));
+        await tickets.ConfirmPriorityAsync(tenantId, ticket.Id, TicketPriority.P1, "Agreed — the service is down for everyone.", "nils", Tue(9, 20));
 
-        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+        Ticket? loaded = await tickets.GetAsync(tenantId, ticket.Id);
 
         loaded!.PriorityEffectiveFrom.Should().Be(Tue(9));
         loaded.PriorityConfirmedAt.Should().Be(Tue(9, 20));
@@ -225,10 +229,9 @@ public class TicketServiceTests : IDisposable
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
 
-        await tickets.ConfirmPriorityAsync(
-            ticket.Id, TicketPriority.P3, "Workaround in place; downgraded per §14.3.", "nils", Tue(11));
+        await tickets.ConfirmPriorityAsync(tenantId, ticket.Id, TicketPriority.P3, "Workaround in place; downgraded per §14.3.", "nils", Tue(11));
 
-        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+        Ticket? loaded = await tickets.GetAsync(tenantId, ticket.Id);
         TicketSlaStatus status = TicketService.StatusOf(loaded!, Tue(12));
 
         loaded!.Priority.Should().Be(TicketPriority.P3);
@@ -247,10 +250,10 @@ public class TicketServiceTests : IDisposable
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
 
-        await tickets.RecordResponseAsync(ticket.Id, "nils", Tue(9, 30));
-        await tickets.RecordResponseAsync(ticket.Id, "someone else", Tue(14));
+        await tickets.RecordResponseAsync(tenantId, ticket.Id, "nils", Tue(9, 30));
+        await tickets.RecordResponseAsync(tenantId, ticket.Id, "someone else", Tue(14));
 
-        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+        Ticket? loaded = await tickets.GetAsync(tenantId, ticket.Id);
 
         loaded!.FirstResponseAt.Should().Be(Tue(9, 30));
         loaded.Status.Should().Be(TicketStatus.InProgress);
@@ -264,13 +267,12 @@ public class TicketServiceTests : IDisposable
     public async Task A_pause_records_who_is_being_waited_for()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P2, Tue(9));
-        await tickets.RecordResponseAsync(ticket.Id, "nils", Tue(9, 30));
+        await tickets.RecordResponseAsync(tenantId, ticket.Id, "nils", Tue(9, 30));
 
-        await tickets.StartPauseAsync(
-            ticket.Id, WaitingOn.CustomerVendor, "The hosting provider",
+        await tickets.StartPauseAsync(tenantId, ticket.Id, WaitingOn.CustomerVendor, "The hosting provider",
             "Awaiting a network trace.", "nils", Tue(10));
 
-        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+        Ticket? loaded = await tickets.GetAsync(tenantId, ticket.Id);
 
         loaded!.Status.Should().Be(TicketStatus.Waiting);
         loaded.Pauses.Should().ContainSingle();
@@ -288,24 +290,23 @@ public class TicketServiceTests : IDisposable
     public async Task A_ticket_cannot_be_paused_twice_at_once()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P2, Tue(9));
-        await tickets.StartPauseAsync(ticket.Id, WaitingOn.Customer, null, "First", "nils", Tue(10));
+        await tickets.StartPauseAsync(tenantId, ticket.Id, WaitingOn.Customer, null, "First", "nils", Tue(10));
 
-        TicketPause? second = await tickets.StartPauseAsync(
-            ticket.Id, WaitingOn.Customer, null, "Second", "nils", Tue(11));
+        TicketPause? second = await tickets.StartPauseAsync(tenantId, ticket.Id, WaitingOn.Customer, null, "Second", "nils", Tue(11));
 
         second.Should().BeNull();
-        (await tickets.GetAsync(ticket.Id))!.Pauses.Should().ContainSingle();
+        (await tickets.GetAsync(tenantId, ticket.Id))!.Pauses.Should().ContainSingle();
     }
 
     [Fact]
     public async Task Ending_a_pause_restarts_the_clock()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P2, Tue(9));
-        await tickets.RecordResponseAsync(ticket.Id, "nils", Tue(9, 30));
-        await tickets.StartPauseAsync(ticket.Id, WaitingOn.Customer, null, "Awaiting access.", "nils", Tue(10));
-        await tickets.EndPauseAsync(ticket.Id, "nils", Tue(12));
+        await tickets.RecordResponseAsync(tenantId, ticket.Id, "nils", Tue(9, 30));
+        await tickets.StartPauseAsync(tenantId, ticket.Id, WaitingOn.Customer, null, "Awaiting access.", "nils", Tue(10));
+        await tickets.EndPauseAsync(tenantId, ticket.Id, "nils", Tue(12));
 
-        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+        Ticket? loaded = await tickets.GetAsync(tenantId, ticket.Id);
         TicketSlaStatus status = TicketService.StatusOf(loaded!, Tue(13));
 
         loaded!.Status.Should().Be(TicketStatus.InProgress);
@@ -320,10 +321,10 @@ public class TicketServiceTests : IDisposable
     public async Task Resolving_closes_any_open_pause()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P2, Tue(9));
-        await tickets.StartPauseAsync(ticket.Id, WaitingOn.Customer, null, "Awaiting a decision.", "nils", Tue(10));
-        await tickets.ResolveAsync(ticket.Id, "Customer accepted the workaround.", "nils", Tue(14));
+        await tickets.StartPauseAsync(tenantId, ticket.Id, WaitingOn.Customer, null, "Awaiting a decision.", "nils", Tue(10));
+        await tickets.ResolveAsync(tenantId, ticket.Id, "Customer accepted the workaround.", "nils", Tue(14));
 
-        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+        Ticket? loaded = await tickets.GetAsync(tenantId, ticket.Id);
 
         loaded!.Status.Should().Be(TicketStatus.Resolved);
         loaded.ResolvedAt.Should().Be(Tue(14));
@@ -336,9 +337,9 @@ public class TicketServiceTests : IDisposable
     public async Task A_missed_P1_response_is_a_penalty_deviation()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
-        await tickets.RecordResponseAsync(ticket.Id, "nils", Tue(14));
+        await tickets.RecordResponseAsync(tenantId, ticket.Id, "nils", Tue(14));
 
-        TicketSlaStatus status = TicketService.StatusOf((await tickets.GetAsync(ticket.Id))!, Tue(15));
+        TicketSlaStatus status = TicketService.StatusOf((await tickets.GetAsync(tenantId, ticket.Id))!, Tue(15));
 
         status.Response.Breached.Should().BeTrue();
         status.IsPenaltyDeviation.Should().BeTrue();
@@ -348,9 +349,9 @@ public class TicketServiceTests : IDisposable
     public async Task A_missed_P3_response_is_not()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P3, Tue(9));
-        await tickets.RecordResponseAsync(ticket.Id, "nils", Swedish(2026, 9, 25, 9));
+        await tickets.RecordResponseAsync(tenantId, ticket.Id, "nils", Swedish(2026, 9, 25, 9));
 
-        TicketSlaStatus status = TicketService.StatusOf((await tickets.GetAsync(ticket.Id))!, Fri(10));
+        TicketSlaStatus status = TicketService.StatusOf((await tickets.GetAsync(tenantId, ticket.Id))!, Fri(10));
 
         status.Response.Breached.Should().BeTrue();
         status.IsPenaltyDeviation.Should().BeFalse();
@@ -365,10 +366,9 @@ public class TicketServiceTests : IDisposable
     public async Task A_rejected_ticket_is_billable_but_not_a_deviation()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
-        await tickets.RejectAsync(
-            ticket.Id, "The fault is in the customer's identity provider.", "nils", Tue(16));
+        await tickets.RejectAsync(tenantId, ticket.Id, "The fault is in the customer's identity provider.", "nils", Tue(16));
 
-        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+        Ticket? loaded = await tickets.GetAsync(tenantId, ticket.Id);
         TicketSlaStatus status = TicketService.StatusOf(loaded!, Tue(17));
 
         loaded!.Status.Should().Be(TicketStatus.Rejected);
@@ -382,11 +382,10 @@ public class TicketServiceTests : IDisposable
     public async Task A_documented_exemption_takes_a_ticket_out_of_the_count()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
-        await tickets.RecordResponseAsync(ticket.Id, "nils", Tue(14));
-        await tickets.ExcludeFromSlaAsync(
-            ticket.Id, "Force majeure — regional power outage.", "nils", Tue(15));
+        await tickets.RecordResponseAsync(tenantId, ticket.Id, "nils", Tue(14));
+        await tickets.ExcludeFromSlaAsync(tenantId, ticket.Id, "Force majeure — regional power outage.", "nils", Tue(15));
 
-        TicketSlaStatus status = TicketService.StatusOf((await tickets.GetAsync(ticket.Id))!, Tue(16));
+        TicketSlaStatus status = TicketService.StatusOf((await tickets.GetAsync(tenantId, ticket.Id))!, Tue(16));
 
         status.IsPenaltyDeviation.Should().BeFalse();
     }
@@ -396,10 +395,10 @@ public class TicketServiceTests : IDisposable
     public async Task A_closed_P1_owes_an_incident_report_within_five_working_days()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
-        await tickets.ResolveAsync(ticket.Id, "Restarted the ingress.", "nils", Tue(11));
-        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+        await tickets.ResolveAsync(tenantId, ticket.Id, "Restarted the ingress.", "nils", Tue(11));
+        await tickets.CloseAsync(tenantId, ticket.Id, "nils", Tue(12));
 
-        TicketSlaStatus status = TicketService.StatusOf((await tickets.GetAsync(ticket.Id))!, Tue(13));
+        TicketSlaStatus status = TicketService.StatusOf((await tickets.GetAsync(tenantId, ticket.Id))!, Tue(13));
 
         // Five working days after Tuesday 22 September is Tuesday 29 September.
         status.IncidentReportDue.Should().Be(Swedish(2026, 9, 29, 17));
@@ -409,9 +408,9 @@ public class TicketServiceTests : IDisposable
     public async Task A_closed_P3_owes_no_incident_report()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P3, Tue(9));
-        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+        await tickets.CloseAsync(tenantId, ticket.Id, "nils", Tue(12));
 
-        TicketSlaStatus status = TicketService.StatusOf((await tickets.GetAsync(ticket.Id))!, Tue(13));
+        TicketSlaStatus status = TicketService.StatusOf((await tickets.GetAsync(tenantId, ticket.Id))!, Tue(13));
 
         status.IncidentReportDue.Should().BeNull();
     }
@@ -425,12 +424,12 @@ public class TicketServiceTests : IDisposable
     public async Task A_customer_can_reopen_a_ticket_they_do_not_accept_as_resolved()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P2, Tue(9));
-        await tickets.RecordResponseAsync(ticket.Id, "nils", Tue(9, 30));
-        await tickets.ResolveAsync(ticket.Id, "Restarted the pod.", "nils", Tue(11));
+        await tickets.RecordResponseAsync(tenantId, ticket.Id, "nils", Tue(9, 30));
+        await tickets.ResolveAsync(tenantId, ticket.Id, "Restarted the pod.", "nils", Tue(11));
 
-        await tickets.ReopenAsync(ticket.Id, "It failed again ten minutes later.", "kund", Tue(12));
+        await tickets.ReopenAsync(tenantId, ticket.Id, "It failed again ten minutes later.", "kund", Tue(12));
 
-        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+        Ticket? loaded = await tickets.GetAsync(tenantId, ticket.Id);
         TicketSlaStatus status = TicketService.StatusOf(loaded!, Tue(13));
 
         loaded!.Status.Should().Be(TicketStatus.InProgress);
@@ -445,12 +444,12 @@ public class TicketServiceTests : IDisposable
     public async Task Reopening_clears_a_close_as_well()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P2, Tue(9));
-        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
-        await tickets.CloseAsync(ticket.Id, "nils", Tue(11, 30));
+        await tickets.ResolveAsync(tenantId, ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(tenantId, ticket.Id, "nils", Tue(11, 30));
 
-        await tickets.ReopenAsync(ticket.Id, "Still broken.", "kund", Tue(12));
+        await tickets.ReopenAsync(tenantId, ticket.Id, "Still broken.", "kund", Tue(12));
 
-        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+        Ticket? loaded = await tickets.GetAsync(tenantId, ticket.Id);
 
         loaded!.ClosedAt.Should().BeNull();
         loaded.Status.Should().Be(TicketStatus.InProgress);
@@ -464,7 +463,7 @@ public class TicketServiceTests : IDisposable
         await Raise(s1AppId, TicketPriority.P3, Tue(9));
         Ticket urgent = await Raise(s1AppId, TicketPriority.P1, Tue(10));
         Ticket done = await Raise(s1AppId, TicketPriority.P2, Tue(11));
-        await tickets.CloseAsync(done.Id, "nils", Tue(12));
+        await tickets.CloseAsync(tenantId, done.Id, "nils", Tue(12));
 
         List<TicketSlaStatus> queue = await tickets.GetOpenQueueAsync(customerId, Tue(13));
 
@@ -500,7 +499,7 @@ public class TicketServiceTests : IDisposable
             "Customer technical contact", "tech@anna.example");
 
         Ticket done = await Raise(s1AppId, TicketPriority.P2, Tue(11));
-        await tickets.CloseAsync(done.Id, "nils", Tue(12));
+        await tickets.CloseAsync(tenantId, done.Id, "nils", Tue(12));
 
         List<TicketSlaStatus> queue = await tickets.GetTenantQueueAsync(tenantId, Tue(13));
 
@@ -579,14 +578,14 @@ public class TicketServiceTests : IDisposable
     public async Task Every_step_is_written_to_the_history()
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
-        await tickets.ConfirmPriorityAsync(ticket.Id, TicketPriority.P1, "Confirmed.", "nils", Tue(9, 10));
-        await tickets.RecordResponseAsync(ticket.Id, "nils", Tue(9, 15));
-        await tickets.StartPauseAsync(ticket.Id, WaitingOn.Customer, null, "Awaiting access.", "nils", Tue(10));
-        await tickets.EndPauseAsync(ticket.Id, "nils", Tue(11));
-        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(12));
-        await tickets.CloseAsync(ticket.Id, "nils", Tue(13));
+        await tickets.ConfirmPriorityAsync(tenantId, ticket.Id, TicketPriority.P1, "Confirmed.", "nils", Tue(9, 10));
+        await tickets.RecordResponseAsync(tenantId, ticket.Id, "nils", Tue(9, 15));
+        await tickets.StartPauseAsync(tenantId, ticket.Id, WaitingOn.Customer, null, "Awaiting access.", "nils", Tue(10));
+        await tickets.EndPauseAsync(tenantId, ticket.Id, "nils", Tue(11));
+        await tickets.ResolveAsync(tenantId, ticket.Id, "Fixed.", "nils", Tue(12));
+        await tickets.CloseAsync(tenantId, ticket.Id, "nils", Tue(13));
 
-        Ticket? loaded = await tickets.GetAsync(ticket.Id);
+        Ticket? loaded = await tickets.GetAsync(tenantId, ticket.Id);
 
         loaded!.Events.Select(e => e.Kind).Should().Contain([
             TicketEventKind.Created,
@@ -612,7 +611,7 @@ public class TicketServiceTests : IDisposable
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P3, Tue(9));
 
-        Ticket? claimed = await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(10));
+        Ticket? claimed = await tickets.AssignAsync(tenantId, ticket.Id, "nils", "nils", Tue(10));
 
         claimed!.Assignee.Should().Be("nils");
     }
@@ -622,8 +621,8 @@ public class TicketServiceTests : IDisposable
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P3, Tue(9));
 
-        await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(10));
-        Ticket? released = await tickets.AssignAsync(ticket.Id, null, "nils", Tue(11));
+        await tickets.AssignAsync(tenantId, ticket.Id, "nils", "nils", Tue(10));
+        Ticket? released = await tickets.AssignAsync(tenantId, ticket.Id, null, "nils", Tue(11));
 
         released!.Assignee.Should().BeNull();
     }
@@ -637,8 +636,8 @@ public class TicketServiceTests : IDisposable
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P3, Tue(9));
 
-        await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(10));
-        await tickets.AssignAsync(ticket.Id, "karin", "nils", Tue(11));
+        await tickets.AssignAsync(tenantId, ticket.Id, "nils", "nils", Tue(10));
+        await tickets.AssignAsync(tenantId, ticket.Id, "karin", "nils", Tue(11));
 
         List<TicketEvent> notes = [.. db.Set<TicketEvent>()
             .Where(e => e.TicketId == ticket.Id && e.Kind == TicketEventKind.Note)];
@@ -656,7 +655,7 @@ public class TicketServiceTests : IDisposable
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P3, Tue(9));
 
-        await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(10));
+        await tickets.AssignAsync(tenantId, ticket.Id, "nils", "nils", Tue(10));
 
         db.Set<TicketEvent>()
             .Where(e => e.TicketId == ticket.Id && e.Detail!.Contains("Assigned to"))
@@ -669,8 +668,8 @@ public class TicketServiceTests : IDisposable
     {
         Ticket ticket = await Raise(s1AppId, TicketPriority.P3, Tue(9));
 
-        await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(10));
-        await tickets.AssignAsync(ticket.Id, "nils", "nils", Tue(11));
+        await tickets.AssignAsync(tenantId, ticket.Id, "nils", "nils", Tue(10));
+        await tickets.AssignAsync(tenantId, ticket.Id, "nils", "nils", Tue(11));
 
         db.Set<TicketEvent>()
             .Count(e => e.TicketId == ticket.Id && e.Detail!.Contains("Assigned to nils"))
@@ -696,7 +695,7 @@ public class TicketServiceTests : IDisposable
 
         // Long past any response target.
         TicketSlaStatus status = TicketService.StatusOf(
-            (await tickets.GetAsync(ticket.Id))!, Tue(9).AddDays(2));
+            (await tickets.GetAsync(tenantId, ticket.Id))!, Tue(9).AddDays(2));
 
         status.Response.Breached.Should().BeTrue("the clock still runs and is still worth seeing");
         status.IsPenaltyDeviation.Should().BeFalse("but there was no guaranteed response to miss");
@@ -713,7 +712,7 @@ public class TicketServiceTests : IDisposable
         Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
 
         TicketSlaStatus status = TicketService.StatusOf(
-            (await tickets.GetAsync(ticket.Id))!, Tue(9).AddDays(2));
+            (await tickets.GetAsync(tenantId, ticket.Id))!, Tue(9).AddDays(2));
 
         status.IsPenaltyDeviation.Should().BeTrue();
         status.BestEffortOnly.Should().BeFalse();
@@ -734,7 +733,7 @@ public class TicketServiceTests : IDisposable
         Ticket ticket = await Raise(s1AppId, TicketPriority.P1, Tue(9));
 
         TicketSlaStatus status = TicketService.StatusOf(
-            (await tickets.GetAsync(ticket.Id))!, Tue(9).AddDays(2));
+            (await tickets.GetAsync(tenantId, ticket.Id))!, Tue(9).AddDays(2));
 
         status.IsPenaltyDeviation.Should().BeTrue();
     }
@@ -756,8 +755,110 @@ public class TicketServiceTests : IDisposable
         await db.SaveChangesAsync();
 
         TicketSlaStatus status = TicketService.StatusOf(
-            (await tickets.GetAsync(ticket.Id))!, Tue(9).AddDays(2));
+            (await tickets.GetAsync(tenantId, ticket.Id))!, Tue(9).AddDays(2));
 
         status.IsPenaltyDeviation.Should().BeFalse();
+    }
+    // ── Tenancy ───────────────────────────────────────────────────────────────
+
+    /// <summary>
+    /// A ticket carries the correspondence between the parties — its events hold the reply text
+    /// the support mailbox sent and received. <c>GetAsync</c> loads it with
+    /// <c>.Include(t =&gt; t.Events)</c>, and <c>CustomerTicketsPanel</c>, a customer-facing portal
+    /// panel, reaches it by id.
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_read_another_tenants_ticket()
+    {
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P2, Tue(9));
+
+        (await tickets.GetAsync(tenantId, ticket.Id)).Should().NotBeNull();
+        (await tickets.GetAsync(strangerTenant, ticket.Id)).Should().BeNull(
+            "the events on a ticket are the correspondence with the customer");
+    }
+
+    /// <summary>
+    /// The state transitions, which is where a cross-tenant write would show up as a ticket
+    /// closing itself or an SLA clock being answered by somebody else's operator.
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_change_another_tenants_ticket_state()
+    {
+        Ticket ticket = await Raise(s1AppId, TicketPriority.P2, Tue(9));
+
+        (await tickets.RecordResponseAsync(strangerTenant, ticket.Id, "them", Tue(10)))
+            .Should().BeNull();
+        (await tickets.ResolveAsync(strangerTenant, ticket.Id, "done", "them", Tue(10)))
+            .Should().BeNull();
+        (await tickets.CloseAsync(strangerTenant, ticket.Id, "them", Tue(10))).Should().BeNull();
+        (await tickets.AssignAsync(strangerTenant, ticket.Id, "them", "them", Tue(10)))
+            .Should().BeNull();
+        (await tickets.ExcludeFromSlaAsync(strangerTenant, ticket.Id, "because", "them", Tue(10)))
+            .Should().BeNull();
+
+        await using ApplicationDbContext check = factory.CreateDbContext();
+        Ticket after = await check.Tickets.FirstAsync(t => t.Id == ticket.Id);
+        after.ResolvedAt.Should().BeNull("no clock was answered");
+        after.ClosedAt.Should().BeNull();
+        after.Assignee.Should().BeNull();
+        after.ExcludedFromSla.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// ⚠️ <c>AddEventAsync</c> is the one a lookup-shaped audit would miss: it <b>writes without
+    /// reading</b>, inserting a <c>TicketEvent</c> for the id it was handed, so there was no
+    /// by-id lookup in it to scope. The event is customer-visible by default, which makes it a
+    /// way to put text into somebody else's correspondence.
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_append_an_event_to_another_tenants_ticket()
+    {
+        Ticket ticket = await Raise(s4AppId, TicketPriority.P3, Tue(9));
+
+        await tickets.AddEventAsync(
+            strangerTenant, ticket.Id, TicketEventKind.Note, "injected", "them", Tue(10));
+
+        await using ApplicationDbContext check = factory.CreateDbContext();
+        check.TicketEvents.Where(e => e.TicketId == ticket.Id)
+            .Should().NotContain(e => e.Detail == "injected",
+                "AddEventAsync returns void, so only the stored events can say it was refused");
+
+        await tickets.AddEventAsync(
+            tenantId, ticket.Id, TicketEventKind.Note, "legitimate", "us", Tue(10));
+
+        await using ApplicationDbContext after = factory.CreateDbContext();
+        after.TicketEvents.Where(e => e.TicketId == ticket.Id)
+            .Should().Contain(e => e.Detail == "legitimate", "the owner can still annotate");
+    }
+
+    /// <summary>
+    /// ⚠️ <c>MoveAsync</c> is deliberately NOT scoped and must stay that way. Its own parameter
+    /// doc says "the customer it belongs to, in any tenant": a report arriving at the shared
+    /// support mailbox can be filed under the wrong tenant, and moving it is the fix. This test
+    /// exists so that a later tenancy sweep does not quietly close it.
+    /// </summary>
+    [Fact]
+    public async Task Moving_a_ticket_across_tenants_stays_possible()
+    {
+        Guid otherCustomer = Guid.NewGuid();
+        await using (ApplicationDbContext seed = factory.CreateDbContext())
+        {
+            seed.Customers.Add(new Customer
+            {
+                Id = otherCustomer, TenantId = strangerTenant, Name = "Elsewhere",
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        Ticket ticket = await Raise(s4AppId, TicketPriority.P3, Tue(9));
+
+        TicketService.TicketMove? moved = await tickets.MoveAsync(
+            ticket.Id, otherCustomer, null, "nils", "filed under the wrong tenant", Tue(10));
+
+        moved.Should().NotBeNull();
+
+        await using ApplicationDbContext check2 = factory.CreateDbContext();
+        Ticket after = await check2.Tickets.FirstAsync(t => t.Id == ticket.Id);
+        after.TenantId.Should().Be(strangerTenant, "the move is the feature, not a leak");
     }
 }

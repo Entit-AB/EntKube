@@ -794,8 +794,7 @@ public class SupportMailTests : IDisposable
 
         open.AppId.Should().BeNull();
 
-        Ticket? ticket = await tickets.GetAsync(
-            (await mail.AcceptAsync(open.Id, "nils", Tue(11)))!.Id);
+        Ticket? ticket = await tickets.GetAsync(tenantId, (await mail.AcceptAsync(open.Id, "nils", Tue(11)))!.Id);
 
         ticket!.AppId.Should().BeNull();
     }
@@ -816,7 +815,7 @@ public class SupportMailTests : IDisposable
         Ticket? created = await mail.AcceptAsync(
             open.Id, "nils", Tue(11), new AppChoice(appId));
 
-        (await tickets.GetAsync(created!.Id))!.AppId.Should().Be(appId);
+        (await tickets.GetAsync(tenantId, created!.Id))!.AppId.Should().Be(appId);
     }
 
     /// <summary>
@@ -837,7 +836,7 @@ public class SupportMailTests : IDisposable
 
         Ticket? created = await mail.AcceptAsync(open.Id, "nils", Tue(11), AppChoice.None);
 
-        (await tickets.GetAsync(created!.Id))!.AppId.Should().BeNull();
+        (await tickets.GetAsync(tenantId, created!.Id))!.AppId.Should().BeNull();
     }
 
     /// <summary>Saying nothing keeps what was recognised.</summary>
@@ -852,7 +851,7 @@ public class SupportMailTests : IDisposable
 
         Ticket? created = await mail.AcceptAsync(open.Id, "nils", Tue(11));
 
-        (await tickets.GetAsync(created!.Id))!.AppId.Should().Be(appId);
+        (await tickets.GetAsync(tenantId, created!.Id))!.AppId.Should().Be(appId);
     }
 
     /// <summary>
@@ -1015,7 +1014,7 @@ public class SupportMailTests : IDisposable
         Ticket existing = await tickets.CreateAsync(
             tenantId, customerId, appId, "Gammalt fel", "", TicketChannel.Portal,
             TicketPriority.P3, Tue(8));
-        await tickets.CloseAsync(existing.Id, "nils", Tue(9));
+        await tickets.CloseAsync(tenantId, existing.Id, "nils", Tue(9));
 
         InboundMailMessage? message = await Receive(
             $"Re: [#{existing.Number}] Gammalt fel", "Det har hänt igen.");
@@ -1417,7 +1416,7 @@ public class SupportMailTests : IDisposable
 
         await mail.AcceptAsync(append.Id, "nils", Tue(11));
 
-        Ticket? loaded = await tickets.GetAsync(existing.Id);
+        Ticket? loaded = await tickets.GetAsync(tenantId, existing.Id);
 
         loaded!.Events.Should().Contain(e => e.Detail.Contains("Här är loggen"));
     }

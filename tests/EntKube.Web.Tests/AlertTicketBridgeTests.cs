@@ -260,7 +260,7 @@ public class AlertTicketBridgeTests : IDisposable
 
         await bridge.NoteIncidentResolvedAsync([incident], Alarm.AddHours(1));
 
-        Ticket? ticket = await tickets.GetAsync(opened[0].Id);
+        Ticket? ticket = await tickets.GetAsync(tenantId, opened[0].Id);
 
         ticket!.Status.Should().NotBe(TicketStatus.Resolved);
         ticket.ResolvedAt.Should().BeNull();
@@ -273,11 +273,11 @@ public class AlertTicketBridgeTests : IDisposable
     {
         AlertIncident incident = Alert("journal-prod");
         List<Ticket> opened = await bridge.OpenForIncidentsAsync(tenantId, [incident]);
-        await tickets.CloseAsync(opened[0].Id, "nils", Alarm.AddMinutes(30));
+        await tickets.CloseAsync(tenantId, opened[0].Id, "nils", Alarm.AddMinutes(30));
 
         await bridge.NoteIncidentResolvedAsync([incident], Alarm.AddHours(1));
 
-        Ticket? ticket = await tickets.GetAsync(opened[0].Id);
+        Ticket? ticket = await tickets.GetAsync(tenantId, opened[0].Id);
 
         ticket!.Events.Should().NotContain(e => e.Detail.Contains("stopped firing"));
     }

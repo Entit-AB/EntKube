@@ -650,8 +650,7 @@ public class SupportMailService(
                 // the analyst cut at the line. Re-cutting here could disagree with what they
                 // read, and the one thing that must not happen is a customer receiving
                 // something nobody saw.
-                ticket = await tickets.ReplyToCustomerAsync(
-                    repliedTo, suggestion.DraftText, actor, message.SentAt, ct);
+                ticket = await tickets.ReplyToCustomerAsync(message.TenantId, repliedTo, suggestion.DraftText, actor, message.SentAt, ct);
 
                 message.TicketId = repliedTo;
 
@@ -668,28 +667,26 @@ public class SupportMailService(
                 // Not customer-visible, and the wording says what it means rather than
                 // pasting a report at somebody: the point is that a particular person did
                 // not hear from us, which is the part that needs acting on.
-                await tickets.AddEventAsync(
-                    failedOn, TicketEventKind.Note,
+                await tickets.AddEventAsync(message.TenantId, failedOn, TicketEventKind.Note,
                     $"Mail we sent about this ticket was refused and did not arrive"
                     + (message.FailedRecipient is string who ? $" for {who}" : "")
                     + $". The server said:\n\n{message.Body}",
                     actor, message.SentAt, customerVisible: false, ct);
 
                 message.TicketId = failedOn;
-                ticket = await tickets.GetAsync(failedOn, ct);
+                ticket = await tickets.GetAsync(message.TenantId, failedOn, ct);
                 message.CustomerId ??= ticket?.CustomerId;
                 break;
             }
 
             case MailSuggestionKind.AppendToTicket when suggestion.TicketId is Guid ticketId:
             {
-                await tickets.AddEventAsync(
-                    ticketId, TicketEventKind.Note,
+                await tickets.AddEventAsync(message.TenantId, ticketId, TicketEventKind.Note,
                     $"From {message.FromAddress}: {message.Body}",
                     actor, message.SentAt, customerVisible: true, ct);
 
                 message.TicketId = ticketId;
-                ticket = await tickets.GetAsync(ticketId, ct);
+                ticket = await tickets.GetAsync(message.TenantId, ticketId, ct);
                 break;
             }
         }

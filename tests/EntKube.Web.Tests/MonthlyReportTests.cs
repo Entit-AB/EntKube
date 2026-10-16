@@ -103,7 +103,7 @@ public class MonthlyReportTests : IDisposable
     private async Task<Ticket> RaiseWithLateResponse(TicketPriority priority, DateTime at)
     {
         Ticket ticket = await Raise(priority, at);
-        await tickets.RecordResponseAsync(ticket.Id, "nils", at.AddHours(6));
+        await tickets.RecordResponseAsync(tenantId, ticket.Id, "nils", at.AddHours(6));
         return ticket;
     }
 
@@ -135,8 +135,8 @@ public class MonthlyReportTests : IDisposable
     {
         Ticket first = await Raise(TicketPriority.P3, Tue(9));
         Ticket second = await Raise(TicketPriority.P3, Tue(9));
-        await tickets.ResolveAsync(first.Id, "Fixed.", "nils", Tue(11));
-        await tickets.ResolveAsync(second.Id, "Fixed.", "nils", Tue(13));
+        await tickets.ResolveAsync(tenantId, first.Id, "Fixed.", "nils", Tue(11));
+        await tickets.ResolveAsync(tenantId, second.Id, "Fixed.", "nils", Tue(13));
 
         MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
         PriorityRow row = report.ByPriority.Single(p => p.Priority == TicketPriority.P3);
@@ -161,7 +161,7 @@ public class MonthlyReportTests : IDisposable
     public async Task Tickets_still_open_at_month_end_are_counted()
     {
         Ticket closed = await Raise(TicketPriority.P3, Tue(9));
-        await tickets.CloseAsync(closed.Id, "nils", Tue(12));
+        await tickets.CloseAsync(tenantId, closed.Id, "nils", Tue(12));
         await Raise(TicketPriority.P3, Tue(10));
 
         MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
@@ -208,8 +208,8 @@ public class MonthlyReportTests : IDisposable
     public async Task An_overrun_resolution_time_is_reported_but_costs_nothing()
     {
         Ticket ticket = await Raise(TicketPriority.P1, Tue(9));
-        await tickets.RecordResponseAsync(ticket.Id, "nils", Tue(10));
-        await tickets.ResolveAsync(ticket.Id, "Took a while.", "nils", Swedish(2026, 9, 24, 16));
+        await tickets.RecordResponseAsync(tenantId, ticket.Id, "nils", Tue(10));
+        await tickets.ResolveAsync(tenantId, ticket.Id, "Took a while.", "nils", Swedish(2026, 9, 24, 16));
 
         MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
         PriorityRow row = report.ByPriority.Single(p => p.Priority == TicketPriority.P1);
@@ -223,7 +223,7 @@ public class MonthlyReportTests : IDisposable
     public async Task A_missed_P3_response_costs_nothing()
     {
         Ticket ticket = await Raise(TicketPriority.P3, Tue(9));
-        await tickets.RecordResponseAsync(ticket.Id, "nils", Swedish(2026, 9, 25, 9));
+        await tickets.RecordResponseAsync(tenantId, ticket.Id, "nils", Swedish(2026, 9, 25, 9));
 
         MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
@@ -234,8 +234,7 @@ public class MonthlyReportTests : IDisposable
     public async Task A_documented_exemption_removes_the_penalty()
     {
         Ticket ticket = await RaiseWithLateResponse(TicketPriority.P1, Tue(9));
-        await tickets.ExcludeFromSlaAsync(
-            ticket.Id, "Force majeure — regional power outage.", "nils", Tue(16));
+        await tickets.ExcludeFromSlaAsync(tenantId, ticket.Id, "Force majeure — regional power outage.", "nils", Tue(16));
 
         MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
@@ -514,8 +513,8 @@ public class MonthlyReportTests : IDisposable
     public async Task A_closed_P1_with_no_report_is_named_in_the_report()
     {
         Ticket ticket = await Raise(TicketPriority.P1, Tue(9));
-        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
-        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+        await tickets.ResolveAsync(tenantId, ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(tenantId, ticket.Id, "nils", Tue(12));
 
         MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
@@ -531,10 +530,10 @@ public class MonthlyReportTests : IDisposable
     public async Task A_report_that_has_been_delivered_is_not_still_owed()
     {
         Ticket ticket = await Raise(TicketPriority.P1, Tue(9));
-        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
-        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+        await tickets.ResolveAsync(tenantId, ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(tenantId, ticket.Id, "nils", Tue(12));
 
-        await tickets.RecordIncidentReportAsync(ticket.Id, "nils", Tue(13));
+        await tickets.RecordIncidentReportAsync(tenantId, ticket.Id, "nils", Tue(13));
 
         MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 
@@ -546,8 +545,8 @@ public class MonthlyReportTests : IDisposable
     public async Task A_closed_P2_owes_no_written_report()
     {
         Ticket ticket = await Raise(TicketPriority.P2, Tue(9));
-        await tickets.ResolveAsync(ticket.Id, "Fixed.", "nils", Tue(11));
-        await tickets.CloseAsync(ticket.Id, "nils", Tue(12));
+        await tickets.ResolveAsync(tenantId, ticket.Id, "Fixed.", "nils", Tue(11));
+        await tickets.CloseAsync(tenantId, ticket.Id, "nils", Tue(12));
 
         MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
 

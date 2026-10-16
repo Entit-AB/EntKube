@@ -305,8 +305,7 @@ public class SupportDutyServiceTests : IDisposable
             tenantId, customerId, null, "Fel", "Beskrivning.", TicketChannel.Email,
             TicketPriority.P3, DateTime.UtcNow);
 
-        await tickets.AssignAsync(
-            ticket.Id, technician.Name, SupportDutyService.RoundRobinActor,
+        await tickets.AssignAsync(tenantId, ticket.Id, technician.Name, SupportDutyService.RoundRobinActor,
             DateTime.UtcNow.AddSeconds(1), technician.UserId);
     }
 }

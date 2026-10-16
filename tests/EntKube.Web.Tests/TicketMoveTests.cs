@@ -257,7 +257,7 @@ public class TicketMoveTests : IDisposable
         Ticket ticket = await Reported(saturday);
         DateTime startedAt = ticket.ClockStartsAt;
 
-        await tickets.RecordResponseAsync(ticket.Id, "nils", saturday.AddHours(2));
+        await tickets.RecordResponseAsync(ours, ticket.Id, "nils", saturday.AddHours(2));
 
         await tickets.MoveAsync(
             ticket.Id, theirCustomer, theirApp, "nils", null, saturday.AddHours(3));

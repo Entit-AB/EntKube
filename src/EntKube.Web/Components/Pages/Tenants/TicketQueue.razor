@@ -17,7 +17,8 @@
 
 @if (selectedTicketId is not null)
 {
-    <TicketDetail TicketId="selectedTicketId.Value"
+    <TicketDetail TenantId="DetailTenantId"
+                  TicketId="selectedTicketId.Value"
                   OnBack="() => selectedTicketId = null"
                   OnChanged="LoadAsync" />
 }
@@ -190,6 +191,20 @@ else
     /// Every customer's queue, for the tenant. Ignored when <see cref="CustomerId"/> is set.
     /// </summary>
     [Parameter] public Guid? TenantId { get; set; }
+
+    /// <summary>
+    /// The tenant the detail view acts as. Every ticket operation is scoped to it now, so the
+    /// queue has to name one rather than letting the detail derive it from the ticket it loaded.
+    ///
+    /// <para>⚠️ Throws rather than guessing in the <see cref="CustomerId"/>-only mode. That mode
+    /// has no caller in any markup — this component is rendered once, from TenantExplorer, always
+    /// with a tenant — and a customer's queue cannot name a tenant without another lookup. If it
+    /// is ever wired up, this says so instead of silently opening a ticket as nobody.</para>
+    /// </summary>
+    private Guid DetailTenantId => TenantId
+        ?? throw new InvalidOperationException(
+            "TicketQueue needs a TenantId to open a ticket: the CustomerId-only mode cannot "
+            + "resolve one for the detail view.");
 
     private bool loading = true;
     private string? error;
