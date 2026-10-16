@@ -25,7 +25,8 @@ public class MongoService(
     IDbContextFactory<DataServicesDbContext> dbFactory,
     VaultService vaultService,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
-    EntKube.Contracts.Catalog.ICatalogApi catalog)
+    EntKube.Contracts.Catalog.ICatalogApi catalog,
+    EntKube.Contracts.Delivery.IDeliveryApi delivery)
 {
     /// <summary>
     /// A client for one of the tenant's clusters, or a refusal that says why. Keeps the cluster
@@ -2489,11 +2490,32 @@ public class MongoService(
     /// Creates a binding between a MongoDB database and an app deployment. Call
     /// SyncDatabaseCredentialsToK8sAsync afterwards to push credentials to the app namespace.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose deployment and whose database — both are checked. A binding is a pairing: scoping
+    /// one end still lets the other cross, and the binding is what syncs the database credentials
+    /// into the application's namespace. ⚠️ This wrote with no validation at all, so there was no
+    /// lookup here to be missing a predicate.
+    /// </param>
     public async Task<DatabaseBinding> AddMongoDatabaseBindingAsync(
-        Guid appDeploymentId, Guid mongoDatabaseId, string kubernetesSecretName,
+        Guid tenantId, Guid appDeploymentId, Guid mongoDatabaseId, string kubernetesSecretName,
         CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        bool databaseIsTenants = await db.MongoDatabases
+            .AnyAsync(d => d.Id == mongoDatabaseId && d.MongoCluster.TenantId == tenantId, ct);
+
+        if (!databaseIsTenants)
+        {
+            throw new InvalidOperationException(
+                "Database not found, or it does not belong to this tenant.");
+        }
+
+        if (await delivery.GetDeploymentAsync(tenantId, appDeploymentId, ct) is null)
+        {
+            throw new InvalidOperationException(
+                "Deployment not found, or it does not belong to this tenant.");
+        }
 
         DatabaseBinding binding = new()
         {

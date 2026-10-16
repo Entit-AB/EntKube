@@ -585,15 +585,15 @@ else
             switch (entry.Kind)
             {
                 case DbKind.Cnpg:
-                    await CnpgService.AddCnpgDatabaseBindingAsync(connectDeploymentId, entry.Id, connectSecretName.Trim());
+                    await CnpgService.AddCnpgDatabaseBindingAsync(TenantId, connectDeploymentId, entry.Id, connectSecretName.Trim());
                     await CnpgService.SyncDatabaseCredentialsToK8sAsync(TenantId, entry.ServerId, entry.Id);
                     break;
                 case DbKind.Mongo:
-                    await MongoService.AddMongoDatabaseBindingAsync(connectDeploymentId, entry.Id, connectSecretName.Trim());
+                    await MongoService.AddMongoDatabaseBindingAsync(TenantId, connectDeploymentId, entry.Id, connectSecretName.Trim());
                     await MongoService.SyncDatabaseCredentialsToK8sAsync(TenantId, entry.ServerId, entry.Id);
                     break;
                 case DbKind.RegisteredPostgres:
-                    await RegisteredPostgresService.AddDatabaseBindingAsync(connectDeploymentId, entry.Id, connectSecretName.Trim());
+                    await RegisteredPostgresService.AddDatabaseBindingAsync(TenantId, connectDeploymentId, entry.Id, connectSecretName.Trim());
                     await RegisteredPostgresService.SyncCredentialsToK8sAsync(TenantId, entry.ServerId, entry.Id);
                     break;
             }
@@ -618,7 +618,7 @@ else
         if (!CanWrite || scope?.Bindings.Any(b => b.Id == binding.Id) != true) return;
         try
         {
-            await CnpgService.RemoveDatabaseBindingAsync(binding.Id);
+            await CnpgService.RemoveDatabaseBindingAsync(TenantId, binding.Id);
             Toasts.Success("Database disconnected from the deployment.");
             await Reload();
         }

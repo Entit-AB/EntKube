@@ -29,7 +29,8 @@ public static class TestServices
         IHttpClientFactory httpFactory = new Mock<IHttpClientFactory>().Object;
         CnpgService cnpgService = new(dbFactory, vaultService,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory),
-            new EntKube.Web.Modules.Api.CatalogApi(dbFactory));
+            new EntKube.Web.Modules.Api.CatalogApi(dbFactory),
+            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory));
         return new KeycloakService(dbFactory, vaultService, httpFactory, cnpgService,
             new EntKube.Web.Modules.Api.CatalogApi(dbFactory),
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory));
@@ -88,7 +89,8 @@ public static class TestServices
 
         CnpgService cnpg = new(testDb.Factory, vaultService,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory),
-            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory));
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory));
 
         return new ComponentLifecycleService(
             testDb.Factory, vaultService,

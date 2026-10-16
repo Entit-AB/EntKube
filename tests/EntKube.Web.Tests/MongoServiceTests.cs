@@ -41,7 +41,8 @@ public class MongoServiceTests : IDisposable
         sut = new MongoService(
             testDb.Factory, vaultService,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory.Object),
-            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory));
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory));
     }
 
     public void Dispose()

@@ -81,7 +81,8 @@ public class DeploymentImportTenancyTests : IDisposable
             new RegisteredPostgresService(testDb.Factory, vault, clusters,
                 new StorageBrowserService(
                     new StorageLinkClientFactory(vault, testDb.Factory, httpFactory, keystone)),
-                NullLogger<RegisteredPostgresService>.Instance),
+                NullLogger<RegisteredPostgresService>.Instance,
+                new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory)),
             new DockerRegistryService(testDb.Factory, clusters, testDb.Encryption),
             new AppRouteService(testDb.Factory,
                 new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
