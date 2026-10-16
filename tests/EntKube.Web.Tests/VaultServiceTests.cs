@@ -342,7 +342,7 @@ public class VaultServiceTests : IDisposable
 
         // Act
 
-        string? value = await sut.GetSecretValueByIdAsync(secret.Id);
+        string? value = await sut.GetSecretValueByIdAsync(tenant.Id, secret.Id);
 
         // Assert
 
@@ -354,7 +354,7 @@ public class VaultServiceTests : IDisposable
     {
         // Act
 
-        string? value = await sut.GetSecretValueByIdAsync(Guid.NewGuid());
+        string? value = await sut.GetSecretValueByIdAsync(Guid.NewGuid(), Guid.NewGuid());
 
         // Assert
 
@@ -379,7 +379,7 @@ public class VaultServiceTests : IDisposable
         // Assert
 
         updated.Should().BeTrue();
-        string? value = await sut.GetSecretValueByIdAsync(secret.Id);
+        string? value = await sut.GetSecretValueByIdAsync(tenant.Id, secret.Id);
         value.Should().Be("new-password");
     }
 
@@ -592,7 +592,7 @@ public class VaultServiceTests : IDisposable
         stored.SyncToKubernetes.Should().BeFalse();
 
         // Round-trips the YAML and expiry.
-        KubeconfigBundle? got = await sut.GetKubeconfigBundleByIdAsync(secretId!.Value);
+        KubeconfigBundle? got = await sut.GetKubeconfigBundleByIdAsync(tenant.Id, secretId!.Value);
         got.Should().NotBeNull();
         got!.ConfigYaml.Should().Be(SampleKubeconfig);
         got.ExpiresAt.Should().Be(expiry);
@@ -621,7 +621,7 @@ public class VaultServiceTests : IDisposable
         int versions = await db.VaultSecretVersions.CountAsync(v => v.SecretId == secretId);
         versions.Should().Be(1);
 
-        KubeconfigBundle? latest = await sut.GetKubeconfigBundleByIdAsync(secretId!.Value);
+        KubeconfigBundle? latest = await sut.GetKubeconfigBundleByIdAsync(tenant.Id, secretId!.Value);
         latest!.ConfigYaml.Should().Contain("xyz789");
     }
 
@@ -727,7 +727,7 @@ public class VaultServiceTests : IDisposable
         cert.KubernetesNamespace.Should().Be("prod");
 
         // It is genuinely readable as a certificate.
-        CertificateInfo? info = await sut.GetCertificateInfoByIdAsync(cert.Id);
+        CertificateInfo? info = await sut.GetCertificateInfoByIdAsync(tenant.Id, cert.Id);
         info.Should().NotBeNull();
         info!.Subject.Should().Contain("import-test.example.com");
 
@@ -784,7 +784,7 @@ public class VaultServiceTests : IDisposable
         cert.KubernetesSecretName.Should().Be("legacy-tls");
         cert.SyncToKubernetes.Should().BeFalse();
 
-        CertificateInfo? info = await sut.GetCertificateInfoByIdAsync(cert.Id);
+        CertificateInfo? info = await sut.GetCertificateInfoByIdAsync(tenant.Id, cert.Id);
         info!.Subject.Should().Contain("legacy-import.example.com");
 
         // Idempotent: a second pass finds nothing to do.
@@ -869,7 +869,7 @@ public class VaultServiceTests : IDisposable
         list[0].Info.Should().NotBeNull();
 
         // Decrypts back to a usable bundle.
-        CertificateBundle? loaded = await sut.GetCertificateBundleByIdAsync(id!.Value);
+        CertificateBundle? loaded = await sut.GetCertificateBundleByIdAsync(tenant.Id, id!.Value);
         loaded!.HasPrivateKey.Should().BeTrue();
     }
 
@@ -988,4 +988,95 @@ public class VaultServiceTests : IDisposable
             .WithMessage("*not this tenant's*");
     }
 
+    // ── Tenancy of the decrypt path ───────────────────────────────────────────
+
+    /// <summary>
+    /// A secret id from another tenant must not decrypt — and the reason this is worth a test of
+    /// its own is the shape the code had.
+    ///
+    /// <para>These reads took a secret id alone, loaded the row with no tenant predicate, and then
+    /// unsealed the vault with <c>secret.Vault.TenantId</c> — the tenant of the row the caller had
+    /// just named — so the derived tenant handed over the <b>correct data key</b> and the
+    /// plaintext came back.</para>
+    ///
+    /// <para>⚠️ The fix is the <em>predicate</em>, and this test says so because I first claimed
+    /// otherwise. Unsealing with the caller's <c>tenantId</c> instead of the row's reads like a
+    /// second fix and is not one: once the row is scoped, <c>secret.Vault.TenantId == tenantId</c>
+    /// necessarily, so the two expressions are the same value. Reintroducing the derived key on
+    /// its own changes no behaviour and <b>this test does not fail</b> — correctly. It is a
+    /// clarity change: the key no longer depends on a row having been scoped somewhere above it.
+    /// Same correction <c>ValidateClientCertificateAsync</c> forced in #248 — a vacuous predicate
+    /// is dangerous <em>through</em> the unscoped lookup that feeds it, not on its own.</para>
+    ///
+    /// <para>No caller could reach it with an attacker-chosen id (every one passes an id from a
+    /// list the server rendered for one tenant), so this is hardening. The contract was the
+    /// problem: "name a secret and I will decrypt it" is what a REST route, an MCP tool or an
+    /// in-cluster agent would have inherited.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_decrypt_another_tenants_secret()
+    {
+        (Tenant tenant, App app) = CreateTenantWithApp();
+        await sut.InitializeVaultAsync(tenant.Id);
+        VaultSecret secret = await sut.SetAppSecretAsync(tenant.Id, app.Id, "API_KEY", "my-secret-value");
+
+        Tenant stranger = CreateTenant("Stranger", "stranger");
+        await sut.InitializeVaultAsync(stranger.Id);
+
+        (await sut.GetSecretValueByIdAsync(tenant.Id, secret.Id))
+            .Should().Be("my-secret-value", "the owner still reads its own secret");
+
+        (await sut.GetSecretValueByIdAsync(stranger.Id, secret.Id))
+            .Should().BeNull("the row must not resolve, let alone decrypt");
+    }
+
+    /// <summary>
+    /// The same for the typed bundles. A kubeconfig is cluster-admin credential material, so it
+    /// is named explicitly rather than left to stand in for "a secret".
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_read_another_tenants_certificate_oauth_or_kubeconfig()
+    {
+        (Tenant tenant, App app) = CreateTenantWithApp();
+        await sut.InitializeVaultAsync(tenant.Id);
+
+        Tenant stranger = CreateTenant("Stranger", "stranger");
+        await sut.InitializeVaultAsync(stranger.Id);
+
+        (string certPem, string keyPem) = MakeSelfSignedCert("app.example.com");
+        (bool ok, string? error) = await sut.SetAppCertificateAsync(
+            tenant.Id, app.Id, "TLS", TryBuild(certPem, keyPem).Bundle);
+        ok.Should().BeTrue(error);
+
+        VaultSecret cert = await db.VaultSecrets.FirstAsync(v => v.Name == "TLS");
+
+        (await sut.GetCertificateBundleByIdAsync(tenant.Id, cert.Id)).Should().NotBeNull();
+        (await sut.GetCertificateBundleByIdAsync(stranger.Id, cert.Id)).Should().BeNull();
+        (await sut.GetCertificateInfoByIdAsync(stranger.Id, cert.Id)).Should().BeNull();
+    }
+
+    /// <summary>
+    /// Versions hang off a secret, so the scope has to travel through it — and the version read
+    /// derived its key the same way the secret read did.
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_read_another_tenants_secret_version()
+    {
+        (Tenant tenant, App app) = CreateTenantWithApp();
+        await sut.InitializeVaultAsync(tenant.Id);
+        VaultSecret secret = await sut.SetAppSecretAsync(tenant.Id, app.Id, "API_KEY", "first");
+        await sut.UpdateSecretValueAsync(secret.Id, "second");
+
+        Tenant stranger = CreateTenant("Stranger", "stranger");
+        await sut.InitializeVaultAsync(stranger.Id);
+
+        List<VaultSecretVersion> versions = await sut.GetSecretVersionsAsync(secret.Id);
+        versions.Should().NotBeEmpty("the update archived the previous value");
+
+        (await sut.GetSecretVersionValueAsync(tenant.Id, secret.Id, versions[0].Id))
+            .Should().Be("first");
+
+        (await sut.GetSecretVersionValueAsync(stranger.Id, secret.Id, versions[0].Id))
+            .Should().BeNull();
+    }
 }

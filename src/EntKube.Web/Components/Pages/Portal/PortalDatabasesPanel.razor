@@ -711,7 +711,7 @@ else
             };
             foreach (VaultSecret sec in credSecrets ?? [])
                 if (sec.Name != "PASSWORD")
-                    credValues[sec.Id] = await VaultService.GetSecretValueByIdAsync(sec.Id);
+                    credValues[sec.Id] = await VaultService.GetSecretValueByIdAsync(TenantId, sec.Id);
         }
         finally
         {
@@ -724,7 +724,7 @@ else
         passwordRevealing = true;
         try
         {
-            credValues[secret.Id] = await VaultService.GetSecretValueByIdAsync(secret.Id);
+            credValues[secret.Id] = await VaultService.GetSecretValueByIdAsync(TenantId, secret.Id);
             revealedPasswordId = secret.Id;
         }
         finally

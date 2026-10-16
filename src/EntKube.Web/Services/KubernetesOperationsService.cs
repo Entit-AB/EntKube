@@ -1543,7 +1543,7 @@ public class KubernetesOperationsService(
         if (credential is null)
             return KubernetesOperationResult<string>.Failure("Credential not found.");
 
-        CertificateBundle? bundle = await vault.GetCertificateBundleByIdAsync(credential.VaultSecretId, ct);
+        CertificateBundle? bundle = await vault.GetCertificateBundleByIdAsync(tenantId, credential.VaultSecretId, ct);
         if (bundle is null || !bundle.HasCertificate || !bundle.HasPrivateKey)
             return KubernetesOperationResult<string>.Failure(
                 "The vault certificate for this credential is missing its certificate or private key.");

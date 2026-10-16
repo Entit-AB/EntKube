@@ -1180,7 +1180,7 @@ public class CnpgService(
 
         foreach (VaultSecret secret in secrets)
         {
-            string? value = await vaultService.GetSecretValueByIdAsync(secret.Id, ct);
+            string? value = await vaultService.GetSecretValueByIdAsync(tenantId, secret.Id, ct);
 
             if (value is not null)
             {

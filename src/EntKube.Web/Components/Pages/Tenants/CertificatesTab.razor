@@ -354,7 +354,7 @@ else
     {
         editCertId = c.Id;
         editCertName = c.Name;
-        editCertBundle = await VaultService.GetCertificateBundleByIdAsync(c.Id) ?? new();
+        editCertBundle = await VaultService.GetCertificateBundleByIdAsync(TenantId, c.Id) ?? new();
     }
 
     private async Task SaveEditCert(TenantCertificateInfo c)

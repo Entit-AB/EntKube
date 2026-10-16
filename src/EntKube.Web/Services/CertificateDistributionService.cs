@@ -163,7 +163,7 @@ public class CertificateDistributionService(
         List<DistributableCertificate> result = [];
         foreach (VaultSecret s in certs)
         {
-            CertificateBundle? bundle = await vault.GetCertificateBundleByIdAsync(s.Id, ct);
+            CertificateBundle? bundle = await vault.GetCertificateBundleByIdAsync(tenantId, s.Id, ct);
             CertificateInfo? info = bundle is null ? null : CertificateParser.TryParse(bundle.Certificate);
             result.Add(new DistributableCertificate(s.Id, s.Name, bundle?.HasPrivateKey ?? false, info));
         }
@@ -235,7 +235,7 @@ public class CertificateDistributionService(
     private async Task<CertificateDistributionResult> ApplyCoreAsync(
         ApplicationDbContext db, Guid tenantId, CertificateDistribution dist, CancellationToken ct)
     {
-        CertificateBundle? bundle = await vault.GetCertificateBundleByIdAsync(dist.VaultSecretId, ct);
+        CertificateBundle? bundle = await vault.GetCertificateBundleByIdAsync(tenantId, dist.VaultSecretId, ct);
         if (bundle is null || !bundle.HasCertificate)
             return new(false, 0, "Source certificate could not be loaded from the vault.");
 

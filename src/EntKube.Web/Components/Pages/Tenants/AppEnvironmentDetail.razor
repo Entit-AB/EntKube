@@ -3223,7 +3223,7 @@
                 dbCredSecrets = await VaultService.GetRegisteredPostgresDatabaseSecretsAsync(TenantId, binding.RegisteredPostgresDatabaseId.Value);
             foreach (VaultSecret sec in dbCredSecrets ?? [])
                 if (sec.Name != "PASSWORD")
-                    dbCredValues[sec.Id] = await VaultService.GetSecretValueByIdAsync(sec.Id);
+                    dbCredValues[sec.Id] = await VaultService.GetSecretValueByIdAsync(TenantId, sec.Id);
         }
         finally { dbCredLoading = false; }
     }
@@ -3231,7 +3231,7 @@
     private async Task RevealDbPassword(VaultSecret secret)
     {
         dbPasswordRevealing = true; revealedDbPasswordSecretId = secret.Id;
-        try { dbCredValues[secret.Id] = await VaultService.GetSecretValueByIdAsync(secret.Id); }
+        try { dbCredValues[secret.Id] = await VaultService.GetSecretValueByIdAsync(TenantId, secret.Id); }
         finally { dbPasswordRevealing = false; }
     }
 
