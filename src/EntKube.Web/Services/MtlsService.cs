@@ -83,14 +83,21 @@ public class MtlsService(
             .ToListAsync(ct);
     }
 
-    public async Task<ClientCaBundle?> GetBundleAsync(Guid bundleId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose trust anchor. ⚠️ Everything in this service was keyed by a bare id, and what it
+    /// holds is the set of CAs whose client certificates the gateway will accept. The sharp one
+    /// is <see cref="AddCertificateAsync"/>; the rest are the same bundle read, edited or deleted.
+    /// <c>ClientCaBundle</c> carries a <c>TenantId</c>, so these are direct comparisons.
+    /// </param>
+    public async Task<ClientCaBundle?> GetBundleAsync(
+        Guid tenantId, Guid bundleId, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         return await db.ClientCaBundles
             .Include(b => b.Certificates)
             .Include(b => b.Routes)
-            .FirstOrDefaultAsync(b => b.Id == bundleId, ct);
+            .FirstOrDefaultAsync(b => b.Id == bundleId && b.TenantId == tenantId, ct);
     }
 
     public async Task<ClientCaBundle> CreateBundleAsync(
@@ -131,15 +138,22 @@ public class MtlsService(
         return bundle;
     }
 
+    /// <param name="tenantId">
+    /// Whose trust anchor. <c>listenerPort</c> is editable here, and inbound client certificates
+    /// bind per PORT rather than per hostname — so moving another tenant's bundle onto 443 would
+    /// demand client certificates from every host co-located on that listener.
+    /// </param>
     public async Task UpdateBundleAsync(
-        Guid bundleId, string name, string? description, int listenerPort, CancellationToken ct = default)
+        Guid tenantId, Guid bundleId, string name, string? description, int listenerPort,
+        CancellationToken ct = default)
     {
         if (!IsUsableListenerPort(listenerPort))
             throw new InvalidOperationException($"Port {listenerPort} can't serve mTLS.");
 
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
-        ClientCaBundle bundle = await db.ClientCaBundles.FirstOrDefaultAsync(b => b.Id == bundleId, ct)
+        ClientCaBundle bundle = await db.ClientCaBundles
+            .FirstOrDefaultAsync(b => b.Id == bundleId && b.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Trust anchor not found.");
 
         bundle.Name = name.Trim();
@@ -154,13 +168,18 @@ public class MtlsService(
     /// Deletes a trust anchor. Refused while routes still authenticate against it — dropping it
     /// would leave those routes published on an mTLS port with nothing validating clients.
     /// </summary>
-    public async Task DeleteBundleAsync(Guid bundleId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose trust anchor. Deleting one stops their gateway accepting the client certificates
+    /// their partners present — an outage for every route bound to it.
+    /// </param>
+    public async Task DeleteBundleAsync(
+        Guid tenantId, Guid bundleId, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         ClientCaBundle bundle = await db.ClientCaBundles
             .Include(b => b.Routes)
-            .FirstOrDefaultAsync(b => b.Id == bundleId, ct)
+            .FirstOrDefaultAsync(b => b.Id == bundleId && b.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Trust anchor not found.");
 
         if (bundle.Routes.Count > 0)
@@ -177,8 +196,15 @@ public class MtlsService(
     /// certificate is rejected at upload time rather than silently producing a trust store that
     /// rejects every client.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose trust anchor. ⚠️ <b>The sharpest of the lot.</b> A certificate added here is a CA
+    /// the gateway will accept client certificates from — so with a bare bundle id, anyone could
+    /// add their own CA to another tenant's trust anchor and then issue themselves a client
+    /// certificate that authenticates to that tenant's apps. The existence check was
+    /// <c>AnyAsync(b => b.Id == bundleId)</c>, with no tenant in it.
+    /// </param>
     public async Task<ClientCaCertificate> AddCertificateAsync(
-        Guid bundleId, string name, string pem, CancellationToken ct = default)
+        Guid tenantId, Guid bundleId, string name, string pem, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(name))
             throw new InvalidOperationException("Name is required.");
@@ -187,7 +213,8 @@ public class MtlsService(
 
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
-        bool exists = await db.ClientCaBundles.AnyAsync(b => b.Id == bundleId, ct);
+        bool exists = await db.ClientCaBundles
+            .AnyAsync(b => b.Id == bundleId && b.TenantId == tenantId, ct);
         if (!exists)
             throw new InvalidOperationException("Trust anchor not found.");
 
@@ -204,7 +231,8 @@ public class MtlsService(
 
         db.ClientCaCertificates.Add(cert);
 
-        ClientCaBundle? bundle = await db.ClientCaBundles.FirstOrDefaultAsync(b => b.Id == bundleId, ct);
+        ClientCaBundle? bundle = await db.ClientCaBundles
+            .FirstOrDefaultAsync(b => b.Id == bundleId && b.TenantId == tenantId, ct);
         if (bundle is not null) bundle.UpdatedAt = DateTime.UtcNow;
 
         await db.SaveChangesAsync(ct);
@@ -212,12 +240,20 @@ public class MtlsService(
         return cert;
     }
 
-    public async Task RemoveCertificateAsync(Guid certificateId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose certificate. ⚠️ <c>ClientCaCertificate</c> has no <c>TenantId</c> of its own — it
+    /// hangs off a bundle, which has one — so the scope runs certificate → bundle. (A per-entity
+    /// grep said it had one; it does not, and the two classes share AppMtls.cs. Third time this
+    /// session a grep across a shared file has been wrong about which class owns a column.)
+    /// </param>
+    public async Task RemoveCertificateAsync(
+        Guid tenantId, Guid certificateId, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         ClientCaCertificate? cert = await db.ClientCaCertificates
-            .FirstOrDefaultAsync(c => c.Id == certificateId, ct);
+            .FirstOrDefaultAsync(
+                c => c.Id == certificateId && c.Bundle.TenantId == tenantId, ct);
         if (cert is null) return;
 
         db.ClientCaCertificates.Remove(cert);

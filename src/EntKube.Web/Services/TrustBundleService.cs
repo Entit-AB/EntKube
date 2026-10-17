@@ -33,11 +33,14 @@ public class TrustBundleService(
     /// that trust bundles won't reconcile until the component is present. A DB check against the
     /// component inventory — cheap and does not touch the cluster.
     /// </summary>
-    public async Task<bool> IsTrustManagerAvailableAsync(Guid clusterId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose cluster.</param>
+    public async Task<bool> IsTrustManagerAvailableAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         using CatalogDbContext db = dbFactory.CreateDbContext();
         return await db.ClusterComponents
             .AnyAsync(c => c.ClusterId == clusterId
+                        && c.Cluster.TenantId == tenantId
                         && c.Status == ComponentStatus.Installed
                         && (c.Name == "trust-manager"
                             || c.HelmChartName == "trust-manager"
@@ -56,17 +59,37 @@ public class TrustBundleService(
             .ToListAsync(ct);
     }
 
-    public async Task<CaTrustBundle?> GetBundleAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose bundle. ⚠️ A CA trust bundle is distributed into namespaces as a Secret that
+    /// workloads trust for outbound TLS. Its sources come back with it here.
+    /// <c>DeleteBundleAsync</c> beside it was already scoped; the rest of this service was not.
+    /// </param>
+    public async Task<CaTrustBundle?> GetBundleAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using CatalogDbContext db = dbFactory.CreateDbContext();
         return await db.CaTrustBundles
             .Include(b => b.Sources)
-            .FirstOrDefaultAsync(b => b.Id == id, ct);
+            .FirstOrDefaultAsync(b => b.Id == id && b.TenantId == tenantId, ct);
     }
 
-    public async Task<CaTrustBundle> CreateBundleAsync(CaTrustBundle bundle, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose bundle. ⚠️ This takes a whole entity from the caller, so its <c>TenantId</c> and
+    /// <c>ClusterId</c> are whatever was posted. Both are checked and the tenant is stamped from
+    /// the parameter rather than trusted from the object.
+    /// </param>
+    public async Task<CaTrustBundle> CreateBundleAsync(
+        Guid tenantId, CaTrustBundle bundle, CancellationToken ct = default)
     {
         using CatalogDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.KubernetesClusters.AnyAsync(
+                c => c.Id == bundle.ClusterId && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("That cluster does not belong to this tenant.");
+        }
+
+        bundle.TenantId = tenantId;
         bundle.Id = bundle.Id == Guid.Empty ? Guid.NewGuid() : bundle.Id;
         bundle.TargetName = SanitizeName(bundle.TargetName, "entkube-trust-bundle");
         bundle.CreatedAt = bundle.UpdatedAt = DateTime.UtcNow;
@@ -75,13 +98,24 @@ public class TrustBundleService(
         return bundle;
     }
 
+    /// <param name="tenantId">
+    /// Whose bundle. ⚠️ <paramref name="mutate"/> is an arbitrary action over the loaded entity,
+    /// so it can rewrite any column — including <c>TenantId</c> and <c>ClusterId</c>. The row is
+    /// loaded scoped, and both are pinned back afterwards: a caller may edit a bundle, not move
+    /// it to another tenant or point it at another cluster.
+    /// </param>
     public async Task<CaTrustBundle> UpdateBundleAsync(
-        Guid id, Action<CaTrustBundle> mutate, CancellationToken ct = default)
+        Guid tenantId, Guid id, Action<CaTrustBundle> mutate, CancellationToken ct = default)
     {
         using CatalogDbContext db = dbFactory.CreateDbContext();
-        CaTrustBundle bundle = await db.CaTrustBundles.FindAsync([id], ct)
+        CaTrustBundle bundle = await db.CaTrustBundles
+            .FirstOrDefaultAsync(b => b.Id == id && b.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException($"Trust bundle {id} not found.");
+
+        Guid cluster = bundle.ClusterId;
         mutate(bundle);
+        bundle.TenantId = tenantId;
+        bundle.ClusterId = cluster;
         bundle.TargetName = SanitizeName(bundle.TargetName, "entkube-trust-bundle");
         bundle.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -125,13 +159,25 @@ public class TrustBundleService(
         await db.SaveChangesAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose bundle. ⚠️ The outbound twin of <c>MtlsService.AddCertificateAsync</c> and just as
+    /// sharp: a source added here is a CA that every workload the bundle is distributed to will
+    /// trust for outbound TLS. With a bare bundle id, one tenant could add their own CA to
+    /// another's trust bundle and then present a certificate those workloads accept.
+    /// </param>
     public async Task<CaTrustBundleSource> AddSourceAsync(
-        Guid bundleId, string name, string pem, CancellationToken ct = default)
+        Guid tenantId, Guid bundleId, string name, string pem, CancellationToken ct = default)
     {
         if (CertificateParser.TryParse(pem) is null)
             throw new InvalidOperationException("The CA certificate is not valid PEM. Paste the full -----BEGIN CERTIFICATE----- block.");
 
         using CatalogDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.CaTrustBundles.AnyAsync(b => b.Id == bundleId && b.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("That trust bundle does not belong to this tenant.");
+        }
+
         CaTrustBundleSource source = new()
         {
             Id = Guid.NewGuid(),
@@ -145,10 +191,17 @@ public class TrustBundleService(
         return source;
     }
 
-    public async Task RemoveSourceAsync(Guid sourceId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose source. <c>CaTrustBundleSource</c> has no <c>TenantId</c> — it hangs off a bundle,
+    /// which has one — so the scope runs source → bundle. Removing a CA from a stranger's bundle
+    /// breaks the outbound TLS their workloads depend on.
+    /// </param>
+    public async Task RemoveSourceAsync(
+        Guid tenantId, Guid sourceId, CancellationToken ct = default)
     {
         using CatalogDbContext db = dbFactory.CreateDbContext();
-        CaTrustBundleSource? source = await db.CaTrustBundleSources.FindAsync([sourceId], ct);
+        CaTrustBundleSource? source = await db.CaTrustBundleSources
+            .FirstOrDefaultAsync(s => s.Id == sourceId && s.Bundle.TenantId == tenantId, ct);
         if (source is null) return;
         Guid bundleId = source.BundleId;
         db.CaTrustBundleSources.Remove(source);

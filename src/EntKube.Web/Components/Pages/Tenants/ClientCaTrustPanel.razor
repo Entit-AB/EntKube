@@ -246,7 +246,7 @@
         busy = true;
         try
         {
-            await Mtls.AddCertificateAsync(anchorId, ncName, ncPem);
+            await Mtls.AddCertificateAsync(TenantId, anchorId, ncName, ncPem);
             Toasts.Success("CA certificate added.");
             uploadFor = null;
             await LoadAsync();
@@ -260,7 +260,7 @@
         busy = true;
         try
         {
-            await Mtls.RemoveCertificateAsync(certificateId);
+            await Mtls.RemoveCertificateAsync(TenantId, certificateId);
             Toasts.Success("CA certificate removed.");
             await LoadAsync();
         }
@@ -273,7 +273,7 @@
         busy = true;
         try
         {
-            await Mtls.DeleteBundleAsync(anchorId);
+            await Mtls.DeleteBundleAsync(TenantId, anchorId);
             Toasts.Success("Trust anchor removed.");
             await LoadAsync();
         }

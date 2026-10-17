@@ -31,7 +31,28 @@ public sealed class TrustBundleServiceTests : IDisposable
         connection.Open();
         dbFactory = new TestDbContextFactory(connection);
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        {
             db.Database.EnsureCreated();
+
+            // ⚠️ The tenant's own cluster, seeded for every test rather than in the one that
+            // needed it. CreateBundleAsync now checks that the ClusterId on the posted entity
+            // belongs to the caller's tenant — a bundle names the cluster it is distributed to,
+            // so a bundle pointed at somebody else's cluster is the thing being prevented. Three
+            // tests failed on this: they created bundles against a cluster id that existed
+            // nowhere, which the guard is right to refuse.
+            Guid envId = Guid.NewGuid();
+            db.Tenants.Add(new Tenant { Id = tenantId, Name = "Acme", Slug = $"acme-{tenantId:N}" });
+            db.Environments.Add(new EntKube.Web.Data.Environment
+            {
+                Id = envId, TenantId = tenantId, Name = "prod",
+            });
+            db.KubernetesClusters.Add(new KubernetesCluster
+            {
+                Id = clusterId, TenantId = tenantId, EnvironmentId = envId,
+                Name = "prod", ApiServerUrl = "https://api",
+            });
+            db.SaveChanges();
+        }
 
         // No gate here any more: this service reaches it only through IClusterClient.
         sut = new TrustBundleService(
@@ -137,10 +158,10 @@ public sealed class TrustBundleServiceTests : IDisposable
     [Fact]
     public async Task CreateAndAddSource_ParsesValidity()
     {
-        CaTrustBundle created = await sut.CreateBundleAsync(NewBundle(TrustDistributionScope.TenantNamespaces));
-        await sut.AddSourceAsync(created.Id, "Root CA", NewSelfSignedCertPem());
+        CaTrustBundle created = await sut.CreateBundleAsync(tenantId, NewBundle(TrustDistributionScope.TenantNamespaces));
+        await sut.AddSourceAsync(tenantId, created.Id, "Root CA", NewSelfSignedCertPem());
 
-        CaTrustBundle? loaded = await sut.GetBundleAsync(created.Id);
+        CaTrustBundle? loaded = await sut.GetBundleAsync(tenantId, created.Id);
         loaded.Should().NotBeNull();
         loaded!.Sources.Should().HaveCount(1);
 
@@ -153,9 +174,9 @@ public sealed class TrustBundleServiceTests : IDisposable
     [Fact]
     public async Task AddSource_RejectsInvalidPem()
     {
-        CaTrustBundle created = await sut.CreateBundleAsync(NewBundle(TrustDistributionScope.AllNamespaces));
+        CaTrustBundle created = await sut.CreateBundleAsync(tenantId, NewBundle(TrustDistributionScope.AllNamespaces));
 
-        Func<Task> act = () => sut.AddSourceAsync(created.Id, "bad", "not a certificate");
+        Func<Task> act = () => sut.AddSourceAsync(tenantId, created.Id, "bad", "not a certificate");
 
         await act.Should().ThrowAsync<InvalidOperationException>();
     }
@@ -163,12 +184,12 @@ public sealed class TrustBundleServiceTests : IDisposable
     [Fact]
     public async Task RemoveSource_Removes()
     {
-        CaTrustBundle created = await sut.CreateBundleAsync(NewBundle(TrustDistributionScope.AllNamespaces));
-        CaTrustBundleSource src = await sut.AddSourceAsync(created.Id, "Root CA", NewSelfSignedCertPem());
+        CaTrustBundle created = await sut.CreateBundleAsync(tenantId, NewBundle(TrustDistributionScope.AllNamespaces));
+        CaTrustBundleSource src = await sut.AddSourceAsync(tenantId, created.Id, "Root CA", NewSelfSignedCertPem());
 
-        await sut.RemoveSourceAsync(src.Id);
+        await sut.RemoveSourceAsync(tenantId, src.Id);
 
-        CaTrustBundle? loaded = await sut.GetBundleAsync(created.Id);
+        CaTrustBundle? loaded = await sut.GetBundleAsync(tenantId, created.Id);
         loaded!.Sources.Should().BeEmpty();
     }
 
@@ -177,17 +198,12 @@ public sealed class TrustBundleServiceTests : IDisposable
     [Fact]
     public async Task IsTrustManagerAvailable_FalseWhenAbsent_TrueWhenInstalled()
     {
-        (await sut.IsTrustManagerAvailableAsync(clusterId)).Should().BeFalse();
+        (await sut.IsTrustManagerAvailableAsync(tenantId, clusterId)).Should().BeFalse();
 
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
-            Guid envId = Guid.NewGuid();
-            db.Tenants.Add(new Tenant { Id = tenantId, Name = "Acme", Slug = "acme" });
-            db.Environments.Add(new EntKube.Web.Data.Environment { Id = envId, TenantId = tenantId, Name = "prod" });
-            db.KubernetesClusters.Add(new KubernetesCluster
-            {
-                Id = clusterId, TenantId = tenantId, EnvironmentId = envId, Name = "prod", ApiServerUrl = "https://api",
-            });
+            // Tenant, environment and cluster come from the constructor now; this test only
+            // needs the component that makes trust-manager "available".
             db.ClusterComponents.Add(new ClusterComponent
             {
                 Id = Guid.NewGuid(),
@@ -201,7 +217,7 @@ public sealed class TrustBundleServiceTests : IDisposable
             await db.SaveChangesAsync();
         }
 
-        (await sut.IsTrustManagerAvailableAsync(clusterId)).Should().BeTrue();
+        (await sut.IsTrustManagerAvailableAsync(tenantId, clusterId)).Should().BeTrue();
     }
 
     // ── helpers ──────────────────────────────────────────────────────────────
@@ -231,4 +247,99 @@ public sealed class TrustBundleServiceTests : IDisposable
     }
 
     public void Dispose() => connection.Dispose();
+
+    // ──────── Whose trust ────────
+
+    /// <summary>
+    /// ⚠️ What a CA trust bundle <em>is</em> makes this the sharpest kind of scoping bug: the
+    /// bundle is distributed into namespaces as a Secret that workloads trust for outbound TLS.
+    /// A source added to it is a CA those workloads will accept. With a bare bundle id, one
+    /// tenant could add their own CA to another's bundle and then present a certificate that
+    /// every workload the bundle reaches would believe.
+    ///
+    /// <para><c>DeleteBundleAsync</c> was already scoped. Everything else here — the read, the
+    /// create, the mutate-by-action update, add-source and remove-source — was not.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_trust_bundle_and_its_sources_are_confined_to_their_tenant()
+    {
+        Guid stranger = Guid.NewGuid(), strangerCluster = Guid.NewGuid();
+
+        using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        {
+            Guid envId = Guid.NewGuid();
+            db.Tenants.Add(new Tenant { Id = stranger, Name = "Stranger", Slug = $"s-{stranger:N}" });
+            db.Environments.Add(new EntKube.Web.Data.Environment
+            {
+                Id = envId, TenantId = stranger, Name = "their-prod",
+            });
+            db.KubernetesClusters.Add(new KubernetesCluster
+            {
+                Id = strangerCluster, TenantId = stranger, EnvironmentId = envId,
+                Name = "their-prod", ApiServerUrl = "https://their-api",
+            });
+            db.SaveChanges();
+        }
+
+        // Their bundle, with a CA of their own in it.
+        CaTrustBundle theirs = await sut.CreateBundleAsync(stranger, new CaTrustBundle
+        {
+            TenantId = stranger, ClusterId = strangerCluster,
+            Name = "Their Corporate Trust", Scope = TrustDistributionScope.AllNamespaces,
+        });
+        CaTrustBundleSource theirSource =
+            await sut.AddSourceAsync(stranger, theirs.Id, "Their Root CA", NewSelfSignedCertPem());
+
+        // We cannot read it.
+        (await sut.GetBundleAsync(tenantId, theirs.Id)).Should().BeNull(
+            "the bundle exists, so this is a refusal");
+        (await sut.GetBundleAsync(stranger, theirs.Id)).Should().NotBeNull("the owner still sees it");
+
+        // ⚠️ Nor add a CA of ours to it — the whole point.
+        Func<Task> plantCa = () => sut.AddSourceAsync(tenantId, theirs.Id, "Our CA", NewSelfSignedCertPem());
+        await plantCa.Should().ThrowAsync<InvalidOperationException>();
+
+        // Nor remove theirs, nor edit the bundle.
+        await sut.RemoveSourceAsync(tenantId, theirSource.Id);
+        Func<Task> edit = () => sut.UpdateBundleAsync(tenantId, theirs.Id, b => b.Name = "hijacked");
+        await edit.Should().ThrowAsync<InvalidOperationException>();
+
+        CaTrustBundle intact = (await sut.GetBundleAsync(stranger, theirs.Id))!;
+        intact.Name.Should().Be("Their Corporate Trust");
+        intact.Sources.Should().ContainSingle("their CA is still there and ours never arrived")
+            .Which.Name.Should().Be("Their Root CA");
+
+        // And a bundle cannot be created against their cluster either.
+        Func<Task> ontoTheirCluster = () => sut.CreateBundleAsync(tenantId, new CaTrustBundle
+        {
+            TenantId = tenantId, ClusterId = strangerCluster,
+            Name = "Ours on their cluster", Scope = TrustDistributionScope.AllNamespaces,
+        });
+        await ontoTheirCluster.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    /// <summary>
+    /// ⚠️ <c>UpdateBundleAsync</c> takes an <c>Action&lt;CaTrustBundle&gt;</c> over the loaded
+    /// entity, so a caller can write any column on it — including the two that decide whose it is
+    /// and where it goes. Loading the row scoped is not enough on its own; the tenant and cluster
+    /// are pinned back after the action runs.
+    /// </summary>
+    [Fact]
+    public async Task An_update_action_cannot_move_a_bundle_to_another_tenant_or_cluster()
+    {
+        Guid stranger = Guid.NewGuid();
+        CaTrustBundle ours = await sut.CreateBundleAsync(
+            tenantId, NewBundle(TrustDistributionScope.AllNamespaces));
+
+        CaTrustBundle after = await sut.UpdateBundleAsync(tenantId, ours.Id, b =>
+        {
+            b.Name = "renamed";
+            b.TenantId = stranger;
+            b.ClusterId = Guid.NewGuid();
+        });
+
+        after.Name.Should().Be("renamed", "the edit itself still applies");
+        after.TenantId.Should().Be(tenantId, "a caller may edit a bundle, not give it away");
+        after.ClusterId.Should().Be(clusterId, "nor redirect where it is distributed");
+    }
 }
