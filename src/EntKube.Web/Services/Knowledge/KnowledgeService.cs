@@ -96,26 +96,38 @@ public class KnowledgeService(
     public static readonly KnowledgeSectionKind[] ExpectedSections =
         [KnowledgeSectionKind.Architecture, KnowledgeSectionKind.Runbook];
 
+    /// <summary>
+    /// Whether an application is this tenant's.
+    ///
+    /// <para>Every row here is keyed by an application. A read or an update has a row to
+    /// compare a tenant against; a <i>create</i> does not yet, so the application is the only
+    /// thing there is to check — and it is what the caller named.</para>
+    /// </summary>
+    private static Task<bool> AppIsTenantsAsync(
+        ApplicationDbContext db, Guid tenantId, Guid appId, CancellationToken ct) =>
+        db.Apps.AnyAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct);
+
     public async Task<List<KnowledgeSection>> GetSectionsAsync(
-        Guid appId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.KnowledgeSections.AsNoTracking()
-            .Where(s => s.AppId == appId)
+            .Where(s => s.TenantId == tenantId && s.AppId == appId)
             .OrderBy(s => s.Kind)
             .ThenBy(s => s.Title)
             .ToListAsync(ct);
     }
 
-    public async Task<KnowledgeSection?> GetSectionAsync(Guid sectionId, CancellationToken ct = default)
+    public async Task<KnowledgeSection?> GetSectionAsync(
+        Guid tenantId, Guid sectionId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.KnowledgeSections
             .Include(s => s.Revisions.OrderByDescending(r => r.SavedAt))
             .AsNoTracking()
-            .FirstOrDefaultAsync(s => s.Id == sectionId, ct);
+            .FirstOrDefaultAsync(s => s.Id == sectionId && s.TenantId == tenantId, ct);
     }
 
     /// <summary>
@@ -139,12 +151,24 @@ public class KnowledgeService(
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
+        // A section id belonging to another tenant finds nothing, so the save goes on to
+        // create one of our own — which is what already happened when the section had been
+        // deleted while the editor was open. What it must not do is reach their row: the body
+        // that was there would have been pushed into a revision and their runbook replaced,
+        // still under their application, by us.
         KnowledgeSection? section = sectionId is Guid id
-            ? await db.KnowledgeSections.FirstOrDefaultAsync(s => s.Id == id, ct)
+            ? await db.KnowledgeSections
+                .FirstOrDefaultAsync(s => s.Id == id && s.TenantId == tenantId, ct)
             : null;
 
         if (section is null)
         {
+            if (!await AppIsTenantsAsync(db, tenantId, appId, ct))
+            {
+                throw new InvalidOperationException(
+                    "Application not found, or it is not this tenant's.");
+            }
+
             section = new KnowledgeSection
             {
                 Id = Guid.NewGuid(),
@@ -192,12 +216,13 @@ public class KnowledgeService(
     /// on purpose: fixing a typo is not a review, and the fee is paid for the confirmation.
     /// </summary>
     public async Task MarkReviewedAsync(
-        Guid sectionId, string? reviewer, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid sectionId, string? reviewer, DateTime at,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         KnowledgeSection? section = await db.KnowledgeSections
-            .FirstOrDefaultAsync(s => s.Id == sectionId, ct);
+            .FirstOrDefaultAsync(s => s.Id == sectionId && s.TenantId == tenantId, ct);
 
         if (section is not null)
         {
@@ -207,11 +232,15 @@ public class KnowledgeService(
         }
     }
 
-    public async Task DeleteSectionAsync(Guid sectionId, CancellationToken ct = default)
+    public async Task DeleteSectionAsync(
+        Guid tenantId, Guid sectionId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        KnowledgeSection? section = await db.KnowledgeSections.FindAsync([sectionId], ct);
+        // FindAsync takes a key and cannot carry a predicate, which is how this came to have
+        // no tenant in it.
+        KnowledgeSection? section = await db.KnowledgeSections
+            .FirstOrDefaultAsync(s => s.Id == sectionId && s.TenantId == tenantId, ct);
         if (section is not null)
         {
             db.KnowledgeSections.Remove(section);
@@ -219,18 +248,33 @@ public class KnowledgeService(
         }
     }
 
-    public async Task<AppKnowledgeProfile?> GetProfileAsync(Guid appId, CancellationToken ct = default)
+    public async Task<AppKnowledgeProfile?> GetProfileAsync(
+        Guid tenantId, Guid appId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.AppKnowledgeProfiles.AsNoTracking()
-            .FirstOrDefaultAsync(p => p.AppId == appId, ct);
+            .FirstOrDefaultAsync(p => p.AppId == appId && p.TenantId == tenantId, ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose classification. Not read off <paramref name="edited"/>: the entity is the
+    /// caller's to fill in, so a TenantId on it is a claim rather than an authorization — and
+    /// it was the AppId on it that decided which row got written.
+    /// </param>
     public async Task<AppKnowledgeProfile> SaveProfileAsync(
-        AppKnowledgeProfile edited, CancellationToken ct = default)
+        Guid tenantId, AppKnowledgeProfile edited, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        // The application rather than the row, for once. There is one profile per application
+        // — the AppId index is unique — so the application is what says whose row this is,
+        // and asking here covers the create as well as the edit.
+        if (!await AppIsTenantsAsync(db, tenantId, edited.AppId, ct))
+        {
+            throw new InvalidOperationException(
+                "Application not found, or it is not this tenant's.");
+        }
 
         AppKnowledgeProfile? existing = await db.AppKnowledgeProfiles
             .FirstOrDefaultAsync(p => p.AppId == edited.AppId, ct);
@@ -238,6 +282,7 @@ public class KnowledgeService(
         if (existing is null)
         {
             edited.Id = edited.Id == Guid.Empty ? Guid.NewGuid() : edited.Id;
+            edited.TenantId = tenantId;
             edited.UpdatedAt = DateTime.UtcNow;
             db.AppKnowledgeProfiles.Add(edited);
             await db.SaveChangesAsync(ct);
@@ -259,19 +304,24 @@ public class KnowledgeService(
     }
 
     public async Task<List<AppServiceDependency>> GetDependenciesAsync(
-        Guid appId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.AppServiceDependencies.AsNoTracking()
-            .Where(d => d.AppId == appId)
+            .Where(d => d.TenantId == tenantId && d.AppId == appId)
             .OrderByDescending(d => d.CriticalPath)
             .ThenBy(d => d.Name)
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose dependency. A detached <c>Update</c> writes every column of whichever row the
+    /// entity's Id names, so without this the Id alone decided what was rewritten — and the
+    /// TenantId and AppId on the entity decided whose list it appeared in afterwards.
+    /// </param>
     public async Task<AppServiceDependency> SaveDependencyAsync(
-        AppServiceDependency dependency, CancellationToken ct = default)
+        Guid tenantId, AppServiceDependency dependency, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
@@ -279,11 +329,28 @@ public class KnowledgeService(
 
         if (dependency.Id == Guid.Empty)
         {
+            if (!await AppIsTenantsAsync(db, tenantId, dependency.AppId, ct))
+            {
+                throw new InvalidOperationException(
+                    "Application not found, or it is not this tenant's.");
+            }
+
             dependency.Id = Guid.NewGuid();
+            dependency.TenantId = tenantId;
             db.AppServiceDependencies.Add(dependency);
         }
         else
         {
+            AppServiceDependency stored = await db.AppServiceDependencies.AsNoTracking()
+                .FirstOrDefaultAsync(d => d.Id == dependency.Id && d.TenantId == tenantId, ct)
+                ?? throw new InvalidOperationException(
+                    "Dependency not found, or it is not this tenant's.");
+
+            // Where the row lives is the stored row's to say, not the entity's.
+            dependency.TenantId = stored.TenantId;
+            dependency.AppId = stored.AppId;
+            dependency.CreatedAt = stored.CreatedAt;
+
             db.AppServiceDependencies.Update(dependency);
         }
 
@@ -291,11 +358,13 @@ public class KnowledgeService(
         return dependency;
     }
 
-    public async Task DeleteDependencyAsync(Guid id, CancellationToken ct = default)
+    public async Task DeleteDependencyAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        AppServiceDependency? dependency = await db.AppServiceDependencies.FindAsync([id], ct);
+        AppServiceDependency? dependency = await db.AppServiceDependencies
+            .FirstOrDefaultAsync(d => d.Id == id && d.TenantId == tenantId, ct);
         if (dependency is not null)
         {
             db.AppServiceDependencies.Remove(dependency);
@@ -303,19 +372,26 @@ public class KnowledgeService(
         }
     }
 
-    public async Task<List<EndOfLifeNotice>> GetEndOfLifeAsync(Guid appId, CancellationToken ct = default)
+    public async Task<List<EndOfLifeNotice>> GetEndOfLifeAsync(
+        Guid tenantId, Guid appId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.EndOfLifeNotices.AsNoTracking()
-            .Where(n => n.AppId == appId)
+            .Where(n => n.TenantId == tenantId && n.AppId == appId)
             .OrderBy(n => n.UpgradedAt != null)
             .ThenBy(n => n.EndOfLifeOn)
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose notice. This row <i>is</i> §14.7's evidence — the date written notice was given,
+    /// and whether an upgrade was ordered — so being able to rewrite one by Id alone was
+    /// being able to rewrite when somebody else's exemption started, or move the row out of
+    /// their application altogether.
+    /// </param>
     public async Task<EndOfLifeNotice> SaveEndOfLifeAsync(
-        EndOfLifeNotice notice, CancellationToken ct = default)
+        Guid tenantId, EndOfLifeNotice notice, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
@@ -323,11 +399,28 @@ public class KnowledgeService(
 
         if (notice.Id == Guid.Empty)
         {
+            if (!await AppIsTenantsAsync(db, tenantId, notice.AppId, ct))
+            {
+                throw new InvalidOperationException(
+                    "Application not found, or it is not this tenant's.");
+            }
+
             notice.Id = Guid.NewGuid();
+            notice.TenantId = tenantId;
             db.EndOfLifeNotices.Add(notice);
         }
         else
         {
+            EndOfLifeNotice stored = await db.EndOfLifeNotices.AsNoTracking()
+                .FirstOrDefaultAsync(n => n.Id == notice.Id && n.TenantId == tenantId, ct)
+                ?? throw new InvalidOperationException(
+                    "Notice not found, or it is not this tenant's.");
+
+            // Where the row lives is the stored row's to say, not the entity's.
+            notice.TenantId = stored.TenantId;
+            notice.AppId = stored.AppId;
+            notice.CreatedAt = stored.CreatedAt;
+
             db.EndOfLifeNotices.Update(notice);
         }
 
@@ -372,7 +465,7 @@ public class KnowledgeService(
         List<KnowledgeGap> gaps = [];
 
         List<KnowledgeSection> sections = await db.KnowledgeSections.AsNoTracking()
-            .Where(s => s.AppId == appId)
+            .Where(s => s.TenantId == tenantId && s.AppId == appId)
             .ToListAsync(ct);
 
         foreach (KnowledgeSectionKind expected in ExpectedSections)
@@ -418,7 +511,8 @@ public class KnowledgeService(
         if (level?.Window is SupportWindow window and > SupportWindow.S1)
         {
             List<AppServiceDependency> officeHours = await db.AppServiceDependencies.AsNoTracking()
-                .Where(d => d.AppId == appId && d.OfficeHoursOnly && d.CriticalPath)
+                .Where(d => d.TenantId == tenantId && d.AppId == appId
+                    && d.OfficeHoursOnly && d.CriticalPath)
                 .ToListAsync(ct);
 
             foreach (AppServiceDependency dependency in officeHours)
@@ -437,7 +531,7 @@ public class KnowledgeService(
 
         // §14.7: components whose notice period has run out.
         List<EndOfLifeNotice> notices = await db.EndOfLifeNotices.AsNoTracking()
-            .Where(n => n.AppId == appId && n.UpgradedAt == null)
+            .Where(n => n.TenantId == tenantId && n.AppId == appId && n.UpgradedAt == null)
             .ToListAsync(ct);
 
         foreach (EndOfLifeNotice notice in notices)
@@ -466,7 +560,8 @@ public class KnowledgeService(
             }
         }
 
-        if (await db.AppKnowledgeProfiles.AsNoTracking().AllAsync(p => p.AppId != appId, ct))
+        if (!await db.AppKnowledgeProfiles.AsNoTracking()
+                .AnyAsync(p => p.AppId == appId && p.TenantId == tenantId, ct))
         {
             gaps.Add(new KnowledgeGap(
                 KnowledgeCheck.Classification,

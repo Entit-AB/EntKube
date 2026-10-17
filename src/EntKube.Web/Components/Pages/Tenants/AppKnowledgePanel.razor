@@ -703,12 +703,12 @@
 
         try
         {
-            sections = await Knowledge.GetSectionsAsync(App.Id);
-            dependencies = await Knowledge.GetDependenciesAsync(App.Id);
-            notices = await Knowledge.GetEndOfLifeAsync(App.Id);
+            sections = await Knowledge.GetSectionsAsync(TenantId, App.Id);
+            dependencies = await Knowledge.GetDependenciesAsync(TenantId, App.Id);
+            notices = await Knowledge.GetEndOfLifeAsync(TenantId, App.Id);
             health = await Knowledge.GetHealthAsync(TenantId, App.Id, DateTime.UtcNow);
 
-            AppKnowledgeProfile? stored = await Knowledge.GetProfileAsync(App.Id);
+            AppKnowledgeProfile? stored = await Knowledge.GetProfileAsync(TenantId, App.Id);
             profileMissing = stored is null;
             profile = stored ?? new AppKnowledgeProfile { TenantId = TenantId, AppId = App.Id };
 
@@ -741,7 +741,7 @@
         editing = null;
 
         // The list is loaded without revisions; the reading pane says how many there are.
-        KnowledgeSection? full = await Knowledge.GetSectionAsync(article.Id);
+        KnowledgeSection? full = await Knowledge.GetSectionAsync(TenantId, article.Id);
 
         if (full is not null)
         {
@@ -859,7 +859,7 @@
 
     private async Task MarkReviewedAsync(Guid sectionId)
     {
-        await Knowledge.MarkReviewedAsync(sectionId, Actor, DateTime.UtcNow);
+        await Knowledge.MarkReviewedAsync(TenantId, sectionId, Actor, DateTime.UtcNow);
         Toasts.Success("Confirmed as still true.");
         await LoadAsync();
     }
@@ -868,7 +868,7 @@
     {
         if (pendingDeleteSectionId is Guid id)
         {
-            await Knowledge.DeleteSectionAsync(id);
+            await Knowledge.DeleteSectionAsync(TenantId, id);
             pendingDeleteSectionId = null;
             selectedSectionId = null;
             view = View.Overview;
@@ -882,7 +882,7 @@
         profile.AppId = App.Id;
         profile.UpdatedBy = Actor;
 
-        await Knowledge.SaveProfileAsync(profile);
+        await Knowledge.SaveProfileAsync(TenantId, profile);
         Toasts.Success("Classification saved.");
         await LoadAsync();
     }
@@ -898,14 +898,14 @@
             return;
         }
 
-        await Knowledge.SaveDependencyAsync(newDependency);
+        await Knowledge.SaveDependencyAsync(TenantId, newDependency);
         newDependency = null;
         await LoadAsync();
     }
 
     private async Task DeleteDependencyAsync(Guid id)
     {
-        await Knowledge.DeleteDependencyAsync(id);
+        await Knowledge.DeleteDependencyAsync(TenantId, id);
         await LoadAsync();
     }
 
@@ -920,7 +920,7 @@
             return;
         }
 
-        await Knowledge.SaveEndOfLifeAsync(newNotice);
+        await Knowledge.SaveEndOfLifeAsync(TenantId, newNotice);
         newNotice = null;
         await LoadAsync();
     }
@@ -929,7 +929,7 @@
     {
         notice.NoticeGivenAt = DateTime.UtcNow;
         notice.NoticeGivenBy = Actor;
-        await Knowledge.SaveEndOfLifeAsync(notice);
+        await Knowledge.SaveEndOfLifeAsync(TenantId, notice);
         Toasts.Success("Notice recorded — §14.7's three months start now.");
         await LoadAsync();
     }
@@ -937,7 +937,7 @@
     private async Task RecordUpgradedAsync(EndOfLifeNotice notice)
     {
         notice.UpgradedAt = DateTime.UtcNow;
-        await Knowledge.SaveEndOfLifeAsync(notice);
+        await Knowledge.SaveEndOfLifeAsync(TenantId, notice);
         await LoadAsync();
     }
 
