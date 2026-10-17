@@ -260,7 +260,7 @@ else
         loadError = null;
         try
         {
-            trustManagerAvailable = await TrustService.IsTrustManagerAvailableAsync(ClusterId);
+            trustManagerAvailable = await TrustService.IsTrustManagerAvailableAsync(TenantId, ClusterId);
             bundles = await TrustService.GetBundlesAsync(TenantId, ClusterId);
         }
         catch (Exception ex)
@@ -299,7 +299,7 @@ else
         busy = true;
         try
         {
-            await TrustService.CreateBundleAsync(new CaTrustBundle
+            await TrustService.CreateBundleAsync(TenantId, new CaTrustBundle
             {
                 TenantId = TenantId,
                 ClusterId = ClusterId,
@@ -331,7 +331,7 @@ else
         busy = true;
         try
         {
-            await TrustService.AddSourceAsync(bundleId, asName, asPem);
+            await TrustService.AddSourceAsync(TenantId, bundleId, asName, asPem);
             Toasts.Success("CA certificate added.");
             addSourceBundleId = null;
             await LoadAsync();
@@ -345,7 +345,7 @@ else
         busy = true;
         try
         {
-            await TrustService.RemoveSourceAsync(sourceId);
+            await TrustService.RemoveSourceAsync(TenantId, sourceId);
             await LoadAsync();
         }
         catch (Exception ex) { Toasts.Error(ex.Message); }
