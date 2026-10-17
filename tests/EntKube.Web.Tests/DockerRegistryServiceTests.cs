@@ -61,7 +61,7 @@ public class DockerRegistryServiceTests : IDisposable
 
     private async Task<(Tenant tenant, App app, Data.Environment prod, Data.Environment test)> SeedAsync()
     {
-        Tenant tenant = new() { Id = Guid.NewGuid(), Name = "Co", Slug = "co" };
+        Tenant tenant = new() { Id = Guid.NewGuid(), Name = "Co", Slug = $"co-{Guid.NewGuid():N}" };
         db.Tenants.Add(tenant);
         Customer customer = new() { Id = Guid.NewGuid(), TenantId = tenant.Id, Name = "Cust" };
         db.Customers.Add(customer);
@@ -122,11 +122,11 @@ public class DockerRegistryServiceTests : IDisposable
         (Tenant tenant, App app, Data.Environment prod, _) = await SeedAsync();
         DockerRegistryCredential cred = await CreateAsync(tenant.Id, app.Id, "cred", null);
 
-        await sut.ChangeScopeAsync(cred.Id, prod.Id);
+        await sut.ChangeScopeAsync(tenant.Id, cred.Id, prod.Id);
         (await db.Set<DockerRegistryCredential>().AsNoTracking().FirstAsync(c => c.Id == cred.Id))
             .EnvironmentId.Should().Be(prod.Id);
 
-        await sut.ChangeScopeAsync(cred.Id, null);
+        await sut.ChangeScopeAsync(tenant.Id, cred.Id, null);
         (await db.Set<DockerRegistryCredential>().AsNoTracking().FirstAsync(c => c.Id == cred.Id))
             .EnvironmentId.Should().BeNull();
     }
@@ -137,7 +137,7 @@ public class DockerRegistryServiceTests : IDisposable
         (Tenant tenant, _, Data.Environment prod, _) = await SeedAsync();
         DockerRegistryCredential cred = await CreateAsync(tenant.Id, appId: null, "shared", null);
 
-        await sut.ChangeScopeAsync(cred.Id, prod.Id);
+        await sut.ChangeScopeAsync(tenant.Id, cred.Id, prod.Id);
 
         (await db.Set<DockerRegistryCredential>().AsNoTracking().FirstAsync(c => c.Id == cred.Id))
             .EnvironmentId.Should().BeNull();
@@ -163,7 +163,7 @@ public class DockerRegistryServiceTests : IDisposable
 
         // A credential bound to PROD, configured to sync into the TEST cluster.
         DockerRegistryCredential cred = await CreateAsync(tenant.Id, app.Id, "prod-cred", prod.Id);
-        await sut.ConfigureSyncAsync(cred.Id, cluster.Id, "registry-creds", "app");
+        await sut.ConfigureSyncAsync(tenant.Id, cred.Id, cluster.Id, "registry-creds", "app");
 
         KubernetesOperationResult<string> result = await sut.SyncToKubernetesAsync(tenant.Id, cred.Id);
 
@@ -194,7 +194,7 @@ public class DockerRegistryServiceTests : IDisposable
         await testDb.SeedKubeconfigAsync(vault, tenant.Id, cluster.Id, TestKubeconfig.Valid);
 
         DockerRegistryCredential cred = await CreateAsync(tenant.Id, app.Id, "prod-cred", prod.Id);
-        await sut.ConfigureSyncAsync(cred.Id, cluster.Id, "registry-creds", "app");
+        await sut.ConfigureSyncAsync(tenant.Id, cred.Id, cluster.Id, "registry-creds", "app");
 
         (await sut.SyncToKubernetesAsync(tenant.Id, cred.Id)).IsSuccess.Should().BeTrue();
 
@@ -225,7 +225,7 @@ public class DockerRegistryServiceTests : IDisposable
         await testDb.SeedKubeconfigAsync(vault, tenant.Id, cluster.Id, TestKubeconfig.Valid);
 
         DockerRegistryCredential cred = await CreateAsync(tenant.Id, app.Id, "prod-cred", prod.Id);
-        await sut.ConfigureSyncAsync(cred.Id, cluster.Id, "registry-creds", "app");
+        await sut.ConfigureSyncAsync(tenant.Id, cred.Id, cluster.Id, "registry-creds", "app");
 
         KubernetesOperationResult<string> result =
             await sut.SyncToKubernetesAsync(Guid.NewGuid(), cred.Id);
@@ -233,5 +233,48 @@ public class DockerRegistryServiceTests : IDisposable
         result.IsSuccess.Should().BeFalse();
         secretsReplaced.Should().BeEmpty("nothing should reach anyone's cluster");
         namespacesEnsured.Should().BeEmpty();
+    }
+
+    // ──────── Tenancy on the row, where there is no cluster to refuse ────────
+
+    /// <summary>
+    /// ⚠️ <c>GetPasswordAsync</c> is the sharpest shape in this service: it <b>returns the
+    /// registry password in cleartext</b> and took a bare credential id. There is no cluster, no
+    /// manifest and no seam between that id and the secret, so nothing downstream could have
+    /// refused — unlike <c>SyncToKubernetesAsync</c> above, whose tenant was already load-bearing
+    /// because the cluster seam refuses a foreign cluster.
+    ///
+    /// <para><c>DockerRegistryCredential</c> has no <c>TenantId</c> of its own; it lives in a
+    /// vault, and the vault has one, so every predicate here runs <c>c.Vault.TenantId</c>.</para>
+    /// </summary>
+    [Fact]
+    public async Task Another_tenant_cannot_read_or_rewrite_a_registry_credential()
+    {
+        (Tenant tenant, App app, Data.Environment prod, _) = await SeedAsync();
+        DockerRegistryCredential cred = await CreateAsync(tenant.Id, app.Id, "prod-acr", prod.Id);
+
+        Guid stranger = Guid.NewGuid();
+
+        (await sut.GetPasswordAsync(stranger, cred.Id)).Should().BeNull(
+            "the credential exists and its password is retrievable, so this is a refusal");
+        (await sut.GetPasswordAsync(tenant.Id, cred.Id)).Should().Be("pass",
+            "the owner's own read still returns it, or the null above proves nothing");
+
+        await sut.UpdateAsync(stranger, cred.Id, "attacker", "attacker-pass", "a@example.com");
+        await sut.ChangeScopeAsync(stranger, cred.Id, null);
+        (await sut.DeleteAsync(stranger, cred.Id)).Should().BeFalse();
+
+        using ApplicationDbContext after = testDb.CreateContext();
+        DockerRegistryCredential intact =
+            after.Set<DockerRegistryCredential>().Single(c => c.Id == cred.Id);
+        intact.Username.Should().Be("user", "rewriting it would break every pull that uses it");
+        intact.EnvironmentId.Should().Be(prod.Id, "and unscoping it would widen who may pull");
+        (await sut.GetPasswordAsync(tenant.Id, cred.Id)).Should().Be("pass");
+
+        // The owner can still do all three.
+        await sut.UpdateAsync(tenant.Id, cred.Id, "renamed", null, null);
+        (await sut.GetAsync(tenant.Id, app.Id, prod.Id))
+            .Should().ContainSingle().Which.Username.Should().Be("renamed");
+        (await sut.DeleteAsync(tenant.Id, cred.Id)).Should().BeTrue();
     }
 }

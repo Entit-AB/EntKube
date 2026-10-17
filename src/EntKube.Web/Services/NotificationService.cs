@@ -303,7 +303,11 @@ public class NotificationService(
 
         AlertIncident? incident = await db.AlertIncidents
             .Include(i => i.Cluster)
-            .FirstOrDefaultAsync(i => i.Id == incidentId, ct);
+            // ⚠️ AlertIncident has no TenantId, so the scope runs through its cluster. Without
+            // it this method read a stranger's incident and then notified OUR channels about it
+            // — the channel and route queries below are already tenant-scoped, which is what
+            // made the leak outbound rather than inbound: their alert text, our Teams webhook.
+            .FirstOrDefaultAsync(i => i.Id == incidentId && i.Cluster.TenantId == tenantId, ct);
         if (incident is null) return 0;
 
         List<NotificationChannel> channels = await db.NotificationChannels

@@ -659,7 +659,7 @@ else
         revealLoading = true;
         revealedId = cred.Id;
         revealedPassword = null;
-        revealedPassword = await DockerRegistryService.GetPasswordAsync(cred.Id);
+        revealedPassword = await DockerRegistryService.GetPasswordAsync(TenantId, cred.Id);
         revealLoading = false;
     }
 
@@ -688,6 +688,7 @@ else
         try
         {
             await DockerRegistryService.UpdateAsync(
+                TenantId,
                 editId.Value,
                 string.IsNullOrWhiteSpace(editUsername) ? null : editUsername.Trim(),
                 string.IsNullOrWhiteSpace(editPassword) ? null : editPassword,
@@ -715,6 +716,7 @@ else
     private async Task SaveScopeEdit(Guid credId)
     {
         await DockerRegistryService.ChangeScopeAsync(
+            TenantId,
             credId, scopeEditValue == Guid.Empty ? null : scopeEditValue);
         scopeEditId = null;
         await LoadCredentials();
@@ -744,7 +746,7 @@ else
 
     private async Task SaveSyncConfig(Guid credId)
     {
-        await DockerRegistryService.ConfigureSyncAsync(credId, syncClusterId, syncSecretName, syncNamespace);
+        await DockerRegistryService.ConfigureSyncAsync(TenantId, credId, syncClusterId, syncSecretName, syncNamespace);
         syncConfigId = null;
         await LoadCredentials();
     }
@@ -768,7 +770,7 @@ else
 
     private async Task DeleteCredential(Guid credId)
     {
-        await DockerRegistryService.DeleteAsync(credId);
+        await DockerRegistryService.DeleteAsync(TenantId, credId);
         confirmDeleteId = null;
         revealedId = null;
         editId = null;

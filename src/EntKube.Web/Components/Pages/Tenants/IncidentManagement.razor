@@ -493,7 +493,7 @@ else if (!isLoading)
 
         try
         {
-            int count = await NotificationService.ReNotifyAsync(incident.Id, incident.Cluster!.TenantId);
+            int count = await NotificationService.ReNotifyAsync(incident.Id, TenantId);
             reNotifyResults[incident.Id] = count > 0
                 ? $"✓ Notified {count} channel{(count == 1 ? "" : "s")}"
                 : "✓ No channels to notify";
