@@ -87,7 +87,7 @@ public sealed class ProductionBaselineTests
 
         ClusterBlueprint bp = await sut.CreateProvisioningBlueprintAsync(tenantId, "prod-eu-1-baseline", config, baseline);
 
-        ClusterBlueprint reloaded = (await sut.GetBlueprintAsync(bp.Id))!;
+        ClusterBlueprint reloaded = (await sut.GetBlueprintAsync(tenantId, bp.Id))!;
         reloaded.ProvisioningProvider.Should().Be("openstack");
         reloaded.ProvisioningConfig.Should().NotBeNullOrEmpty();
         OpenStackProvisioningConfig storedConfig = OpenStackProvisioningConfig.FromJson(reloaded.ProvisioningConfig!);

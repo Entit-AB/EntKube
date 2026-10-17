@@ -32,7 +32,7 @@ public sealed class ClusterBlueprintRolloutTests : IDisposable
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         db.Database.EnsureCreated();
 
-        db.Tenants.Add(new Tenant { Id = tenantId, Name = "Acme", Slug = "acme" });
+        db.Tenants.Add(new Tenant { Id = tenantId, Name = "Acme", Slug = $"acme-{tenantId:N}" });
         db.Environments.Add(new EntKube.Web.Data.Environment { Id = environmentId, TenantId = tenantId, Name = "prod" });
         db.ClusterBlueprints.Add(new ClusterBlueprint { Id = blueprintId, TenantId = tenantId, Name = "Platform" });
         db.BlueprintSteps.Add(new BlueprintStep
@@ -60,7 +60,7 @@ public sealed class ClusterBlueprintRolloutTests : IDisposable
 
     private async Task CompleteRunningTargetAsync(Guid rolloutId, bool success)
     {
-        BlueprintRollout rollout = (await sut.GetRolloutAsync(rolloutId))!;
+        BlueprintRollout rollout = (await sut.GetRolloutAsync(tenantId, rolloutId))!;
         BlueprintRolloutTarget running = rollout.Targets.Single(t => t.Status == RolloutTargetStatus.Running);
         Guid runId = running.BootstrapRunId!.Value;
 
@@ -71,13 +71,13 @@ public sealed class ClusterBlueprintRolloutTests : IDisposable
             await db.SaveChangesAsync();
         }
 
-        await sut.OnRunFinishedAsync(runId);
+        await sut.OnRunFinishedAsync(tenantId, runId);
     }
 
     [Fact]
     public async Task GetBootstrappedClusters_ReturnsBothClusters()
     {
-        List<(Guid ClusterId, string ClusterName)> clusters = await sut.GetBootstrappedClustersAsync(blueprintId);
+        List<(Guid ClusterId, string ClusterName)> clusters = await sut.GetBootstrappedClustersAsync(tenantId, blueprintId);
         Assert.Equal(2, clusters.Count);
         Assert.Contains(clusters, c => c.ClusterName == "prod-a");
         Assert.Contains(clusters, c => c.ClusterName == "prod-b");
@@ -87,7 +87,7 @@ public sealed class ClusterBlueprintRolloutTests : IDisposable
     public async Task CreateRollout_StartsFirstTargetOnly()
     {
         BlueprintRollout rollout = await sut.CreateRolloutAsync(
-            blueprintId, [clusterA, clusterB], autoAdvance: false, triggeredBy: "test");
+            tenantId, blueprintId, [clusterA, clusterB], autoAdvance: false, triggeredBy: "test");
 
         Assert.Equal(RolloutStatus.InProgress, rollout.Status);
         Assert.Equal(2, rollout.Targets.Count);
@@ -105,23 +105,23 @@ public sealed class ClusterBlueprintRolloutTests : IDisposable
     public async Task ManualPromotion_AdvancesOneAtATimeToCompletion()
     {
         BlueprintRollout rollout = await sut.CreateRolloutAsync(
-            blueprintId, [clusterA, clusterB], autoAdvance: false, triggeredBy: "test");
+            tenantId, blueprintId, [clusterA, clusterB], autoAdvance: false, triggeredBy: "test");
 
         // First cluster succeeds; rollout waits for manual promotion (second still pending).
         await CompleteRunningTargetAsync(rollout.Id, success: true);
-        BlueprintRollout afterFirst = (await sut.GetRolloutAsync(rollout.Id))!;
+        BlueprintRollout afterFirst = (await sut.GetRolloutAsync(tenantId, rollout.Id))!;
         Assert.Equal(RolloutStatus.InProgress, afterFirst.Status);
         Assert.Equal(RolloutTargetStatus.Succeeded, afterFirst.Targets.Single(t => t.Order == 0).Status);
         Assert.Equal(RolloutTargetStatus.Pending, afterFirst.Targets.Single(t => t.Order == 1).Status);
 
         // Promote the next cluster.
-        await sut.StartNextTargetAsync(rollout.Id);
-        BlueprintRollout afterPromote = (await sut.GetRolloutAsync(rollout.Id))!;
+        await sut.StartNextTargetAsync(tenantId, rollout.Id);
+        BlueprintRollout afterPromote = (await sut.GetRolloutAsync(tenantId, rollout.Id))!;
         Assert.Equal(RolloutTargetStatus.Running, afterPromote.Targets.Single(t => t.Order == 1).Status);
 
         // Second cluster succeeds → rollout completes.
         await CompleteRunningTargetAsync(rollout.Id, success: true);
-        BlueprintRollout done = (await sut.GetRolloutAsync(rollout.Id))!;
+        BlueprintRollout done = (await sut.GetRolloutAsync(tenantId, rollout.Id))!;
         Assert.Equal(RolloutStatus.Completed, done.Status);
         Assert.All(done.Targets, t => Assert.Equal(RolloutTargetStatus.Succeeded, t.Status));
     }
@@ -130,11 +130,11 @@ public sealed class ClusterBlueprintRolloutTests : IDisposable
     public async Task FailedTarget_HaltsRollout()
     {
         BlueprintRollout rollout = await sut.CreateRolloutAsync(
-            blueprintId, [clusterA, clusterB], autoAdvance: false, triggeredBy: "test");
+            tenantId, blueprintId, [clusterA, clusterB], autoAdvance: false, triggeredBy: "test");
 
         await CompleteRunningTargetAsync(rollout.Id, success: false);
 
-        BlueprintRollout failed = (await sut.GetRolloutAsync(rollout.Id))!;
+        BlueprintRollout failed = (await sut.GetRolloutAsync(tenantId, rollout.Id))!;
         Assert.Equal(RolloutStatus.Failed, failed.Status);
         Assert.Equal(RolloutTargetStatus.Failed, failed.Targets.Single(t => t.Order == 0).Status);
         Assert.Equal(RolloutTargetStatus.Pending, failed.Targets.Single(t => t.Order == 1).Status);
@@ -144,26 +144,26 @@ public sealed class ClusterBlueprintRolloutTests : IDisposable
     public async Task AutoAdvance_PromotesNextAutomaticallyOnSuccess()
     {
         BlueprintRollout rollout = await sut.CreateRolloutAsync(
-            blueprintId, [clusterA, clusterB], autoAdvance: true, triggeredBy: "test");
+            tenantId, blueprintId, [clusterA, clusterB], autoAdvance: true, triggeredBy: "test");
 
         // Completing the first target auto-starts the second (no manual promotion).
         await CompleteRunningTargetAsync(rollout.Id, success: true);
 
-        BlueprintRollout afterFirst = (await sut.GetRolloutAsync(rollout.Id))!;
+        BlueprintRollout afterFirst = (await sut.GetRolloutAsync(tenantId, rollout.Id))!;
         Assert.Equal(RolloutTargetStatus.Succeeded, afterFirst.Targets.Single(t => t.Order == 0).Status);
         Assert.Equal(RolloutTargetStatus.Running, afterFirst.Targets.Single(t => t.Order == 1).Status);
 
         await CompleteRunningTargetAsync(rollout.Id, success: true);
-        Assert.Equal(RolloutStatus.Completed, (await sut.GetRolloutAsync(rollout.Id))!.Status);
+        Assert.Equal(RolloutStatus.Completed, (await sut.GetRolloutAsync(tenantId, rollout.Id))!.Status);
     }
 
     [Fact]
     public async Task CreateRollout_RejectsSecondConcurrentRollout()
     {
-        await sut.CreateRolloutAsync(blueprintId, [clusterA], autoAdvance: false, triggeredBy: "test");
+        await sut.CreateRolloutAsync(tenantId, blueprintId, [clusterA], autoAdvance: false, triggeredBy: "test");
 
         await Assert.ThrowsAsync<InvalidOperationException>(() =>
-            sut.CreateRolloutAsync(blueprintId, [clusterB], autoAdvance: false, triggeredBy: "test"));
+            sut.CreateRolloutAsync(tenantId, blueprintId, [clusterB], autoAdvance: false, triggeredBy: "test"));
     }
 
     public void Dispose() => connection.Dispose();

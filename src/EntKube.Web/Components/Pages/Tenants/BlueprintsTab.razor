@@ -407,7 +407,7 @@
                         }
                     </div>
 
-                    <BlueprintRolloutPanel BlueprintId="selected.Id" @key="selected.Id" />
+                    <BlueprintRolloutPanel BlueprintId="selected.Id" TenantId="TenantId" @key="selected.Id" />
                 </div>
             </div>
         }
@@ -476,8 +476,8 @@
     {
         CancelStepForm();
         showVariableForm = false;
-        selected = await BlueprintService.GetBlueprintAsync(id);
-        variables = await BlueprintService.GetVariablesAsync(id);
+        selected = await BlueprintService.GetBlueprintAsync(TenantId, id);
+        variables = await BlueprintService.GetVariablesAsync(TenantId, id);
         LoadProvisioningState();
     }
 
@@ -518,10 +518,10 @@
         try
         {
             await BlueprintService.SetProvisioningAsync(
-                selected!.Id,
+                TenantId, selected!.Id,
                 provisioningEnabled ? "openstack" : null,
                 provisioningEnabled ? BuildConfigForSave() : null);
-            selected = await BlueprintService.GetBlueprintAsync(selected.Id);
+            selected = await BlueprintService.GetBlueprintAsync(TenantId, selected.Id);
             Toasts.Success("Provisioning configuration saved.");
         }
         catch (Exception ex) { Toasts.Error($"Could not save provisioning config: {ex.Message}"); }
@@ -533,7 +533,7 @@
         try
         {
             // Persist the latest edits first so the run uses them.
-            await BlueprintService.SetProvisioningAsync(selected!.Id, "openstack", BuildConfigForSave());
+            await BlueprintService.SetProvisioningAsync(TenantId, selected!.Id, "openstack", BuildConfigForSave());
             await BlueprintService.StartProvisioningBootstrapAsync(
                 TenantId, provisionEnvironmentId, selected.Id, overrides: null, triggeredBy: "portal");
             provisioningMessage =
@@ -563,7 +563,7 @@
         string? name = blueprints.FirstOrDefault(b => b.Id == id)?.Name;
         try
         {
-            await BlueprintService.DeleteBlueprintAsync(id);
+            await BlueprintService.DeleteBlueprintAsync(TenantId, id);
             selected = null;
             await LoadBlueprints();
             Toasts.Success($"Deleted blueprint \"{name}\".");
@@ -604,15 +604,15 @@
         {
             if (editingVariableId is Guid id)
             {
-                await BlueprintService.UpdateVariableAsync(id, variableName, variableDescription, variableDefault);
+                await BlueprintService.UpdateVariableAsync(TenantId, id, variableName, variableDescription, variableDefault);
             }
             else
             {
-                await BlueprintService.AddVariableAsync(selected!.Id, variableName, variableDescription, variableDefault);
+                await BlueprintService.AddVariableAsync(TenantId, selected!.Id, variableName, variableDescription, variableDefault);
             }
             showVariableForm = false;
             editingVariableId = null;
-            variables = await BlueprintService.GetVariablesAsync(selected!.Id);
+            variables = await BlueprintService.GetVariablesAsync(TenantId, selected!.Id);
         }
         catch (InvalidOperationException ex) { error = ex.Message; }
     }
@@ -621,8 +621,8 @@
     {
         try
         {
-            await BlueprintService.DeleteVariableAsync(variableId);
-            variables = await BlueprintService.GetVariablesAsync(selected!.Id);
+            await BlueprintService.DeleteVariableAsync(TenantId, variableId);
+            variables = await BlueprintService.GetVariablesAsync(TenantId, selected!.Id);
         }
         catch (Exception ex)
         {
@@ -632,8 +632,8 @@
 
     private async Task SetVariableValue(Guid variableId, Guid environmentId, string? value)
     {
-        await BlueprintService.SetVariableValueAsync(variableId, environmentId, value);
-        variables = await BlueprintService.GetVariablesAsync(selected!.Id);
+        await BlueprintService.SetVariableValueAsync(TenantId, variableId, environmentId, value);
+        variables = await BlueprintService.GetVariablesAsync(TenantId, selected!.Id);
     }
 
     // ── Step editing ──
@@ -719,23 +719,23 @@
             string key = stepType == BlueprintStepType.Component ? selectedCatalogKey! : selectedServiceKind!;
             if (editingStepId is Guid id)
             {
-                await BlueprintService.UpdateStepAsync(id, stepName, stepNamespace, stepParams);
+                await BlueprintService.UpdateStepAsync(TenantId, id, stepName, stepNamespace, stepParams);
             }
             else
             {
-                await BlueprintService.AddStepAsync(selected!.Id, stepType, key, stepName, stepNamespace, stepParams);
+                await BlueprintService.AddStepAsync(TenantId, selected!.Id, stepType, key, stepName, stepNamespace, stepParams);
             }
             showStepForm = false;
             editingStepId = null;
-            selected = await BlueprintService.GetBlueprintAsync(selected!.Id);
+            selected = await BlueprintService.GetBlueprintAsync(TenantId, selected!.Id);
         }
         catch (InvalidOperationException ex) { error = ex.Message; }
     }
 
     private async Task MoveStep(Guid stepId, int direction)
     {
-        await BlueprintService.MoveStepAsync(stepId, direction);
-        selected = await BlueprintService.GetBlueprintAsync(selected!.Id);
+        await BlueprintService.MoveStepAsync(TenantId, stepId, direction);
+        selected = await BlueprintService.GetBlueprintAsync(TenantId, selected!.Id);
     }
 
     private async Task DeleteStep(Guid stepId)
@@ -743,8 +743,8 @@
         string? name = selected?.Steps.FirstOrDefault(s => s.Id == stepId)?.Name;
         try
         {
-            await BlueprintService.DeleteStepAsync(stepId);
-            selected = await BlueprintService.GetBlueprintAsync(selected!.Id);
+            await BlueprintService.DeleteStepAsync(TenantId, stepId);
+            selected = await BlueprintService.GetBlueprintAsync(TenantId, selected!.Id);
             Toasts.Success($"Deleted step \"{name}\".");
         }
         catch (Exception ex)
