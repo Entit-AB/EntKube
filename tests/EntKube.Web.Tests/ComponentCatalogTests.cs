@@ -20,6 +20,7 @@ public class ComponentCatalogTests : IDisposable
     private readonly TestDbContextFactory dbFactory;
     private readonly ComponentLifecycleService lifecycleService;
     private readonly Guid clusterId = Guid.NewGuid();
+    private readonly Guid tenantId = Guid.NewGuid();
 
     public ComponentCatalogTests()
     {
@@ -36,9 +37,8 @@ public class ComponentCatalogTests : IDisposable
 
         // Seed a tenant, environment, and cluster for integration tests.
 
-        Guid tenantId = Guid.NewGuid();
         Guid envId = Guid.NewGuid();
-        Tenant tenant = new() { Id = tenantId, Name = "CatalogTenant", Slug = "catalog" };
+        Tenant tenant = new() { Id = tenantId, Name = "CatalogTenant", Slug = $"catalog-{tenantId:N}" };
         Data.Environment env = new() { Id = envId, TenantId = tenantId, Name = "production" };
         KubernetesCluster cluster = new()
         {
@@ -307,7 +307,7 @@ public class ComponentCatalogTests : IDisposable
         CatalogEntry entry = ComponentCatalog.GetByKey("minio")!;
         ComponentRegistration registration = ComponentCatalog.ToRegistration(entry);
 
-        ClusterComponent component = await lifecycleService.RegisterComponentAsync(clusterId, registration);
+        ClusterComponent component = await lifecycleService.RegisterComponentAsync(tenantId, clusterId, registration);
 
         component.Name.Should().Be("minio");
         component.HelmRepoUrl.Should().Be("https://charts.min.io/");
@@ -337,7 +337,7 @@ public class ComponentCatalogTests : IDisposable
                 cpu: 100m
             """;
 
-        ClusterComponent component = await lifecycleService.RegisterComponentAsync(clusterId, registration);
+        ClusterComponent component = await lifecycleService.RegisterComponentAsync(tenantId, clusterId, registration);
 
         component.HelmValues.Should().Contain("256Mi");
         component.HelmValues.Should().NotContain("128Mi");
@@ -350,11 +350,11 @@ public class ComponentCatalogTests : IDisposable
 
         CatalogEntry entry = ComponentCatalog.GetByKey("traefik")!;
         ComponentRegistration registration = ComponentCatalog.ToRegistration(entry);
-        await lifecycleService.RegisterComponentAsync(clusterId, registration);
+        await lifecycleService.RegisterComponentAsync(tenantId, clusterId, registration);
 
         // Second attempt should be rejected.
 
-        Func<Task> secondAttempt = () => lifecycleService.RegisterComponentAsync(
+        Func<Task> secondAttempt = () => lifecycleService.RegisterComponentAsync(tenantId, 
             clusterId, ComponentCatalog.ToRegistration(entry));
 
         await secondAttempt.Should().ThrowAsync<InvalidOperationException>()

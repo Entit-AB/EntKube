@@ -2390,7 +2390,7 @@ else if (section == "components")
             string mergedValues = MergeRegFormFields();
             registration.HelmValues = string.IsNullOrWhiteSpace(mergedValues) ? null : mergedValues;
 
-            ClusterComponent created = await LifecycleService.RegisterComponentAsync(Cluster.Id, registration);
+            ClusterComponent created = await LifecycleService.RegisterComponentAsync(TenantId, Cluster.Id, registration);
 
             // Store any secret-marked form fields in the vault.
 
@@ -2457,7 +2457,7 @@ else if (section == "components")
                 HelmValues = string.IsNullOrWhiteSpace(regValues) ? null : regValues
             };
 
-            await LifecycleService.RegisterComponentAsync(Cluster.Id, registration);
+            await LifecycleService.RegisterComponentAsync(TenantId, Cluster.Id, registration);
             showRegisterForm = false;
             ResetRegisterForm();
             await LoadComponents();
@@ -2715,6 +2715,7 @@ else if (section == "components")
             // card showing values the database had rejected (an installed component refuses a
             // namespace move) until the next reload.
             ClusterComponent saved = await LifecycleService.UpdateConfigurationAsync(
+                TenantId,
                 componentId,
                 helmValues: helmValues,
                 chartVersion: chartVersion,
@@ -2895,20 +2896,20 @@ else if (section == "components")
 
         try
         {
-            await LifecycleService.PrepareUninstallAsync(componentId);
+            await LifecycleService.PrepareUninstallAsync(TenantId, componentId);
 
             // wg-easy: capture its target Istio gateway BEFORE uninstalling (while the
             // WG_GATEWAY_NAME secret still exists) so we can re-apply it afterwards to
             // strip the WireGuard UDP port from the gateway's LoadBalancer.
             Guid? wgGatewayId = components?.FirstOrDefault(c => c.Id == componentId)?.Name == "wg-easy"
-                ? await LifecycleService.ResolveWireGuardGatewayIdAsync(componentId)
+                ? await LifecycleService.ResolveWireGuardGatewayIdAsync(TenantId, componentId)
                 : null;
 
             // Uninstall any subcharts (e.g. Barman Cloud Plugin) before the parent.
 
             HelmExecutionResult subResult = await LifecycleService.UninstallSubchartsAsync(TenantId, componentId);
 
-            HelmCommand command = await LifecycleService.GetUninstallCommandAsync(componentId);
+            HelmCommand command = await LifecycleService.GetUninstallCommandAsync(TenantId, componentId);
             HelmExecutionResult result = await LifecycleService.ExecuteHelmAsync(TenantId, componentId, command);
 
             string combinedOutput = string.IsNullOrWhiteSpace(subResult.Output)
@@ -2917,7 +2918,7 @@ else if (section == "components")
 
             bool success = result.Success && subResult.Success;
 
-            await LifecycleService.MarkUninstallResultAsync(componentId, success, success ? null : combinedOutput);
+            await LifecycleService.MarkUninstallResultAsync(TenantId, componentId, success, success ? null : combinedOutput);
 
             // Now that wg-easy is NotInstalled, re-apply its gateway so the UDP port is
             // removed (GetInstallCommandAsync no longer injects it).
@@ -2974,7 +2975,7 @@ else if (section == "components")
     {
         // Clear the LastError without changing the component's status.
 
-        await LifecycleService.ClearErrorAsync(componentId);
+        await LifecycleService.ClearErrorAsync(TenantId, componentId);
         await LoadComponents();
     }
 
@@ -3664,7 +3665,7 @@ else if (section == "components")
         if (entry is null) return;
 
         ComponentRegistration registration = ComponentCatalog.ToRegistration(entry);
-        ClusterComponent created = await LifecycleService.RegisterComponentAsync(Cluster.Id, registration);
+        ClusterComponent created = await LifecycleService.RegisterComponentAsync(TenantId, Cluster.Id, registration);
         await LoadComponents();
         await InstallComponent(created.Id);
         await CheckGatewayApiCrdsIfNeededAsync();
@@ -3686,7 +3687,7 @@ else if (section == "components")
         string updatedValues = YamlFormMerger.MergeFormValues(currentValues,
             new Dictionary<string, string> { ["config.enableGatewayAPI"] = "true" });
 
-        await LifecycleService.UpdateConfigurationAsync(certManager.Id, updatedValues);
+        await LifecycleService.UpdateConfigurationAsync(TenantId, certManager.Id, updatedValues);
 
         // Refresh the in-memory component so UpgradeComponent picks up the new values.
         // Use noWait=true so Helm applies the values and returns immediately;

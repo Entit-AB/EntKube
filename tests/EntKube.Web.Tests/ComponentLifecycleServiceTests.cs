@@ -38,7 +38,7 @@ public class ComponentLifecycleServiceTests : IDisposable
 
         // Seed a tenant, environment, and cluster for component lifecycle tests.
 
-        Tenant tenant = new() { Id = tenantId, Name = "LifecycleTenant", Slug = "lifecycle" };
+        Tenant tenant = new() { Id = tenantId, Name = "LifecycleTenant", Slug = $"lifecycle-{tenantId:N}" };
         Data.Environment env = new() { Id = envId, TenantId = tenantId, Name = "production" };
         KubernetesCluster cluster = new()
         {
@@ -86,7 +86,7 @@ public class ComponentLifecycleServiceTests : IDisposable
 
         // Act
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, registration);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, registration);
 
         // Assert — component exists in DB with NotInstalled status.
 
@@ -111,11 +111,11 @@ public class ComponentLifecycleServiceTests : IDisposable
             Namespace = "default"
         };
 
-        await sut.RegisterComponentAsync(clusterId, registration);
+        await sut.RegisterComponentAsync(tenantId, clusterId, registration);
 
         // Act & Assert
 
-        Func<Task> act = () => sut.RegisterComponentAsync(clusterId, registration);
+        Func<Task> act = () => sut.RegisterComponentAsync(tenantId, clusterId, registration);
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*already exists*");
     }
@@ -135,13 +135,13 @@ public class ComponentLifecycleServiceTests : IDisposable
             HelmChartName = "kube-prometheus-stack"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, reg);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, reg);
 
         string newValues = "alertmanager:\n  enabled: true\ngrafana:\n  enabled: true";
 
         // Act
 
-        ClusterComponent updated = await sut.UpdateConfigurationAsync(
+        ClusterComponent updated = await sut.UpdateConfigurationAsync(tenantId, 
             component.Id, newValues, chartVersion: "65.2.0");
 
         // Assert
@@ -155,7 +155,7 @@ public class ComponentLifecycleServiceTests : IDisposable
     {
         // Act & Assert
 
-        Func<Task> act = () => sut.UpdateConfigurationAsync(Guid.NewGuid(), "values: true");
+        Func<Task> act = () => sut.UpdateConfigurationAsync(tenantId, Guid.NewGuid(), "values: true");
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*not found*");
     }
@@ -177,11 +177,11 @@ public class ComponentLifecycleServiceTests : IDisposable
             HelmChartVersion = "65.1.0"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, reg);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, reg);
 
         // Act
 
-        ClusterComponent prepared = await sut.PrepareInstallAsync(component.Id);
+        ClusterComponent prepared = await sut.PrepareInstallAsync(tenantId, component.Id);
 
         // Assert — status should transition to Installing.
 
@@ -200,11 +200,11 @@ public class ComponentLifecycleServiceTests : IDisposable
             Namespace = "default"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, reg);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, reg);
 
         // Act & Assert
 
-        Func<Task> act = () => sut.PrepareInstallAsync(component.Id);
+        Func<Task> act = () => sut.PrepareInstallAsync(tenantId, component.Id);
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*chart name*");
     }
@@ -223,7 +223,7 @@ public class ComponentLifecycleServiceTests : IDisposable
             HelmChartVersion = "65.1.0"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, reg);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, reg);
 
         // Manually set status to Installed to simulate.
         // Re-fetch from test db since the returned entity is detached.
@@ -233,7 +233,7 @@ public class ComponentLifecycleServiceTests : IDisposable
 
         // Act & Assert — can't install something that's already installed (use upgrade instead).
 
-        Func<Task> act = () => sut.PrepareInstallAsync(component.Id);
+        Func<Task> act = () => sut.PrepareInstallAsync(tenantId, component.Id);
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*already installed*");
     }
@@ -254,12 +254,12 @@ public class ComponentLifecycleServiceTests : IDisposable
             HelmChartVersion = "65.1.0"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, reg);
-        await sut.PrepareInstallAsync(component.Id);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, reg);
+        await sut.PrepareInstallAsync(tenantId, component.Id);
 
         // Act
 
-        ClusterComponent result = await sut.MarkInstallResultAsync(component.Id, success: true);
+        ClusterComponent result = await sut.MarkInstallResultAsync(tenantId, component.Id, success: true);
 
         // Assert
 
@@ -282,12 +282,12 @@ public class ComponentLifecycleServiceTests : IDisposable
             HelmChartVersion = "65.1.0"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, reg);
-        await sut.PrepareInstallAsync(component.Id);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, reg);
+        await sut.PrepareInstallAsync(tenantId, component.Id);
 
         // Act
 
-        ClusterComponent result = await sut.MarkInstallResultAsync(
+        ClusterComponent result = await sut.MarkInstallResultAsync(tenantId, 
             component.Id, success: false, error: "timeout waiting for resources");
 
         // Assert
@@ -313,7 +313,7 @@ public class ComponentLifecycleServiceTests : IDisposable
             HelmChartVersion = "65.1.0"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, reg);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, reg);
 
         // Re-fetch from test db since the returned entity is detached.
         ClusterComponent tracked = (await db.Set<ClusterComponent>().FindAsync(component.Id))!;
@@ -323,7 +323,7 @@ public class ComponentLifecycleServiceTests : IDisposable
 
         // Act
 
-        ClusterComponent prepared = await sut.PrepareUninstallAsync(component.Id);
+        ClusterComponent prepared = await sut.PrepareUninstallAsync(tenantId, component.Id);
 
         // Assert
 
@@ -343,11 +343,11 @@ public class ComponentLifecycleServiceTests : IDisposable
             HelmChartName = "some-chart"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, reg);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, reg);
 
         // Act & Assert
 
-        Func<Task> act = () => sut.PrepareUninstallAsync(component.Id);
+        Func<Task> act = () => sut.PrepareUninstallAsync(tenantId, component.Id);
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*not installed*");
     }
@@ -370,8 +370,8 @@ public class ComponentLifecycleServiceTests : IDisposable
             ReleaseName = "prom-stack"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, reg);
-        await sut.UpdateConfigurationAsync(component.Id, "grafana:\n  enabled: true");
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, reg);
+        await sut.UpdateConfigurationAsync(tenantId, component.Id, "grafana:\n  enabled: true");
 
         // Act
 
@@ -402,7 +402,7 @@ public class ComponentLifecycleServiceTests : IDisposable
             ReleaseName = "prom-stack"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, reg);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, reg);
 
         // Re-fetch from test db since the returned entity is detached.
         ClusterComponent tracked = (await db.Set<ClusterComponent>().FindAsync(component.Id))!;
@@ -411,7 +411,7 @@ public class ComponentLifecycleServiceTests : IDisposable
 
         // Act
 
-        HelmCommand command = await sut.GetUninstallCommandAsync(component.Id);
+        HelmCommand command = await sut.GetUninstallCommandAsync(tenantId, component.Id);
 
         // Assert
 
@@ -441,7 +441,7 @@ public class ComponentLifecycleServiceTests : IDisposable
             HelmValues = "grafana:\n  enabled: true\n"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, registration);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, registration);
 
         // Store the admin password in the vault under the secret name
         // matching the catalog's SecretName for grafana-password.
@@ -449,7 +449,7 @@ public class ComponentLifecycleServiceTests : IDisposable
         await vaultService.InitializeVaultAsync(tenantId);
         await vaultService.SetComponentSecretAsync(tenantId, component.Id, "GRAFANA_ADMIN_PASSWORD", "SuperSecret123!");
 
-        await sut.PrepareInstallAsync(component.Id);
+        await sut.PrepareInstallAsync(tenantId, component.Id);
 
         // Act
 
@@ -480,8 +480,8 @@ public class ComponentLifecycleServiceTests : IDisposable
             HelmValues = "grafana:\n  enabled: true\n"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, registration);
-        await sut.PrepareInstallAsync(component.Id);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, registration);
+        await sut.PrepareInstallAsync(tenantId, component.Id);
 
         // Act
 
@@ -518,7 +518,7 @@ public class ComponentLifecycleServiceTests : IDisposable
             ReleaseName = "gateway-api-crds"
         };
 
-        ClusterComponent component = await sut.RegisterComponentAsync(clusterId, registration);
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, registration);
 
         HelmCommand command = await sut.GetInstallCommandAsync(tenantId, component.Id);
 
@@ -531,7 +531,7 @@ public class ComponentLifecycleServiceTests : IDisposable
     // ──────── UpdateConfigurationAsync — Helm identity fields ────────
 
     private async Task<ClusterComponent> RegisterAsync(string name = "prom", string ns = "monitoring") =>
-        await sut.RegisterComponentAsync(clusterId, new ComponentRegistration
+        await sut.RegisterComponentAsync(tenantId, clusterId, new ComponentRegistration
         {
             Name = name,
             ComponentType = "HelmChart",
@@ -549,7 +549,7 @@ public class ComponentLifecycleServiceTests : IDisposable
         // on the floor and reappeared as the old values on the next load.
         ClusterComponent component = await RegisterAsync();
 
-        await sut.UpdateConfigurationAsync(
+        await sut.UpdateConfigurationAsync(tenantId, 
             component.Id, helmValues: null,
             componentNamespace: "observability", releaseName: "prom-stack", chartName: "prometheus");
 
@@ -566,12 +566,12 @@ public class ComponentLifecycleServiceTests : IDisposable
         // Helm keys a release on (namespace, name). Repointing them would strand the running
         // release rather than move it, so the change is refused while the component is installed.
         ClusterComponent component = await RegisterAsync();
-        await sut.PrepareInstallAsync(component.Id);
-        await sut.MarkInstallResultAsync(component.Id, true);
+        await sut.PrepareInstallAsync(tenantId, component.Id);
+        await sut.MarkInstallResultAsync(tenantId, component.Id, true);
 
-        Func<Task> moveNamespace = () => sut.UpdateConfigurationAsync(
+        Func<Task> moveNamespace = () => sut.UpdateConfigurationAsync(tenantId, 
             component.Id, helmValues: null, componentNamespace: "elsewhere");
-        Func<Task> renameRelease = () => sut.UpdateConfigurationAsync(
+        Func<Task> renameRelease = () => sut.UpdateConfigurationAsync(tenantId, 
             component.Id, helmValues: null, releaseName: "renamed");
 
         await moveNamespace.Should().ThrowAsync<InvalidOperationException>().WithMessage("*Uninstall it first*");
@@ -589,10 +589,10 @@ public class ComponentLifecycleServiceTests : IDisposable
         // The config form posts every field on every save, so resending the unchanged namespace
         // and release name must not trip the guard — only an actual move does.
         ClusterComponent component = await RegisterAsync();
-        await sut.PrepareInstallAsync(component.Id);
-        await sut.MarkInstallResultAsync(component.Id, true);
+        await sut.PrepareInstallAsync(tenantId, component.Id);
+        await sut.MarkInstallResultAsync(tenantId, component.Id, true);
 
-        await sut.UpdateConfigurationAsync(
+        await sut.UpdateConfigurationAsync(tenantId, 
             component.Id, helmValues: "grafana:\n  enabled: false\n",
             chartVersion: "66.0.0",
             componentNamespace: "monitoring", releaseName: "prom", chartName: "kube-prometheus-stack");
@@ -608,7 +608,7 @@ public class ComponentLifecycleServiceTests : IDisposable
     {
         ClusterComponent component = await RegisterAsync();
 
-        await sut.UpdateConfigurationAsync(component.Id, helmValues: "replicas: 2\n");
+        await sut.UpdateConfigurationAsync(tenantId, component.Id, helmValues: "replicas: 2\n");
 
         ClusterComponent reloaded = await db.ClusterComponents.AsNoTracking()
             .FirstAsync(c => c.Id == component.Id);
@@ -616,5 +616,141 @@ public class ComponentLifecycleServiceTests : IDisposable
         reloaded.Namespace.Should().Be("monitoring");
         reloaded.ReleaseName.Should().Be("prom");
         reloaded.HelmChartName.Should().Be("kube-prometheus-stack");
+    }
+
+    // ──────── Tenancy ────────
+
+    /// <summary>A second tenant with a cluster and one registered component.</summary>
+    private (Guid Tenant, Guid Cluster, Guid Component, Guid WgEasy) SeedStranger()
+    {
+        Guid tenant = Guid.NewGuid(), environment = Guid.NewGuid(), cluster = Guid.NewGuid();
+
+        db.Set<Tenant>().Add(new Tenant
+        {
+            Id = tenant, Name = "Stranger", Slug = $"stranger-{tenant:N}",
+        });
+        db.Set<Data.Environment>().Add(new Data.Environment
+        {
+            Id = environment, TenantId = tenant, Name = "their-prod",
+        });
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = cluster, TenantId = tenant, EnvironmentId = environment,
+            Name = "their-cluster", ApiServerUrl = "https://their-k8s.example.com",
+        });
+
+        Guid component = Guid.NewGuid();
+        db.ClusterComponents.Add(new ClusterComponent
+        {
+            Id = component, ClusterId = cluster, Name = "their-minio",
+            ComponentType = "Helm", Namespace = "minio",
+            HelmRepoUrl = "https://charts.min.io/", HelmChartName = "minio",
+            HelmChartVersion = "5.0.0", ReleaseName = "their-minio",
+            HelmValues = "replicas: 1", Status = ComponentStatus.Installed,
+        });
+        // ⚠️ ResolveWireGuardGatewayIdAsync returns null both for "not found" and for "not named
+        // wg-easy", so a stranger's minio could never prove its tenant predicate. It needs a real
+        // wg-easy and a gateway for the owner's call to return something.
+        Guid wgEasy = Guid.NewGuid();
+        db.ClusterComponents.AddRange(
+            new ClusterComponent
+            {
+                Id = wgEasy, ClusterId = cluster, Name = "wg-easy",
+                ComponentType = "Helm", Namespace = "wg-easy",
+                ReleaseName = "wg-easy", Status = ComponentStatus.Installed,
+            },
+            new ClusterComponent
+            {
+                Id = Guid.NewGuid(), ClusterId = cluster, Name = "istio",
+                ComponentType = "Helm", Namespace = "istio-system",
+                ReleaseName = "istio", Status = ComponentStatus.Installed,
+            });
+
+        db.SaveChanges();
+
+        return (tenant, cluster, component, wgEasy);
+    }
+
+    /// <summary>
+    /// ⚠️ Six of these methods <em>already took</em> a <c>tenantId</c> and never put it in the
+    /// predicate — <c>GetInstallCommandAsync</c>, <c>InstallSubchartsAsync</c>,
+    /// <c>UninstallSubchartsAsync</c>, <c>SyncComponentSecretsAsync</c>, <c>ExecuteHelmAsync</c>
+    /// and <c>ApplyExternalRoutesAsync</c> each looked the component up by id alone. A parameter
+    /// that never reaches the query authorizes nothing, which is the shape
+    /// <c>VacuousTenantCheckTests</c> exists to catch; it only watches cluster rows, so these
+    /// went unnoticed.
+    ///
+    /// <para><c>ClusterComponent</c> has no <c>TenantId</c>, so all fourteen lookups in the file
+    /// now run <c>c.Cluster.TenantId</c>.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_component_cannot_be_installed_or_reconfigured_across_a_tenant()
+    {
+        var them = SeedStranger();
+
+        // Registering against their cluster.
+        Func<Task> register = () => sut.RegisterComponentAsync(
+            tenantId, them.Cluster, new ComponentRegistration
+            {
+                Name = "planted", ComponentType = "Helm", Namespace = "kube-system",
+                HelmRepoUrl = "https://evil.example.com/", HelmChartName = "miner",
+            });
+        await register.Should().ThrowAsync<InvalidOperationException>();
+
+        db.ClusterComponents.Count(c => c.ClusterId == them.Cluster).Should().Be(3,
+            "a component row is what the installer then acts on — theirs are untouched");
+
+        // Helm values are arbitrary chart input — image, replicas, mounted secrets.
+        Func<Task> reconfigure = () => sut.UpdateConfigurationAsync(
+            tenantId, them.Component, helmValues: "image:\n  repository: evil/backdoor");
+        Func<Task> install = () => sut.PrepareInstallAsync(tenantId, them.Component);
+        Func<Task> upgrade = () => sut.PrepareUpgradeAsync(tenantId, them.Component);
+        Func<Task> uninstall = () => sut.PrepareUninstallAsync(tenantId, them.Component);
+        Func<Task> forgeResult = () => sut.MarkInstallResultAsync(tenantId, them.Component, true);
+        Func<Task> command = () => sut.GetUninstallCommandAsync(tenantId, them.Component);
+        // ⚠️ The one that already had the parameter.
+        Func<Task> installCommand = () => sut.GetInstallCommandAsync(tenantId, them.Component);
+
+        await reconfigure.Should().ThrowAsync<InvalidOperationException>();
+        await install.Should().ThrowAsync<InvalidOperationException>();
+        await upgrade.Should().ThrowAsync<InvalidOperationException>();
+        await uninstall.Should().ThrowAsync<InvalidOperationException>();
+        await forgeResult.Should().ThrowAsync<InvalidOperationException>();
+        await command.Should().ThrowAsync<InvalidOperationException>();
+        await installCommand.Should().ThrowAsync<InvalidOperationException>();
+
+        // ⚠️ ClearErrorAsync throws as well. Every one of these looks its row up with
+        // FirstOrDefaultAsync and a `?? throw`, so the refusal shape IS uniform here — unlike
+        // ClusterBlueprintService, where two deletes return silently. Worth checking per
+        // service rather than assuming: an assertion written for the wrong shape fails for the
+        // right reason only by luck.
+        Func<Task> clearError = () => sut.ClearErrorAsync(tenantId, them.Component);
+        await clearError.Should().ThrowAsync<InvalidOperationException>();
+
+        // The WireGuard resolver returns Guid? rather than throwing, so null is its refusal.
+        (await sut.ResolveWireGuardGatewayIdAsync(tenantId, them.WgEasy)).Should().BeNull(
+            "their wg-easy is installed and their istio gateway is there to be found");
+        (await sut.ResolveWireGuardGatewayIdAsync(them.Tenant, them.WgEasy)).Should().NotBeNull(
+            "the owner's own resolve finds it, so the null above is a refusal and not an absence");
+
+        using ApplicationDbContext after = dbFactory.CreateDbContext();
+        ClusterComponent intact = after.ClusterComponents.Single(c => c.Id == them.Component);
+        intact.HelmValues.Should().Be("replicas: 1",
+            "their chart input decides what runs on their cluster");
+        intact.Status.Should().Be(ComponentStatus.Installed,
+            "neither a prepare nor a forged result may move their status");
+
+        // And the owner's own component still goes all the way through.
+        ClusterComponent ours = await sut.RegisterComponentAsync(
+            tenantId, clusterId, new ComponentRegistration
+            {
+                Name = "our-minio", ComponentType = "Helm", Namespace = "minio",
+                HelmRepoUrl = "https://charts.min.io/", HelmChartName = "minio",
+                HelmChartVersion = "5.0.0",
+            });
+        await sut.UpdateConfigurationAsync(tenantId, ours.Id, helmValues: "replicas: 4");
+        await sut.PrepareInstallAsync(tenantId, ours.Id);
+        (await sut.MarkInstallResultAsync(tenantId, ours.Id, success: true))
+            .Status.Should().Be(ComponentStatus.Installed);
     }
 }

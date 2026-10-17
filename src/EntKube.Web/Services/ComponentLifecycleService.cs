@@ -91,10 +91,20 @@ public class ComponentLifecycleService(
     /// status — it's just a record of what should be deployed, not yet deployed.
     /// Think of this as adding a line item to a deployment plan.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose cluster. Registering a component is the row the installer then acts on, so writing
+    /// one against a stranger's cluster queues software for their machines.
+    /// </param>
     public async Task<ClusterComponent> RegisterComponentAsync(
-        Guid clusterId, ComponentRegistration registration, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, ComponentRegistration registration,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.KubernetesClusters.AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("That cluster does not belong to this tenant.");
+        }
 
         // Check that no component with this name already exists on the cluster.
 
@@ -137,8 +147,14 @@ public class ComponentLifecycleService(
     /// before initial install or to prepare an upgrade of an already-installed
     /// component. Changes to values or version take effect on the next install/upgrade.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose component. ⚠️ <c>ClusterComponent</c> has no <c>TenantId</c>, so every predicate
+    /// here runs <c>c.Cluster.TenantId</c>. Helm values are arbitrary chart input — image,
+    /// replicas, mounted secrets — so writing them into a stranger's component is remote control
+    /// of what their next install or upgrade deploys.
+    /// </param>
     public async Task<ClusterComponent> UpdateConfigurationAsync(
-        Guid componentId, string? helmValues, string? chartVersion = null,
+        Guid tenantId, Guid componentId, string? helmValues, string? chartVersion = null,
         string? helmRepoUrl = null, string? configuration = null,
         string? componentNamespace = null, string? releaseName = null,
         string? chartName = null,
@@ -147,7 +163,7 @@ public class ComponentLifecycleService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         // Update only the fields that were provided.
@@ -216,26 +232,28 @@ public class ComponentLifecycleService(
     /// have the minimum required info (chart name, namespace), we reject early
     /// rather than failing mid-install.
     /// </summary>
+    /// <param name="tenantId">Whose component.</param>
     public async Task<ClusterComponent> PrepareInstallAsync(
-        Guid componentId, CancellationToken ct = default) =>
-        await PrepareApplyAsync(componentId, allowInstalled: false, ct);
+        Guid tenantId, Guid componentId, CancellationToken ct = default) =>
+        await PrepareApplyAsync(tenantId, componentId, allowInstalled: false, ct);
 
     /// <summary>
     /// Same gatekeeping as <see cref="PrepareInstallAsync"/> but for a release that is
     /// already installed: an in-place `helm upgrade` is exactly the same command, so the
     /// only difference is that Installed is an acceptable starting state.
     /// </summary>
+    /// <param name="tenantId">Whose component.</param>
     public async Task<ClusterComponent> PrepareUpgradeAsync(
-        Guid componentId, CancellationToken ct = default) =>
-        await PrepareApplyAsync(componentId, allowInstalled: true, ct);
+        Guid tenantId, Guid componentId, CancellationToken ct = default) =>
+        await PrepareApplyAsync(tenantId, componentId, allowInstalled: true, ct);
 
     private async Task<ClusterComponent> PrepareApplyAsync(
-        Guid componentId, bool allowInstalled, CancellationToken ct)
+        Guid tenantId, Guid componentId, bool allowInstalled, CancellationToken ct)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         // Only NotInstalled or Failed components can be installed.
@@ -278,13 +296,17 @@ public class ComponentLifecycleService(
     /// On success, marks as Installed with a timestamp. On failure, marks as
     /// Failed with the error message so the user can diagnose and retry.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose component. This is what the installer writes back, so an unscoped call could mark a
+    /// stranger's failed install as succeeded — and the error text is their install output.
+    /// </param>
     public async Task<ClusterComponent> MarkInstallResultAsync(
-        Guid componentId, bool success, string? error = null, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, bool success, string? error = null, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         if (success)
@@ -320,7 +342,7 @@ public class ComponentLifecycleService(
 
         ClusterComponent component = await db.ClusterComponents
             .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         // Look up the catalog entry to find subchart toggle fields.
@@ -446,7 +468,7 @@ public class ComponentLifecycleService(
 
         ClusterComponent component = await db.ClusterComponents
             .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         CatalogEntry? entry = ComponentCatalog.ResolveForComponent(component.Name, component.HelmChartName);
@@ -514,13 +536,14 @@ public class ComponentLifecycleService(
     /// Validates that a component can be uninstalled and transitions it to
     /// Uninstalling status. Only installed or failed components can be uninstalled.
     /// </summary>
+    /// <param name="tenantId">Whose component.</param>
     public async Task<ClusterComponent> PrepareUninstallAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         if (component.Status is ComponentStatus.NotInstalled)
@@ -545,13 +568,14 @@ public class ComponentLifecycleService(
     /// Records the result of a Helm uninstall operation. On success, resets
     /// the component to NotInstalled so it can be reinstalled later if needed.
     /// </summary>
+    /// <param name="tenantId">Whose component.</param>
     public async Task<ClusterComponent> MarkUninstallResultAsync(
-        Guid componentId, bool success, string? error = null, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, bool success, string? error = null, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         if (success)
@@ -575,12 +599,14 @@ public class ComponentLifecycleService(
     /// Used when a user dismisses an error notification — the component
     /// stays in its current state, we just stop showing the old error.
     /// </summary>
-    public async Task ClearErrorAsync(Guid componentId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose component.</param>
+    public async Task ClearErrorAsync(
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent component = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         component.LastError = null;
@@ -600,7 +626,7 @@ public class ComponentLifecycleService(
 
         ClusterComponent component = await db.ClusterComponents
             .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         // Manifest components are applied via kubectl, not helm.
@@ -1029,14 +1055,17 @@ public class ComponentLifecycleService(
     /// Builds a HelmCommand for uninstalling a component.
     /// For Manifest-type components, produces a "kubectl-delete" operation.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose component. Its sibling <see cref="GetInstallCommandAsync"/> has always taken one.
+    /// </param>
     public async Task<HelmCommand> GetUninstallCommandAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent component = await db.ClusterComponents
             .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         string releaseName = component.ReleaseName ?? component.Name;
@@ -1171,14 +1200,15 @@ public class ComponentLifecycleService(
     /// wg-easy itself to be installed, so it can be called before an uninstall to
     /// capture the gateway that must later be re-applied to strip the UDP port.
     /// </summary>
+    /// <param name="tenantId">Whose component.</param>
     public async Task<Guid?> ResolveWireGuardGatewayIdAsync(
-        Guid wgComponentId, CancellationToken ct = default)
+        Guid tenantId, Guid wgComponentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ClusterComponent? wg = await db.ClusterComponents
             .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == wgComponentId, ct);
+            .FirstOrDefaultAsync(c => c.Id == wgComponentId && c.Cluster.TenantId == tenantId, ct);
 
         if (wg is null || wg.Name != "wg-easy")
             return null;
@@ -1221,7 +1251,7 @@ public class ComponentLifecycleService(
     public async Task<HelmExecutionResult?> EnsureGatewayWireGuardPortAsync(
         Guid tenantId, Guid wgComponentId, CancellationToken ct = default)
     {
-        Guid? gatewayId = await ResolveWireGuardGatewayIdAsync(wgComponentId, ct);
+        Guid? gatewayId = await ResolveWireGuardGatewayIdAsync(tenantId, wgComponentId, ct);
         return gatewayId is null ? null : await ReapplyGatewayAsync(tenantId, gatewayId.Value, ct);
     }
 
@@ -1409,11 +1439,22 @@ public class ComponentLifecycleService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         // Load the component with its cluster to get kubeconfig and tenant ID.
+        //
+        // ⚠️ This one refuses by RETURNING a failure, not by throwing, unlike every other lookup
+        // in this file. That is the contract its own test already pinned
+        // (ComponentSecretSyncTests.Another_tenant_cannot_sync_this_components_secrets expects
+        // Success == false), because the refusal used to come from the cluster seam further down
+        // rather than from the row. Adding the predicate without matching the shape turned that
+        // test red — the guard was right and the exception was not.
 
-        ClusterComponent component = await db.ClusterComponents
+        ClusterComponent? component = await db.ClusterComponents
             .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
-            ?? throw new InvalidOperationException("Component not found.");
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct);
+
+        if (component is null)
+        {
+            return new HelmExecutionResult { Success = false, Output = "Component not found." };
+        }
 
         // The tenant is the caller's. This method used to read it off the component's own cluster
         // row and explain, in a comment here, that the resulting check was vacuous because the
@@ -1587,7 +1628,7 @@ public class ComponentLifecycleService(
 
         ClusterComponent component = await db.ClusterComponents
             .Include(c => c.Cluster)
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         // The tenant is the caller's. It was component.Cluster.TenantId — read off the row whose
@@ -1768,7 +1809,7 @@ public class ComponentLifecycleService(
             .Include(c => c.Cluster)
                 .ThenInclude(cl => cl.Components)
                     .ThenInclude(comp => comp.ExternalRoutes)
-            .FirstOrDefaultAsync(c => c.Id == componentId, ct)
+            .FirstOrDefaultAsync(c => c.Id == componentId && c.Cluster.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Component not found.");
 
         List<ExternalRoute> allRoutes = [];

@@ -94,7 +94,7 @@ public class CatalogComponentRegistrar(
         {
             // Update path — refresh values + chart version/repo to the blueprint's latest.
             component = await lifecycleService.UpdateConfigurationAsync(
-                current.Id, helmValues, entry.HelmChartVersion, entry.HelmRepoUrl, ct: ct);
+                tenantId, current.Id, helmValues, entry.HelmChartVersion, entry.HelmRepoUrl, ct: ct);
         }
         else
         {
@@ -108,7 +108,7 @@ public class CatalogComponentRegistrar(
                 registration.ReleaseName = releaseNameOverride.Trim();
             }
             registration.HelmValues = helmValues;
-            component = await lifecycleService.RegisterComponentAsync(clusterId, registration, ct);
+            component = await lifecycleService.RegisterComponentAsync(tenantId, clusterId, registration, ct);
         }
 
         await SaveSecretFieldsToVaultAsync(tenantId, component.Id, entry, formValues, component.Namespace);

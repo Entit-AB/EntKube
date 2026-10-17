@@ -98,7 +98,7 @@ public class ComponentUpgradeRunner(
             && !string.Equals(request.TargetChartVersion, component.HelmChartVersion, StringComparison.Ordinal))
         {
             await lifecycleService.UpdateConfigurationAsync(
-                request.ComponentId, helmValues: null, chartVersion: request.TargetChartVersion, ct: ct);
+                request.TenantId, request.ComponentId, helmValues: null, chartVersion: request.TargetChartVersion, ct: ct);
         }
 
         StringBuilder log = new();
