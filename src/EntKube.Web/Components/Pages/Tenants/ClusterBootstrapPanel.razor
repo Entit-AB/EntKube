@@ -242,7 +242,7 @@
             await RefreshRuns();
             if (expandedRunId is Guid id)
             {
-                runDetail = await BlueprintService.GetRunAsync(id);
+                runDetail = await BlueprintService.GetRunAsync(TenantId, id);
             }
             StateHasChanged();
         }), null, TimeSpan.FromSeconds(3), TimeSpan.FromSeconds(3));
@@ -250,7 +250,7 @@
 
     private async Task RefreshRuns()
     {
-        runs = await BlueprintService.GetRunsForClusterAsync(ClusterId);
+        runs = await BlueprintService.GetRunsForClusterAsync(TenantId, ClusterId);
         activeRun = runs.FirstOrDefault();
     }
 
@@ -268,7 +268,7 @@
 
     private async Task LoadReviewAsync(Guid blueprintId)
     {
-        reviewBlueprint = await BlueprintService.GetBlueprintAsync(blueprintId);
+        reviewBlueprint = await BlueprintService.GetBlueprintAsync(TenantId, blueprintId);
         overrides = new();
         if (reviewBlueprint is not null)
         {
@@ -276,7 +276,7 @@
             {
                 overrides[step.Id] = ClusterBlueprintService.DeserializeParams(step.ParametersJson);
             }
-            variablePreview = await BlueprintService.PreviewVariablesAsync(ClusterId, blueprintId);
+            variablePreview = await BlueprintService.PreviewVariablesAsync(TenantId, ClusterId, blueprintId);
         }
         StateHasChanged();
     }
@@ -287,7 +287,7 @@
         try
         {
             if (reviewBlueprint is null) return;
-            await BlueprintService.StartBootstrapAsync(ClusterId, reviewBlueprint.Id, overrides, triggeredBy: null);
+            await BlueprintService.StartBootstrapAsync(TenantId, ClusterId, reviewBlueprint.Id, overrides, triggeredBy: null);
             reviewBlueprint = null;
             selectedBlueprintId = null;
             variablePreview = null;
@@ -295,7 +295,7 @@
             if (activeRun is not null)
             {
                 expandedRunId = activeRun.Id;
-                runDetail = await BlueprintService.GetRunAsync(activeRun.Id);
+                runDetail = await BlueprintService.GetRunAsync(TenantId, activeRun.Id);
             }
         }
         catch (InvalidOperationException ex) { error = ex.Message; }
@@ -311,7 +311,7 @@
         else
         {
             expandedRunId = runId;
-            runDetail = await BlueprintService.GetRunAsync(runId);
+            runDetail = await BlueprintService.GetRunAsync(TenantId, runId);
         }
     }
 
@@ -323,7 +323,7 @@
         error = null;
         try
         {
-            await BlueprintService.ResumeAsync(runId);
+            await BlueprintService.ResumeAsync(TenantId, runId);
             await RefreshRuns();
         }
         catch (InvalidOperationException ex) { error = ex.Message; }
@@ -331,7 +331,7 @@
 
     private async Task Cancel(Guid runId)
     {
-        await BlueprintService.CancelAsync(runId);
+        await BlueprintService.CancelAsync(TenantId, runId);
         await RefreshRuns();
     }
 

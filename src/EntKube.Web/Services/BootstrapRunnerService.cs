@@ -178,7 +178,7 @@ public class BootstrapRunnerService(
         }
 
         // If this run belongs to a staged rollout, update its target and advance.
-        await blueprintService.OnRunFinishedAsync(runId, ct);
+        await blueprintService.OnRunFinishedAsync(tenantId, runId, ct);
 
         logger.LogInformation("BootstrapRunnerService: run {RunId} finished ({Status})",
             runId, failed ? "Failed" : "Succeeded");

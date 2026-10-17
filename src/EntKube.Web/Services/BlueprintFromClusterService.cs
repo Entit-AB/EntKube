@@ -65,11 +65,11 @@ public class BlueprintFromClusterService(
             string vname = Slug(suggestedName);
             if (!createdVars.TryGetValue(vname, out Guid vid))
             {
-                BlueprintVariable v = await blueprintService.AddVariableAsync(bp.Id, vname, null, null, ct);
+                BlueprintVariable v = await blueprintService.AddVariableAsync(tenantId, bp.Id, vname, null, null, ct);
                 vid = v.Id;
                 createdVars[vname] = vid;
             }
-            await blueprintService.SetVariableValueAsync(vid, environmentId, literal, ct);
+            await blueprintService.SetVariableValueAsync(tenantId, vid, environmentId, literal, ct);
             return "${" + vname + "}";
         }
 
@@ -90,7 +90,7 @@ public class BlueprintFromClusterService(
             if (!string.IsNullOrWhiteSpace(c.BackupSchedule)) p["backupSchedule"] = c.BackupSchedule;
             if (c.StorageLinkId is Guid sl && sl != Guid.Empty)
                 p["storageLinkId"] = await Variabilize($"{c.Name}_storageLink", sl.ToString());
-            await blueprintService.AddStepAsync(bp.Id, BlueprintStepType.Service, "cnpg", c.Name, c.Namespace, p, ct);
+            await blueprintService.AddStepAsync(tenantId, bp.Id, BlueprintStepType.Service, "cnpg", c.Name, c.Namespace, p, ct);
             serviceSteps++;
         }
 
@@ -105,7 +105,7 @@ public class BlueprintFromClusterService(
                 ["persistenceEnabled"] = c.PersistenceEnabled ? "true" : "false",
             };
             if (!string.IsNullOrWhiteSpace(c.StorageClass)) p["storageClass"] = c.StorageClass;
-            await blueprintService.AddStepAsync(bp.Id, BlueprintStepType.Service, "redis", c.Name, c.Namespace, p, ct);
+            await blueprintService.AddStepAsync(tenantId, bp.Id, BlueprintStepType.Service, "redis", c.Name, c.Namespace, p, ct);
             serviceSteps++;
         }
 
@@ -121,7 +121,7 @@ public class BlueprintFromClusterService(
             if (!string.IsNullOrWhiteSpace(c.StorageClass)) p["storageClass"] = c.StorageClass;
             if (c.StorageLinkId is Guid sl && sl != Guid.Empty)
                 p["storageLinkId"] = await Variabilize($"{c.Name}_storageLink", sl.ToString());
-            await blueprintService.AddStepAsync(bp.Id, BlueprintStepType.Service, "rabbitmq", c.Name, c.Namespace, p, ct);
+            await blueprintService.AddStepAsync(tenantId, bp.Id, BlueprintStepType.Service, "rabbitmq", c.Name, c.Namespace, p, ct);
             serviceSteps++;
         }
 
@@ -188,7 +188,7 @@ public class BlueprintFromClusterService(
             }
 
             await blueprintService.AddStepAsync(
-                bp.Id, BlueprintStepType.Component, entry.Key, comp.Name, comp.Namespace, p, ct);
+                tenantId, bp.Id, BlueprintStepType.Component, entry.Key, comp.Name, comp.Namespace, p, ct);
             componentSteps++;
         }
 

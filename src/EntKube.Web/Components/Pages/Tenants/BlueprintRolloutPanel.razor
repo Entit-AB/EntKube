@@ -104,6 +104,9 @@
 @code {
     [Parameter] public Guid BlueprintId { get; set; }
 
+    /// <summary>Whose blueprint — every call below is scoped by it.</summary>
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
     private List<(Guid Id, string Name)> clusters = [];
     private List<BlueprintRollout> rollouts = [];
     private readonly HashSet<Guid> selected = [];
@@ -131,8 +134,8 @@
 
     private async Task Reload()
     {
-        clusters = await BlueprintService.GetBootstrappedClustersAsync(BlueprintId);
-        rollouts = await BlueprintService.GetRolloutsForBlueprintAsync(BlueprintId);
+        clusters = await BlueprintService.GetBootstrappedClustersAsync(TenantId, BlueprintId);
+        rollouts = await BlueprintService.GetRolloutsForBlueprintAsync(TenantId, BlueprintId);
     }
 
     private void ToggleCluster(Guid id, bool include)
@@ -147,7 +150,7 @@
         {
             // Preserve the display order (clusters is name-ordered).
             List<Guid> ordered = clusters.Where(c => selected.Contains(c.Id)).Select(c => c.Id).ToList();
-            await BlueprintService.CreateRolloutAsync(BlueprintId, ordered, autoAdvance, triggeredBy: null);
+            await BlueprintService.CreateRolloutAsync(TenantId, BlueprintId, ordered, autoAdvance, triggeredBy: null);
             await Reload();
         }
         catch (InvalidOperationException ex) { error = ex.Message; }
@@ -158,7 +161,7 @@
         error = null;
         try
         {
-            await BlueprintService.StartNextTargetAsync(rolloutId);
+            await BlueprintService.StartNextTargetAsync(TenantId, rolloutId);
             await Reload();
         }
         catch (InvalidOperationException ex) { error = ex.Message; }
@@ -166,7 +169,7 @@
 
     private async Task Cancel(Guid rolloutId)
     {
-        await BlueprintService.CancelRolloutAsync(rolloutId);
+        await BlueprintService.CancelRolloutAsync(TenantId, rolloutId);
         await Reload();
     }
 
