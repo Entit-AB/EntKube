@@ -202,7 +202,7 @@ public class TimeService(
 
         (DateTime from, DateTime to) = MonthBounds(month);
 
-        PortfolioAgreement? agreement = await contracts.GetPortfolioAgreementAsync(customerId, from, ct);
+        PortfolioAgreement? agreement = await contracts.GetPortfolioAgreementAsync(tenantId, customerId, from, ct);
 
         decimal? entitled = agreement?.PricingModel == PricingModel.HourBank
             ? agreement.HourBankHoursPerMonth
@@ -296,7 +296,7 @@ public class TimeService(
             }
         }
 
-        decimal unauthorised = await UnauthorisedHoursAsync(db, customerId, from, passes, entries, ct);
+        decimal unauthorised = await UnauthorisedHoursAsync(db, tenantId, customerId, from, passes, entries, ct);
         List<string> capped = await CappedAppsAsync(db, customerId, from, passes, ct);
 
         return new CommittedHoursStatement(from, to, lines, unauthorised, capped);
@@ -334,13 +334,14 @@ public class TimeService(
     /// </summary>
     private async Task<decimal> UnauthorisedHoursAsync(
         SupportDbContext db,
+        Guid tenantId,
         Guid customerId,
         DateTime month,
         IReadOnlyList<WorkPass> passes,
         List<TimeEntry> entries,
         CancellationToken ct)
     {
-        PortfolioAgreement? agreement = await contracts.GetPortfolioAgreementAsync(customerId, month, ct);
+        PortfolioAgreement? agreement = await contracts.GetPortfolioAgreementAsync(tenantId, customerId, month, ct);
 
         // Two rules, one act. §11.1 gates work once a portfolio's hour bank is spent;
         // §12 gates it once an application passes the monthly ceiling the customer set for

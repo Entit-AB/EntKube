@@ -245,7 +245,7 @@ public class MonthlyReportService(
 
         // §14.6 prices the penalty at 10% of the month's window fee, which comes from the
         // portfolio's widest window and the price list in force then.
-        BaseFeeBreakdown fees = await contracts.CalculateBaseFeeAsync(customerId, from, ct);
+        BaseFeeBreakdown fees = await contracts.CalculateBaseFeeAsync(tenantId, customerId, from, ct);
 
         decimal penalty = fees.WindowFee * TicketSla.PenaltyFractionOfWindowFee * penaltyDeviations;
 

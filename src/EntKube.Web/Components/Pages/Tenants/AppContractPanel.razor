@@ -323,10 +323,10 @@
 
         try
         {
-            contract = await Contracts.GetContractAsync(App.Id);
-            current = await Contracts.ResolveServiceLevelAsync(App.Id, DateTime.UtcNow);
+            contract = await Contracts.GetContractAsync(TenantId, App.Id);
+            current = await Contracts.ResolveServiceLevelAsync(TenantId, App.Id, DateTime.UtcNow);
 
-            levels = contract is null ? [] : await Contracts.ListServiceLevelsAsync(contract.Id);
+            levels = contract is null ? [] : await Contracts.ListServiceLevelsAsync(TenantId, contract.Id);
 
             using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
             siblingApps = await db.Apps.AsNoTracking()
@@ -372,7 +372,7 @@
         try
         {
             form.ApplyTo(contract);
-            contract = await Contracts.SaveContractAsync(contract);
+            contract = await Contracts.SaveContractAsync(TenantId, contract);
             Toasts.Success("Annex A saved.");
             await LoadAsync();
         }
@@ -399,7 +399,7 @@
         try
         {
             await Contracts.RecordServiceLevelAsync(
-                contract.Id, newLevel, newWindow,
+                TenantId, contract.Id, newLevel, newWindow,
                 DateTime.SpecifyKind(newEffectiveFrom.Value.Date, DateTimeKind.Utc),
                 newReason, null);
 
@@ -429,7 +429,7 @@
 
         try
         {
-            await Contracts.DeleteServiceLevelAsync(pendingDeleteLevelId.Value);
+            await Contracts.DeleteServiceLevelAsync(TenantId, pendingDeleteLevelId.Value);
             pendingDeleteLevelId = null;
             await LoadAsync();
         }

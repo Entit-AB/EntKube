@@ -37,7 +37,7 @@ public class KnowledgeServiceTests : IDisposable
             new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(connection).Options);
         db.Database.EnsureCreated();
 
-        db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
+        db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = $"entit-{tenantId:N}" });
         db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Entit AB" });
         db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "Records" });
         db.SaveChanges();
@@ -147,7 +147,7 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task A_missing_runbook_is_critical()
     {
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().Contain(g =>
             g.Severity == KnowledgeGapSeverity.Critical && g.Title.Contains("Runbook"));
@@ -159,7 +159,7 @@ public class KnowledgeServiceTests : IDisposable
         await Write(KnowledgeSectionKind.Runbook, "Runbook");
         await Write(KnowledgeSectionKind.Architecture, "Architecture");
 
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().NotContain(g => g.Title.Contains("No Runbook"));
         gaps.Should().NotContain(g => g.Title.Contains("No Architecture"));
@@ -175,7 +175,7 @@ public class KnowledgeServiceTests : IDisposable
         KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Runbook");
         await knowledge.MarkReviewedAsync(section.Id, "nils", Now.AddDays(-120));
 
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().Contain(g => g.Title.Contains("has not been reviewed"));
     }
@@ -186,7 +186,7 @@ public class KnowledgeServiceTests : IDisposable
         KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Runbook");
         await knowledge.MarkReviewedAsync(section.Id, "nils", Now.AddDays(-10));
 
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().NotContain(g => g.Title.Contains("has not been reviewed"));
     }
@@ -210,7 +210,7 @@ public class KnowledgeServiceTests : IDisposable
             CriticalPath = true,
         });
 
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().Contain(g =>
             g.Severity == KnowledgeGapSeverity.Critical && g.Title.Contains("office-hours only"));
@@ -231,7 +231,7 @@ public class KnowledgeServiceTests : IDisposable
             CriticalPath = true,
         });
 
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().NotContain(g => g.Title.Contains("office-hours only"));
     }
@@ -251,7 +251,7 @@ public class KnowledgeServiceTests : IDisposable
             CriticalPath = false,
         });
 
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().NotContain(g => g.Title.Contains("office-hours only"));
     }
@@ -318,7 +318,7 @@ public class KnowledgeServiceTests : IDisposable
             EndOfLifeOn = Now.AddMonths(-3),
         });
 
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().Contain(g => g.Title.Contains("no notice has been given"));
     }
@@ -334,7 +334,7 @@ public class KnowledgeServiceTests : IDisposable
             NoticeGivenAt = Now.AddMonths(-4),
         });
 
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().Contain(g =>
             g.Severity == KnowledgeGapSeverity.Critical && g.Clause == "§14.7");
@@ -352,7 +352,7 @@ public class KnowledgeServiceTests : IDisposable
             UpgradedAt = Now.AddDays(-5),
         });
 
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().NotContain(g => g.Clause == "§14.7");
     }
@@ -362,7 +362,7 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task A_missing_classification_is_reported()
     {
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().Contain(g => g.Title.Contains("No classification"));
     }
@@ -379,7 +379,7 @@ public class KnowledgeServiceTests : IDisposable
             RegulatoryScope = "Patientdatalagen",
         });
 
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().NotContain(g => g.Title.Contains("No classification"));
     }
@@ -414,7 +414,7 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task Health_counts_the_same_checks_the_gaps_report()
     {
-        KnowledgeHealth health = await knowledge.GetHealthAsync(appId, Now);
+        KnowledgeHealth health = await knowledge.GetHealthAsync(tenantId, appId, Now);
 
         health.FailedChecks.Should().Be(health.Gaps.Select(g => g.Check).Distinct().Count());
         health.PassedChecks.Should().Be(KnowledgeHealth.TotalChecks - health.FailedChecks);
@@ -432,7 +432,7 @@ public class KnowledgeServiceTests : IDisposable
         await knowledge.MarkReviewedAsync(runbook.Id, "nils", Now.AddDays(-200));
         await knowledge.MarkReviewedAsync(architecture.Id, "nils", Now.AddDays(-200));
 
-        KnowledgeHealth health = await knowledge.GetHealthAsync(appId, Now);
+        KnowledgeHealth health = await knowledge.GetHealthAsync(tenantId, appId, Now);
 
         health.Gaps.Count(g => g.Check == KnowledgeCheck.Freshness).Should().Be(2);
         health.FailedChecks.Should().Be(2, "staleness and the missing classification");
@@ -449,7 +449,7 @@ public class KnowledgeServiceTests : IDisposable
             DataClassification = DataClassification.SensitivePersonal, HandlesPatientData = true,
         });
 
-        KnowledgeHealth health = await knowledge.GetHealthAsync(appId, Now);
+        KnowledgeHealth health = await knowledge.GetHealthAsync(tenantId, appId, Now);
 
         health.Gaps.Should().BeEmpty();
         health.Percent.Should().Be(100);
@@ -458,7 +458,7 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task An_empty_application_does_not_score_zero_for_checks_nothing_can_fail()
     {
-        KnowledgeHealth health = await knowledge.GetHealthAsync(appId, Now);
+        KnowledgeHealth health = await knowledge.GetHealthAsync(tenantId, appId, Now);
 
         // Nothing written, no classification — but no dependency or end-of-life problem
         // either, because there is nothing to have a problem with.
@@ -476,7 +476,7 @@ public class KnowledgeServiceTests : IDisposable
             Kind = DependencyKind.Infrastructure, OfficeHoursOnly = true,
         });
 
-        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(appId, Now);
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
         gaps.Should().HaveCountGreaterThan(1);
         gaps.Should().BeInAscendingOrder(g => g.Severity);

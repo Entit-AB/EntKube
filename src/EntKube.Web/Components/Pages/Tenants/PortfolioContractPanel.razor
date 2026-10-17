@@ -880,6 +880,13 @@
 @code {
     [Parameter, EditorRequired] public Customer Customer { get; set; } = null!;
 
+    /// <summary>
+    /// Whose customer. Passed in rather than read off <see cref="Customer"/>: a tenant taken from
+    /// the row being authorized compares that row to itself, and the tab that mounts this panel
+    /// has had a TenantId all along.
+    /// </summary>
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
     private enum View { Overview, AnnexB, AnnexC, Contacts }
 
     private bool loading = true;
@@ -990,18 +997,18 @@
         {
             DateTime at = DateTime.SpecifyKind(asOf.Date, DateTimeKind.Utc);
 
-            fee = await Contracts.CalculateBaseFeeAsync(Customer.Id, at);
-            agreements = await Contracts.ListPortfolioAgreementsAsync(Customer.Id);
-            contacts = await Contracts.ListContactsAsync(Customer.Id);
+            fee = await Contracts.CalculateBaseFeeAsync(TenantId, Customer.Id, at);
+            agreements = await Contracts.ListPortfolioAgreementsAsync(TenantId, Customer.Id);
+            contacts = await Contracts.ListContactsAsync(TenantId, Customer.Id);
             domains = await Contracts.ListEmailDomainsAsync(Customer.Id);
             addresses = await Contracts.ListSupportAddressesAsync(Customer.Id);
 
             // A customer's own lists if any have been negotiated, otherwise the tenant's.
-            priceLists = await Contracts.ListPriceListsAsync(Customer.TenantId, Customer.Id);
+            priceLists = await Contracts.ListPriceListsAsync(TenantId, Customer.Id);
 
             if (priceLists.Count == 0)
             {
-                priceLists = await Contracts.ListPriceListsAsync(Customer.TenantId, null);
+                priceLists = await Contracts.ListPriceListsAsync(TenantId, null);
             }
         }
         catch (Exception ex)
@@ -1026,7 +1033,7 @@
 
         try
         {
-            await Contracts.RecordPortfolioAgreementAsync(new PortfolioAgreement
+            await Contracts.RecordPortfolioAgreementAsync(TenantId, new PortfolioAgreement
             {
                 TenantId = Customer.TenantId,
                 CustomerId = Customer.Id,
@@ -1062,7 +1069,7 @@
 
         try
         {
-            await Contracts.DeletePortfolioAgreementAsync(pendingDeleteAgreement.Id);
+            await Contracts.DeletePortfolioAgreementAsync(TenantId, pendingDeleteAgreement.Id);
             pendingDeleteAgreement = null;
             await LoadAsync();
         }
@@ -1086,7 +1093,7 @@
         {
             newContact.TenantId = Customer.TenantId;
             newContact.CustomerId = Customer.Id;
-            await Contracts.SaveContactAsync(newContact);
+            await Contracts.SaveContactAsync(TenantId, newContact);
 
             addingContact = false;
             newContact = NewContact();
@@ -1151,7 +1158,7 @@
 
         try
         {
-            await Contracts.DeleteSupportAddressAsync(pendingDeleteAddress.Id);
+            await Contracts.DeleteSupportAddressAsync(TenantId, pendingDeleteAddress.Id);
             pendingDeleteAddress = null;
             await LoadAsync();
         }
@@ -1208,7 +1215,7 @@
 
         try
         {
-            await Contracts.DeleteEmailDomainAsync(pendingDeleteDomain.Id);
+            await Contracts.DeleteEmailDomainAsync(TenantId, pendingDeleteDomain.Id);
             pendingDeleteDomain = null;
             await LoadAsync();
         }
@@ -1229,7 +1236,7 @@
 
         try
         {
-            await Contracts.DeleteContactAsync(pendingDeleteContactId.Value);
+            await Contracts.DeleteContactAsync(TenantId, pendingDeleteContactId.Value);
             pendingDeleteContactId = null;
             await LoadAsync();
         }
@@ -1316,7 +1323,7 @@
                 editingList = null;
             }
 
-            await Contracts.DeletePriceListAsync(pendingDeleteList.Id);
+            await Contracts.DeletePriceListAsync(TenantId, pendingDeleteList.Id);
             pendingDeleteList = null;
             await LoadAsync();
         }
@@ -1372,7 +1379,7 @@
                 if (entry is not null)
                 {
                     await Contracts.SavePriceListEntryAsync(
-                        editingList.Id, entry.Kind, entry.Key, amount, hours);
+                        TenantId, editingList.Id, entry.Kind, entry.Key, amount, hours);
                 }
             }
 
@@ -1400,7 +1407,7 @@
         }
 
         await Contracts.UpdatePriceListAsync(
-            editingList.Id,
+            TenantId, editingList.Id,
             DateTime.SpecifyKind(headerEffectiveFrom.Value.Date, DateTimeKind.Utc),
             headerNotes);
 
@@ -1419,7 +1426,7 @@
         try
         {
             await Contracts.SavePriceListEntryAsync(
-                editingList.Id, newEntryKind, newEntryKey.Trim(), newEntryAmount,
+                TenantId, editingList.Id, newEntryKind, newEntryKey.Trim(), newEntryAmount,
                 newEntryKind == PriceKind.HourBankTier ? newEntryHours : null);
 
             newEntryKey = "";
@@ -1435,7 +1442,7 @@
 
     private async Task RemoveEntryAsync(PriceListEntry entry)
     {
-        await Contracts.DeletePriceListEntryAsync(entry.Id);
+        await Contracts.DeletePriceListEntryAsync(TenantId, entry.Id);
         staged.Remove(entry.Id);
         await ReloadEditorAsync();
     }

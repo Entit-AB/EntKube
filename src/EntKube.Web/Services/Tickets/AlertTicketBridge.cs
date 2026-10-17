@@ -90,7 +90,7 @@ public class AlertTicketBridge(
 
                 // No Annex A means no SLA, no price and nothing agreed to respond to.
                 ResolvedServiceLevel? level =
-                    await contracts.ResolveServiceLevelAsync(match.AppId, incident.StartsAt, ct);
+                    await contracts.ResolveServiceLevelAsync(tenantId, match.AppId, incident.StartsAt, ct);
 
                 if (level is null)
                 {

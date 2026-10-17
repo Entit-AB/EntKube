@@ -113,7 +113,7 @@ public class TicketService(
         CancellationToken ct = default)
     {
         (SupportWindow window, bool windowKnown, bool slaApplied) =
-            await ResolveCoverAsync(appId, reportedAt, ct);
+            await ResolveCoverAsync(tenantId, appId, reportedAt, ct);
 
         // §14.3: the customer proposes, we confirm at the first assessment. Until then their
         // view stands for P1 and P2, so the proposal is simply adopted and the confirmation
@@ -361,7 +361,7 @@ public class TicketService(
         string from = await DescribeWhereAsync(db, ticket, ct);
 
         (SupportWindow window, bool windowKnown, bool slaApplied) =
-            await ResolveCoverAsync(toAppId, ticket.ReportedAt, ct);
+            await ResolveCoverAsync(destination.TenantId, toAppId, ticket.ReportedAt, ct);
 
         bool windowChanged = window != ticket.SupportWindow;
 
@@ -1141,7 +1141,7 @@ public class TicketService(
     /// <param name="appId">The application, or null where none is known.</param>
     /// <param name="at">The moment the cover is asked about — a ticket's reporting time.</param>
     private async Task<(SupportWindow Window, bool WindowKnown, bool SlaApplied)>
-        ResolveCoverAsync(Guid? appId, DateTime at, CancellationToken ct)
+        ResolveCoverAsync(Guid tenantId, Guid? appId, DateTime at, CancellationToken ct)
     {
         SupportWindow window = SupportWindow.S1;
         bool windowKnown = false;
@@ -1154,7 +1154,7 @@ public class TicketService(
 
         if (appId is not null)
         {
-            ResolvedServiceLevel? level = await contracts.ResolveServiceLevelAsync(appId.Value, at, ct);
+            ResolvedServiceLevel? level = await contracts.ResolveServiceLevelAsync(tenantId, appId.Value, at, ct);
 
             if (level is not null)
             {
