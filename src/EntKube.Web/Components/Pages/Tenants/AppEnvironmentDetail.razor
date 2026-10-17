@@ -2979,6 +2979,14 @@
             yamlApplySuccess = result.IsSuccess;
             yamlApplyOutput = result.IsSuccess ? result.Data : result.Error;
         }
+        catch (Exception ex)
+        {
+            // This handler had the same gap as the Helm one and was saved only by
+            // ApplyYamlDeploymentAsync catching internally — which is the asymmetry that caused
+            // the Helm bug in the first place. Not relying on that twice.
+            yamlApplySuccess = false;
+            yamlApplyOutput = ex.Message;
+        }
         finally { applyingYaml = false; }
     }
 
@@ -3016,6 +3024,16 @@
                 await K8sOps.HelmInstallOrUpgradeAsync(TenantId, selectedDeployment.Id);
             helmInstallSuccess = result.IsSuccess;
             helmInstallOutput = result.IsSuccess ? result.Data : result.Error;
+        }
+        catch (Exception ex)
+        {
+            // Belt as well as braces. The service no longer throws, but this handler is the one
+            // on the page that had try/finally and no catch — its neighbours (SaveHelmValues,
+            // SaveDeployment, AddManifest) all catch and show the message. An exception here
+            // kills the circuit, which loses the operator's place on the page as well as the
+            // error, so it is worth catching even once the thing it calls is well behaved.
+            helmInstallSuccess = false;
+            helmInstallOutput = ex.Message;
         }
         finally { installingHelm = false; }
     }
