@@ -38,7 +38,8 @@ public class ComponentInstallOrchestrator(
     OpenLdapService openLdapService,
     Dr.VeleroService veleroService,
     StalwartService stalwartService,
-    HeadscaleService headscaleService)
+    HeadscaleService headscaleService,
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate)
 {
     /// <summary>
     /// Runs the complete install flow for a single registered component and
@@ -60,6 +61,12 @@ public class ComponentInstallOrchestrator(
         // Before the component is marked as installing, and before helm is given anything to wait on: a
         // Harbor pointed at a database written by a newer Harbor cannot start, and every way of finding
         // that out later costs half an hour and points at the wrong thing.
+        // Installing or upgrading a component is one decision. What follows it is not: the helm
+        // release, the component's own secrets sync, its external routes, and for wg-easy a
+        // re-apply of the Istio gateway — every one a separately gated primitive for an act the
+        // operator approved once.
+        using IDisposable operation = gate.BeginOperation($"apply component {componentId}");
+
         if (await harborService.DescribeDatabaseSchemaConflictAsync(tenantId, componentId, ct) is string conflict)
         {
             return new HelmExecutionResult { Success = false, Output = conflict };

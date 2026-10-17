@@ -817,6 +817,11 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Failure(
                 "The deployment's cluster is not this tenant's, or has no kubeconfig configured.");
 
+        // Removing a deployment is one decision, not one per resource: a Yaml deployment deletes
+        // every manifest it owns, and each delete is separately gated.
+        using IDisposable operation = gate.BeginOperation(
+            $"remove {deployment.Name} from {deployment.Namespace}");
+
         try
         {
             HelmExecutionResult result;
@@ -912,6 +917,11 @@ public class KubernetesOperationsService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // Nesting is a no-op in the gate, so wrapping here makes the whole app one decision
+        // rather than one per deployment: each DeleteDeploymentFromClusterAsync below opens its
+        // own operation and defers to this one.
+        using IDisposable operation = gate.BeginOperation($"remove every deployment of app {appId}");
+
         List<Guid> deploymentIds = await db.AppDeployments
             .Where(d => d.AppId == appId && d.App.Customer.TenantId == tenantId)
             .Select(d => d.Id)
@@ -988,6 +998,13 @@ public class KubernetesOperationsService(
             deployment.Namespace, lockedNs, manifests.Select(m => m.YamlContent));
         if (contentViolation is not null)
             return KubernetesOperationResult<string>.Failure(contentViolation);
+
+        // One action, one acknowledgment. The apply itself asks; the Kyverno apply, the prune
+        // (which DELETES the resources a manifest no longer names) and the route re-apply that
+        // follow are the same approved act. Each is a separate gated primitive, so without this
+        // a single Apply answered one dialog and then one per pruned resource and per hostname.
+        using IDisposable operation = gate.BeginOperation(
+            $"apply {manifests.Count} manifest(s) to {deployment.Namespace}");
 
         // The namespace check above only catches resources that name a namespace. Cluster-scoped
         // resources carry none, so RBAC and webhook kinds are refused by kind instead.
@@ -2331,6 +2348,13 @@ public class KubernetesOperationsService(
         if (string.IsNullOrWhiteSpace(deployment.HelmChartName))
             return KubernetesOperationResult<string>.Failure(
                 "No Helm chart name configured. Set the chart name in the deployment settings before installing.");
+
+        // One action, one acknowledgment. The release itself asks; the Kyverno apply and the
+        // route re-apply that follow it are the same approved act carrying on, and each of them
+        // is a separate gated primitive — so without this the operator answered one dialog for
+        // the release and then one per hostname for work they had just approved.
+        using IDisposable operation = gate.BeginOperation(
+            $"helm upgrade --install {ToHelmReleaseName(deployment.Name)} in {deployment.Namespace}");
 
         string releaseName = ToHelmReleaseName(deployment.Name);
         string? tempValues = null;
