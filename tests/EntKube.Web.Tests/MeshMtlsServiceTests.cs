@@ -1,6 +1,9 @@
 using EntKube.Web.Data;
 using EntKube.Web.Services;
 using FluentAssertions;
+using Microsoft.Data.Sqlite;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging.Abstractions;
 
 namespace EntKube.Web.Tests;
 
@@ -144,5 +147,85 @@ public class MeshMtlsServiceTests
 
         yaml.Should().Contain("portLevelSettings");
         yaml.Should().Contain("number: 8443");
+    }
+
+    // ──────── Whose mesh ────────
+
+    /// <summary>
+    /// ⚠️ <c>SetModeAsync</c> took a tenant and used it only to <b>stamp</b> a new row. The
+    /// cluster was never checked, and the policy it upserts was found by cluster id and namespace
+    /// alone — so the else-branch overwrote whatever row matched, whoever owned it.
+    ///
+    /// <para>The mode is mTLS enforcement for a namespace, and there are only two: Permissive
+    /// and Strict. This file's own summary says STRICT is the one setting that can take a working
+    /// namespace offline; the reverse is just as bad and quieter — moving somebody else's
+    /// namespace back to Permissive accepts plaintext again, and nothing appears to break.</para>
+    /// </summary>
+    [Fact]
+    public async Task Another_tenant_cannot_set_the_mtls_mode_of_a_namespace()
+    {
+        using SqliteConnection connection = new("DataSource=:memory:");
+        connection.Open();
+
+        using ApplicationDbContext db = new(
+            new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(connection).Options);
+        db.Database.EnsureCreated();
+
+        TestDbContextFactory factory = new(connection);
+        MeshMtlsService sut = new(factory, NullLogger<MeshMtlsService>.Instance);
+
+        (Guid Tenant, Guid Cluster) Seed(string slug)
+        {
+            Guid tenant = Guid.NewGuid(), environment = Guid.NewGuid(), cluster = Guid.NewGuid();
+            db.Tenants.Add(new Tenant { Id = tenant, Name = slug, Slug = $"{slug}-{tenant:N}" });
+            db.Set<Data.Environment>().Add(new Data.Environment
+            {
+                Id = environment, TenantId = tenant, Name = $"{slug}-prod",
+            });
+            db.KubernetesClusters.Add(new KubernetesCluster
+            {
+                Id = cluster, TenantId = tenant, EnvironmentId = environment,
+                Name = $"{slug}-cluster", ApiServerUrl = "https://k8s.example.com",
+            });
+            db.SaveChanges();
+            return (tenant, cluster);
+        }
+
+        (Guid Tenant, Guid Cluster) us = Seed("us");
+        (Guid Tenant, Guid Cluster) them = Seed("them");
+
+        // Their namespace is STRICT, set by them.
+        MeshMtlsPolicy theirs = await sut.SetModeAsync(
+            them.Tenant, them.Cluster, "payments", MeshMtlsMode.Strict);
+        theirs.Mode.Should().Be(MeshMtlsMode.Strict);
+
+        // We cannot reach their cluster at all.
+        Func<Task> downgrade = () => sut.SetModeAsync(
+            us.Tenant, them.Cluster, "payments", MeshMtlsMode.Permissive);
+        await downgrade.Should().ThrowAsync<InvalidOperationException>();
+
+        using ApplicationDbContext after = factory.CreateDbContext();
+        after.Set<MeshMtlsPolicy>().Single(p => p.Id == theirs.Id)
+            .Mode.Should().Be(MeshMtlsMode.Strict,
+                "downgrading their mTLS would not look like a failure to them");
+
+        // Nor can we read it, or mark it applied.
+        (await sut.GetModeAsync(us.Tenant, them.Cluster, "payments"))
+            .Should().Be(MeshMtlsMode.Permissive,
+                "the miss default is Permissive, so an unscoped read would report their STRICT "
+                + "namespace as unenforced");
+        (await sut.GetModeAsync(them.Tenant, them.Cluster, "payments"))
+            .Should().Be(MeshMtlsMode.Strict, "the owner's own read still answers");
+
+        await sut.MarkAppliedAsync(us.Tenant, them.Cluster, "payments");
+        using ApplicationDbContext unmarked = factory.CreateDbContext();
+        unmarked.Set<MeshMtlsPolicy>().Single(p => p.Id == theirs.Id)
+            .AppliedAt.Should().BeNull();
+
+        // And our own policy on our own cluster is a separate row, not theirs rewritten.
+        MeshMtlsPolicy ours = await sut.SetModeAsync(
+            us.Tenant, us.Cluster, "payments", MeshMtlsMode.Permissive);
+        ours.Id.Should().NotBe(theirs.Id);
+        ours.TenantId.Should().Be(us.Tenant);
     }
 }
