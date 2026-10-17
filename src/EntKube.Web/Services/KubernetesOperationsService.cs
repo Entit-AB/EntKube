@@ -306,13 +306,23 @@ public class KubernetesOperationsService(
         AppDeployment? deployment;
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
+            // Scoped at the row as well as at the seam. The ForAsync call below already refuses
+            // a cluster that is not this tenant's, which made this predicate redundant rather
+            // than exploitable — but an unscoped read still loads a stranger's deployment to
+            // decide what to say about it, and a refactor that moves the cluster call is one
+            // edit from a hole. AppDeployment has no TenantId; the scope runs through its app.
             deployment = await db.AppDeployments
-                .FirstOrDefaultAsync(d => d.Id == deploymentId, ct);
+                .FirstOrDefaultAsync(
+                    d => d.Id == deploymentId && d.App.Customer.TenantId == tenantId, ct);
         }
 
         if (deployment is null)
         {
-            return (null, "Deployment not found.");
+            // One message for both cases on purpose: the row-scoped lookup above cannot tell an
+            // absent deployment from one that belongs to somebody else, and it must not — saying
+            // which would leak whether a stranger's row exists. The wording keeps the phrase the
+            // six existing tenancy tests assert on, which is what pins this as a refusal.
+            return (null, "Deployment not found, or it is not this tenant's.");
         }
 
         EntKube.Web.Services.Clusters.IClusterClient? cluster =
@@ -796,7 +806,7 @@ public class KubernetesOperationsService(
         AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
 
         if (deployment is null)
-            return KubernetesOperationResult<string>.Failure("Deployment not found.");
+            return KubernetesOperationResult<string>.Failure("Deployment not found, or it is not this tenant's.");
 
         // The tenant is the caller's, not one read off the row being authorized. The old form —
         // ForAsync(deployment.Cluster.TenantId, deployment.ClusterId) — compared a row against
@@ -903,7 +913,7 @@ public class KubernetesOperationsService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         List<Guid> deploymentIds = await db.AppDeployments
-            .Where(d => d.AppId == appId)
+            .Where(d => d.AppId == appId && d.App.Customer.TenantId == tenantId)
             .Select(d => d.Id)
             .ToListAsync(ct);
 
@@ -940,7 +950,7 @@ public class KubernetesOperationsService(
         AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
 
         if (deployment is null)
-            return KubernetesOperationResult<string>.Failure("Deployment not found.");
+            return KubernetesOperationResult<string>.Failure("Deployment not found, or it is not this tenant's.");
 
         if (!deployment.IsManaged)
             return KubernetesOperationResult<string>.Failure(
@@ -1096,7 +1106,11 @@ public class KubernetesOperationsService(
                         .ThenInclude(d => d.Cluster)
             .Include(r => r.AppDeployment)
                 .ThenInclude(d => d.Cluster)
-            .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct);
+            .FirstOrDefaultAsync(
+                // AppDeploymentRoute has no TenantId and no App of its own — it hangs off a route,
+                // which has one. (A per-entity grep said otherwise; the compiler disagreed.)
+                r => r.Id == deploymentRouteId
+                  && r.AppRoute.App.Customer.TenantId == tenantId, ct);
 
         if (dr is null)
             return KubernetesOperationResult<string>.Failure("Deployment route not found.");
@@ -1247,9 +1261,15 @@ public class KubernetesOperationsService(
         bool wasApplied;
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
+            // ⚠️ Unlike its neighbours, this one does not reach a cluster before it writes:
+            // route.IsManaged is set a few lines down, so the cluster seam never gets the chance
+            // to refuse. Unmanaging another tenant's route abandons the HTTPRoute EntKube
+            // re-applies for them; managing one makes EntKube start overwriting a route it does
+            // not own. AppRoute has no TenantId, so the scope runs route → app → customer.
             AppRoute? route = await db.AppRoutes
                 .Include(r => r.DeploymentRoutes)
-                .FirstOrDefaultAsync(r => r.Id == appRouteId, ct);
+                .FirstOrDefaultAsync(
+                    r => r.Id == appRouteId && r.App.Customer.TenantId == tenantId, ct);
 
             if (route is null)
                 return KubernetesOperationResult<string>.Failure("Route not found.");
@@ -1305,7 +1325,11 @@ public class KubernetesOperationsService(
                         .ThenInclude(d => d.Cluster)
             .Include(r => r.AppDeployment)
                 .ThenInclude(d => d.Cluster)
-            .FirstOrDefaultAsync(r => r.Id == deploymentRouteId, ct);
+            .FirstOrDefaultAsync(
+                // AppDeploymentRoute has no TenantId and no App of its own — it hangs off a route,
+                // which has one. (A per-entity grep said otherwise; the compiler disagreed.)
+                r => r.Id == deploymentRouteId
+                  && r.AppRoute.App.Customer.TenantId == tenantId, ct);
 
         if (dr is null)
             return KubernetesOperationResult<string>.Failure("Deployment route not found.");
@@ -1537,8 +1561,11 @@ public class KubernetesOperationsService(
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // OutboundMtlsCredential is one of the few rows here with a TenantId of its own, so
+        // this is a direct comparison. The credential names the partner endpoint a workload
+        // presents a client certificate to, so applying a stranger's redirects their mTLS.
         OutboundMtlsCredential? credential = await db.OutboundMtlsCredentials
-            .FirstOrDefaultAsync(c => c.Id == credentialId, ct);
+            .FirstOrDefaultAsync(c => c.Id == credentialId && c.TenantId == tenantId, ct);
 
         if (credential is null)
             return KubernetesOperationResult<string>.Failure("Credential not found.");
@@ -1817,10 +1844,13 @@ public class KubernetesOperationsService(
         AppL4Route? route = await db.AppL4Routes
             .Include(r => r.AppDeployment)
                 .ThenInclude(d => d.Cluster)
-            .FirstOrDefaultAsync(r => r.Id == l4RouteId, ct);
+            .FirstOrDefaultAsync(
+                // AppL4Route has no TenantId; it reaches one through its deployment's app.
+                r => r.Id == l4RouteId
+                  && r.AppDeployment.App.Customer.TenantId == tenantId, ct);
 
         if (route is null)
-            return KubernetesOperationResult<string>.Failure("L4 route not found.");
+            return KubernetesOperationResult<string>.Failure("L4 route not found, or it is not this tenant's.");
 
         if (!route.IsManaged)
             return KubernetesOperationResult<string>.Failure(
@@ -1920,10 +1950,13 @@ public class KubernetesOperationsService(
         AppL4Route? route = await db.AppL4Routes
             .Include(r => r.AppDeployment)
                 .ThenInclude(d => d.Cluster)
-            .FirstOrDefaultAsync(r => r.Id == l4RouteId, ct);
+            .FirstOrDefaultAsync(
+                // AppL4Route has no TenantId; it reaches one through its deployment's app.
+                r => r.Id == l4RouteId
+                  && r.AppDeployment.App.Customer.TenantId == tenantId, ct);
 
         if (route is null)
-            return KubernetesOperationResult<string>.Failure("L4 route not found.");
+            return KubernetesOperationResult<string>.Failure("L4 route not found, or it is not this tenant's.");
 
         IClusterClient? clusterAccess = route.AppDeployment is null
             ? null
@@ -2274,7 +2307,7 @@ public class KubernetesOperationsService(
         AppDeployment? deployment = await GetDeploymentWithClusterAsync(deploymentId, ct);
 
         if (deployment is null)
-            return KubernetesOperationResult<string>.Failure("Deployment not found.");
+            return KubernetesOperationResult<string>.Failure("Deployment not found, or it is not this tenant's.");
 
         if (!deployment.IsManaged)
             return KubernetesOperationResult<string>.Failure(
