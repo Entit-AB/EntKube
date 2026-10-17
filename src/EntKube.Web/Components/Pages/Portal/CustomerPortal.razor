@@ -748,7 +748,7 @@ else
 
         foreach (Data.App app in customer.Apps)
         {
-            appDeployments[app.Id] = await DeploymentService.GetDeploymentsAsync(app.Id);
+            appDeployments[app.Id] = await DeploymentService.GetDeploymentsAsync(customer.TenantId, app.Id);
 
             KeycloakRealm? realm = await KeycloakService.GetRealmForAppAsync(customer.TenantId, app.Id);
             if (realm is not null) appRealms[app.Id] = realm;

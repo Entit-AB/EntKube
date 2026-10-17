@@ -1248,7 +1248,7 @@ else
             rbacPolicy = await GovernanceService.SaveRbacPolicyAsync(TenantId, AppId, EnvironmentId, rbacSaName, rbacAutoMount);
 
         // Only apply to clusters that have a deployment for this app+environment.
-        List<AppDeployment> envDeployments = (await DeploymentService.GetDeploymentsAsync(AppId))
+        List<AppDeployment> envDeployments = (await DeploymentService.GetDeploymentsAsync(TenantId, AppId))
             .Where(d => d.EnvironmentId == EnvironmentId && d.Cluster is not null)
             .DistinctBy(d => d.ClusterId)
             .ToList();

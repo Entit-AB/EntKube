@@ -189,7 +189,7 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        List<AppDeployment> all = await DeploymentService.GetDeploymentsAsync(AppId);
+        List<AppDeployment> all = await DeploymentService.GetDeploymentsAsync(TenantId, AppId);
         deployments = EnvironmentId.HasValue
             ? all.Where(d => d.EnvironmentId == EnvironmentId.Value).ToList()
             : all;

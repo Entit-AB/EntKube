@@ -884,7 +884,7 @@ public class DeploymentImportService(
         result.AppCreated = appCreated;
 
         // ── Deployment: one per (app, environment, cluster). Reuse if present (update), else create. ──
-        List<AppDeployment> existingDeployments = await deploymentService.GetDeploymentsAsync(appId, ct);
+        List<AppDeployment> existingDeployments = await deploymentService.GetDeploymentsAsync(tenantId, appId, ct);
         AppDeployment? deployment = existingDeployments
             .FirstOrDefault(d => d.EnvironmentId == request.EnvironmentId && d.ClusterId == cluster.Id);
 
@@ -897,7 +897,7 @@ public class DeploymentImportService(
                 : request.DeploymentName.Trim();
             string deployName = UniqueDeploymentName(existingDeployments, requestedName, envName);
             deployment = await deploymentService.CreateDeploymentAsync(
-                appId, deployName, DeploymentType.Yaml, request.EnvironmentId, cluster.Id,
+                tenantId, appId, deployName, DeploymentType.Yaml, request.EnvironmentId, cluster.Id,
                 preview.PrimaryNamespace, performedBy: request.PerformedBy, ct: ct,
                 // Observe-only on import — the live workload is likely owned by ArgoCD/Flux.
                 isManaged: false);
@@ -906,7 +906,7 @@ public class DeploymentImportService(
         else
         {
             result.DeploymentCreated = false;
-            foreach (DeploymentManifest m in await deploymentService.GetManifestsAsync(deployment.Id, ct))
+            foreach (DeploymentManifest m in await deploymentService.GetManifestsAsync(tenantId, deployment.Id, ct))
             {
                 existingManifestKeys.Add((m.Kind, m.Name));
             }
@@ -925,7 +925,8 @@ public class DeploymentImportService(
 
             try
             {
-                await deploymentService.AddManifestAsync(deployment.Id, res.Kind, res.Name, res.SanitizedYaml, res.SortOrder, ct);
+                await deploymentService.AddManifestAsync(
+                    tenantId, deployment.Id, res.Kind, res.Name, res.SanitizedYaml, res.SortOrder, ct);
                 existingManifestKeys.Add((res.Kind, res.Name));
                 result.ManifestCount++;
             }

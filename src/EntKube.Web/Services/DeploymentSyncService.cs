@@ -82,13 +82,13 @@ public class DeploymentSyncService(
                     (SyncStatus sync, HealthStatus health) =
                         KubernetesOperationsService.ComputeStatusFromResources(result.Data);
 
-                    await deploymentService.UpdateDeploymentStatusAsync(id, sync, health, null, ct);
+                    await deploymentService.UpdateDeploymentStatusAsync(tenantId, id, sync, health, null, ct);
                     synced++;
                 }
                 else
                 {
                     await deploymentService.UpdateDeploymentStatusAsync(
-                        id, SyncStatus.Unknown, HealthStatus.Unknown, result.Error, ct);
+                        tenantId, id, SyncStatus.Unknown, HealthStatus.Unknown, result.Error, ct);
                 }
             }
             catch (Exception ex)

@@ -413,7 +413,7 @@ else
         try
         {
             routes = await AppRouteService.GetRoutesForAppAsync(TenantId, App.Id);
-            deployments = await DeploymentService.GetDeploymentsAsync(App.Id);
+            deployments = await DeploymentService.GetDeploymentsAsync(TenantId, App.Id);
         }
         catch (Exception ex)
         {
