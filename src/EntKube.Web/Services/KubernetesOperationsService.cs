@@ -2437,6 +2437,36 @@ public class KubernetesOperationsService(
                     string.IsNullOrWhiteSpace(routeNote) ? result.Output : $"{result.Output}\n{routeNote}")
                 : KubernetesOperationResult<string>.Failure(result.Output);
         }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // ⚠️ The likeliest way to get here, and not an error. ClusterChangeGate implements
+            // declare-or-refuse by THROWING: when the operator answers the acknowledgment dialog
+            // with anything other than Acknowledged it records Cancelled and throws
+            // OperationCanceledException. Dismissing that dialog on a Helm install therefore used
+            // to terminate the circuit — a normal, deliberate operator action taking the page
+            // down. It reads as a cancellation, not a failure.
+            //
+            // The `when` keeps a genuinely cancelled request — the operator navigating away —
+            // falling through to the caller, where it belongs.
+            return KubernetesOperationResult<string>.Failure(
+                "Cancelled: the change was not acknowledged, so nothing was applied.");
+        }
+        catch (Exception ex)
+        {
+            // ⚠️ This method had a try/finally and no catch — the only cluster operation in the
+            // file without one, while its YAML twin ApplyYamlDeploymentAsync and thirty others
+            // have had one all along. Everything in the block above can throw: writing the
+            // values file, spawning helm, and the post-deploy route refresh. Those escaped the
+            // method, escaped the page handler (which also had try/finally and no catch) and
+            // terminated the Blazor circuit — so a failed install showed as a dead page with
+            // "unhandled exception on the current circuit" and no indication of what went wrong.
+            //
+            // The signature already promises a result rather than an exception. Honouring it
+            // makes the cause visible where the operator is looking.
+            logger.LogError(ex, "Helm install/upgrade threw for deployment {DeploymentId}", deploymentId);
+            return KubernetesOperationResult<string>.Failure(
+                $"Helm install/upgrade failed: {ex.Message}");
+        }
         finally
         {
             // The credential is not ours any more — the seam writes and removes its own.

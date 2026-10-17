@@ -442,4 +442,72 @@ public class HelmSeamTests : IDisposable
             "the owner resolves the deployment and gets to the cluster call, so whatever "
             + "fails after that is the harness and not authorization");
     }
+
+    // ──────── A failure is a result, not an exception ────────
+
+    /// <summary>
+    /// ⚠️ Regression test for a dead page. <c>HelmInstallOrUpgradeAsync</c> was the only cluster
+    /// operation in its file with a <c>try/finally</c> and no <c>catch</c> — thirty-one siblings
+    /// have one, including <c>ApplyYamlDeploymentAsync</c>, which is the same button for YAML
+    /// deployments. Everything inside that block can throw: writing the values file, spawning
+    /// helm, and the post-deploy route refresh.
+    ///
+    /// <para>So a failed install did not render an error. It escaped the method, escaped the page
+    /// handler — which also had <c>try/finally</c> and no <c>catch</c> — and terminated the
+    /// Blazor circuit, which the browser reports as "unhandled exception on the current circuit"
+    /// with nothing about the cause. The YAML button next to it showed a message, because its
+    /// service caught; the Helm button killed the page.</para>
+    ///
+    /// <para>The signature promises <c>KubernetesOperationResult</c>. This pins that promise
+    /// against the one thing on the path that is guaranteed to throw in a test: the seam itself.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_helm_run_that_throws_is_returned_as_a_failure()
+    {
+        await SeedAsync();
+
+        // The cluster client throws rather than returning an unsuccessful result — what a helm
+        // binary that will not spawn, or a values file that cannot be written, looks like here.
+        k8s.Setup(x => x.RunHelmAsync(
+                It.IsAny<HelmInvocation>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("helm: executable file not found in $PATH"));
+
+        KubernetesOperationResult<string> result =
+            await Sut().HelmInstallOrUpgradeAsync(tenantId, deploymentId);
+
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("executable file not found",
+            "the operator has to be told what actually failed — this is the whole point of "
+            + "returning a result rather than letting it reach the circuit");
+    }
+
+    /// <summary>
+    /// ⚠️ The likeliest way the circuit actually died, and the reason this is a separate branch:
+    /// <see cref="EntKube.Web.Services.ClusterChanges.ClusterChangeGate"/> implements
+    /// declare-or-refuse <b>by throwing</b>. An operator who answers the acknowledgment dialog
+    /// with anything other than Acknowledged gets <c>OperationCanceledException</c> — so
+    /// dismissing that dialog on a Helm install used to terminate the page.
+    ///
+    /// <para>Cancelling is a deliberate operator action, not a failure, so it must not be
+    /// reported as one. The assertion is on the wording for that reason.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_cancelled_acknowledgment_reads_as_cancelled_not_as_a_failure()
+    {
+        await SeedAsync();
+
+        k8s.Setup(x => x.RunHelmAsync(
+                It.IsAny<HelmInvocation>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new OperationCanceledException(
+                "Cluster change cancelled by operator: helm upgrade --install billing-api"));
+
+        KubernetesOperationResult<string> result =
+            await Sut().HelmInstallOrUpgradeAsync(tenantId, deploymentId);
+
+        result.IsSuccess.Should().BeFalse("nothing was applied");
+        result.Error.Should().Contain("Cancelled");
+        result.Error.Should().NotContain("failed",
+            "the operator cancelled on purpose — calling that a failure teaches them to ignore "
+            + "the message");
+    }
 }
