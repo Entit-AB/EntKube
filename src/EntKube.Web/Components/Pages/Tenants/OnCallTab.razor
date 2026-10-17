@@ -357,7 +357,7 @@ else
 
         try
         {
-            await OnCallService.RecordHandoverAsync(id, handoverText);
+            await OnCallService.RecordHandoverAsync(TenantId, id, handoverText);
             handoverShiftId = null;
             await Load();
             Toasts.Success("Handover noted.");
@@ -467,7 +467,7 @@ else
     {
         try
         {
-            await OnCallService.DeleteScheduleAsync(schedule.Id);
+            await OnCallService.DeleteScheduleAsync(TenantId, schedule.Id);
             await Load();
             Toasts.Success($"Deleted schedule \"{schedule.Name}\".");
         }
@@ -498,6 +498,7 @@ else
         try
         {
             await OnCallService.AddShiftAsync(
+                TenantId,
                 scheduleId,
                 shiftForm.AssigneeName.Trim(),
                 string.IsNullOrWhiteSpace(shiftForm.Email) ? null : shiftForm.Email.Trim(),
@@ -524,7 +525,7 @@ else
     {
         try
         {
-            await OnCallService.DeleteShiftAsync(shift.Id);
+            await OnCallService.DeleteShiftAsync(TenantId, shift.Id);
             await Load();
             expandedScheduleId = shift.ScheduleId;
             Toasts.Success($"Deleted shift for \"{shift.AssigneeName}\".");

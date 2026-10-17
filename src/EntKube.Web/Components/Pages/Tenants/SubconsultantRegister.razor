@@ -299,7 +299,7 @@
             editing.ConfidentialitySignedAt = AsUtc(confidentiality);
             editing.DataProcessingBoundAt = AsUtc(dataProcessing);
 
-            await OnCall.SaveSubconsultantAsync(editing);
+            await OnCall.SaveSubconsultantAsync(TenantId, editing);
 
             editing = null;
             Toasts.Success("Saved.");
@@ -318,7 +318,7 @@
     private async Task NotifyAsync(Subconsultant person)
     {
         person.NotifiedAt = DateTime.UtcNow;
-        await OnCall.SaveSubconsultantAsync(person);
+        await OnCall.SaveSubconsultantAsync(TenantId, person);
 
         Toasts.Success(
             $"Recorded. Unless the customer objects, {person.Name} counts as approved on "
@@ -332,7 +332,7 @@
         person.ApprovedAt = DateTime.UtcNow;
         person.ObjectedAt = null;
         person.ObjectionReason = null;
-        await OnCall.SaveSubconsultantAsync(person);
+        await OnCall.SaveSubconsultantAsync(TenantId, person);
         await LoadAsync();
     }
 
@@ -349,7 +349,7 @@
         {
             pendingObjection.ObjectedAt = DateTime.UtcNow;
             pendingObjection.ApprovedAt = null;
-            await OnCall.SaveSubconsultantAsync(pendingObjection);
+            await OnCall.SaveSubconsultantAsync(TenantId, pendingObjection);
             pendingObjection = null;
             await LoadAsync();
         }

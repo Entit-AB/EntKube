@@ -41,7 +41,7 @@ public class OnCallCoverageTests : IDisposable
             new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(connection).Options);
         db.Database.EnsureCreated();
 
-        db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
+        db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = $"entit-{tenantId:N}" });
         db.SaveChanges();
 
         onCall = new OnCallService(new TestDbContextFactory(connection));
@@ -89,7 +89,7 @@ public class OnCallCoverageTests : IDisposable
     {
         Guid schedule = AddSchedule(SupportWindow.S1, (Tue(8), Tue(17)));
 
-        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(schedule, Tue(0), Wed(0));
+        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(tenantId, schedule, Tue(0), Wed(0));
 
         gaps.Should().BeEmpty();
     }
@@ -99,7 +99,7 @@ public class OnCallCoverageTests : IDisposable
     {
         Guid schedule = AddSchedule(SupportWindow.S1, (Tue(8), Tue(12)));
 
-        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(schedule, Tue(0), Wed(0));
+        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(tenantId, schedule, Tue(0), Wed(0));
 
         gaps.Should().ContainSingle();
         gaps[0].From.Should().Be(Tue(12));
@@ -112,7 +112,7 @@ public class OnCallCoverageTests : IDisposable
     {
         Guid schedule = AddSchedule(SupportWindow.S1, (Tue(8), Tue(11)), (Tue(13), Tue(17)));
 
-        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(schedule, Tue(0), Wed(0));
+        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(tenantId, schedule, Tue(0), Wed(0));
 
         gaps.Should().ContainSingle();
         gaps[0].From.Should().Be(Tue(11));
@@ -128,7 +128,7 @@ public class OnCallCoverageTests : IDisposable
     {
         Guid schedule = AddSchedule(SupportWindow.S1, (Tue(8), Tue(17)));
 
-        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(schedule, Tue(0), Swedish(2026, 9, 22, 23));
+        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(tenantId, schedule, Tue(0), Swedish(2026, 9, 22, 23));
 
         gaps.Should().BeEmpty();
     }
@@ -142,7 +142,7 @@ public class OnCallCoverageTests : IDisposable
     {
         Guid schedule = AddSchedule(SupportWindow.S4, (Tue(8), Tue(17)));
 
-        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(schedule, Tue(0), Wed(0));
+        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(tenantId, schedule, Tue(0), Wed(0));
 
         gaps.Should().HaveCount(2);
         gaps[0].From.Should().Be(Tue(0));
@@ -156,7 +156,7 @@ public class OnCallCoverageTests : IDisposable
     {
         Guid schedule = AddSchedule(SupportWindow.S1, (Tue(8), Tue(13)), (Tue(12), Tue(17)));
 
-        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(schedule, Tue(0), Wed(0));
+        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(tenantId, schedule, Tue(0), Wed(0));
 
         gaps.Should().BeEmpty();
     }
@@ -174,9 +174,9 @@ public class OnCallCoverageTests : IDisposable
         DateTime saturday = Swedish(2026, 9, 26, 0);
         DateTime sunday = Swedish(2026, 9, 27, 0);
 
-        (await onCall.GetCoverageGapsAsync(underS1, saturday, sunday)).Should().BeEmpty();
+        (await onCall.GetCoverageGapsAsync(tenantId, underS1, saturday, sunday)).Should().BeEmpty();
 
-        List<CoverageGap> s3 = await onCall.GetCoverageGapsAsync(underS3, saturday, sunday);
+        List<CoverageGap> s3 = await onCall.GetCoverageGapsAsync(tenantId, underS3, saturday, sunday);
         s3.Should().ContainSingle();
         s3[0].Duration.Should().Be(TimeSpan.FromHours(17));
     }
@@ -187,7 +187,7 @@ public class OnCallCoverageTests : IDisposable
     {
         Guid schedule = AddSchedule(covers: null);
 
-        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(schedule, Tue(0), Wed(0));
+        List<CoverageGap> gaps = await onCall.GetCoverageGapsAsync(tenantId, schedule, Tue(0), Wed(0));
 
         gaps.Should().BeEmpty();
     }
@@ -325,7 +325,7 @@ public class OnCallCoverageTests : IDisposable
     [Fact]
     public async Task The_register_is_readable_as_the_agreement_requires()
     {
-        await onCall.SaveSubconsultantAsync(new Subconsultant
+        await onCall.SaveSubconsultantAsync(tenantId, new Subconsultant
         {
             TenantId = tenantId, Name = "Anna Andersson", Company = "Partner AB",
         });
@@ -348,7 +348,7 @@ public class OnCallCoverageTests : IDisposable
     {
         Guid scheduleId = await AddSchedule();
 
-        await onCall.AddShiftAsync(
+        await onCall.AddShiftAsync(tenantId, 
             scheduleId, "Alice Smith", "alice@entit.se",
             Tue(8), Tue(20), notes: null,
             assigneePhone: "+46 70 123 45 67",
@@ -371,7 +371,7 @@ public class OnCallCoverageTests : IDisposable
         Guid scheduleId = await AddSchedule();
         Subconsultant person = await Registered(cleared: true);
 
-        await onCall.AddShiftAsync(
+        await onCall.AddShiftAsync(tenantId, 
             scheduleId, person.Name, person.Email,
             Tue(8), Tue(20), notes: null,
             affiliation: OnCallAffiliation.Subconsultant,
@@ -395,7 +395,7 @@ public class OnCallCoverageTests : IDisposable
         Guid scheduleId = await AddSchedule();
         Subconsultant person = await Registered(cleared: false);
 
-        Func<Task> roster = () => onCall.AddShiftAsync(
+        Func<Task> roster = () => onCall.AddShiftAsync(tenantId, 
             scheduleId, person.Name, person.Email,
             Tue(8), Tue(20), notes: null,
             affiliation: OnCallAffiliation.Subconsultant,
@@ -412,7 +412,7 @@ public class OnCallCoverageTests : IDisposable
     {
         Guid scheduleId = await AddSchedule();
 
-        Func<Task> roster = () => onCall.AddShiftAsync(
+        Func<Task> roster = () => onCall.AddShiftAsync(tenantId, 
             scheduleId, "Somebody", null, Tue(8), Tue(20), notes: null,
             affiliation: OnCallAffiliation.Subconsultant,
             subconsultantId: Guid.NewGuid());
@@ -426,7 +426,7 @@ public class OnCallCoverageTests : IDisposable
     {
         Guid scheduleId = await AddSchedule();
 
-        await onCall.AddShiftAsync(
+        await onCall.AddShiftAsync(tenantId, 
             scheduleId, "Alice Smith", "alice@entit.se", Tue(8), Tue(20), notes: null);
 
         db.OnCallShifts.Single().Affiliation.Should().Be(OnCallAffiliation.Employee);
@@ -442,12 +442,12 @@ public class OnCallCoverageTests : IDisposable
     {
         Guid scheduleId = await AddSchedule();
 
-        await onCall.AddShiftAsync(
+        await onCall.AddShiftAsync(tenantId, 
             scheduleId, "Alice Smith", "alice@entit.se", Tue(8), Tue(20), notes: null);
 
         Guid shiftId = db.OnCallShifts.Single().Id;
 
-        await onCall.RecordHandoverAsync(shiftId, "  Ticket #41 still live; supplier rung at 02:00.  ");
+        await onCall.RecordHandoverAsync(tenantId, shiftId, "  Ticket #41 still live; supplier rung at 02:00.  ");
 
         db.ChangeTracker.Clear();
 
@@ -461,13 +461,13 @@ public class OnCallCoverageTests : IDisposable
     {
         Guid scheduleId = await AddSchedule();
 
-        await onCall.AddShiftAsync(
+        await onCall.AddShiftAsync(tenantId, 
             scheduleId, "Alice Smith", null, Tue(8), Tue(20), notes: null);
 
         Guid shiftId = db.OnCallShifts.Single().Id;
 
-        await onCall.RecordHandoverAsync(shiftId, "Something.");
-        await onCall.RecordHandoverAsync(shiftId, "   ");
+        await onCall.RecordHandoverAsync(tenantId, shiftId, "Something.");
+        await onCall.RecordHandoverAsync(tenantId, shiftId, "   ");
 
         db.ChangeTracker.Clear();
 
@@ -478,7 +478,7 @@ public class OnCallCoverageTests : IDisposable
     [Fact]
     public async Task Handing_over_a_shift_that_is_not_there_does_nothing()
     {
-        Func<Task> handover = () => onCall.RecordHandoverAsync(Guid.NewGuid(), "Anything.");
+        Func<Task> handover = () => onCall.RecordHandoverAsync(tenantId, Guid.NewGuid(), "Anything.");
 
         await handover.Should().NotThrowAsync();
     }
@@ -514,5 +514,181 @@ public class OnCallCoverageTests : IDisposable
         await db.SaveChangesAsync();
 
         return person;
+    }
+
+    // ──────── Tenancy ────────
+
+    /// <summary>A second tenant with a schedule, a shift on it, and a subconsultant.</summary>
+    private (Guid Tenant, Guid Schedule, Guid Shift, Guid Subconsultant) SeedStranger()
+    {
+        Guid tenant = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = tenant, Name = "Stranger", Slug = $"stranger-{tenant:N}" });
+
+        OnCallSchedule schedule = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant,
+            Name = "Their jour",
+            Covers = SupportWindow.S3,
+            IsEnabled = true,
+        };
+        OnCallShift shift = new()
+        {
+            Id = Guid.NewGuid(),
+            ScheduleId = schedule.Id,
+            AssigneeName = "Their person",
+            AssigneePhone = "+46700000000",
+            StartsAt = Tue(8),
+            EndsAt = Tue(17),
+            HandoverNotes = "INC-42 still live, DBA rung at 02:00",
+        };
+        schedule.Shifts.Add(shift);
+        db.OnCallSchedules.Add(schedule);
+
+        Subconsultant person = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant,
+            Name = "Their consultant",
+            Company = "Elsewhere AB",
+            IsActive = true,
+            ConfidentialitySignedAt = Tue(0).AddYears(-1),
+            DataProcessingBoundAt = Tue(0).AddYears(-1),
+            ApprovedAt = Tue(0).AddYears(-1),
+        };
+        db.Subconsultants.Add(person);
+        db.SaveChanges();
+
+        return (tenant, schedule.Id, shift.Id, person.Id);
+    }
+
+    /// <summary>
+    /// A schedule carries who is on call, their phone number and their handover notes; a gap list
+    /// is the hours nobody is covering. <c>WhoIsOnCallAsync</c> and <c>GetSchedulesAsync</c> have
+    /// always taken a tenant — <c>GetScheduleAsync</c> and <c>GetCoverageGapsAsync</c> took an id.
+    ///
+    /// <para><c>IsEnabled</c> is the sharp write: a disabled schedule is skipped by both
+    /// on-call lookups, so switching off a stranger's rota means nobody is found when their
+    /// alert fires.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_schedule_is_not_readable_or_editable_by_another_tenant()
+    {
+        var them = SeedStranger();
+
+        (await onCall.GetScheduleAsync(tenantId, them.Schedule)).Should().BeNull(
+            "their schedule exists, so this is a refusal");
+        (await onCall.GetScheduleAsync(them.Tenant, them.Schedule)).Should().NotBeNull(
+            "the owner still sees it");
+        (await onCall.GetSchedulesAsync(tenantId)).Should().BeEmpty();
+
+        (await onCall.GetCoverageGapsAsync(tenantId, them.Schedule, Tue(0), Wed(0)))
+            .Should().BeEmpty("a schedule we cannot see reports no gaps");
+        (await onCall.GetCoverageGapsAsync(them.Tenant, them.Schedule, Tue(0), Wed(0)))
+            .Should().NotBeEmpty("the owner's own S3 window is only covered 08–17");
+
+        // The writes refuse silently — they look the row up and return when it is null.
+        await onCall.UpdateScheduleAsync(tenantId, them.Schedule, "hijacked", null, isEnabled: false);
+        await onCall.DeleteScheduleAsync(tenantId, them.Schedule);
+
+        OnCallSchedule intact = (await onCall.GetScheduleAsync(them.Tenant, them.Schedule))!;
+        intact.Name.Should().Be("Their jour");
+        intact.IsEnabled.Should().BeTrue(
+            "a disabled rota means nobody is found on call when their alert fires");
+
+        // The owner can still do both.
+        await onCall.UpdateScheduleAsync(them.Tenant, them.Schedule, "renamed", null, isEnabled: true);
+        (await onCall.GetScheduleAsync(them.Tenant, them.Schedule))!.Name.Should().Be("renamed");
+        await onCall.DeleteScheduleAsync(them.Tenant, them.Schedule);
+        (await onCall.GetScheduleAsync(them.Tenant, them.Schedule)).Should().BeNull();
+    }
+
+    /// <summary>
+    /// ⚠️ <c>OnCallShift</c> has no <c>TenantId</c>, so shifts travel shift → schedule. A handover
+    /// note names the live incident and what was tried at two in the morning: the next person on
+    /// call acts on it, which makes it worth both reading and corrupting.
+    /// </summary>
+    [Fact]
+    public async Task A_shift_cannot_be_rostered_or_rewritten_across_a_tenant()
+    {
+        var them = SeedStranger();
+
+        Func<Task> roster = () => onCall.AddShiftAsync(
+            tenantId, them.Schedule, "Our person", null, Wed(8), Wed(17), null);
+        await roster.Should().ThrowAsync<InvalidOperationException>();
+
+        await onCall.RecordHandoverAsync(tenantId, them.Shift, "all quiet, nothing live");
+        await onCall.DeleteShiftAsync(tenantId, them.Shift);
+
+        OnCallShift intact = (await onCall.GetScheduleAsync(them.Tenant, them.Schedule))!
+            .Shifts.Should().ContainSingle("their shift must still be rostered").Subject;
+        intact.HandoverNotes.Should().Be("INC-42 still live, DBA rung at 02:00",
+            "overwriting a handover note is how the next person is told the wrong thing");
+
+        // The owner can still write and delete it.
+        await onCall.RecordHandoverAsync(them.Tenant, them.Shift, "handed over cleanly");
+        (await onCall.GetScheduleAsync(them.Tenant, them.Schedule))!
+            .Shifts.Single().HandoverNotes.Should().Be("handed over cleanly");
+        await onCall.DeleteShiftAsync(them.Tenant, them.Shift);
+        (await onCall.GetScheduleAsync(them.Tenant, them.Schedule))!.Shifts.Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// ⚠️ The §18 register. Two separate findings here.
+    ///
+    /// <para><c>AddShiftAsync</c> resolved the subconsultant by id alone and then evaluated
+    /// <c>MayAccessCustomerEnvironments</c> against that row — so the §18 gate was being decided
+    /// from <em>another tenant's</em> approval record. A person their customer had approved could
+    /// be rostered onto our rota on the strength of a consent nobody here ever obtained.</para>
+    ///
+    /// <para><c>SaveSubconsultantAsync</c> takes a caller-supplied entity and calls
+    /// <c>Update()</c> on the edit path, which writes every column including <c>TenantId</c> —
+    /// so it could move a row out of their register into ours, carrying its approvals.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_subconsultant_register_cannot_be_reached_across_a_tenant()
+    {
+        var them = SeedStranger();
+        Guid ourSchedule = AddSchedule(SupportWindow.S3);
+
+        // Their approved consultant, rostered onto our schedule.
+        Func<Task> borrowTheirConsent = () => onCall.AddShiftAsync(
+            tenantId, ourSchedule, "Their consultant", null, Wed(8), Wed(17), null,
+            affiliation: OnCallAffiliation.Subconsultant, subconsultantId: them.Subconsultant);
+        await borrowTheirConsent.Should().ThrowAsync<InvalidOperationException>();
+
+        (await onCall.GetScheduleAsync(tenantId, ourSchedule))!.Shifts.Should().BeEmpty(
+            "§18 consent is per tenant — theirs is not ours to rely on");
+
+        (await onCall.GetSubconsultantsAsync(tenantId)).Should().BeEmpty(
+            "their register is not ours to read");
+
+        // Moving their row into our register by posting it back with our tenant on it.
+        Subconsultant theirs = db.Subconsultants.AsNoTracking().Single(c => c.Id == them.Subconsultant);
+        Func<Task> steal = () => onCall.SaveSubconsultantAsync(tenantId, new Subconsultant
+        {
+            Id = theirs.Id,
+            TenantId = tenantId,
+            Name = theirs.Name,
+            Company = theirs.Company,
+            IsActive = true,
+            ConfidentialitySignedAt = theirs.ConfidentialitySignedAt,
+            DataProcessingBoundAt = theirs.DataProcessingBoundAt,
+            ApprovedAt = theirs.ApprovedAt,
+        });
+        await steal.Should().ThrowAsync<InvalidOperationException>();
+
+        (await onCall.GetSubconsultantsAsync(them.Tenant)).Should().ContainSingle()
+            .Which.TenantId.Should().Be(them.Tenant, "the row stays in their §18 register");
+
+        // Our own new entry is still created, and stamped with our tenant whatever was posted.
+        Subconsultant ours = await onCall.SaveSubconsultantAsync(tenantId, new Subconsultant
+        {
+            TenantId = them.Tenant,
+            Name = "Our consultant",
+            Company = "Here AB",
+            IsActive = true,
+        });
+        ours.TenantId.Should().Be(tenantId, "the caller's claim is overwritten, not trusted");
     }
 }

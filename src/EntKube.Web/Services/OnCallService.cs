@@ -68,15 +68,20 @@ public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
     /// <para>A schedule with no <see cref="OnCallSchedule.Covers"/> has nothing to be
     /// measured against and reports no gaps.</para>
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose schedule. A gap list is where another tenant's rota is uncovered — the hours nobody
+    /// is on call. <c>WhoIsOnCallAsync</c> and <c>GetSchedulesAsync</c> beside it have always
+    /// taken a tenant.
+    /// </param>
     public async Task<List<CoverageGap>> GetCoverageGapsAsync(
-        Guid scheduleId, DateTime from, DateTime to, CancellationToken ct = default)
+        Guid tenantId, Guid scheduleId, DateTime from, DateTime to, CancellationToken ct = default)
     {
         using SupportDbContext db = dbFactory.CreateDbContext();
 
         OnCallSchedule? schedule = await db.OnCallSchedules
             .Include(s => s.Shifts)
             .AsNoTracking()
-            .FirstOrDefaultAsync(s => s.Id == scheduleId, ct);
+            .FirstOrDefaultAsync(s => s.Id == scheduleId && s.TenantId == tenantId, ct);
 
         if (schedule?.Covers is not SupportWindow window)
         {
@@ -146,11 +151,27 @@ public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose register. ⚠️ This takes a whole entity from the caller, so <c>subconsultant.TenantId</c>
+    /// is whatever was posted and cannot be the authority — and the update path calls
+    /// <c>Update()</c>, which writes every column including <c>TenantId</c> and <c>CustomerId</c>.
+    /// Unchecked, that moves a row out of another tenant's §18 register and into ours, carrying
+    /// its recorded approvals with it.
+    /// </param>
     public async Task<Subconsultant> SaveSubconsultantAsync(
-        Subconsultant subconsultant, CancellationToken ct = default)
+        Guid tenantId, Subconsultant subconsultant, CancellationToken ct = default)
     {
         using SupportDbContext db = dbFactory.CreateDbContext();
 
+        if (subconsultant.Id != Guid.Empty
+            && !await db.Subconsultants.AnyAsync(
+                c => c.Id == subconsultant.Id && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException(
+                "That subconsultant does not belong to this tenant.");
+        }
+
+        subconsultant.TenantId = tenantId;
         subconsultant.UpdatedAt = DateTime.UtcNow;
 
         if (subconsultant.Id == Guid.Empty)
@@ -334,12 +355,17 @@ public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
             .ToListAsync(ct);
     }
 
-    public async Task<OnCallSchedule?> GetScheduleAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose schedule. The shifts come with it: who is on call, their phone number and their
+    /// handover notes.
+    /// </param>
+    public async Task<OnCallSchedule?> GetScheduleAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using SupportDbContext db = dbFactory.CreateDbContext();
         return await db.OnCallSchedules
             .Include(s => s.Shifts.OrderBy(sh => sh.StartsAt))
-            .FirstOrDefaultAsync(s => s.Id == id, ct);
+            .FirstOrDefaultAsync(s => s.Id == id && s.TenantId == tenantId, ct);
     }
 
     public async Task<Guid> CreateScheduleAsync(Guid tenantId, string name, string? description, CancellationToken ct = default)
@@ -356,10 +382,18 @@ public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
         return schedule.Id;
     }
 
-    public async Task UpdateScheduleAsync(Guid id, string name, string? description, bool isEnabled, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose schedule. <c>IsEnabled</c> is the sharp field — a disabled schedule is skipped by
+    /// <c>WhoIsOnCallAsync</c> and <c>GetCurrentOnCallAsync</c>, so switching off a stranger's
+    /// rota means nobody is found on call when their alert fires.
+    /// </param>
+    public async Task UpdateScheduleAsync(
+        Guid tenantId, Guid id, string name, string? description, bool isEnabled,
+        CancellationToken ct = default)
     {
         using SupportDbContext db = dbFactory.CreateDbContext();
-        OnCallSchedule? schedule = await db.OnCallSchedules.FindAsync([id], ct);
+        OnCallSchedule? schedule = await db.OnCallSchedules
+            .FirstOrDefaultAsync(s => s.Id == id && s.TenantId == tenantId, ct);
         if (schedule is null) return;
 
         schedule.Name = name;
@@ -368,10 +402,13 @@ public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task DeleteScheduleAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">Whose schedule. The cascade takes its shifts.</param>
+    public async Task DeleteScheduleAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using SupportDbContext db = dbFactory.CreateDbContext();
-        OnCallSchedule? schedule = await db.OnCallSchedules.FindAsync([id], ct);
+        OnCallSchedule? schedule = await db.OnCallSchedules
+            .FirstOrDefaultAsync(s => s.Id == id && s.TenantId == tenantId, ct);
         if (schedule is not null) db.OnCallSchedules.Remove(schedule);
         await db.SaveChangesAsync(ct);
     }
@@ -392,8 +429,14 @@ public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
     /// environments — <see cref="MayAccessCustomerEnvironments"/> is that test, and this
     /// refuses rather than quietly rostering somebody who fails it.
     /// </param>
+    /// <param name="tenantId">
+    /// Whose schedule and whose subconsultant. ⚠️ Both, because the §18 gate below reads the
+    /// subconsultant's approval record: with the lookup unscoped, that gate was evaluated against
+    /// <em>another tenant's</em> register, so a person they had approved could be rostered onto
+    /// our rota — or ours onto theirs — on the strength of a consent nobody here ever obtained.
+    /// </param>
     public async Task AddShiftAsync(
-        Guid scheduleId, string assigneeName, string? assigneeEmail,
+        Guid tenantId, Guid scheduleId, string assigneeName, string? assigneeEmail,
         DateTime startsAt, DateTime endsAt, string? notes,
         string? assigneePhone = null,
         string? assigneeTeamsHandle = null,
@@ -403,10 +446,15 @@ public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
     {
         using SupportDbContext db = dbFactory.CreateDbContext();
 
+        if (!await db.OnCallSchedules.AnyAsync(s => s.Id == scheduleId && s.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("That schedule does not belong to this tenant.");
+        }
+
         if (subconsultantId is Guid id)
         {
             Subconsultant? person = await db.Subconsultants
-                .FirstOrDefaultAsync(c => c.Id == id, ct)
+                .FirstOrDefaultAsync(c => c.Id == id && c.TenantId == tenantId, ct)
                 ?? throw new InvalidOperationException("That subconsultant is not registered.");
 
             if (!MayAccessCustomerEnvironments(person, startsAt))
@@ -443,12 +491,18 @@ public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
     /// and the one thing a rota cannot infer — which incident is still live, what was tried
     /// at two in the morning, who has already been rung.</para>
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose shift. ⚠️ <c>OnCallShift</c> has no <c>TenantId</c>, so the scope runs shift →
+    /// schedule. A handover note names the live incident and what has been tried, which is both
+    /// worth reading and worth corrupting: the next person on call acts on it.
+    /// </param>
     public async Task RecordHandoverAsync(
-        Guid shiftId, string? notes, CancellationToken ct = default)
+        Guid tenantId, Guid shiftId, string? notes, CancellationToken ct = default)
     {
         using SupportDbContext db = dbFactory.CreateDbContext();
 
-        OnCallShift? shift = await db.OnCallShifts.FirstOrDefaultAsync(sh => sh.Id == shiftId, ct);
+        OnCallShift? shift = await db.OnCallShifts
+            .FirstOrDefaultAsync(sh => sh.Id == shiftId && sh.Schedule.TenantId == tenantId, ct);
 
         if (shift is null)
         {
@@ -459,10 +513,16 @@ public class OnCallService(IDbContextFactory<SupportDbContext> dbFactory)
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task DeleteShiftAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose shift — the scope runs shift → schedule. Deleting one leaves an hour of their rota
+    /// with nobody on it.
+    /// </param>
+    public async Task DeleteShiftAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using SupportDbContext db = dbFactory.CreateDbContext();
-        OnCallShift? shift = await db.OnCallShifts.FindAsync([id], ct);
+        OnCallShift? shift = await db.OnCallShifts
+            .FirstOrDefaultAsync(sh => sh.Id == id && sh.Schedule.TenantId == tenantId, ct);
         if (shift is not null) db.OnCallShifts.Remove(shift);
         await db.SaveChangesAsync(ct);
     }
