@@ -189,9 +189,19 @@ public class ExternalRouteService(
     /// <summary>
     /// Gets all external routes for a component.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose component. A route row names the published hostname, its paths and its TLS, so
+    /// listing them for an arbitrary component id describes another tenant's front door.
+    /// <c>AddRouteAsync</c> beside it has always taken a tenant.
+    /// </param>
     public async Task<List<ExternalRoute>> GetRoutesAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
+        if (await catalog.GetComponentAsync(tenantId, componentId, ct) is null)
+        {
+            return [];
+        }
+
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         return await db.ExternalRoutes
@@ -255,8 +265,13 @@ public class ExternalRouteService(
     /// afterwards — the value only reaches the cluster with the regenerated HTTPRoute.
     /// Null restores the platform default; 0 disables the timeout.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose route. The timeout is what the gateway enforces — 0 is the no-timeout escape hatch
+    /// for streaming — so editing a stranger's either cuts their long requests off or removes the
+    /// limit protecting them.
+    /// </param>
     public async Task UpdateRouteTimeoutAsync(
-        Guid routeId, int? requestTimeoutSeconds, CancellationToken ct = default)
+        Guid tenantId, Guid routeId, int? requestTimeoutSeconds, CancellationToken ct = default)
     {
         if (requestTimeoutSeconds is < 0)
         {
@@ -264,6 +279,10 @@ public class ExternalRouteService(
         }
 
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
+
+        // Scoped through the same loader the generators use: the route has to resolve for this
+        // tenant before anything is written to it.
+        _ = await LoadRouteAsync(tenantId, routeId, ct);
 
         ExternalRoute route = await db.ExternalRoutes
             .FirstOrDefaultAsync(r => r.Id == routeId, ct)
@@ -282,8 +301,12 @@ public class ExternalRouteService(
     /// component's routes — the DestinationRule is written there, not here, so nothing changes
     /// in the cluster until the operator re-applies.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose route. Sticky sessions decide which replica a user's requests land on; turning them
+    /// off under somebody else's app scatters sessions that depend on them.
+    /// </param>
     public async Task UpdateRouteSessionAffinityAsync(
-        Guid routeId, SessionAffinityMode mode, string? key, int? ttlSeconds,
+        Guid tenantId, Guid routeId, SessionAffinityMode mode, string? key, int? ttlSeconds,
         CancellationToken ct = default)
     {
         if (ValidateSessionAffinity(mode, key) is string error)
@@ -296,6 +319,8 @@ public class ExternalRouteService(
             throw new InvalidOperationException(
                 "Affinity cookie lifetime cannot be negative. Leave it empty for a session cookie.");
         }
+
+        _ = await LoadRouteAsync(tenantId, routeId, ct);
 
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
@@ -330,8 +355,15 @@ public class ExternalRouteService(
     /// Deletes an external route. The caller should also remove the HTTPRoute
     /// from the cluster (via kubectl delete or the K8s API).
     /// </summary>
-    public async Task DeleteRouteAsync(Guid routeId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose route. Deleting one unpublishes the hostname it serves — an outage for whoever was
+    /// reaching the component through it.
+    /// </param>
+    public async Task DeleteRouteAsync(
+        Guid tenantId, Guid routeId, CancellationToken ct = default)
     {
+        _ = await LoadRouteAsync(tenantId, routeId, ct);
+
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         ExternalRoute route = await db.ExternalRoutes
@@ -392,7 +424,21 @@ public class ExternalRouteService(
             .FirstOrDefaultAsync(r => r.Id == routeId, ct)
             ?? throw new InvalidOperationException("Route not found.");
 
-        return (route, await catalog.GetComponentAsync(tenantId, route.ComponentId, ct));
+        // ⚠️ The component resolution IS the authorization, and it has to be required rather
+        // than optional. ExternalRoute carries only a ComponentId, and ClusterComponents is
+        // Catalog's table — ConnectivityDbContext does not expose it, and reaching into it would
+        // be the coupling CatalogContractAdoptionTests rejects. So the tenant check can only come
+        // from the contract, which takes the tenant as a parameter.
+        //
+        // This used to hand the null straight on, and the generators below document their
+        // component as "null when the caller cannot see one" — so a route belonging to another
+        // tenant still rendered its hostname, paths and timeouts, just without the component's
+        // name. A route you cannot see is not found.
+        EntKube.Contracts.Catalog.InstalledComponent component =
+            await catalog.GetComponentAsync(tenantId, route.ComponentId, ct)
+            ?? throw new InvalidOperationException("Route not found.");
+
+        return (route, component);
     }
 
     /// <summary>

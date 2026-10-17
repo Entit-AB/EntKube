@@ -484,7 +484,7 @@ public class CatalogComponentRegistrar(
         string? fallbackReleaseName = null, bool isKeycloak = false,
         string? serviceName = null, int servicePort = 80)
     {
-        List<ExternalRoute> existing = await routeService.GetRoutesAsync(componentId);
+        List<ExternalRoute> existing = await routeService.GetRoutesAsync(tenantId, componentId);
         if (existing.Any(r => r.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase)))
         {
             return;

@@ -942,7 +942,7 @@ else
             if (hasExternalRoute && component is not null)
             {
                 List<EntKube.Web.Data.ExternalRoute> exRoutes =
-                    await RouteService.GetRoutesAsync(component.Id);
+                    await RouteService.GetRoutesAsync(TenantId, component.Id);
                 routeTlsMode = exRoutes.FirstOrDefault()?.TlsMode;
             }
             routerRunning = await HeadscaleService.IsSubnetRouterRunningAsync(TenantId, ClusterId);
@@ -976,7 +976,7 @@ else
     {
         if (component is null) return false;
         List<EntKube.Web.Data.ExternalRoute> routes =
-            await RouteService.GetRoutesAsync(component.Id);
+            await RouteService.GetRoutesAsync(TenantId, component.Id);
         return routes.Count > 0;
     }
 

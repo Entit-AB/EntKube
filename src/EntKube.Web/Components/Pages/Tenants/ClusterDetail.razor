@@ -2668,7 +2668,7 @@ else if (section == "components")
                 bool hasRouteHostnameField = catalogMatch?.FormFields.Any(f => f.Key == "hostname") == true;
                 if (hasRouteHostnameField)
                 {
-                    List<ExternalRoute> routes = await RouteService.GetRoutesAsync(componentId);
+                    List<ExternalRoute> routes = await RouteService.GetRoutesAsync(TenantId, componentId);
                     ExternalRoute? route = routes.FirstOrDefault();
                     if (route is not null)
                     {
@@ -3623,7 +3623,7 @@ else if (section == "components")
         Guid componentId, Dictionary<string, string> fieldValues, string hostname)
     {
         // Skip if a route for this hostname already exists on the component.
-        List<ExternalRoute> existing = await RouteService.GetRoutesAsync(componentId);
+        List<ExternalRoute> existing = await RouteService.GetRoutesAsync(TenantId, componentId);
         if (existing.Any(r => r.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase)))
         {
             return;
@@ -3923,7 +3923,7 @@ else if (section == "components")
     private async Task EnsureHarborRouteAsync(
         Guid componentId, Dictionary<string, string> fieldValues, string hostname)
     {
-        List<ExternalRoute> existing = await RouteService.GetRoutesAsync(componentId);
+        List<ExternalRoute> existing = await RouteService.GetRoutesAsync(TenantId, componentId);
         if (existing.Any(r => r.Hostname.Equals(hostname, StringComparison.OrdinalIgnoreCase)))
         {
             return;
@@ -3986,7 +3986,7 @@ else if (section == "components")
         compDetailTab = "expose";
         routeError = null;
         routeYamlPreview = null;
-        componentRoutes = await RouteService.GetRoutesAsync(componentId);
+        componentRoutes = await RouteService.GetRoutesAsync(TenantId, componentId);
         shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(TenantId, componentId);
         await LoadRouteUptimes();
     }
@@ -4031,7 +4031,7 @@ else if (section == "components")
             routeTlsCert = "";
             routeTlsKey = "";
 
-            componentRoutes = await RouteService.GetRoutesAsync(componentId);
+            componentRoutes = await RouteService.GetRoutesAsync(TenantId, componentId);
             shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(TenantId, componentId);
             await LifecycleService.ApplyExternalRoutesAsync(TenantId, componentId);
         }
@@ -4138,8 +4138,8 @@ else if (section == "components")
     {
         try
         {
-            await RouteService.UpdateRouteSessionAffinityAsync(route.Id, mode, key, ttl);
-            componentRoutes = await RouteService.GetRoutesAsync(componentId);
+            await RouteService.UpdateRouteSessionAffinityAsync(TenantId, route.Id, mode, key, ttl);
+            componentRoutes = await RouteService.GetRoutesAsync(TenantId, componentId);
             // Re-apply: the DestinationRule carrying the affinity is written by the route apply,
             // so without this the table would show a setting the cluster does not have.
             await LifecycleService.ApplyExternalRoutesAsync(TenantId, componentId);
@@ -4167,8 +4167,8 @@ else if (section == "components")
 
         try
         {
-            await RouteService.UpdateRouteTimeoutAsync(route.Id, seconds);
-            componentRoutes = await RouteService.GetRoutesAsync(componentId);
+            await RouteService.UpdateRouteTimeoutAsync(TenantId, route.Id, seconds);
+            componentRoutes = await RouteService.GetRoutesAsync(TenantId, componentId);
             shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(TenantId, componentId);
             await LifecycleService.ApplyExternalRoutesAsync(TenantId, componentId);
         }
@@ -4180,8 +4180,8 @@ else if (section == "components")
 
     private async Task DeleteRoute(Guid routeId, Guid componentId)
     {
-        await RouteService.DeleteRouteAsync(routeId);
-        componentRoutes = await RouteService.GetRoutesAsync(componentId);
+        await RouteService.DeleteRouteAsync(TenantId, routeId);
+        componentRoutes = await RouteService.GetRoutesAsync(TenantId, componentId);
         shadowedRouteHostnames = await RouteService.ShadowedHostnamesAsync(TenantId, componentId);
         routeYamlPreview = null;
     }
