@@ -102,13 +102,17 @@ public class DockerRegistryService(
     /// across the app's environments, or an environment id to bind it to that environment.
     /// No-op for tenant-wide credentials (which have no app to own the environment).
     /// </summary>
+    /// <param name="tenantId">Whose credential.</param>
     public async Task ChangeScopeAsync(
+        Guid tenantId,
         Guid credentialId,
         Guid? environmentId,
         CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
-        DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>().FindAsync([credentialId], ct);
+        // DockerRegistryCredential has no TenantId; it lives in a vault, and the vault has one.
+        DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>()
+            .FirstOrDefaultAsync(c => c.Id == credentialId && c.Vault.TenantId == tenantId, ct);
         if (cred is null || cred.AppId is null)
             return;
 
@@ -121,7 +125,14 @@ public class DockerRegistryService(
     /// Decrypts and returns the password for a credential.
     /// Returns null if the credential is not found.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose credential. ⚠️ This <b>returns the registry password in cleartext</b> and took a
+    /// bare id — the sharpest shape in this unit, because there is no cluster, no manifest and
+    /// no seam between the id and the secret. The credential has no TenantId of its own; it
+    /// lives in a vault, and the vault has one.
+    /// </param>
     public async Task<string?> GetPasswordAsync(
+        Guid tenantId,
         Guid credentialId,
         CancellationToken ct = default)
     {
@@ -129,7 +140,10 @@ public class DockerRegistryService(
 
         DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>()
             .Include(c => c.Vault)
-            .FirstOrDefaultAsync(c => c.Id == credentialId, ct);
+            // DockerRegistryCredential has no TenantId of its own; it lives in a vault, and the
+            // vault has one. The cluster seam further down already refused a foreign cluster, so
+            // this is the row-level half of the same check.
+            .FirstOrDefaultAsync(c => c.Id == credentialId && c.Vault.TenantId == tenantId, ct);
 
         if (cred is null) return null;
 
@@ -140,7 +154,12 @@ public class DockerRegistryService(
     /// <summary>
     /// Updates the mutable fields of a credential. Pass null to leave a field unchanged.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose credential. Rewriting the username and password of a stranger's registry
+    /// credential breaks every pull that uses it, and replaces it with one the editor knows.
+    /// </param>
     public async Task UpdateAsync(
+        Guid tenantId,
         Guid credentialId,
         string? newUsername,
         string? newPassword,
@@ -151,7 +170,10 @@ public class DockerRegistryService(
 
         DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>()
             .Include(c => c.Vault)
-            .FirstOrDefaultAsync(c => c.Id == credentialId, ct);
+            // DockerRegistryCredential has no TenantId of its own; it lives in a vault, and the
+            // vault has one. The cluster seam further down already refused a foreign cluster, so
+            // this is the row-level half of the same check.
+            .FirstOrDefaultAsync(c => c.Id == credentialId && c.Vault.TenantId == tenantId, ct);
 
         if (cred is null) return;
 
@@ -174,10 +196,14 @@ public class DockerRegistryService(
     }
 
     /// <summary>Deletes a credential by ID. Returns false if not found.</summary>
-    public async Task<bool> DeleteAsync(Guid credentialId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose credential. Deleting one breaks every pull that uses it.</param>
+    public async Task<bool> DeleteAsync(
+        Guid tenantId, Guid credentialId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
-        DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>().FindAsync([credentialId], ct);
+        // DockerRegistryCredential has no TenantId; it lives in a vault, and the vault has one.
+        DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>()
+            .FirstOrDefaultAsync(c => c.Id == credentialId && c.Vault.TenantId == tenantId, ct);
         if (cred is null) return false;
         db.Set<DockerRegistryCredential>().Remove(cred);
         await db.SaveChangesAsync(ct);
@@ -189,7 +215,12 @@ public class DockerRegistryService(
     /// <summary>
     /// Saves the Kubernetes sync target (cluster, namespace, secret name) for a credential.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose credential and whose cluster. This decides the Secret name and namespace the pull
+    /// credential is projected into, so it is a pair — the cluster is checked too.
+    /// </param>
     public async Task ConfigureSyncAsync(
+        Guid tenantId,
         Guid credentialId,
         Guid clusterId,
         string secretName,
@@ -197,7 +228,9 @@ public class DockerRegistryService(
         CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
-        DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>().FindAsync([credentialId], ct);
+        // DockerRegistryCredential has no TenantId; it lives in a vault, and the vault has one.
+        DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>()
+            .FirstOrDefaultAsync(c => c.Id == credentialId && c.Vault.TenantId == tenantId, ct);
         if (cred is null) return;
 
         cred.KubernetesClusterId = clusterId;
@@ -235,7 +268,10 @@ public class DockerRegistryService(
         DockerRegistryCredential? cred = await db.Set<DockerRegistryCredential>()
             .Include(c => c.Vault)
             .Include(c => c.KubernetesCluster)
-            .FirstOrDefaultAsync(c => c.Id == credentialId, ct);
+            // DockerRegistryCredential has no TenantId of its own; it lives in a vault, and the
+            // vault has one. The cluster seam further down already refused a foreign cluster, so
+            // this is the row-level half of the same check.
+            .FirstOrDefaultAsync(c => c.Id == credentialId && c.Vault.TenantId == tenantId, ct);
 
         if (cred is null)
             return KubernetesOperationResult<string>.Failure("Credential not found.");

@@ -1011,7 +1011,8 @@ public class DeploymentImportService(
                     email: reg.Email,
                     ct: ct);
 
-                await dockerRegistryService.ConfigureSyncAsync(cred.Id, cluster.Id, reg.SecretName, reg.Namespace, ct);
+                await dockerRegistryService.ConfigureSyncAsync(
+                    tenantId, cred.Id, cluster.Id, reg.SecretName, reg.Namespace, ct);
                 result.RegistryCredentialCount++;
             }
             catch (Exception ex)

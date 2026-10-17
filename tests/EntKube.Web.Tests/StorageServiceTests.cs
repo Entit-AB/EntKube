@@ -338,6 +338,7 @@ public class StorageServiceTests : IDisposable
         // Act
 
         await sut.UpdateStorageLinkAsync(
+            tenant.Id,
             link.Id, "New Name", "https://new-endpoint.com", "new-bucket", "eu-north-1", "Updated notes");
 
         // Assert — clear tracking so we get fresh data from DB
@@ -1069,5 +1070,88 @@ public class StorageServiceTests : IDisposable
 
         (await sut.GetBindingsForComponentAsync(stranger.Id, component.Id))
             .Should().BeEmpty("the row exists, so this is a refusal");
+    }
+
+    /// <summary>
+    /// ⚠️ A storage link is just a row: there is no cluster between a bare id and the row being
+    /// gone or repointed, so these had nothing downstream to refuse them.
+    /// <c>DeleteStorageLinkAsync</c> already took a tenant and used <c>FindAsync</c> anyway;
+    /// <c>UpdateStorageLinkAsync</c> took no tenant at all, which is the giveaway when its own
+    /// sibling does. The endpoint and bucket are editable there, so an unscoped update repoints
+    /// where another tenant's data is written.
+    /// </summary>
+    [Fact]
+    public async Task A_storage_link_cannot_be_repointed_or_deleted_by_another_tenant()
+    {
+        (Tenant tenant, Data.Environment env) = CreateTenantWithEnvironment();
+        (_, _, StorageLink link) = CreateDeploymentWithStorageLink(tenant, env);
+        (Tenant stranger, _) = CreateTenantWithEnvironment();
+        await db.SaveChangesAsync();
+
+        await sut.UpdateStorageLinkAsync(
+            stranger.Id, link.Id, "hijacked", "https://evil.example.com", "evil-bucket",
+            "eu-west-1", null);
+        await sut.DeleteStorageLinkAsync(stranger.Id, link.Id);
+
+        using ApplicationDbContext after = dbFactory.CreateDbContext();
+        StorageLink intact = after.StorageLinks.Single(l => l.Id == link.Id);
+        intact.Name.Should().Be("Invoice PDFs");
+        intact.BucketName.Should().Be("acme-invoices",
+            "the bucket name is where their data is written");
+        intact.Endpoint.Should().NotBe("https://evil.example.com");
+
+        // The owner can still do both, so the no-ops above are refusals.
+        await sut.UpdateStorageLinkAsync(
+            tenant.Id, link.Id, "renamed", intact.Endpoint, intact.BucketName, intact.Region, null);
+        using ApplicationDbContext renamed = dbFactory.CreateDbContext();
+        renamed.StorageLinks.Single(l => l.Id == link.Id).Name.Should().Be("renamed");
+
+        await sut.DeleteStorageLinkAsync(tenant.Id, link.Id);
+        using ApplicationDbContext gone = dbFactory.CreateDbContext();
+        gone.StorageLinks.Any(l => l.Id == link.Id).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// The same shape on the row that holds the cloud credentials. An OpenStack connection
+    /// carries the auth URL, the project, the username and a vaulted password, plus the outbound
+    /// proxy a tenant's API calls are routed through — and both the update and the delete took a
+    /// bare connection id.
+    /// </summary>
+    [Fact]
+    public async Task An_openstack_connection_cannot_be_repointed_or_deleted_by_another_tenant()
+    {
+        (Tenant tenant, _) = CreateTenantWithEnvironment();
+        (Tenant stranger, _) = CreateTenantWithEnvironment();
+        await db.SaveChangesAsync();
+
+        OpenStackConnection connection = await sut.CreateOpenStackConnectionAsync(
+            tenant.Id, "Cleura Prod", "https://identity.c2.citycloud.com:5000/v3", "Kna1",
+            "my-project", "abc123", "Default", "Default", "admin@example.com", "supersecret",
+            null, null, null, null, null, null);
+
+        await sut.UpdateOpenStackConnectionAsync(
+            connection.Id, "hijacked", "https://evil.example.com/v3", "elsewhere",
+            null, null, null, null, "attacker", "attacker-pass",
+            null, null, null, null, null, null, stranger.Id);
+
+        (await sut.DeleteOpenStackConnectionAsync(stranger.Id, connection.Id)).Should().BeFalse();
+
+        using ApplicationDbContext after = dbFactory.CreateDbContext();
+        OpenStackConnection intact = after.Set<OpenStackConnection>().Single(c => c.Id == connection.Id);
+        intact.Name.Should().Be("Cleura Prod");
+        intact.AuthUrl.Should().Be("https://identity.c2.citycloud.com:5000/v3",
+            "the auth URL is where their cloud credentials would be sent");
+
+        // The owner can still rename it and delete it.
+        await sut.UpdateOpenStackConnectionAsync(
+            connection.Id, "renamed", intact.AuthUrl, intact.Region,
+            null, null, null, null, intact.Username, null,
+            null, null, null, null, null, null, tenant.Id);
+
+        using ApplicationDbContext renamed = dbFactory.CreateDbContext();
+        renamed.Set<OpenStackConnection>().Single(c => c.Id == connection.Id)
+            .Name.Should().Be("renamed");
+
+        (await sut.DeleteOpenStackConnectionAsync(tenant.Id, connection.Id)).Should().BeTrue();
     }
 }

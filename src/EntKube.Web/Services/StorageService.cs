@@ -422,7 +422,13 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     /// Updates an existing storage link's metadata. Credentials are updated
     /// separately via the vault.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose link. Its sibling <see cref="DeleteStorageLinkAsync"/> took a tenant and this did
+    /// not, which is the giveaway: the endpoint and bucket name are editable here, so an
+    /// unscoped update repoints where a stranger's data is written.
+    /// </param>
     public async Task UpdateStorageLinkAsync(
+        Guid tenantId,
         Guid linkId,
         string name,
         string? endpoint,
@@ -433,7 +439,11 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        StorageLink? link = await db.StorageLinks.FindAsync([linkId], ct);
+        // ⚠️ This one deletes, and nothing downstream could have refused it: a storage link is
+        // just a row, so there is no cluster seam between a bare id and the row being gone. The
+        // link names the bucket and carries the vaulted credentials for it.
+        StorageLink? link = await db.StorageLinks
+            .FirstOrDefaultAsync(l => l.Id == linkId && l.TenantId == tenantId, ct);
 
         if (link is null)
         {
@@ -455,7 +465,11 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        StorageLink? link = await db.StorageLinks.FindAsync([linkId], ct);
+        // ⚠️ This one deletes, and nothing downstream could have refused it: a storage link is
+        // just a row, so there is no cluster seam between a bare id and the row being gone. The
+        // link names the bucket and carries the vaulted credentials for it.
+        StorageLink? link = await db.StorageLinks
+            .FirstOrDefaultAsync(l => l.Id == linkId && l.TenantId == tenantId, ct);
 
         if (link is null)
         {
@@ -1234,7 +1248,11 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        OpenStackConnection? connection = await db.OpenStackConnections.FindAsync([connectionId], ct);
+        // An OpenStack connection holds the cloud credentials, the region and the outbound
+        // proxy a tenant's API calls go through. Repointing or deleting somebody else's is the
+        // same class of act as the storage-link delete above: a row, no seam, one id.
+        OpenStackConnection? connection = await db.OpenStackConnections
+            .FirstOrDefaultAsync(c => c.Id == connectionId && c.TenantId == tenantId, ct);
 
         if (connection is null)
         {
@@ -1590,7 +1608,11 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
             return false;
         }
 
-        OpenStackConnection? connection = await db.OpenStackConnections.FindAsync([connectionId], ct);
+        // An OpenStack connection holds the cloud credentials, the region and the outbound
+        // proxy a tenant's API calls go through. Repointing or deleting somebody else's is the
+        // same class of act as the storage-link delete above: a row, no seam, one id.
+        OpenStackConnection? connection = await db.OpenStackConnections
+            .FirstOrDefaultAsync(c => c.Id == connectionId && c.TenantId == tenantId, ct);
 
         if (connection is null)
         {
