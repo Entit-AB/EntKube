@@ -706,7 +706,7 @@
             sections = await Knowledge.GetSectionsAsync(App.Id);
             dependencies = await Knowledge.GetDependenciesAsync(App.Id);
             notices = await Knowledge.GetEndOfLifeAsync(App.Id);
-            health = await Knowledge.GetHealthAsync(App.Id, DateTime.UtcNow);
+            health = await Knowledge.GetHealthAsync(TenantId, App.Id, DateTime.UtcNow);
 
             AppKnowledgeProfile? stored = await Knowledge.GetProfileAsync(App.Id);
             profileMissing = stored is null;

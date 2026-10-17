@@ -49,14 +49,21 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// </summary>
     private const int MaxParentDepth = 8;
 
-    public async Task<ApplicationContract?> GetContractAsync(Guid appId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose application. A contract is the support agreement — its classification, support
+    /// window, monthly work cap and onboarding fee — so reading another tenant's is reading their
+    /// commercial terms. <c>ApplicationContract</c> carries a <c>TenantId</c>, so this is a
+    /// direct comparison.
+    /// </param>
+    public async Task<ApplicationContract?> GetContractAsync(
+        Guid tenantId, Guid appId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         return await db.ApplicationContracts
             .Include(c => c.ServiceLevels)
             .AsNoTracking()
-            .FirstOrDefaultAsync(c => c.AppId == appId, ct);
+            .FirstOrDefaultAsync(c => c.AppId == appId && c.TenantId == tenantId, ct);
     }
 
     /// <summary>
@@ -64,14 +71,22 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// an instance inheriting its parent application's window when it has none of its own.
     /// Null when the application has no contract or nothing had taken effect by then.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose application. ⚠️ This one loaded <b>every contract in the installation</b> into
+    /// memory and then resolved one app out of the dictionary — so the answer was scoped by
+    /// nothing, and the read grew with every tenant on the box. The tenant filter fixes both:
+    /// the walk to a parent application stays possible because §10.2.1 inheritance only ever
+    /// crosses customers <em>within</em> a tenant.
+    /// </param>
     public async Task<ResolvedServiceLevel?> ResolveServiceLevelAsync(
-        Guid appId, DateTime asOf, CancellationToken ct = default)
+        Guid tenantId, Guid appId, DateTime asOf, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         List<ApplicationContract> contracts = await db.ApplicationContracts
             .Include(c => c.ServiceLevels)
             .AsNoTracking()
+            .Where(c => c.TenantId == tenantId)
             .ToListAsync(ct);
 
         return Resolve(appId, asOf, contracts.ToDictionary(c => c.AppId));
@@ -81,14 +96,16 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// The Annex B terms in force for a customer on a date — the latest agreement that had
     /// taken effect by then.
     /// </summary>
+    /// <param name="tenantId">Whose customer. An Annex B is the negotiated terms.</param>
     public async Task<PortfolioAgreement?> GetPortfolioAgreementAsync(
-        Guid customerId, DateTime asOf, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, DateTime asOf, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         return await db.PortfolioAgreements
             .AsNoTracking()
-            .Where(a => a.CustomerId == customerId && a.EffectiveFrom <= asOf)
+            .Where(a => a.CustomerId == customerId && a.TenantId == tenantId
+                     && a.EffectiveFrom <= asOf)
             .OrderByDescending(a => a.EffectiveFrom)
             .FirstOrDefaultAsync(ct);
     }
@@ -133,13 +150,20 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// <para>Applications that cannot be priced are listed rather than charged at zero, so a
     /// missing classification shows up as a gap instead of as a discount.</para>
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose customer. ⚠️ Everything below already filtered by <c>customer.TenantId</c> — read
+    /// off the customer row this method had just fetched <em>by id alone</em>. A tenant taken
+    /// from the row you are deciding about compares that row to itself, so the figures were
+    /// consistent and unauthorized at the same time. Scoping the customer lookup is the whole
+    /// fix; the rest of the method inherits it.
+    /// </param>
     public async Task<BaseFeeBreakdown> CalculateBaseFeeAsync(
-        Guid customerId, DateTime asOf, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, DateTime asOf, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         Customer? customer = await db.Customers.AsNoTracking()
-            .FirstOrDefaultAsync(c => c.Id == customerId, ct);
+            .FirstOrDefaultAsync(c => c.Id == customerId && c.TenantId == tenantId, ct);
 
         if (customer is null)
         {
@@ -221,13 +245,26 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// Creates or updates an application's Annex A. The classification is not touched here
     /// — it moves through <see cref="RecordServiceLevelAsync"/>, which keeps its history.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose contract. ⚠️ This takes a whole entity from the caller, so <c>edited.TenantId</c> is
+    /// whatever was posted — it cannot be the authority for anything. Both the app and the
+    /// claimed tenant are checked against <paramref name="tenantId"/>, and the stored row's own
+    /// tenant is never read from the incoming object on an update.
+    /// </param>
     public async Task<ApplicationContract> SaveContractAsync(
-        ApplicationContract edited, CancellationToken ct = default)
+        Guid tenantId, ApplicationContract edited, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        if (!await db.Apps.AnyAsync(a => a.Id == edited.AppId && a.Customer.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("The application does not belong to this tenant.");
+        }
+
+        edited.TenantId = tenantId;
+
         ApplicationContract? existing = await db.ApplicationContracts
-            .FirstOrDefaultAsync(c => c.AppId == edited.AppId, ct);
+            .FirstOrDefaultAsync(c => c.AppId == edited.AppId && c.TenantId == tenantId, ct);
 
         if (existing is null)
         {
@@ -261,7 +298,12 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// both change the level over the life of the agreement, and the fee follows, so the
     /// previous classification has to stay readable.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose contract. A classification sets the fee and the support window, so an insert
+    /// against a stranger's contract rewrites what they are charged and what they are owed.
+    /// </param>
     public async Task<ApplicationServiceLevel> RecordServiceLevelAsync(
+        Guid tenantId,
         Guid contractId,
         ManagementLevel level,
         SupportWindow? window,
@@ -271,6 +313,12 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.ApplicationContracts.AnyAsync(
+                c => c.Id == contractId && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("The contract does not belong to this tenant.");
+        }
 
         ApplicationServiceLevel entry = new()
         {
@@ -293,11 +341,19 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// Deletes a classification entry. For correcting a mistyped row, not for changing the
     /// terms: a real change is a new entry with its own effective date.
     /// </summary>
-    public async Task DeleteServiceLevelAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose entry. ⚠️ <c>ApplicationServiceLevel</c> is the one entity here with no
+    /// <c>TenantId</c> of its own, so the scope runs entry → contract. Deleting the entry that
+    /// was in force changes which terms a past month resolves to.
+    /// </param>
+    public async Task DeleteServiceLevelAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ApplicationServiceLevel? entry = await db.ApplicationServiceLevels.FindAsync([id], ct);
+        ApplicationServiceLevel? entry = await db.ApplicationServiceLevels
+            .FirstOrDefaultAsync(
+                e => e.Id == id && e.Contract.TenantId == tenantId, ct);
         if (entry is not null)
         {
             db.ApplicationServiceLevels.Remove(entry);
@@ -306,11 +362,22 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     }
 
     /// <summary>Records an Annex B taking effect from a date.</summary>
+    /// <param name="tenantId">
+    /// Whose customer. Another caller-supplied entity, so its own <c>TenantId</c> and
+    /// <c>CustomerId</c> are both checked rather than trusted.
+    /// </param>
     public async Task<PortfolioAgreement> RecordPortfolioAgreementAsync(
-        PortfolioAgreement agreement, CancellationToken ct = default)
+        Guid tenantId, PortfolioAgreement agreement, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        if (!await db.Customers.AnyAsync(
+                c => c.Id == agreement.CustomerId && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("The customer does not belong to this tenant.");
+        }
+
+        agreement.TenantId = tenantId;
         agreement.Id = agreement.Id == Guid.Empty ? Guid.NewGuid() : agreement.Id;
         agreement.RecordedAt = DateTime.UtcNow;
 
@@ -319,46 +386,73 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         return agreement;
     }
 
+    /// <param name="tenantId">Whose customer.</param>
     public async Task<List<PortfolioAgreement>> ListPortfolioAgreementsAsync(
-        Guid customerId, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         return await db.PortfolioAgreements.AsNoTracking()
-            .Where(a => a.CustomerId == customerId)
+            .Where(a => a.CustomerId == customerId && a.TenantId == tenantId)
             .OrderByDescending(a => a.EffectiveFrom)
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">Whose contract — the scope runs entry → contract.</param>
     public async Task<List<ApplicationServiceLevel>> ListServiceLevelsAsync(
-        Guid contractId, CancellationToken ct = default)
+        Guid tenantId, Guid contractId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         return await db.ApplicationServiceLevels.AsNoTracking()
-            .Where(l => l.ApplicationContractId == contractId)
+            .Where(l => l.ApplicationContractId == contractId
+                     && l.Contract.TenantId == tenantId)
             .OrderByDescending(l => l.EffectiveFrom)
             .ThenByDescending(l => l.RecordedAt)
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose customer. A contact row is a named person with a role and their details.
+    /// </param>
     public async Task<List<ContractContact>> ListContactsAsync(
-        Guid customerId, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         return await db.ContractContacts.AsNoTracking()
-            .Where(c => c.CustomerId == customerId)
+            .Where(c => c.CustomerId == customerId && c.TenantId == tenantId)
             .OrderBy(c => c.Party)
             .ThenBy(c => c.Role)
             .ThenBy(c => c.Name)
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose customer. ⚠️ On an update this called <c>Update(contact)</c> on an entity handed in
+    /// by the caller, which writes every column including <c>TenantId</c> and <c>CustomerId</c> —
+    /// so without a check it could move a contact row into another tenant outright. The existing
+    /// row is now loaded scoped and its fields copied over instead.
+    /// </param>
     public async Task<ContractContact> SaveContactAsync(
-        ContractContact contact, CancellationToken ct = default)
+        Guid tenantId, ContractContact contact, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.Customers.AnyAsync(
+                c => c.Id == contact.CustomerId && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("The customer does not belong to this tenant.");
+        }
+
+        contact.TenantId = tenantId;
+
+        if (contact.Id != Guid.Empty
+            && !await db.ContractContacts.AnyAsync(
+                c => c.Id == contact.Id && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("The contact does not belong to this tenant.");
+        }
 
         if (contact.Id == Guid.Empty)
         {
@@ -524,12 +618,16 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         return (added, null);
     }
 
-    public async Task DeleteSupportAddressAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose address. Removing one stops support mail sent to it from reaching its customer.
+    /// </param>
+    public async Task DeleteSupportAddressAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        CustomerSupportAddress? address =
-            await db.CustomerSupportAddresses.FindAsync([id], ct);
+        CustomerSupportAddress? address = await db.CustomerSupportAddresses
+            .FirstOrDefaultAsync(a => a.Id == id && a.TenantId == tenantId, ct);
 
         if (address is not null)
         {
@@ -538,11 +636,16 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         }
     }
 
-    public async Task DeleteEmailDomainAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose domain. Removing one unplaces every later message from that domain.
+    /// </param>
+    public async Task DeleteEmailDomainAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        CustomerEmailDomain? domain = await db.CustomerEmailDomains.FindAsync([id], ct);
+        CustomerEmailDomain? domain = await db.CustomerEmailDomains
+            .FirstOrDefaultAsync(d => d.Id == id && d.TenantId == tenantId, ct);
 
         if (domain is not null)
         {
@@ -551,11 +654,14 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         }
     }
 
-    public async Task DeleteContactAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">Whose contact.</param>
+    public async Task DeleteContactAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        ContractContact? contact = await db.ContractContacts.FindAsync([id], ct);
+        ContractContact? contact = await db.ContractContacts
+            .FirstOrDefaultAsync(c => c.Id == id && c.TenantId == tenantId, ct);
         if (contact is not null)
         {
             db.ContractContacts.Remove(contact);
@@ -571,11 +677,14 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// later effective date, which leaves the old one readable. Deleting the one that was
     /// in force changes which terms a past month resolves to.</para>
     /// </summary>
-    public async Task DeletePortfolioAgreementAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">Whose agreement.</param>
+    public async Task DeletePortfolioAgreementAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        PortfolioAgreement? agreement = await db.PortfolioAgreements.FindAsync([id], ct);
+        PortfolioAgreement? agreement = await db.PortfolioAgreements
+            .FirstOrDefaultAsync(a => a.Id == id && a.TenantId == tenantId, ct);
 
         if (agreement is not null)
         {
@@ -592,13 +701,19 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// whichever list preceded it — including months already reported and invoiced. It is
     /// here for a list entered by mistake, not for superseding one.</para>
     /// </summary>
-    public async Task DeletePriceListAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose price list. The remark above is the reason this needs a tenant more than anything
+    /// else in the file: deleting a list reprices every month that used it, <b>including months
+    /// already reported and invoiced</b>. With a bare id that was one guess away.
+    /// </param>
+    public async Task DeletePriceListAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         PriceList? list = await db.PriceLists
             .Include(p => p.Entries)
-            .FirstOrDefaultAsync(p => p.Id == id, ct);
+            .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId, ct);
 
         if (list is not null)
         {
@@ -611,12 +726,17 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// Changes a price list's own details — when it takes effect, and the note explaining
     /// what it is.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose price list. <c>EffectiveFrom</c> decides which months resolve to this list, so
+    /// moving it is the same repricing as deleting it.
+    /// </param>
     public async Task UpdatePriceListAsync(
-        Guid id, DateTime effectiveFrom, string? notes, CancellationToken ct = default)
+        Guid tenantId, Guid id, DateTime effectiveFrom, string? notes, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        PriceList? list = await db.PriceLists.FirstOrDefaultAsync(p => p.Id == id, ct);
+        PriceList? list = await db.PriceLists
+            .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId, ct);
 
         if (list is not null)
         {
@@ -638,7 +758,15 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// figure that changes underneath one is how that dispute starts. To change prices
     /// going forward, add a list with a later effective date instead.</para>
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose price list. One amount is all it takes: the remark above says an edit reprices every
+    /// month that used this list, including ones already reported, and §28 gives the customer
+    /// thirty days to dispute a report — so this is the write that starts that dispute on
+    /// somebody else's behalf. <c>PriceListEntry</c> carries no <c>TenantId</c> of its own, so
+    /// the list is both what is checked and the only path to a tenant.
+    /// </param>
     public async Task<PriceListEntry> SavePriceListEntryAsync(
+        Guid tenantId,
         Guid priceListId,
         PriceKind kind,
         string key,
@@ -647,6 +775,11 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.PriceLists.AnyAsync(p => p.Id == priceListId && p.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("The price list does not belong to this tenant.");
+        }
 
         PriceListEntry? entry = await db.PriceListEntries
             .FirstOrDefaultAsync(e => e.PriceListId == priceListId && e.Kind == kind && e.Key == key, ct);
@@ -685,11 +818,14 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// Removes one amount from a price list. Anything priced from that line then reports
     /// as unpriced rather than as free, which is the point of reporting gaps at all.
     /// </summary>
-    public async Task DeletePriceListEntryAsync(Guid entryId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose entry — the scope runs entry → list.</param>
+    public async Task DeletePriceListEntryAsync(
+        Guid tenantId, Guid entryId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        PriceListEntry? entry = await db.PriceListEntries.FindAsync([entryId], ct);
+        PriceListEntry? entry = await db.PriceListEntries
+            .FirstOrDefaultAsync(e => e.Id == entryId && e.PriceList.TenantId == tenantId, ct);
 
         if (entry is not null)
         {

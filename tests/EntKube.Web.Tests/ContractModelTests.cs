@@ -37,7 +37,7 @@ public class ContractModelTests : IDisposable
             new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(connection).Options);
         db.Database.EnsureCreated();
 
-        db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
+        db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = $"entit-{tenantId:N}" });
         db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Entit AB" });
         db.PriceLists.Add(StandardPriceList.Create(tenantId, January));
         db.SaveChanges();
@@ -116,8 +116,8 @@ public class ContractModelTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        ResolvedServiceLevel? march = await contracts.ResolveServiceLevelAsync(appId, new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc));
-        ResolvedServiceLevel? july = await contracts.ResolveServiceLevelAsync(appId, new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc));
+        ResolvedServiceLevel? march = await contracts.ResolveServiceLevelAsync(tenantId, appId, new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc));
+        ResolvedServiceLevel? july = await contracts.ResolveServiceLevelAsync(tenantId, appId, new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc));
 
         march!.Value.Level.Should().Be(ManagementLevel.Standard);
         march.Value.Window.Should().Be(SupportWindow.S1);
@@ -131,7 +131,7 @@ public class ContractModelTests : IDisposable
         Guid appId = AddApp("Journal");
         AddContract(appId, ManagementLevel.Standard, SupportWindow.S1, effectiveFrom: June);
 
-        ResolvedServiceLevel? inMarch = await contracts.ResolveServiceLevelAsync(
+        ResolvedServiceLevel? inMarch = await contracts.ResolveServiceLevelAsync(tenantId, 
             appId, new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc));
 
         inMarch.Should().BeNull();
@@ -152,7 +152,7 @@ public class ContractModelTests : IDisposable
         Guid instanceId = AddApp("Care portal — South");
         AddContract(instanceId, ManagementLevel.Instance, window: null, parentAppId: parentId);
 
-        ResolvedServiceLevel? resolved = await contracts.ResolveServiceLevelAsync(instanceId, June);
+        ResolvedServiceLevel? resolved = await contracts.ResolveServiceLevelAsync(tenantId, instanceId, June);
 
         resolved!.Value.Window.Should().Be(SupportWindow.S3);
         resolved.Value.WindowInherited.Should().BeTrue();
@@ -168,7 +168,7 @@ public class ContractModelTests : IDisposable
         Guid instanceId = AddApp("Care portal — North");
         AddContract(instanceId, ManagementLevel.Instance, SupportWindow.S4, parentAppId: parentId);
 
-        ResolvedServiceLevel? resolved = await contracts.ResolveServiceLevelAsync(instanceId, June);
+        ResolvedServiceLevel? resolved = await contracts.ResolveServiceLevelAsync(tenantId, instanceId, June);
 
         resolved!.Value.Window.Should().Be(SupportWindow.S4);
         resolved.Value.WindowInherited.Should().BeFalse();
@@ -193,7 +193,7 @@ public class ContractModelTests : IDisposable
                 onboardedAt: January.AddDays(i));
         }
 
-        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(customerId, June);
+        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(tenantId, customerId, June);
 
         fee.Unpriced.Should().BeEmpty();
         fee.Applications.Count(a => a.PriceKey == nameof(ManagementLevel.Instance)).Should().Be(20);
@@ -216,7 +216,7 @@ public class ContractModelTests : IDisposable
         AddContract(AddApp("Bokning"), ManagementLevel.Standard, SupportWindow.S1);
         AddContract(AddApp("Journal"), ManagementLevel.Complex, SupportWindow.S3);
 
-        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(customerId, June);
+        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(tenantId, customerId, June);
 
         fee.Window.Should().Be(SupportWindow.S3);
         fee.WindowFee.Should().Be(55_000m);
@@ -235,7 +235,7 @@ public class ContractModelTests : IDisposable
     {
         AddContract(AddApp("Journal"), ManagementLevel.Complex, SupportWindow.S1, onboardedAt: June);
 
-        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(
+        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(tenantId, 
             customerId, new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc));
 
         fee.Applications.Should().BeEmpty();
@@ -250,9 +250,9 @@ public class ContractModelTests : IDisposable
         contract.ManagementEndedAt = new DateTime(2026, 4, 1, 0, 0, 0, DateTimeKind.Utc);
         await db.SaveChangesAsync();
 
-        BaseFeeBreakdown march = await contracts.CalculateBaseFeeAsync(
+        BaseFeeBreakdown march = await contracts.CalculateBaseFeeAsync(tenantId, 
             customerId, new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc));
-        BaseFeeBreakdown june = await contracts.CalculateBaseFeeAsync(customerId, June);
+        BaseFeeBreakdown june = await contracts.CalculateBaseFeeAsync(tenantId, customerId, June);
 
         march.Applications.Should().ContainSingle();
         june.Applications.Should().BeEmpty();
@@ -270,7 +270,7 @@ public class ContractModelTests : IDisposable
     {
         AddContract(AddApp("Nytt system"), ManagementLevel.NeedsInvestigation, SupportWindow.S1);
 
-        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(customerId, June);
+        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(tenantId, customerId, June);
 
         fee.Applications.Should().BeEmpty();
         fee.Unpriced.Should().ContainSingle().Which.Should().Contain("Nytt system");
@@ -282,7 +282,7 @@ public class ContractModelTests : IDisposable
     {
         AddContract(AddApp("Orphaned instance"), ManagementLevel.Instance, window: null);
 
-        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(customerId, June);
+        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(tenantId, customerId, June);
 
         fee.Unpriced.Should().ContainSingle().Which.Should().Contain("support window");
     }
@@ -306,9 +306,9 @@ public class ContractModelTests : IDisposable
             });
         await db.SaveChangesAsync();
 
-        PortfolioAgreement? march = await contracts.GetPortfolioAgreementAsync(
+        PortfolioAgreement? march = await contracts.GetPortfolioAgreementAsync(tenantId, 
             customerId, new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc));
-        PortfolioAgreement? july = await contracts.GetPortfolioAgreementAsync(
+        PortfolioAgreement? july = await contracts.GetPortfolioAgreementAsync(tenantId, 
             customerId, new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc));
 
         march!.PricingModel.Should().Be(PricingModel.TimeAndMaterials);
@@ -332,8 +332,8 @@ public class ContractModelTests : IDisposable
 
         AddContract(AddApp("Bokning"), ManagementLevel.Standard, SupportWindow.S1);
 
-        BaseFeeBreakdown before = await contracts.CalculateBaseFeeAsync(customerId, June);
-        BaseFeeBreakdown after = await contracts.CalculateBaseFeeAsync(customerId, nextYear);
+        BaseFeeBreakdown before = await contracts.CalculateBaseFeeAsync(tenantId, customerId, June);
+        BaseFeeBreakdown after = await contracts.CalculateBaseFeeAsync(tenantId, customerId, nextYear);
 
         before.WindowFee.Should().Be(6_000m);
         after.WindowFee.Should().Be(6_120m);
@@ -351,7 +351,7 @@ public class ContractModelTests : IDisposable
 
         AddContract(AddApp("Journal"), ManagementLevel.Complex, SupportWindow.S1);
 
-        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(customerId, June);
+        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(tenantId, customerId, June);
 
         fee.KnowledgeFees.Should().Be(7_500m);
     }
@@ -442,11 +442,11 @@ public class ContractModelTests : IDisposable
         Guid appId = AddApp("Journal");
         ApplicationContract contract = AddContract(appId, ManagementLevel.Standard, SupportWindow.S1);
 
-        await contracts.RecordServiceLevelAsync(
+        await contracts.RecordServiceLevelAsync(tenantId, 
             contract.Id, ManagementLevel.Complex, SupportWindow.S3, June,
             "§16.2 quarterly review", "nils");
 
-        List<ApplicationServiceLevel> history = await contracts.ListServiceLevelsAsync(contract.Id);
+        List<ApplicationServiceLevel> history = await contracts.ListServiceLevelsAsync(tenantId, contract.Id);
 
         history.Should().HaveCount(2);
         history[0].EffectiveFrom.Should().Be(June);
@@ -459,19 +459,19 @@ public class ContractModelTests : IDisposable
     {
         Guid appId = AddApp("Journal");
 
-        await contracts.SaveContractAsync(new ApplicationContract
+        await contracts.SaveContractAsync(tenantId, new ApplicationContract
         {
             TenantId = tenantId, AppId = appId, Origin = ContractOrigin.ExternallyDeveloped,
             DevelopedBy = "Previous supplier", OnboardedAt = January,
         });
 
-        await contracts.SaveContractAsync(new ApplicationContract
+        await contracts.SaveContractAsync(tenantId, new ApplicationContract
         {
             TenantId = tenantId, AppId = appId, Origin = ContractOrigin.SupplierDeveloped,
             OnboardedAt = January, GuaranteeEndsAt = June,
         });
 
-        ApplicationContract? saved = await contracts.GetContractAsync(appId);
+        ApplicationContract? saved = await contracts.GetContractAsync(tenantId, appId);
 
         saved!.Origin.Should().Be(ContractOrigin.SupplierDeveloped);
         saved.GuaranteeEndsAt.Should().Be(June);
@@ -551,18 +551,18 @@ public class ContractModelTests : IDisposable
     [Fact]
     public async Task A_contact_can_be_saved_then_removed()
     {
-        ContractContact saved = await contracts.SaveContactAsync(new ContractContact
+        ContractContact saved = await contracts.SaveContactAsync(tenantId, new ContractContact
         {
             TenantId = tenantId, CustomerId = customerId,
             Party = ContractParty.Customer, Role = ContractContactRole.Deputy,
             Name = "Deputy", Phone = "+46 70 111 11 11",
         });
 
-        (await contracts.ListContactsAsync(customerId)).Should().ContainSingle();
+        (await contracts.ListContactsAsync(tenantId, customerId)).Should().ContainSingle();
 
-        await contracts.DeleteContactAsync(saved.Id);
+        await contracts.DeleteContactAsync(tenantId, saved.Id);
 
-        (await contracts.ListContactsAsync(customerId)).Should().BeEmpty();
+        (await contracts.ListContactsAsync(tenantId, customerId)).Should().BeEmpty();
     }
 
     // ---- Deleting and correcting -----------------------------------------------------------
@@ -574,25 +574,25 @@ public class ContractModelTests : IDisposable
     [Fact]
     public async Task An_Annex_B_can_be_deleted_and_the_earlier_one_takes_over()
     {
-        PortfolioAgreement first = await contracts.RecordPortfolioAgreementAsync(new PortfolioAgreement
+        PortfolioAgreement first = await contracts.RecordPortfolioAgreementAsync(tenantId, new PortfolioAgreement
         {
             TenantId = tenantId, CustomerId = customerId, EffectiveFrom = January,
             PricingModel = PricingModel.TimeAndMaterials,
         });
 
-        PortfolioAgreement mistake = await contracts.RecordPortfolioAgreementAsync(new PortfolioAgreement
+        PortfolioAgreement mistake = await contracts.RecordPortfolioAgreementAsync(tenantId, new PortfolioAgreement
         {
             TenantId = tenantId, CustomerId = customerId, EffectiveFrom = June,
             PricingModel = PricingModel.HourBank, HourBankHoursPerMonth = 20m,
         });
 
-        await contracts.DeletePortfolioAgreementAsync(mistake.Id);
+        await contracts.DeletePortfolioAgreementAsync(tenantId, mistake.Id);
 
-        PortfolioAgreement? inForce = await contracts.GetPortfolioAgreementAsync(
+        PortfolioAgreement? inForce = await contracts.GetPortfolioAgreementAsync(tenantId, 
             customerId, new DateTime(2026, 7, 1, 0, 0, 0, DateTimeKind.Utc));
 
         inForce!.Id.Should().Be(first.Id);
-        (await contracts.ListPortfolioAgreementsAsync(customerId)).Should().ContainSingle();
+        (await contracts.ListPortfolioAgreementsAsync(tenantId, customerId)).Should().ContainSingle();
     }
 
     /// <summary>
@@ -607,12 +607,12 @@ public class ContractModelTests : IDisposable
 
         AddContract(AddApp("Booking"), ManagementLevel.Standard, SupportWindow.S1);
 
-        BaseFeeBreakdown after = await contracts.CalculateBaseFeeAsync(customerId, nextYear);
+        BaseFeeBreakdown after = await contracts.CalculateBaseFeeAsync(tenantId, customerId, nextYear);
         after.WindowFee.Should().Be(6_600m);
 
-        await contracts.DeletePriceListAsync(indexed!.Id);
+        await contracts.DeletePriceListAsync(tenantId, indexed!.Id);
 
-        BaseFeeBreakdown reverted = await contracts.CalculateBaseFeeAsync(customerId, nextYear);
+        BaseFeeBreakdown reverted = await contracts.CalculateBaseFeeAsync(tenantId, customerId, nextYear);
         reverted.WindowFee.Should().Be(6_000m);
     }
 
@@ -622,7 +622,7 @@ public class ContractModelTests : IDisposable
         PriceList extra = StandardPriceList.Create(tenantId, June);
         await contracts.AddPriceListAsync(extra);
 
-        await contracts.DeletePriceListAsync(extra.Id);
+        await contracts.DeletePriceListAsync(tenantId, extra.Id);
 
         db.PriceListEntries.Count(e => e.PriceListId == extra.Id).Should().Be(0);
     }
@@ -636,12 +636,12 @@ public class ContractModelTests : IDisposable
     {
         PriceList list = (await contracts.ListPriceListsAsync(tenantId, null)).Single();
 
-        await contracts.SavePriceListEntryAsync(
+        await contracts.SavePriceListEntryAsync(tenantId, 
             list.Id, PriceKind.WindowFee, nameof(SupportWindow.S1), 7_500m);
 
         AddContract(AddApp("Booking"), ManagementLevel.Standard, SupportWindow.S1);
 
-        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(customerId, June);
+        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(tenantId, customerId, June);
 
         fee.WindowFee.Should().Be(7_500m);
     }
@@ -653,12 +653,12 @@ public class ContractModelTests : IDisposable
 
         // §10.2 quotes Needs investigation after a review, so the standard list has no
         // amount for it — which is exactly the case where one gets typed in later.
-        await contracts.SavePriceListEntryAsync(
+        await contracts.SavePriceListEntryAsync(tenantId, 
             list.Id, PriceKind.KnowledgeFee, nameof(ManagementLevel.NeedsInvestigation), 2_750m);
 
         AddContract(AddApp("New system"), ManagementLevel.NeedsInvestigation, SupportWindow.S1);
 
-        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(customerId, June);
+        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(tenantId, customerId, June);
 
         fee.Unpriced.Should().BeEmpty();
         fee.KnowledgeFees.Should().Be(2_750m);
@@ -675,11 +675,11 @@ public class ContractModelTests : IDisposable
         PriceListEntry standard = list.Entries
             .Single(e => e.Kind == PriceKind.KnowledgeFee && e.Key == nameof(ManagementLevel.Standard));
 
-        await contracts.DeletePriceListEntryAsync(standard.Id);
+        await contracts.DeletePriceListEntryAsync(tenantId, standard.Id);
 
         AddContract(AddApp("Booking"), ManagementLevel.Standard, SupportWindow.S1);
 
-        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(customerId, June);
+        BaseFeeBreakdown fee = await contracts.CalculateBaseFeeAsync(tenantId, customerId, June);
 
         fee.KnowledgeFees.Should().Be(0m);
         fee.Unpriced.Should().ContainSingle().Which.Should().Contain("Booking");
@@ -690,8 +690,8 @@ public class ContractModelTests : IDisposable
     {
         PriceList list = (await contracts.ListPriceListsAsync(tenantId, null)).Single();
 
-        await contracts.SavePriceListEntryAsync(list.Id, PriceKind.WindowFee, nameof(SupportWindow.S1), 7_000m);
-        await contracts.SavePriceListEntryAsync(list.Id, PriceKind.WindowFee, nameof(SupportWindow.S1), 8_000m);
+        await contracts.SavePriceListEntryAsync(tenantId, list.Id, PriceKind.WindowFee, nameof(SupportWindow.S1), 7_000m);
+        await contracts.SavePriceListEntryAsync(tenantId, list.Id, PriceKind.WindowFee, nameof(SupportWindow.S1), 8_000m);
 
         db.PriceListEntries
             .Count(e => e.PriceListId == list.Id && e.Kind == PriceKind.WindowFee
@@ -710,13 +710,13 @@ public class ContractModelTests : IDisposable
         PriceList list = (await contracts.ListPriceListsAsync(tenantId, null)).Single();
         DateTime moved = new(2026, 4, 1, 0, 0, 0, DateTimeKind.Utc);
 
-        await contracts.UpdatePriceListAsync(list.Id, moved, "Corrected — signed in April.");
+        await contracts.UpdatePriceListAsync(tenantId, list.Id, moved, "Corrected — signed in April.");
 
         AddContract(AddApp("Booking"), ManagementLevel.Standard, SupportWindow.S1);
 
-        BaseFeeBreakdown march = await contracts.CalculateBaseFeeAsync(
+        BaseFeeBreakdown march = await contracts.CalculateBaseFeeAsync(tenantId, 
             customerId, new DateTime(2026, 3, 1, 0, 0, 0, DateTimeKind.Utc));
-        BaseFeeBreakdown may = await contracts.CalculateBaseFeeAsync(
+        BaseFeeBreakdown may = await contracts.CalculateBaseFeeAsync(tenantId, 
             customerId, new DateTime(2026, 5, 1, 0, 0, 0, DateTimeKind.Utc));
 
         // Before it took effect there is no list at all, so nothing prices.
@@ -740,5 +740,241 @@ public class ContractModelTests : IDisposable
 
         await act.Should().ThrowAsync<DbUpdateException>();
 
+    }
+
+    // ──────── Tenancy ────────
+
+    /// <summary>A second tenant with a customer, an app and a contract of its own.</summary>
+    private (Guid Tenant, Guid Customer, Guid App, Guid Contract, Guid PriceList) SeedStranger()
+    {
+        Guid tenant = Guid.NewGuid(), customer = Guid.NewGuid(), app = Guid.NewGuid();
+
+        db.Tenants.Add(new Tenant { Id = tenant, Name = "Stranger", Slug = $"stranger-{tenant:N}" });
+        db.Customers.Add(new Customer { Id = customer, TenantId = tenant, Name = "Elsewhere AB" });
+        db.Apps.Add(new App { Id = app, CustomerId = customer, Name = "theirs" });
+
+        ApplicationContract contract = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant,
+            AppId = app,
+            Origin = ContractOrigin.ExternallyDeveloped,
+            OnboardedAt = January,
+            MonthlyWorkCapHours = 10m,
+            Notes = "theirs",
+        };
+        contract.ServiceLevels.Add(new ApplicationServiceLevel
+        {
+            Id = Guid.NewGuid(),
+            ApplicationContractId = contract.Id,
+            Level = ManagementLevel.Standard,
+            SupportWindow = SupportWindow.S3,
+            EffectiveFrom = January,
+            Reason = "signed",
+        });
+        db.ApplicationContracts.Add(contract);
+
+        PriceList theirPrices = StandardPriceList.Create(tenant, January);
+        db.PriceLists.Add(theirPrices);
+        db.SaveChanges();
+
+        return (tenant, customer, app, contract.Id, theirPrices.Id);
+    }
+
+    /// <summary>
+    /// A contract is the support agreement — classification, support window, monthly work cap,
+    /// onboarding fee. Every read of one was keyed by an app, a customer or a contract id alone.
+    ///
+    /// <para>⚠️ <c>ResolveServiceLevelAsync</c> was the worst of them: it loaded <b>every contract
+    /// in the installation</b> into a dictionary and then looked one app up in it, so the answer
+    /// was scoped by nothing at all and the read grew with every tenant on the box.</para>
+    /// </summary>
+    [Fact]
+    public async Task Contract_reads_are_confined_to_their_tenant()
+    {
+        var them = SeedStranger();
+
+        (await contracts.GetContractAsync(tenantId, them.App)).Should().BeNull(
+            "their contract exists, so this is a refusal");
+        (await contracts.GetContractAsync(them.Tenant, them.App)).Should().NotBeNull(
+            "the owner still sees it");
+
+        (await contracts.ResolveServiceLevelAsync(tenantId, them.App, June)).Should().BeNull();
+        (await contracts.ResolveServiceLevelAsync(them.Tenant, them.App, June)).Should().NotBeNull();
+
+        (await contracts.ListServiceLevelsAsync(tenantId, them.Contract)).Should().BeEmpty(
+            "ApplicationServiceLevel has no TenantId — this is the entry → contract traversal");
+        (await contracts.ListServiceLevelsAsync(them.Tenant, them.Contract)).Should().ContainSingle();
+
+        // The base fee is the invoice line. It already filtered by customer.TenantId — read off
+        // the customer row it had just fetched by id alone, which compares that row to itself.
+        BaseFeeBreakdown refused = await contracts.CalculateBaseFeeAsync(tenantId, them.Customer, June);
+        refused.Applications.Should().BeEmpty("a customer we cannot see has no fees to report");
+        refused.WindowFee.Should().Be(0m);
+
+        BaseFeeBreakdown theirs = await contracts.CalculateBaseFeeAsync(them.Tenant, them.Customer, June);
+        theirs.Applications.Should().ContainSingle("the owner's own figures still compute");
+    }
+
+    /// <summary>
+    /// The writes that take a whole entity from the caller. <c>edited.TenantId</c> is whatever was
+    /// posted, so it cannot be the authority for anything — the app and the claimed tenant are
+    /// both checked instead.
+    /// </summary>
+    [Fact]
+    public async Task A_contract_cannot_be_written_against_another_tenants_application()
+    {
+        var them = SeedStranger();
+
+        Func<Task> overwrite = () => contracts.SaveContractAsync(tenantId, new ApplicationContract
+        {
+            TenantId = tenantId,
+            AppId = them.App,
+            Origin = ContractOrigin.SupplierDeveloped,
+            OnboardedAt = June,
+            Notes = "hijacked",
+        });
+        await overwrite.Should().ThrowAsync<InvalidOperationException>();
+
+        // ⚠️ And claiming their tenant in the posted object must not help either.
+        Func<Task> claimTheirs = () => contracts.SaveContractAsync(tenantId, new ApplicationContract
+        {
+            TenantId = them.Tenant,
+            AppId = them.App,
+            Origin = ContractOrigin.SupplierDeveloped,
+            OnboardedAt = June,
+            Notes = "hijacked",
+        });
+        await claimTheirs.Should().ThrowAsync<InvalidOperationException>();
+
+        ApplicationContract survived = (await contracts.GetContractAsync(them.Tenant, them.App))!;
+        survived.Notes.Should().Be("theirs");
+        survived.MonthlyWorkCapHours.Should().Be(10m);
+
+        // A classification sets the fee and the window, so an insert must not land either.
+        Func<Task> reclassify = () => contracts.RecordServiceLevelAsync(
+            tenantId, them.Contract, ManagementLevel.Simple, SupportWindow.S1, June,
+            "downgraded", null);
+        await reclassify.Should().ThrowAsync<InvalidOperationException>();
+
+        (await contracts.ListServiceLevelsAsync(them.Tenant, them.Contract)).Should().ContainSingle();
+    }
+
+    /// <summary>
+    /// ⚠️ The sharpest write in the file, and its own doc comment says why: an edit reprices every
+    /// month that used the list, <b>including ones already reported and invoiced</b>, and §28 gives
+    /// the customer thirty days to dispute a report. With a bare list id that was one guess away.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_price_list_cannot_be_edited_or_deleted()
+    {
+        var them = SeedStranger();
+
+        decimal before = ContractService.Lookup(
+            (await contracts.ListPriceListsAsync(them.Tenant, null))[0],
+            PriceKind.WindowFee, nameof(SupportWindow.S4))!.Value;
+
+        Func<Task> reprice = () => contracts.SavePriceListEntryAsync(
+            tenantId, them.PriceList, PriceKind.WindowFee, nameof(SupportWindow.S4), 1m);
+        await reprice.Should().ThrowAsync<InvalidOperationException>();
+
+        // The list's own details decide which months resolve to it, so moving it is the same act.
+        await contracts.UpdatePriceListAsync(tenantId, them.PriceList, June, "moved");
+        await contracts.DeletePriceListAsync(tenantId, them.PriceList);
+
+        PriceList intact = (await contracts.ListPriceListsAsync(them.Tenant, null)).Should()
+            .ContainSingle("their list must still be there").Subject;
+        intact.EffectiveFrom.Should().Be(January, "and still take effect when it did");
+        ContractService.Lookup(intact, PriceKind.WindowFee, nameof(SupportWindow.S4))
+            .Should().Be(before, "with the amount they agreed");
+
+        // The entry-level delete travels entry → list, since PriceListEntry has no TenantId.
+        PriceListEntry entry = intact.Entries.First(e => e.Kind == PriceKind.WindowFee);
+        await contracts.DeletePriceListEntryAsync(tenantId, entry.Id);
+
+        PriceList stillPriced = (await contracts.ListPriceListsAsync(them.Tenant, null))[0];
+        stillPriced.Entries.Should().Contain(e => e.Id == entry.Id,
+            "anything priced from a deleted line reports as unpriced, not as free");
+
+        // And the owner can still do all three.
+        await contracts.SavePriceListEntryAsync(
+            them.Tenant, them.PriceList, PriceKind.WindowFee, nameof(SupportWindow.S4), 1m);
+        ContractService.Lookup(
+                (await contracts.ListPriceListsAsync(them.Tenant, null))[0],
+                PriceKind.WindowFee, nameof(SupportWindow.S4))
+            .Should().Be(1m);
+    }
+
+    /// <summary>
+    /// The portfolio side: Annex B terms, contacts, mail domains and support addresses. The adds
+    /// already took a tenant — these are the reads and the deletes that did not.
+    /// </summary>
+    [Fact]
+    public async Task Portfolio_rows_are_confined_to_their_tenant()
+    {
+        var them = SeedStranger();
+
+        PortfolioAgreement agreement = await contracts.RecordPortfolioAgreementAsync(
+            them.Tenant, new PortfolioAgreement
+            {
+                TenantId = them.Tenant,
+                CustomerId = them.Customer,
+                EffectiveFrom = January,
+                PricingModel = PricingModel.HourBank,
+                HourBankHoursPerMonth = 10m,
+            });
+
+        ContractContact contact = await contracts.SaveContactAsync(them.Tenant, new ContractContact
+        {
+            TenantId = them.Tenant,
+            CustomerId = them.Customer,
+            Party = ContractParty.Customer,
+            Role = ContractContactRole.TechnicalContact,
+            Name = "Their Person",
+        });
+
+        (await contracts.ListPortfolioAgreementsAsync(tenantId, them.Customer)).Should().BeEmpty();
+        (await contracts.GetPortfolioAgreementAsync(tenantId, them.Customer, June)).Should().BeNull();
+        (await contracts.ListContactsAsync(tenantId, them.Customer)).Should().BeEmpty();
+
+        // Writing against their customer must be refused outright.
+        Func<Task> plantAgreement = () => contracts.RecordPortfolioAgreementAsync(
+            tenantId, new PortfolioAgreement
+            {
+                TenantId = tenantId, CustomerId = them.Customer,
+                EffectiveFrom = June, PricingModel = PricingModel.HourBank,
+                HourBankHoursPerMonth = 99m,
+            });
+        Func<Task> plantContact = () => contracts.SaveContactAsync(tenantId, new ContractContact
+        {
+            TenantId = tenantId, CustomerId = them.Customer,
+            Party = ContractParty.Customer, Role = ContractContactRole.TechnicalContact, Name = "Us",
+        });
+        // ⚠️ And moving one of THEIR rows into our tenant — SaveContactAsync used to call
+        // Update() on the caller's entity, which writes TenantId and CustomerId along with
+        // everything else.
+        Func<Task> stealContact = () => contracts.SaveContactAsync(tenantId, new ContractContact
+        {
+            Id = contact.Id, TenantId = tenantId, CustomerId = customerId,
+            Party = ContractParty.Customer, Role = ContractContactRole.Deputy, Name = "Their Person",
+        });
+
+        await plantAgreement.Should().ThrowAsync<InvalidOperationException>();
+        await plantContact.Should().ThrowAsync<InvalidOperationException>();
+        await stealContact.Should().ThrowAsync<InvalidOperationException>();
+
+        // The deletes refuse silently, so the surviving rows are the evidence.
+        await contracts.DeletePortfolioAgreementAsync(tenantId, agreement.Id);
+        await contracts.DeleteContactAsync(tenantId, contact.Id);
+
+        (await contracts.ListPortfolioAgreementsAsync(them.Tenant, them.Customer)).Should().ContainSingle();
+        (await contracts.ListContactsAsync(them.Tenant, them.Customer)).Should().ContainSingle()
+            .Which.Name.Should().Be("Their Person");
+
+        // And their own tenant can delete them.
+        await contracts.DeletePortfolioAgreementAsync(them.Tenant, agreement.Id);
+        await contracts.DeleteContactAsync(them.Tenant, contact.Id);
+        (await contracts.ListPortfolioAgreementsAsync(them.Tenant, them.Customer)).Should().BeEmpty();
+        (await contracts.ListContactsAsync(them.Tenant, them.Customer)).Should().BeEmpty();
     }
 }

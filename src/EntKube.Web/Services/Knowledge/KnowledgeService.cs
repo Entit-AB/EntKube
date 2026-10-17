@@ -350,8 +350,8 @@ public class KnowledgeService(
     /// so the figure at the top and the items underneath it always agree.
     /// </summary>
     public async Task<KnowledgeHealth> GetHealthAsync(
-        Guid appId, DateTime asOf, CancellationToken ct = default) =>
-        new(await GetGapsAsync(appId, asOf, ct));
+        Guid tenantId, Guid appId, DateTime asOf, CancellationToken ct = default) =>
+        new(await GetGapsAsync(tenantId, appId, asOf, ct));
 
     /// <summary>
     /// What is missing or has lapsed in what we know about an application.
@@ -360,8 +360,12 @@ public class KnowledgeService(
     /// they are needed — usually at 03:00, or at a quarterly review where the
     /// knowledge fee is being questioned.</para>
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose application. The gaps are derived from its contract, so this has to ask for the
+    /// contract as somebody — and the panel that shows them has always had a tenant.
+    /// </param>
     public async Task<List<KnowledgeGap>> GetGapsAsync(
-        Guid appId, DateTime asOf, CancellationToken ct = default)
+        Guid tenantId, Guid appId, DateTime asOf, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
@@ -409,7 +413,7 @@ public class KnowledgeService(
         }
 
         // §23: a support window wider than the dependencies can be reached in.
-        ResolvedServiceLevel? level = await contracts.ResolveServiceLevelAsync(appId, asOf, ct);
+        ResolvedServiceLevel? level = await contracts.ResolveServiceLevelAsync(tenantId, appId, asOf, ct);
 
         if (level?.Window is SupportWindow window and > SupportWindow.S1)
         {
