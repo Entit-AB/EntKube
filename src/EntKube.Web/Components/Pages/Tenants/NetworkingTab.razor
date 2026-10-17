@@ -1115,20 +1115,20 @@
                 TenantId, newTunnelName, newTunnelType,
                 string.IsNullOrWhiteSpace(newTunnelDescription) ? null : newTunnelDescription);
 
-            await VpnService.UpdateCryptoSettingsAsync(tunnel.Id, ikeVersion, ikeProposal, espProposal, dpdDelay, dpdTimeout, ikeLifetime, childLifetime);
+            await VpnService.UpdateCryptoSettingsAsync(TenantId, tunnel.Id, ikeVersion, ikeProposal, espProposal, dpdDelay, dpdTimeout, ikeLifetime, childLifetime);
 
             if (newTunnelType == VpnTunnelType.SiteToSite)
             {
                 if (Guid.TryParse(selectedGatewayClusterId, out Guid gwClusterId))
                 {
                     string[] localSubnets = [gatewayPodCidr.Trim(), gatewayServiceCidr.Trim()];
-                    await VpnService.AddLocalEndpointAsync(tunnel.Id, gwClusterId, localSubnets, VpnEndpointRole.Gateway);
+                    await VpnService.AddLocalEndpointAsync(TenantId, tunnel.Id, gwClusterId, localSubnets, VpnEndpointRole.Gateway);
                 }
 
                 string[] subnets = remoteSubnets.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
                 await VpnService.AddRemoteEndpointAsync(
-                    tunnel.Id, remoteEndpointName.Trim(), remotePublicIp.Trim(),
-                    subnets, VpnAuthMode.Psk, remotePsk, TenantId);
+                    TenantId, tunnel.Id, remoteEndpointName.Trim(), remotePublicIp.Trim(),
+                    subnets, VpnAuthMode.Psk, remotePsk);
             }
             else
             {
@@ -1138,7 +1138,7 @@
                         ? VpnEndpointRole.Gateway
                         : VpnEndpointRole.Participant;
                     string[] subnets = [sel.PodCidr.Trim(), sel.ServiceCidr.Trim()];
-                    await VpnService.AddLocalEndpointAsync(tunnel.Id, clusterId, subnets, role);
+                    await VpnService.AddLocalEndpointAsync(TenantId, tunnel.Id, clusterId, subnets, role);
                 }
             }
 
@@ -1231,7 +1231,7 @@
         saving = true;
         try
         {
-            await VpnService.RotatePskAsync(rotatePskEndpointId.Value, rotatePskValue, tenantId);
+            await VpnService.RotatePskAsync(tenantId, rotatePskEndpointId.Value, rotatePskValue);
             rotatePskEndpointId = null;
             rotatePskValue = "";
         }
@@ -1255,8 +1255,8 @@
         {
             string[] subnets = addRemoteSubnets.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
             await VpnService.AddRemoteEndpointAsync(
-                addRemoteEndpointTunnelId.Value, addRemoteName.Trim(), addRemoteIp.Trim(),
-                subnets, VpnAuthMode.Psk, addRemotePsk, tenantId,
+                tenantId, addRemoteEndpointTunnelId.Value, addRemoteName.Trim(), addRemoteIp.Trim(),
+                subnets, VpnAuthMode.Psk, addRemotePsk,
                 string.IsNullOrWhiteSpace(addRemoteLocalId) ? null : addRemoteLocalId.Trim(),
                 string.IsNullOrWhiteSpace(addRemoteRemoteId) ? null : addRemoteRemoteId.Trim());
 
@@ -1310,7 +1310,7 @@
         errorMessage = null;
         try
         {
-            await VpnService.DeleteTunnelAsync(tunnelId);
+            await VpnService.DeleteTunnelAsync(TenantId, tunnelId);
             confirmDeleteTunnelId = null;
             if (expandedTunnelId == tunnelId) expandedTunnelId = null;
             await LoadAsync();
