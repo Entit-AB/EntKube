@@ -75,11 +75,11 @@ public class ComponentInstallOrchestrator(
 
         if (options.IsUpgrade)
         {
-            await lifecycleService.PrepareUpgradeAsync(componentId, ct);
+            await lifecycleService.PrepareUpgradeAsync(tenantId, componentId, ct);
         }
         else
         {
-            await lifecycleService.PrepareInstallAsync(componentId, ct);
+            await lifecycleService.PrepareInstallAsync(tenantId, componentId, ct);
         }
 
         // Refresh Keycloak DB config into HelmValues from the stored config (if any).
@@ -149,7 +149,7 @@ public class ComponentInstallOrchestrator(
         }
 
         await lifecycleService.MarkInstallResultAsync(
-            componentId, result.Success, result.Success ? null : result.Output, ct);
+            tenantId, componentId, result.Success, result.Success ? null : result.Output, ct);
 
         // After successful install, sync any secrets marked for K8s sync.
 
