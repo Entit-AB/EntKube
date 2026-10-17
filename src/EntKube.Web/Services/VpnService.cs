@@ -52,7 +52,14 @@ public class VpnService(
         return tunnel;
     }
 
-    public async Task<VpnTunnel?> GetTunnelWithDetailsAsync(Guid tunnelId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose tunnel. This returns the whole tunnel with its local and remote endpoints — public
+    /// IPs, the subnets on both sides, the peer identities — which is a map of the other tenant's
+    /// network and of whoever they are peered with. <c>GetTunnelsForTenantAsync</c> beside it has
+    /// always taken a tenant; this one took an id.
+    /// </param>
+    public async Task<VpnTunnel?> GetTunnelWithDetailsAsync(
+        Guid tenantId, Guid tunnelId, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
         // The component navigation used to be included here and was read by nobody: both callers
@@ -62,7 +69,7 @@ public class VpnService(
         return await db.VpnTunnels
             .Include(t => t.LocalEndpoints).ThenInclude(e => e.Cluster)
             .Include(t => t.RemoteEndpoints)
-            .FirstOrDefaultAsync(t => t.Id == tunnelId, ct);
+            .FirstOrDefaultAsync(t => t.Id == tunnelId && t.TenantId == tenantId, ct);
     }
 
     public async Task<List<VpnTunnel>> GetTunnelsForTenantAsync(Guid tenantId, CancellationToken ct = default)
@@ -76,13 +83,18 @@ public class VpnService(
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose tunnel. The proposals and lifetimes here are the negotiated crypto — weakening
+    /// somebody else's IKE or ESP proposal is an attack on the tunnel itself, not a config typo.
+    /// </param>
     public async Task UpdateCryptoSettingsAsync(
-        Guid tunnelId, int ikeVersion, string ikeProposal, string espProposal,
+        Guid tenantId, Guid tunnelId, int ikeVersion, string ikeProposal, string espProposal,
         int dpdDelay, int dpdTimeout, int ikeLifetime = 86400, int childLifetime = 3600,
         CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
-        VpnTunnel tunnel = await db.VpnTunnels.FindAsync([tunnelId], ct)
+        VpnTunnel tunnel = await db.VpnTunnels
+            .FirstOrDefaultAsync(t => t.Id == tunnelId && t.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException($"Tunnel {tunnelId} not found.");
 
         tunnel.IkeVersion = ikeVersion;
@@ -95,19 +107,25 @@ public class VpnService(
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task UpdateTunnelStatusAsync(Guid tunnelId, VpnTunnelStatus status, CancellationToken ct = default)
+    /// <param name="tenantId">Whose tunnel.</param>
+    public async Task UpdateTunnelStatusAsync(
+        Guid tenantId, Guid tunnelId, VpnTunnelStatus status, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
-        VpnTunnel tunnel = await db.VpnTunnels.FindAsync([tunnelId], ct)
+        VpnTunnel tunnel = await db.VpnTunnels
+            .FirstOrDefaultAsync(t => t.Id == tunnelId && t.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException($"Tunnel {tunnelId} not found.");
         tunnel.Status = status;
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task DeleteTunnelAsync(Guid tunnelId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose tunnel. The cascade takes its endpoints with it.</param>
+    public async Task DeleteTunnelAsync(
+        Guid tenantId, Guid tunnelId, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
-        VpnTunnel tunnel = await db.VpnTunnels.FindAsync([tunnelId], ct)
+        VpnTunnel tunnel = await db.VpnTunnels
+            .FirstOrDefaultAsync(t => t.Id == tunnelId && t.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException($"Tunnel {tunnelId} not found.");
         db.VpnTunnels.Remove(tunnel);
         await db.SaveChangesAsync(ct);
@@ -115,11 +133,23 @@ public class VpnService(
 
     // ── Local endpoints ──────────────────────────────────────────────────────────
 
+    /// <param name="tenantId">
+    /// Whose tunnel and whose cluster. An endpoint names both, and the cluster is where the
+    /// gateway config is then synced — so this is a pair, checked as one.
+    /// </param>
     public async Task<VpnLocalEndpoint> AddLocalEndpointAsync(
-        Guid tunnelId, Guid clusterId, string[] subnets, VpnEndpointRole role,
+        Guid tenantId, Guid tunnelId, Guid clusterId, string[] subnets, VpnEndpointRole role,
         CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.VpnTunnels.AnyAsync(t => t.Id == tunnelId && t.TenantId == tenantId, ct)
+            || !await db.KubernetesClusters.AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException(
+                "The tunnel or the cluster does not belong to this tenant.");
+        }
+
         VpnLocalEndpoint ep = new()
         {
             Id = Guid.NewGuid(),
@@ -134,31 +164,44 @@ public class VpnService(
         return ep;
     }
 
+    /// <param name="tenantId">
+    /// Whose endpoint. ⚠️ <c>VpnLocalEndpoint</c> has no <c>TenantId</c>, so the scope runs
+    /// endpoint → tunnel. The subnets are what gets routed down the tunnel, so an edit here
+    /// changes which of their networks the peer can reach.
+    /// </param>
     public async Task UpdateLocalEndpointAsync(
-        Guid endpointId, string[] subnets, string? publicIp, CancellationToken ct = default)
+        Guid tenantId, Guid endpointId, string[] subnets, string? publicIp,
+        CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
-        VpnLocalEndpoint ep = await db.VpnLocalEndpoints.FindAsync([endpointId], ct)
+        VpnLocalEndpoint ep = await db.VpnLocalEndpoints
+            .FirstOrDefaultAsync(e => e.Id == endpointId && e.Tunnel.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException($"Local endpoint {endpointId} not found.");
         ep.Subnets = JsonSerializer.Serialize(subnets);
         if (publicIp is not null) ep.PublicIp = publicIp;
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task LinkComponentAsync(Guid endpointId, Guid componentId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose endpoint.</param>
+    public async Task LinkComponentAsync(
+        Guid tenantId, Guid endpointId, Guid componentId, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
-        VpnLocalEndpoint ep = await db.VpnLocalEndpoints.FindAsync([endpointId], ct)
+        VpnLocalEndpoint ep = await db.VpnLocalEndpoints
+            .FirstOrDefaultAsync(e => e.Id == endpointId && e.Tunnel.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException($"Local endpoint {endpointId} not found.");
         ep.ComponentId = componentId;
         ep.Status = VpnEndpointStatus.Ready;
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task RemoveLocalEndpointAsync(Guid endpointId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose endpoint.</param>
+    public async Task RemoveLocalEndpointAsync(
+        Guid tenantId, Guid endpointId, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
-        VpnLocalEndpoint ep = await db.VpnLocalEndpoints.FindAsync([endpointId], ct)
+        VpnLocalEndpoint ep = await db.VpnLocalEndpoints
+            .FirstOrDefaultAsync(e => e.Id == endpointId && e.Tunnel.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException($"Local endpoint {endpointId} not found.");
         db.VpnLocalEndpoints.Remove(ep);
         await db.SaveChangesAsync(ct);
@@ -166,13 +209,25 @@ public class VpnService(
 
     // ── Remote endpoints (SiteToSite only) ──────────────────────────────────────
 
+    /// <param name="tenantId">
+    /// Whose tunnel. ⚠️ This is the sharpest call in the file. It already <em>took</em> a
+    /// <c>tenantId</c> — in seventh position, and only to file the PSK in the vault — while the
+    /// tunnel the peer is attached to was never checked against it. A remote endpoint becomes a
+    /// connection block in that tunnel's <c>swanctl.conf</c>, with a PSK and a subnet list of the
+    /// caller's choosing: adding one to a stranger's tunnel is a VPN peer into their network.
+    /// </param>
     public async Task<VpnRemoteEndpoint> AddRemoteEndpointAsync(
-        Guid tunnelId, string name, string publicIp, string[] subnets,
-        VpnAuthMode authMode, string psk, Guid tenantId,
+        Guid tenantId, Guid tunnelId, string name, string publicIp, string[] subnets,
+        VpnAuthMode authMode, string psk,
         string? localId = null, string? remoteId = null,
         CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.VpnTunnels.AnyAsync(t => t.Id == tunnelId && t.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("The tunnel does not belong to this tenant.");
+        }
 
         VpnRemoteEndpoint ep = new()
         {
@@ -195,26 +250,50 @@ public class VpnService(
         return ep;
     }
 
+    /// <param name="tenantId">
+    /// Whose endpoint — the scope runs endpoint → tunnel. Repointing <c>PublicIp</c> aims an
+    /// existing tunnel at a different peer, which the PSK then authenticates to.
+    /// </param>
     public async Task UpdateRemoteEndpointAsync(
-        Guid endpointId, string publicIp, string[] subnets, CancellationToken ct = default)
+        Guid tenantId, Guid endpointId, string publicIp, string[] subnets,
+        CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
-        VpnRemoteEndpoint ep = await db.VpnRemoteEndpoints.FindAsync([endpointId], ct)
+        VpnRemoteEndpoint ep = await db.VpnRemoteEndpoints
+            .FirstOrDefaultAsync(e => e.Id == endpointId && e.Tunnel.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException($"Remote endpoint {endpointId} not found.");
         ep.PublicIp = publicIp;
         ep.Subnets = JsonSerializer.Serialize(subnets);
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task RotatePskAsync(Guid endpointId, string newPsk, Guid tenantId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose endpoint. This also took a <c>tenantId</c> already and used it only as the vault's
+    /// scope, so a stranger's endpoint id wrote a PSK into the <em>caller's</em> own vault rather
+    /// than over the owner's — redundant rather than exploitable, but the id was still
+    /// unauthorized, and a rotation that silently files itself nowhere is its own bug.
+    /// </param>
+    public async Task RotatePskAsync(
+        Guid tenantId, Guid endpointId, string newPsk, CancellationToken ct = default)
     {
+        using ConnectivityDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.VpnRemoteEndpoints.AnyAsync(
+                e => e.Id == endpointId && e.Tunnel.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("The endpoint does not belong to this tenant.");
+        }
+
         await vaultService.SetVpnRemoteEndpointSecretAsync(tenantId, endpointId, "PSK", newPsk, ct);
     }
 
-    public async Task RemoveRemoteEndpointAsync(Guid endpointId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose endpoint.</param>
+    public async Task RemoveRemoteEndpointAsync(
+        Guid tenantId, Guid endpointId, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
-        VpnRemoteEndpoint ep = await db.VpnRemoteEndpoints.FindAsync([endpointId], ct)
+        VpnRemoteEndpoint ep = await db.VpnRemoteEndpoints
+            .FirstOrDefaultAsync(e => e.Id == endpointId && e.Tunnel.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException($"Remote endpoint {endpointId} not found.");
         db.VpnRemoteEndpoints.Remove(ep);
         await db.SaveChangesAsync(ct);
@@ -226,9 +305,11 @@ public class VpnService(
     /// Generates a swanctl.conf for the given tunnel, containing one connection
     /// block per remote endpoint.
     /// </summary>
-    public async Task<string> GenerateSwanctlConfigAsync(Guid tunnelId, CancellationToken ct = default)
+    /// <param name="tenantId">Whose tunnel. The output is its full peer configuration.</param>
+    public async Task<string> GenerateSwanctlConfigAsync(
+        Guid tenantId, Guid tunnelId, CancellationToken ct = default)
     {
-        VpnTunnel tunnel = await GetTunnelWithDetailsAsync(tunnelId, ct)
+        VpnTunnel tunnel = await GetTunnelWithDetailsAsync(tenantId, tunnelId, ct)
             ?? throw new InvalidOperationException($"Tunnel {tunnelId} not found.");
 
         StringBuilder sb = new();
@@ -285,9 +366,15 @@ public class VpnService(
     /// Generates the swanctl secrets section (PSKs) for the tunnel.
     /// PSK values are decrypted from the vault at call time.
     /// </summary>
-    public async Task<string> GenerateSwanctlSecretsAsync(Guid tunnelId, Guid tenantId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose tunnel. The PSKs come out of the vault in cleartext here, and the tunnel read is now
+    /// scoped by the same tenant the vault is asked as — it was not, so the two halves could
+    /// disagree about whose tunnel this is.
+    /// </param>
+    public async Task<string> GenerateSwanctlSecretsAsync(
+        Guid tenantId, Guid tunnelId, CancellationToken ct = default)
     {
-        VpnTunnel tunnel = await GetTunnelWithDetailsAsync(tunnelId, ct)
+        VpnTunnel tunnel = await GetTunnelWithDetailsAsync(tenantId, tunnelId, ct)
             ?? throw new InvalidOperationException($"Tunnel {tunnelId} not found.");
 
         StringBuilder sb = new();
@@ -317,13 +404,19 @@ public class VpnService(
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
+        // ⚠️ This predicate is defence in depth, not the load-bearing guard: removing it leaves
+        // every test green, because GenerateSwanctlConfigAsync one line below is scoped and
+        // refuses a stranger's tunnel first. It stays because a method should not depend on a
+        // downstream call for its own authorization — if the generators were ever inlined or
+        // relaxed, this lookup is what keeps a foreign cluster out of ApplyRawManifestAsync.
         VpnLocalEndpoint ep = await db.VpnLocalEndpoints
             .Include(e => e.Cluster)
-            .FirstOrDefaultAsync(e => e.Id == localEndpointId, ct)
+            .FirstOrDefaultAsync(
+                e => e.Id == localEndpointId && e.Tunnel.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException($"Local endpoint {localEndpointId} not found.");
 
-        string config = await GenerateSwanctlConfigAsync(ep.VpnTunnelId, ct);
-        string secrets = await GenerateSwanctlSecretsAsync(ep.VpnTunnelId, tenantId, ct);
+        string config = await GenerateSwanctlConfigAsync(tenantId, ep.VpnTunnelId, ct);
+        string secrets = await GenerateSwanctlSecretsAsync(tenantId, ep.VpnTunnelId, ct);
 
         string secretsB64 = Convert.ToBase64String(Encoding.UTF8.GetBytes(secrets));
 
