@@ -32,6 +32,25 @@ public class ConnectivityGraphService(
     private static readonly IDeserializer YamlDeserializer =
         new DeserializerBuilder().IgnoreUnmatchedProperties().Build();
 
+    /// <summary>
+    /// Whether an application <i>and</i> an environment are both this tenant's.
+    ///
+    /// <para>Neither <see cref="ConnectivityRule"/> nor <see cref="ExternalDependency"/>
+    /// carries a TenantId — they are keyed by (AppId, EnvironmentId) — so there is no row to
+    /// compare a tenant against. The tenant is established once, here, at each public entry,
+    /// and every query inside is then keyed by a pair that has been checked. That is why the
+    /// nineteen interior queries keep their (appId, environmentId) predicates rather than
+    /// each growing a tenant clause no crossing could reach.</para>
+    ///
+    /// <para>The environment is checked as well as the application because a rule names both
+    /// and a generated NetworkPolicy lands in the namespace the environment decides.</para>
+    /// </summary>
+    private static async Task<bool> ScopeIsTenantsAsync(
+        ApplicationDbContext db, Guid tenantId, Guid appId, Guid environmentId,
+        CancellationToken ct) =>
+        await db.Apps.AnyAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct)
+        && await db.Environments.AnyAsync(e => e.Id == environmentId && e.TenantId == tenantId, ct);
+
     /// <param name="tenantId">
     /// Whose clusters this graph may be read from. An input, not derived from the app: the live
     /// Service lookup below reaches a cluster, and the tenant that may do so is the caller's,
@@ -43,6 +62,16 @@ public class ConnectivityGraphService(
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         ConnectivityGraph graph = new();
+
+        if (!await ScopeIsTenantsAsync(db, tenantId, appId, environmentId, ct))
+        {
+            // Empty AND flagged. An empty graph on its own would read as a fact about their
+            // application — that it exposes nothing — which is not what we know; what we know
+            // is that we were not allowed to look. BuildGraph_AnotherTenant_DoesNotReachTheCluster
+            // already specified this shape for the live half, and it is the right shape here too.
+            graph.LiveLookupFailed = true;
+            return graph;
+        }
 
         // The app's deployments in this environment, with everything we infer from.
         List<AppDeployment> deployments = await db.AppDeployments
@@ -530,7 +559,7 @@ public class ConnectivityGraphService(
         Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
         ConnectivityGraph graph = await BuildGraphAsync(tenantId, appId, environmentId, ct);
-        return await AnalyzeAsync(graph, appId, environmentId, ct);
+        return await AnalyzeAsync(tenantId, graph, appId, environmentId, ct);
     }
 
     /// <summary>
@@ -538,9 +567,16 @@ public class ConnectivityGraphService(
     /// (e.g. the topology view) should use this to avoid rebuilding it.
     /// </summary>
     public async Task<List<ConnectivityFinding>> AnalyzeAsync(
-        ConnectivityGraph graph, Guid appId, Guid environmentId, CancellationToken ct = default)
+        Guid tenantId, ConnectivityGraph graph, Guid appId, Guid environmentId,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await ScopeIsTenantsAsync(db, tenantId, appId, environmentId, ct))
+        {
+            return [];
+        }
+
         List<AppNetworkPolicy> policies = await db.AppNetworkPolicies
             .AsNoTracking()
             .Where(p => p.AppId == appId && p.EnvironmentId == environmentId)
@@ -679,9 +715,15 @@ public class ConnectivityGraphService(
 
     // ── CRUD for declared intent ──────────────────────────────────────────────
 
-    public async Task<List<ConnectivityRule>> GetRulesAsync(Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<List<ConnectivityRule>> GetRulesAsync(
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+        if (!await ScopeIsTenantsAsync(db, tenantId, appId, environmentId, ct))
+        {
+            return [];
+        }
+
         return await db.ConnectivityRules
             .AsNoTracking()
             .Include(r => r.PeerApp)
@@ -690,7 +732,13 @@ public class ConnectivityGraphService(
             .ToListAsync(ct);
     }
 
-    public async Task<ConnectivityRule> AddRuleAsync(ConnectivityRule rule, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose rule. An inbound rule is an <em>allow</em> that ends up in a generated
+    /// NetworkPolicy and AuthorizationPolicy, so writing one against an application by Id
+    /// alone was opening a hole in whatever application the entity named.
+    /// </param>
+    public async Task<ConnectivityRule> AddRuleAsync(
+        Guid tenantId, ConnectivityRule rule, CancellationToken ct = default)
     {
         if (rule.PeerType == ConnectivityPeerType.App && rule.PeerAppId is null)
         {
@@ -732,20 +780,49 @@ public class ConnectivityGraphService(
         rule.CreatedAt = DateTime.UtcNow;
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await ScopeIsTenantsAsync(db, tenantId, rule.AppId, rule.EnvironmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "App or environment not found, or it is not this tenant's.");
+        }
+
+        // The PEER, not only the subject. An app-to-app rule names a second application and
+        // generates an AuthorizationPolicy principal for it, so a peer from another tenant is
+        // an allow for their workload into ours. The picker only ever offers apps of the same
+        // customer; the check belongs here, where the id arrives.
+        if (rule.PeerAppId is Guid peerAppId
+            && !await db.Apps.AnyAsync(
+                a => a.Id == peerAppId && a.Customer.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException(
+                "Peer app not found, or it is not this tenant's.");
+        }
+
         db.ConnectivityRules.Add(rule);
         await db.SaveChangesAsync(ct);
         return rule;
     }
 
-    public async Task DeleteRuleAsync(Guid id, CancellationToken ct = default)
+    public async Task DeleteRuleAsync(Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        await db.ConnectivityRules.Where(r => r.Id == id).ExecuteDeleteAsync(ct);
+
+        // No TenantId on the row, so the tenant comes through the application it belongs to.
+        await db.ConnectivityRules
+            .Where(r => r.Id == id && r.App.Customer.TenantId == tenantId)
+            .ExecuteDeleteAsync(ct);
     }
 
-    public async Task<List<ExternalDependency>> GetExternalDependenciesAsync(Guid appId, Guid environmentId, CancellationToken ct = default)
+    public async Task<List<ExternalDependency>> GetExternalDependenciesAsync(
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+        if (!await ScopeIsTenantsAsync(db, tenantId, appId, environmentId, ct))
+        {
+            return [];
+        }
+
         return await db.ExternalDependencies
             .AsNoTracking()
             .Where(d => d.AppId == appId && d.EnvironmentId == environmentId)
@@ -753,7 +830,13 @@ public class ConnectivityGraphService(
             .ToListAsync(ct);
     }
 
-    public async Task<ExternalDependency> AddExternalDependencyAsync(ExternalDependency dep, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose dependency. This row becomes an <em>egress allow</em> to a host of the caller's
+    /// choosing — an Istio ServiceEntry and a NetworkPolicy egress rule — so writing one
+    /// against an application by Id alone was granting that application a route out.
+    /// </param>
+    public async Task<ExternalDependency> AddExternalDependencyAsync(
+        Guid tenantId, ExternalDependency dep, CancellationToken ct = default)
     {
         if (string.IsNullOrWhiteSpace(dep.Host))
         {
@@ -774,22 +857,38 @@ public class ConnectivityGraphService(
         dep.CreatedAt = DateTime.UtcNow;
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await ScopeIsTenantsAsync(db, tenantId, dep.AppId, dep.EnvironmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "App or environment not found, or it is not this tenant's.");
+        }
+
         db.ExternalDependencies.Add(dep);
         await db.SaveChangesAsync(ct);
         return dep;
     }
 
-    public async Task DeleteExternalDependencyAsync(Guid id, CancellationToken ct = default)
+    public async Task DeleteExternalDependencyAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        await db.ExternalDependencies.Where(d => d.Id == id).ExecuteDeleteAsync(ct);
+
+        await db.ExternalDependencies
+            .Where(d => d.Id == id && d.App.Customer.TenantId == tenantId)
+            .ExecuteDeleteAsync(ct);
     }
 
     /// <summary>Apps in the same customer as <paramref name="appId"/>, excluding itself — candidate peers.</summary>
-    public async Task<List<App>> GetCandidatePeerAppsAsync(Guid appId, CancellationToken ct = default)
+    public async Task<List<App>> GetCandidatePeerAppsAsync(
+        Guid tenantId, Guid appId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        App? app = await db.Apps.AsNoTracking().FirstOrDefaultAsync(a => a.Id == appId, ct);
+
+        // A picker: without the tenant it listed another customer's application names to
+        // anybody holding one of their app ids.
+        App? app = await db.Apps.AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct);
         if (app is null)
         {
             return [];
@@ -819,7 +918,15 @@ public class ConnectivityGraphService(
         ConnectivityGraph graph = await BuildGraphAsync(tenantId, appId, environmentId, ct);
 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        App? app = await db.Apps.AsNoTracking().FirstOrDefaultAsync(a => a.Id == appId, ct);
+
+        if (!await ScopeIsTenantsAsync(db, tenantId, appId, environmentId, ct))
+        {
+            // No plans, which ApplyNetworkPoliciesAsync already reports as no targets.
+            return [];
+        }
+
+        App? app = await db.Apps.AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct);
         string prefix = Sanitize(app?.Name ?? "app");
 
         List<ConnectivityRule> declaredRules = await db.ConnectivityRules
@@ -1076,6 +1183,23 @@ public class ConnectivityGraphService(
     public async Task<List<(string Target, bool Success, string Output)>> ApplyNetworkPoliciesAsync(
         Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
+        // Before generating anything: with the guard on GenerateNetworkPoliciesAsync a refused
+        // pair comes back with no plans, and "(no targets)" below would then claim their
+        // application has no deployments rather than that we may not touch it.
+        //
+        // Defence in depth, not the crossing's only cover: the cluster seam already refuses a
+        // tenant that does not own the cluster, which is what
+        // ApplyNetworkPolicies_AnotherTenant_AppliesNothing has always exercised. What this adds
+        // is that the refusal is decided here, before any cluster work, and still says so.
+        using (ApplicationDbContext scope = dbFactory.CreateDbContext())
+        {
+            if (!await ScopeIsTenantsAsync(scope, tenantId, appId, environmentId, ct))
+            {
+                return [("(refused)", false,
+                    "App or environment not found, or it is not this tenant's.")];
+            }
+        }
+
         List<ConnectivityPolicyPlan> plans =
             await GenerateNetworkPoliciesAsync(tenantId, appId, environmentId, ct);
         if (plans.Count == 0)
