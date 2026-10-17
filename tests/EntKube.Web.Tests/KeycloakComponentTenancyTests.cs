@@ -16,6 +16,21 @@ namespace EntKube.Web.Tests;
 ///
 /// <para>This is the third time this programme has turned up that shape (<c>RedisService</c> #123,
 /// <c>WorkloadService</c> #135), which is why it is worth a test rather than a changelog line.</para>
+///
+/// <para>⚠️ <b>It kept happening.</b> <c>ComponentLifecycleService</c> had <em>six</em> of them at
+/// once (#270) — <c>GetInstallCommandAsync</c>, <c>InstallSubchartsAsync</c>,
+/// <c>UninstallSubchartsAsync</c>, <c>SyncComponentSecretsAsync</c>, <c>ExecuteHelmAsync</c>,
+/// <c>ApplyExternalRoutesAsync</c> — and <c>VpnService.AddRemoteEndpointAsync</c> had it with the
+/// tenant in seventh position, used only to file a PSK in the vault (#268).
+/// <c>HarborService.LinkProjectToAppAsync</c> is the same shape again and the reason this file
+/// gained a third test: there the tenant was used only to <em>stamp</em> a new row, so neither of
+/// the two ids it was handed was ever checked.
+///
+/// <para>The common thread is that a tenant reaching the vault, the cluster seam or an INSERT
+/// looks exactly like a tenant reaching the predicate at a glance. Only the query says which.
+/// <c>VacuousTenantCheckTests</c> catches the related tautology — a tenant read off the row being
+/// authorized — but not this one, and an attempt to ratchet it generally was measured three ways
+/// and abandoned: every variant was dominated by legitimate code.</para></para>
 /// </summary>
 public class KeycloakComponentTenancyTests : IDisposable
 {
@@ -92,5 +107,59 @@ public class KeycloakComponentTenancyTests : IDisposable
         Func<Task> act = () => sut.GetRegisteredPostgresDatabasesForComponentAsync(ourTenant, theirComponent);
 
         await act.Should().ThrowAsync<InvalidOperationException>();
+    }
+
+    /// <summary>
+    /// <c>SyncIdentityBindingAsync</c> loaded its binding by id alone. Here the tenant was
+    /// genuinely load-bearing twice further down — <c>GetClientSecretAsync</c> asks the vault as
+    /// this tenant, and <c>ForAsync</c> refuses a cluster that is not theirs — so this was
+    /// redundant rather than exploitable. It is scoped anyway: <c>IdentityBinding</c> has no
+    /// <c>TenantId</c>, and a method should not depend on what happens after it for its own
+    /// authorization.
+    /// </summary>
+    [Fact]
+    public async Task An_identity_binding_is_not_reachable_across_tenants()
+    {
+        Guid customerId = Guid.NewGuid(), appId = Guid.NewGuid(), bindingId = Guid.NewGuid();
+        Guid realmId = Guid.NewGuid(), deploymentId = Guid.NewGuid();
+
+        KubernetesCluster theirCluster = db.KubernetesClusters.First(c => c.TenantId == theirTenant);
+
+        db.Customers.Add(new Customer { Id = customerId, TenantId = theirTenant, Name = "Theirs" });
+        db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "their-app" });
+        db.AppDeployments.Add(new AppDeployment
+        {
+            Id = deploymentId, AppId = appId, Name = "their-deploy", Type = DeploymentType.Manual,
+            EnvironmentId = theirCluster.EnvironmentId, ClusterId = theirCluster.Id,
+            Namespace = "their-ns",
+        });
+        Guid configId = Guid.NewGuid();
+        db.Set<KeycloakComponentConfig>().Add(new KeycloakComponentConfig
+        {
+            Id = configId, TenantId = theirTenant, ClusterComponentId = theirComponent,
+            AdminUrl = "https://keycloak.theirs.example",
+        });
+        db.Set<KeycloakRealm>().Add(new KeycloakRealm
+        {
+            Id = realmId, TenantId = theirTenant, KeycloakComponentConfigId = configId,
+            RealmName = "theirs", DisplayName = "Theirs", LinkedAppId = appId,
+        });
+        db.Set<IdentityBinding>().Add(new IdentityBinding
+        {
+            Id = bindingId, KeycloakRealmId = realmId, AppDeploymentId = deploymentId,
+            ClientId = "their-client", ClientUuid = "uuid", KubernetesSecretName = "oidc",
+        });
+        db.SaveChanges();
+
+        Func<Task> act = () => sut.SyncIdentityBindingAsync(ourTenant, bindingId);
+
+        // ⚠️ The exact message, not a wildcard. "*not found*" passed with the predicate deleted,
+        // because the binding was then found and the NEXT guard — no client secret for a realm
+        // that is not ours — threw a message that also matched. An assertion loose enough to
+        // accept a downstream refusal is not testing this one.
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Identity binding not found.",
+                "the binding must read as absent here, not be resolved and then refused later "
+                + "for a different reason");
     }
 }

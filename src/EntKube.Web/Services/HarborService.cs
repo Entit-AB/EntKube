@@ -1761,15 +1761,48 @@ public class HarborService(
     /// the project through the portal. Creates the tracking record if it
     /// does not exist yet.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose Harbor and whose app. ⚠️ This method took a tenant and used it only to <em>stamp</em>
+    /// a new row — neither of the two ids it is given was ever checked against it, and both are
+    /// consequential:
+    ///
+    /// <para><b>The config id</b> says which Harbor instance the project lives in. Unchecked, a
+    /// row claiming this tenant could be written under another tenant's registry config, and
+    /// <c>GetTrackedProjectsAsync</c> lists by config id — so it would appear in their portal.</para>
+    ///
+    /// <para><b>The app id</b> becomes <c>LinkedAppId</c>, which is what grants an app pull
+    /// access to the project in the portal. Unchecked, it points at any app in the installation.</para>
+    ///
+    /// <para>And the <c>existing</c> row below is found by config id and project name alone, so
+    /// the write at the end could repoint <em>another tenant's</em> project link rather than
+    /// create one — which is why the lookup is scoped too and not just the inserts.</para>
+    /// </param>
     public async Task<HarborProject> LinkProjectToAppAsync(
         Guid tenantId, Guid harborComponentConfigId,
         string projectName, Guid appId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
+        if (!await db.HarborComponentConfigs.AnyAsync(
+                c => c.Id == harborComponentConfigId && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("That Harbor instance does not belong to this tenant.");
+        }
+
+        if (!await db.Apps.AnyAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("That application does not belong to this tenant.");
+        }
+
+        // ⚠️ The tenant predicate here is defence in depth, not the load-bearing guard: with the
+        // config check above in place this lookup can only ever be reached with one of our own
+        // configs, and a project row under our own config is ours. Removing it leaves the tests
+        // green, which is how I know. It stays because the upsert WRITES to whatever it finds,
+        // and that write should not depend on a guard twenty lines up staying where it is.
         HarborProject? existing = await db.HarborProjects
             .FirstOrDefaultAsync(p => p.HarborComponentConfigId == harborComponentConfigId
-                && p.ProjectName == projectName, ct);
+                && p.ProjectName == projectName
+                && p.TenantId == tenantId, ct);
 
         if (existing is null)
         {

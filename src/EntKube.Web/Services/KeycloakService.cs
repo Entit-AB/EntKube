@@ -1772,10 +1772,16 @@ public class KeycloakService(
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
+        // IdentityBinding has no TenantId, so the scope runs through its deployment's app. The
+        // tenant was already load-bearing twice below — GetClientSecretAsync asks the vault as
+        // this tenant, and ForAsync refuses a foreign cluster — so this predicate is the
+        // row-level half rather than the thing that was missing.
         IdentityBinding binding = await db.IdentityBindings
             .Include(b => b.KeycloakRealm).ThenInclude(r => r.ComponentConfig)
             .Include(b => b.AppDeployment).ThenInclude(d => d.Cluster)
-            .FirstOrDefaultAsync(b => b.Id == bindingId, ct)
+            .FirstOrDefaultAsync(
+                b => b.Id == bindingId
+                  && b.AppDeployment.App.Customer.TenantId == tenantId, ct)
             ?? throw new InvalidOperationException("Identity binding not found.");
 
         string? clientSecret = await GetClientSecretAsync(
