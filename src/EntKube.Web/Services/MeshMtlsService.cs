@@ -68,12 +68,21 @@ public class MeshMtlsService(
     /// The configured posture for a namespace. A namespace with no row is PERMISSIVE — the
     /// platform default, and what every namespace was before this feature existed.
     /// </summary>
-    public async Task<MeshMtlsMode> GetModeAsync(Guid clusterId, string ns, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose cluster. ⚠️ This had no tenant at all, and it has no callers either — which is the
+    /// reason to scope it rather than leave it: the next caller would inherit the hole, and the
+    /// default it returns on a miss is <c>Permissive</c>, so an unscoped read of a namespace
+    /// outside this tenant would answer "mTLS is not enforced there" about somebody else's mesh.
+    /// </param>
+    public async Task<MeshMtlsMode> GetModeAsync(
+        Guid tenantId, Guid clusterId, string ns, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         MeshMtlsPolicy? policy = await db.MeshMtlsPolicies
-            .FirstOrDefaultAsync(p => p.ClusterId == clusterId && p.Namespace == ns, ct);
+            .FirstOrDefaultAsync(
+                p => p.ClusterId == clusterId && p.Namespace == ns
+                  && p.TenantId == tenantId, ct);
 
         return policy?.Mode ?? MeshMtlsMode.Permissive;
     }
@@ -86,9 +95,27 @@ public class MeshMtlsService(
 
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
+        // ⚠️ Neither the cluster nor the policy row was checked against the tenant, and the
+        // tenant's only use was stamping TenantId onto a new row — which reads like scoping and
+        // is not. The mode here is mTLS enforcement for a namespace: setting Permissive or
+        // Disabled on somebody else's namespace downgrades their mutual TLS, and the row is
+        // found by cluster and namespace alone, so the else-branch below would have overwritten
+        // theirs rather than created ours.
+        if (!await db.KubernetesClusters.AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("That cluster does not belong to this tenant.");
+        }
+
+        // The tenant predicate on this lookup is defence in depth rather than the guard: behind
+        // the cluster check above it can only be reached with one of our own clusters, so
+        // deleting it leaves the test green. It stays because the else-branch WRITES to whatever
+        // this finds, and that write should not depend on a check ten lines up staying put —
+        // the same reasoning as HarborService.LinkProjectToAppAsync.
         string trimmed = ns.Trim();
         MeshMtlsPolicy? policy = await db.MeshMtlsPolicies
-            .FirstOrDefaultAsync(p => p.ClusterId == clusterId && p.Namespace == trimmed, ct);
+            .FirstOrDefaultAsync(
+                p => p.ClusterId == clusterId && p.Namespace == trimmed
+                  && p.TenantId == tenantId, ct);
 
         if (policy is null)
         {
@@ -117,12 +144,21 @@ public class MeshMtlsService(
     }
 
     /// <summary>Records that the PeerAuthentication for a namespace was applied.</summary>
-    public async Task MarkAppliedAsync(Guid clusterId, string ns, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose cluster. ⚠️ Also callerless — and that is worth noting beyond the scoping, because
+    /// nothing in the product calls it: <c>MeshMtlsPolicy.AppliedAt</c> is therefore never
+    /// written, so a policy that has reached a cluster is indistinguishable from one that has
+    /// not. Scoped here; the missing call is a separate question.
+    /// </param>
+    public async Task MarkAppliedAsync(
+        Guid tenantId, Guid clusterId, string ns, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         MeshMtlsPolicy? policy = await db.MeshMtlsPolicies
-            .FirstOrDefaultAsync(p => p.ClusterId == clusterId && p.Namespace == ns, ct);
+            .FirstOrDefaultAsync(
+                p => p.ClusterId == clusterId && p.Namespace == ns
+                  && p.TenantId == tenantId, ct);
         if (policy is null) return;
 
         policy.AppliedAt = DateTime.UtcNow;
