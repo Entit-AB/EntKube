@@ -1225,13 +1225,13 @@ public class StalwartService(
             releaseName = component.ReleaseName ?? component.Name;
         }
 
-        List<ExternalRoute> existing = await routeService.GetRoutesAsync(clusterComponentId, ct);
+        List<ExternalRoute> existing = await routeService.GetRoutesAsync(tenantId, clusterComponentId, ct);
 
         // Clear the route we own before re-adding it, so a hostname change or a switch back to
         // "not published" actually removes the old route rather than leaving it serving.
         foreach (ExternalRoute route in existing.Where(r => r.ServiceName == releaseName))
         {
-            await routeService.DeleteRouteAsync(route.Id, ct);
+            await routeService.DeleteRouteAsync(tenantId, route.Id, ct);
         }
 
         if (string.IsNullOrWhiteSpace(config.AdminHostname))
@@ -3220,10 +3220,10 @@ public class StalwartService(
         Guid tenantId, Guid clusterComponentId, string releaseName,
         string hostnameSecret, string issuerSecret, int servicePort, CancellationToken ct)
     {
-        List<ExternalRoute> existing = await routeService.GetRoutesAsync(clusterComponentId, ct);
+        List<ExternalRoute> existing = await routeService.GetRoutesAsync(tenantId, clusterComponentId, ct);
         foreach (ExternalRoute route in existing.Where(r => r.ServiceName == releaseName))
         {
-            await routeService.DeleteRouteAsync(route.Id, ct);
+            await routeService.DeleteRouteAsync(tenantId, route.Id, ct);
         }
 
         string? hostname = await Secret(tenantId, clusterComponentId, hostnameSecret, ct);

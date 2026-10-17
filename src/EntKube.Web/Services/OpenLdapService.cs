@@ -215,10 +215,10 @@ public class OpenLdapService(
         string ltbSvc = $"{release}-{LtbPasswdServiceSuffix}";
 
         // Remove any existing web-UI routes (by their backing Service) so mode/host/disable changes reconcile.
-        List<ExternalRoute> existing = await routeService.GetRoutesAsync(clusterComponentId, ct);
+        List<ExternalRoute> existing = await routeService.GetRoutesAsync(tenantId, clusterComponentId, ct);
         foreach (ExternalRoute r in existing.Where(r => r.ServiceName == phpSvc || r.ServiceName == ltbSvc))
         {
-            await routeService.DeleteRouteAsync(r.Id, ct);
+            await routeService.DeleteRouteAsync(tenantId, r.Id, ct);
         }
 
         await AddGatewayRouteIfNeeded(tenantId, clusterComponentId, config.PhpLdapAdminEnabled, config.PhpLdapAdminExposeMode,

@@ -46,7 +46,7 @@ public class ExternalRouteServiceTests : IDisposable
 
         // Seed a cluster with traefik installed and a monitoring component.
 
-        Tenant tenant = new() { Id = tenantId, Name = "RouteTenant", Slug = "route" };
+        Tenant tenant = new() { Id = tenantId, Name = "RouteTenant", Slug = $"route-{tenantId:N}" };
         Data.Environment env = new() { Id = envId, TenantId = tenantId, Name = "production" };
         KubernetesCluster cluster = new()
         {
@@ -252,7 +252,7 @@ public class ExternalRouteServiceTests : IDisposable
         await sut.AddRouteAsync(tenantId, componentId, request1);
         await sut.AddRouteAsync(tenantId, componentId, request2);
 
-        List<ExternalRoute> routes = await sut.GetRoutesAsync(componentId);
+        List<ExternalRoute> routes = await sut.GetRoutesAsync(tenantId, componentId);
 
         routes.Should().HaveCount(2);
         routes.Select(r => r.Hostname).Should().BeEquivalentTo(["a.example.com", "b.example.com"]);
@@ -269,9 +269,9 @@ public class ExternalRouteServiceTests : IDisposable
         };
 
         ExternalRoute route = await sut.AddRouteAsync(tenantId, componentId, request);
-        await sut.DeleteRouteAsync(route.Id);
+        await sut.DeleteRouteAsync(tenantId, route.Id);
 
-        List<ExternalRoute> routes = await sut.GetRoutesAsync(componentId);
+        List<ExternalRoute> routes = await sut.GetRoutesAsync(tenantId, componentId);
         routes.Should().BeEmpty();
     }
 
@@ -534,9 +534,9 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         });
 
-        await sut.UpdateRouteTimeoutAsync(route.Id, 120);
+        await sut.UpdateRouteTimeoutAsync(tenantId, route.Id, 120);
 
-        List<ExternalRoute> routes = await sut.GetRoutesAsync(componentId);
+        List<ExternalRoute> routes = await sut.GetRoutesAsync(tenantId, componentId);
         routes.Single(r => r.Id == route.Id).RequestTimeoutSeconds.Should().Be(120);
     }
 
@@ -550,7 +550,7 @@ public class ExternalRouteServiceTests : IDisposable
             ClusterIssuerName = "letsencrypt-prod"
         });
 
-        Func<Task> act = () => sut.UpdateRouteTimeoutAsync(route.Id, -1);
+        Func<Task> act = () => sut.UpdateRouteTimeoutAsync(tenantId, route.Id, -1);
 
         await act.Should().ThrowAsync<InvalidOperationException>();
     }
@@ -949,8 +949,8 @@ public class ExternalRouteServiceTests : IDisposable
     {
         ExternalRoute route = await AddRouteForAffinityTestAsync();
 
-        await sut.UpdateRouteSessionAffinityAsync(route.Id, SessionAffinityMode.Header, "x-tenant-id", null);
-        await sut.UpdateRouteSessionAffinityAsync(route.Id, SessionAffinityMode.SourceIp, "x-tenant-id", 60);
+        await sut.UpdateRouteSessionAffinityAsync(tenantId, route.Id, SessionAffinityMode.Header, "x-tenant-id", null);
+        await sut.UpdateRouteSessionAffinityAsync(tenantId, route.Id, SessionAffinityMode.SourceIp, "x-tenant-id", 60);
 
         ExternalRoute saved = await db.ExternalRoutes.AsNoTracking().FirstAsync(r => r.Id == route.Id);
         saved.SessionAffinity.Should().Be(SessionAffinityMode.SourceIp);
@@ -965,7 +965,7 @@ public class ExternalRouteServiceTests : IDisposable
     {
         ExternalRoute route = await AddRouteForAffinityTestAsync();
 
-        Func<Task> act = () => sut.UpdateRouteSessionAffinityAsync(route.Id, SessionAffinityMode.Header, null, null);
+        Func<Task> act = () => sut.UpdateRouteSessionAffinityAsync(tenantId, route.Id, SessionAffinityMode.Header, null, null);
 
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*header*");
@@ -1164,5 +1164,78 @@ public class ExternalRouteServiceTests : IDisposable
         IReadOnlySet<string> shadowed = await sut.ShadowedHostnamesAsync(tenantId, componentId);
 
         shadowed.Should().BeEmpty();
+    }
+
+    // ──────── Whose route ────────
+
+    /// <summary>
+    /// ⚠️ <c>ExternalRoute</c> carries no <c>TenantId</c> — only a <c>ComponentId</c> — and
+    /// <c>ClusterComponents</c> is Catalog's table, which <c>ConnectivityDbContext</c> does not
+    /// expose. So the tenant check cannot be a predicate on the route at all without reaching
+    /// into another module's table, which is the coupling <c>CatalogContractAdoptionTests</c>
+    /// rejects. It has to come from <c>ICatalogApi</c>, which takes the tenant as a parameter.
+    ///
+    /// <para>The loader already asked the contract — and then handed the <c>null</c> straight on.
+    /// The generators document their component as "null when the caller cannot see one", so a
+    /// route belonging to another tenant still rendered: its hostname, its paths, its timeout,
+    /// just without the component's name. Requiring the component to resolve turns that into a
+    /// refusal, which is what "I cannot see this route" should mean.</para>
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_route_is_not_readable_editable_or_deletable()
+    {
+        ExternalRoute ours = await sut.AddRouteAsync(tenantId, componentId, new ExternalRouteRequest
+        {
+            Hostname = "grafana.example.com",
+            ServiceName = "kube-prometheus-stack-grafana",
+            ServicePort = 80,
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt-prod",
+        });
+
+        Guid stranger = Guid.NewGuid();
+        db.Tenants.Add(new Tenant { Id = stranger, Name = "Stranger", Slug = $"s-{stranger:N}" });
+        await db.SaveChangesAsync();
+
+        // Reads.
+        (await sut.GetRoutesAsync(stranger, componentId)).Should().BeEmpty(
+            "the route exists, so this is a refusal");
+        (await sut.GetRoutesAsync(tenantId, componentId)).Should().ContainSingle(
+            "the owner still sees it");
+
+        // The generators: a route they cannot see is not found, rather than rendered without a
+        // component name.
+        Func<Task> yaml = () => sut.GenerateHttpRouteYamlAsync(stranger, ours.Id);
+        Func<Task> manifest = () => sut.GenerateFullManifestYamlAsync(stranger, ours.Id);
+        await yaml.Should().ThrowAsync<InvalidOperationException>();
+        await manifest.Should().ThrowAsync<InvalidOperationException>();
+
+        (await sut.GenerateHttpRouteYamlAsync(tenantId, ours.Id)).Should().Contain(
+            "grafana.example.com", "the owner's own render still works");
+
+        // Writes.
+        Func<Task> timeout = () => sut.UpdateRouteTimeoutAsync(stranger, ours.Id, 0);
+        Func<Task> affinity = () => sut.UpdateRouteSessionAffinityAsync(
+            stranger, ours.Id, SessionAffinityMode.Cookie, "SESSIONID", 3600);
+        Func<Task> delete = () => sut.DeleteRouteAsync(stranger, ours.Id);
+
+        await timeout.Should().ThrowAsync<InvalidOperationException>();
+        await affinity.Should().ThrowAsync<InvalidOperationException>();
+        await delete.Should().ThrowAsync<InvalidOperationException>();
+
+        ExternalRoute intact = (await sut.GetRoutesAsync(tenantId, componentId)).Single();
+        intact.RequestTimeoutSeconds.Should().BeNull(
+            "0 is the no-timeout escape hatch — setting it removes the limit protecting them");
+        intact.SessionAffinity.Should().Be(SessionAffinityMode.None);
+
+        // And the owner can still do all three.
+        await sut.UpdateRouteTimeoutAsync(tenantId, ours.Id, 120);
+        await sut.UpdateRouteSessionAffinityAsync(
+            tenantId, ours.Id, SessionAffinityMode.Cookie, "SESSIONID", 3600);
+        (await sut.GetRoutesAsync(tenantId, componentId)).Single()
+            .RequestTimeoutSeconds.Should().Be(120);
+
+        await sut.DeleteRouteAsync(tenantId, ours.Id);
+        (await sut.GetRoutesAsync(tenantId, componentId)).Should().BeEmpty();
     }
 }
