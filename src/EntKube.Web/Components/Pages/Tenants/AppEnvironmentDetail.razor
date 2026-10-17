@@ -2686,7 +2686,7 @@
     {
         if (newDeployType is DeploymentType.GitYaml or DeploymentType.GitHelm or DeploymentType.GitAppOfApps)
         {
-            gitRepoPolicies ??= await CustomerGitService.GetRepoPoliciesAsync(App.CustomerId, Environment.Id);
+            gitRepoPolicies ??= await CustomerGitService.GetRepoPoliciesAsync(TenantId, App.CustomerId, Environment.Id);
         }
     }
 
@@ -2858,7 +2858,7 @@
         showEditGitSettings = true;
         showEditDeployment = false;
 
-        gitRepoPolicies ??= await CustomerGitService.GetRepoPoliciesAsync(App.CustomerId, Environment.Id);
+        gitRepoPolicies ??= await CustomerGitService.GetRepoPoliciesAsync(TenantId, App.CustomerId, Environment.Id);
     }
 
     private async Task SaveGitSettings()
@@ -3522,10 +3522,10 @@
     {
         section = "git-access";
         if (gitRepoPolicies is null)
-            gitRepoPolicies = await CustomerGitService.GetRepoPoliciesAsync(App.CustomerId, Environment.Id);
+            gitRepoPolicies = await CustomerGitService.GetRepoPoliciesAsync(TenantId, App.CustomerId, Environment.Id);
         if (gitCredentials is null)
         {
-            gitCredentials = await CustomerGitService.GetCredentialsAsync(App.CustomerId, Environment.Id);
+            gitCredentials = await CustomerGitService.GetCredentialsAsync(TenantId, App.CustomerId, Environment.Id);
             foreach (CustomerGitCredential c in gitCredentials)
                 credSecretValues.TryAdd(c.Id, "");
         }
@@ -3536,9 +3536,9 @@
         repoPolicyError = null;
         try
         {
-            await CustomerGitService.AddRepoPolicyAsync(App.CustomerId, Environment.Id, repoPolicyModel.Pattern.Trim());
+            await CustomerGitService.AddRepoPolicyAsync(TenantId, App.CustomerId, Environment.Id, repoPolicyModel.Pattern.Trim());
             repoPolicyModel = new();
-            gitRepoPolicies = await CustomerGitService.GetRepoPoliciesAsync(App.CustomerId, Environment.Id);
+            gitRepoPolicies = await CustomerGitService.GetRepoPoliciesAsync(TenantId, App.CustomerId, Environment.Id);
             Toasts.Success("URL policy added.");
         }
         catch (Microsoft.EntityFrameworkCore.DbUpdateException)
@@ -3550,8 +3550,8 @@
     private async Task DeleteRepoPolicy(Guid policyId)
     {
         confirmDeletePolicyId = null;
-        await CustomerGitService.DeleteRepoPolicyAsync(App.CustomerId, policyId);
-        gitRepoPolicies = await CustomerGitService.GetRepoPoliciesAsync(App.CustomerId, Environment.Id);
+        await CustomerGitService.DeleteRepoPolicyAsync(TenantId, App.CustomerId, policyId);
+        gitRepoPolicies = await CustomerGitService.GetRepoPoliciesAsync(TenantId, App.CustomerId, Environment.Id);
     }
 
     private async Task AddGitCredential()
@@ -3566,7 +3566,7 @@
                 addCredentialModel.AuthType == GitAuthType.HttpsPassword ? addCredentialModel.Username : null,
                 string.IsNullOrWhiteSpace(addCredentialModel.UrlPattern) ? null : addCredentialModel.UrlPattern.Trim());
             addCredentialModel = new();
-            gitCredentials = await CustomerGitService.GetCredentialsAsync(App.CustomerId, Environment.Id);
+            gitCredentials = await CustomerGitService.GetCredentialsAsync(TenantId, App.CustomerId, Environment.Id);
             foreach (CustomerGitCredential c in gitCredentials)
                 credSecretValues.TryAdd(c.Id, "");
             credentialSuccess = "Credential added.";
@@ -3581,11 +3581,11 @@
     {
         confirmDeleteCredentialId = null;
         credentialError = null;
-        await CustomerGitService.DeleteCredentialAsync(App.CustomerId, credentialId);
+        await CustomerGitService.DeleteCredentialAsync(TenantId, App.CustomerId, credentialId);
         credSecretValues.Remove(credentialId);
         credSaveMessages.Remove(credentialId);
         credSaveOk.Remove(credentialId);
-        gitCredentials = await CustomerGitService.GetCredentialsAsync(App.CustomerId, Environment.Id);
+        gitCredentials = await CustomerGitService.GetCredentialsAsync(TenantId, App.CustomerId, Environment.Id);
     }
 
     private async Task SaveCredentialSecret(CustomerGitCredential cred)

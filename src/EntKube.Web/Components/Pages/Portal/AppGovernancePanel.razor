@@ -288,7 +288,7 @@ else
         loading = true;
         data = await GovernanceService.LoadAsync(TenantId, AppId, EnvironmentId);
         if (CustomerId != Guid.Empty)
-            gitPolicies = await CustomerGitService.GetRepoPoliciesAsync(CustomerId, EnvironmentId);
+            gitPolicies = await CustomerGitService.GetRepoPoliciesAsync(TenantId, CustomerId, EnvironmentId);
         loading = false;
     }
 
