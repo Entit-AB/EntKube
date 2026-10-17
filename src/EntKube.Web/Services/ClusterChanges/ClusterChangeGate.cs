@@ -20,6 +20,8 @@ public sealed class ClusterChangeGate : IClusterChangeGate
     private IClusterChangeAckSink? _sink;
     private string? _unattendedReason;
     private string? _consequenceReason;
+    private string? _operation;
+    private bool _operationAcknowledged;
 
     /// <param name="recorder">
     /// Where outcomes are written. Optional so that the tests about acknowledgment can keep
@@ -72,6 +74,29 @@ public sealed class ClusterChangeGate : IClusterChangeGate
         return new Unconsequence(this, reason);
     }
 
+    public IDisposable BeginOperation(string what)
+    {
+        if (string.IsNullOrWhiteSpace(what))
+        {
+            // Same rule as the other two declarations: the name is what the audit trail shows in
+            // place of the acknowledgment the consequences did not get.
+            throw new ArgumentException(
+                "An operation must name the action an operator chose.", nameof(what));
+        }
+
+        // Nesting is a no-op so the OUTERMOST action owns the window. A service that opens its
+        // own operation while already inside one must not reset _operationAcknowledged, or the
+        // first change of its own would get a second dialog for the same approved act.
+        if (_operation is not null)
+        {
+            return new NoOperation();
+        }
+
+        _operation = what;
+        _operationAcknowledged = false;
+        return new EndOperation(this, what);
+    }
+
     public async Task AcknowledgeAsync(PlannedClusterChange change, CancellationToken ct = default)
     {
         // Bypass when the feature is off. An operator opting out of the dialog is a different
@@ -109,6 +134,26 @@ public sealed class ClusterChangeGate : IClusterChangeGate
                 change.ClusterLabel, _unattendedReason, change.Describe());
 
             await RecordAsync(change, ClusterChangeOutcome.AppliedUnattended, null, ct);
+            return;
+        }
+
+        if (_operation is not null && _operationAcknowledged)
+        {
+            // An operation suppresses the QUESTION, not the refusal. Below the sinkless branch to
+            // match the consequence branch — but note the two are not equally fragile, and it is
+            // worth being exact about why.
+            //
+            // _consequenceReason is set by a CALLER, so ordering is what stops a declaration
+            // rescuing a scope with nobody to ask. _operationAcknowledged cannot be set that way:
+            // the only assignment is in the acknowledged branch below, which is unreachable
+            // without a sink. So a sinkless scope can never satisfy this condition, whatever the
+            // order — moving this block above the refusal leaves the behaviour unchanged, which
+            // is how I know. The placement is defence in depth; the invariant is structural.
+            _logger.LogInformation(
+                "Cluster change applied on {Cluster} as part of {Operation}: {Change}",
+                change.ClusterLabel, _operation, change.Describe());
+
+            await RecordAsync(change, ClusterChangeOutcome.AppliedAsConsequence, null, ct);
             return;
         }
 
@@ -160,6 +205,14 @@ public sealed class ClusterChangeGate : IClusterChangeGate
         if (decision == ClusterChangeDecision.Acknowledged)
         {
             _logger.LogInformation("Cluster change ACKNOWLEDGED on {Cluster}: {Change}", change.ClusterLabel, change.Describe());
+
+            // Inside an operation this is the one dialog for the whole action: everything it goes
+            // on to do is a consequence of what was just approved.
+            if (_operation is not null)
+            {
+                _operationAcknowledged = true;
+            }
+
             await RecordAsync(change, ClusterChangeOutcome.Acknowledged, diff, ct);
             return;
         }
@@ -365,6 +418,27 @@ public sealed class ClusterChangeGate : IClusterChangeGate
         public void Dispose()
         {
             if (ReferenceEquals(_gate._consequenceReason, _reason)) _gate._consequenceReason = null;
+        }
+    }
+
+    /// <summary>Returned by a nested <see cref="BeginOperation"/>; the outer one owns the window.</summary>
+    private sealed class NoOperation : IDisposable
+    {
+        public void Dispose() { }
+    }
+
+    private sealed class EndOperation : IDisposable
+    {
+        private readonly ClusterChangeGate _gate;
+        private readonly string _what;
+        public EndOperation(ClusterChangeGate gate, string what) { _gate = gate; _what = what; }
+        public void Dispose()
+        {
+            // Only if it is still ours, matching Undeclare/Unconsequence: an operation that has
+            // already been replaced is not this one's to close.
+            if (!ReferenceEquals(_gate._operation, _what)) return;
+            _gate._operation = null;
+            _gate._operationAcknowledged = false;
         }
     }
 

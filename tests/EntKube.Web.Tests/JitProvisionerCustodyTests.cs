@@ -198,6 +198,8 @@ public class JitProvisionerCustodyTests : IDisposable
 
         public IDisposable DeclareConsequence(string reason) => new Nothing();
 
+        public IDisposable BeginOperation(string what) => new Nothing();
+
         private sealed class Nothing : IDisposable
         {
             public void Dispose() { }

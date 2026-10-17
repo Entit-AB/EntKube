@@ -77,6 +77,33 @@ public interface IClusterChangeGate
     /// "volume guard".</para>
     /// </summary>
     IDisposable DeclareConsequence(string reason);
+
+    /// <summary>
+    /// Opens an <b>operator action</b>: one acknowledgment covers everything the action goes on
+    /// to do. The first gated change inside asks as usual; every later one is recorded as
+    /// <see cref="ClusterChangeOutcome.AppliedAsConsequence"/> against <paramref name="what"/>.
+    /// Disposing closes the window, so the operator's next action asks again.
+    ///
+    /// <para><b>Why the boundary has to be explicit.</b> "Do not ask twice" needs an end as well
+    /// as a beginning. The gate is scoped per circuit and a circuit lasts as long as the page, so
+    /// a rule like "stop asking once something has been acknowledged" would carry across to the
+    /// next button press and quietly retire the gate. This is the scope of one action, which is
+    /// the unit the operator actually decided about.</para>
+    ///
+    /// <para><b>The outermost one wins.</b> Nesting is a no-op: a service inside an action that
+    /// opens its own operation does not restart the window, so the first change of the action is
+    /// the one that gets the dialog however deep the call tree goes.</para>
+    ///
+    /// <para><b>It suppresses the question, never the refusal</b> — the same invariant
+    /// <see cref="DeclareConsequence"/> holds. A scope with no sink and no
+    /// <see cref="DeclareUnattended"/> is still refused inside an operation, because an operation
+    /// cannot manufacture an approver who was never there.</para>
+    ///
+    /// <para><paramref name="what"/> reaches the audit trail as the reason each consequence was
+    /// applied, so it should name the action an operator chose — "helm upgrade --install flow",
+    /// not "operation".</para>
+    /// </summary>
+    IDisposable BeginOperation(string what);
 }
 
 /// <summary>

@@ -253,4 +253,147 @@ public class ClusterChangeGateTests
         await act.Should().ThrowAsync<InvalidOperationException>();
         sink.Calls.Should().Be(0);
     }
+
+    // ──────── One acknowledgment per operator action ────────
+
+    /// <summary>
+    /// The rule: an operator acknowledges an <em>action</em>, and everything that action goes on
+    /// to do follows from that one answer.
+    ///
+    /// <para><b>Why it was needed.</b> Every mutating primitive gates itself — fifteen raise
+    /// points in <c>KubernetesClientFactory</c> alone — so any service method that performs more
+    /// than one primitive asked more than once. A Helm install asked for the release, then for
+    /// the Kyverno apply, then once per hostname for the route re-apply: four dialogs for one
+    /// button, all of them about work the operator had already approved. That is how an operator
+    /// learns to click through dialogs without reading them, which costs more safety than it
+    /// buys.</para>
+    /// </summary>
+    [Fact]
+    public async Task An_operation_asks_once_and_treats_the_rest_as_consequences()
+    {
+        ClusterChangeGate gate = NewGate();
+        FakeSink sink = new(ClusterChangeDecision.Acknowledged);
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        using (gate.BeginOperation("helm upgrade --install flow in flow"))
+        {
+            await gate.AcknowledgeAsync(PatchChange());   // the release: asks
+            await gate.AcknowledgeAsync(PatchChange());   // kyverno: follows from it
+            await gate.AcknowledgeAsync(PatchChange());   // route refresh: likewise
+        }
+
+        sink.Calls.Should().Be(1, "one action, one dialog");
+    }
+
+    /// <summary>
+    /// <b>The boundary, and the reason this is an operation rather than a flag.</b> The gate is
+    /// scoped per circuit and a circuit lasts as long as the page, so "stop asking once something
+    /// has been acknowledged" would carry across to the operator's next button press and quietly
+    /// retire the gate. The window closes with the action.
+    /// </summary>
+    [Fact]
+    public async Task The_next_action_asks_again()
+    {
+        ClusterChangeGate gate = NewGate();
+        FakeSink sink = new(ClusterChangeDecision.Acknowledged);
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        using (gate.BeginOperation("apply 3 manifest(s) to billing-ns"))
+        {
+            await gate.AcknowledgeAsync(PatchChange());
+            await gate.AcknowledgeAsync(PatchChange());
+        }
+
+        using (gate.BeginOperation("remove billing-api from billing-ns"))
+        {
+            await gate.AcknowledgeAsync(PatchChange());
+        }
+
+        sink.Calls.Should().Be(2, "a second deliberate action is a second decision");
+    }
+
+    /// <summary>
+    /// Nesting defers to the outermost action, so the first change of the action gets the dialog
+    /// however deep the call tree goes. <c>DeleteAppFromClusterAsync</c> relies on this: it wraps
+    /// the whole app, and each per-deployment delete inside opens its own operation.
+    /// </summary>
+    [Fact]
+    public async Task A_nested_operation_does_not_start_a_second_window()
+    {
+        ClusterChangeGate gate = NewGate();
+        FakeSink sink = new(ClusterChangeDecision.Acknowledged);
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        using (gate.BeginOperation("remove every deployment of app X"))
+        {
+            await gate.AcknowledgeAsync(PatchChange());
+
+            using (gate.BeginOperation("remove deployment 1"))
+            {
+                await gate.AcknowledgeAsync(PatchChange());
+            }
+
+            // ⚠️ The inner dispose must not reopen the window. If it cleared the flag, the next
+            // change would ask again — one dialog per deployment, which is the bug this whole
+            // mechanism exists to remove.
+            await gate.AcknowledgeAsync(PatchChange());
+
+            using (gate.BeginOperation("remove deployment 2"))
+            {
+                await gate.AcknowledgeAsync(PatchChange());
+            }
+        }
+
+        sink.Calls.Should().Be(1, "the outermost action owns the window");
+    }
+
+    /// <summary>
+    /// <b>The safety property, same as for a consequence declaration.</b> An operation suppresses
+    /// the question, never the refusal: a scope with nobody to ask and no unattended declaration
+    /// is still refused inside one. Otherwise opening an operation would be a way to manufacture
+    /// an approver who was never there — and since the entry points now open operations as a
+    /// matter of course, that would have been a bypass on every one of them.
+    /// </summary>
+    [Fact]
+    public async Task An_operation_does_not_rescue_a_scope_with_nobody_to_ask()
+    {
+        ClusterChangeGate gate = NewGate();
+
+        using (gate.BeginOperation("an action with no operator behind it"))
+        {
+            await Assert.ThrowsAsync<InvalidOperationException>(
+                () => gate.AcknowledgeAsync(PatchChange()));
+        }
+    }
+
+    /// <summary>
+    /// A cancelled first change must not open the window either — nothing was approved, so there
+    /// is nothing for the rest of the action to follow from. The cancellation aborts the caller,
+    /// but a caller that swallowed it would otherwise find the gate silent afterwards.
+    /// </summary>
+    [Fact]
+    public async Task A_cancelled_first_change_leaves_the_operation_unacknowledged()
+    {
+        ClusterChangeGate gate = NewGate();
+        FakeSink sink = new(ClusterChangeDecision.Cancelled);
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        using (gate.BeginOperation("an action the operator declined"))
+        {
+            await Assert.ThrowsAsync<OperationCanceledException>(
+                () => gate.AcknowledgeAsync(PatchChange()));
+
+            await Assert.ThrowsAsync<OperationCanceledException>(
+                () => gate.AcknowledgeAsync(PatchChange()));
+        }
+
+        sink.Calls.Should().Be(2, "a refusal is not an approval to ride on");
+    }
+
+    [Fact]
+    public void An_operation_must_name_the_action()
+    {
+        ClusterChangeGate gate = NewGate();
+        Assert.Throws<ArgumentException>(() => gate.BeginOperation("  "));
+    }
 }
