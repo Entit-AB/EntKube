@@ -363,4 +363,83 @@ public class HelmSeamTests : IDisposable
         helm.Should().BeEmpty("no helm invocation may reach a cluster this tenant does not own");
     }
 
+    // ──────── Tenancy at the row, not only at the seam ────────
+
+    /// <summary>
+    /// Every entry point in <see cref="KubernetesOperationsService"/> already took a tenant, and
+    /// for the cluster-reaching ones the tenant was load-bearing <em>at the seam</em>:
+    /// <c>ForAsync(tenantId, clusterId)</c> refuses a cluster that is not this tenant's, so the
+    /// unscoped row reads above it were redundant rather than exploitable.
+    ///
+    /// <para>⚠️ <c>SetRouteManagementAsync</c> is the exception, and the reason this unit exists.
+    /// It writes <c>AppRoute.IsManaged</c> before any cluster call, so the seam never gets the
+    /// chance to refuse. Unmanaging another tenant's route abandons the HTTPRoute EntKube
+    /// re-applies for them; managing one makes EntKube start overwriting a route it does not own.
+    /// The assertion is on the row, because that is where the damage was.</para>
+    /// </summary>
+    [Fact]
+    public async Task Another_tenant_cannot_change_who_manages_a_route()
+    {
+        await SeedAsync();
+
+        Guid routeId = Guid.NewGuid();
+        db.Set<AppRoute>().Add(new AppRoute
+        {
+            Id = routeId,
+            AppId = db.Apps.Single().Id,
+            Hostname = "billing.example.com",
+            IsManaged = true,
+        });
+        await db.SaveChangesAsync();
+
+        KubernetesOperationsService sut = Sut();
+
+        KubernetesOperationResult<string> refused =
+            await sut.SetRouteManagementAsync(Guid.NewGuid(), routeId, managed: false);
+
+        refused.IsSuccess.Should().BeFalse();
+
+        using ApplicationDbContext after = testDb.CreateContext();
+        after.Set<AppRoute>().Single(r => r.Id == routeId).IsManaged.Should().BeTrue(
+            "unmanaging a route abandons the HTTPRoute EntKube re-applies for its owner");
+
+        // The owner's own call still lands, so the refusal is about the crossing.
+        KubernetesOperationResult<string> ours =
+            await sut.SetRouteManagementAsync(tenantId, routeId, managed: false);
+        ours.IsSuccess.Should().BeTrue(ours.Error ?? "");
+
+        using ApplicationDbContext owned = testDb.CreateContext();
+        owned.Set<AppRoute>().Single(r => r.Id == routeId).IsManaged.Should().BeFalse();
+    }
+
+    /// <summary>
+    /// The deployment resolver that the apply, restart, scale and delete paths all share. The
+    /// seam already refused a foreign cluster; the row is now scoped too, so nothing of another
+    /// tenant's is loaded to decide what to say about it.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenant_cannot_reach_a_deployment_through_the_shared_resolver()
+    {
+        await SeedAsync();
+
+        KubernetesOperationsService sut = Sut();
+
+        KubernetesOperationResult refused =
+            await sut.RestartDeploymentAsync(Guid.NewGuid(), deploymentId, "billing-api");
+
+        refused.IsSuccess.Should().BeFalse();
+        refused.Error.Should().Contain("not this tenant's",
+            "the row predicate refuses before the seam does now, so the message has to stay true "
+            + "for an absent row AND for somebody else's — telling the two apart would leak "
+            + "whether a stranger's deployment exists");
+
+        // ⚠️ The owner's half has to assert a DIFFERENT failure, not a success: this harness
+        // mocks helm and not kubectl, so the owner's restart also fails — on the network. A bare
+        // IsSuccess==false for the stranger would therefore pass against no guard at all.
+        KubernetesOperationResult ours =
+            await sut.RestartDeploymentAsync(tenantId, deploymentId, "billing-api");
+        ours.Error.Should().NotContain("not this tenant's",
+            "the owner resolves the deployment and gets to the cluster call, so whatever "
+            + "fails after that is the harness and not authorization");
+    }
 }
