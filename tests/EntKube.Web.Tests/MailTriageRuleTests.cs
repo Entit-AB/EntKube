@@ -50,7 +50,7 @@ public class MailTriageRuleTests : IDisposable
 
     private Task<MailTriageRule> Add(
         MailSignal signal, string phrase, TicketPriority? priority = null, string? criterion = null) =>
-        rules.SaveAsync(new MailTriageRule
+        rules.SaveAsync(tenantId, new MailTriageRule
         {
             TenantId = tenantId,
             Signal = signal,
@@ -132,7 +132,7 @@ public class MailTriageRuleTests : IDisposable
         MailTriageRule doomed = (await rules.ListAsync(tenantId))
             .First(r => r.Phrase == "ingen kan logga in");
 
-        await rules.DeleteAsync(doomed.Id);
+        await rules.DeleteAsync(tenantId, doomed.Id);
 
         MailTriageRuleSet effective = await rules.GetEffectiveAsync(tenantId);
 
@@ -186,7 +186,7 @@ public class MailTriageRuleTests : IDisposable
             MailSignal.Priority, "kan inte boka", TicketPriority.P2, "booking is unavailable");
 
         rule.IsEnabled = false;
-        await rules.SaveAsync(rule);
+        await rules.SaveAsync(tenantId, rule);
 
         MailTriageRuleSet effective = await rules.GetEffectiveAsync(tenantId);
 
@@ -215,7 +215,7 @@ public class MailTriageRuleTests : IDisposable
     [Fact]
     public async Task Only_a_priority_rule_keeps_a_priority_and_a_criterion()
     {
-        MailTriageRule saved = await rules.SaveAsync(new MailTriageRule
+        MailTriageRule saved = await rules.SaveAsync(tenantId, new MailTriageRule
         {
             TenantId = tenantId,
             Signal = MailSignal.ThirdParty,
@@ -291,5 +291,111 @@ public class MailTriageRuleTests : IDisposable
 
         preview.Priority.Should().Be(TicketPriority.P1);
         preview.Criterion.Should().Be("login impossible for all users");
+    }
+    // ---- Somebody else's rules ------------------------------------------------------------
+
+    /// <summary>A rule of the other tenant's, reachable only by its id.</summary>
+    private MailTriageRule Theirs(string phrase = "brandlarm")
+    {
+        MailTriageRule rule = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = otherTenantId,
+            Signal = MailSignal.Priority,
+            Phrase = phrase,
+            Priority = TicketPriority.P1,
+            Criterion = "the building is on fire",
+        };
+        db.MailTriageRules.Add(rule);
+        db.SaveChanges();
+        return rule;
+    }
+
+    /// <summary>
+    /// <b>A triage rule decides what inbound support mail is classified as</b> — the priority
+    /// an operator is shown, and whether a message reads as development or third-party work.
+    /// Rewriting one by Id alone was deciding how somebody else's support mail gets triaged;
+    /// deleting one was removing a classification they rely on.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_rule_cannot_be_rewritten_or_deleted()
+    {
+        MailTriageRule theirs = Theirs();
+
+        Func<Task> rewrite = () => rules.SaveAsync(tenantId, new MailTriageRule
+        {
+            Id = theirs.Id,
+            TenantId = tenantId,
+            Signal = MailSignal.ThirdParty,
+            Phrase = "brandlarm",
+        });
+
+        await rewrite.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Rule not found, or it is not this tenant's.");
+
+        await rules.DeleteAsync(tenantId, theirs.Id);
+
+        MailTriageRule stored = await db.MailTriageRules.AsNoTracking()
+            .FirstAsync(r => r.Id == theirs.Id);
+
+        stored.Signal.Should().Be(MailSignal.Priority);
+        stored.TenantId.Should().Be(otherTenantId);
+
+        // And it still decides their mail, which is the thing that would have been lost.
+        (await rules.GetEffectiveAsync(otherTenantId))
+            .ProposePriority("brandlarm i huset").Priority.Should().Be(TicketPriority.P1);
+    }
+
+    /// <summary>
+    /// The other direction. The ownership check above refuses a row that is not ours, so it
+    /// never fires on the way in — what the pinning stops is an <i>authorized</i> edit of our
+    /// own rule that names their tenant on the way out. A detached <c>Update</c> writes every
+    /// column, TenantId among them, so the rule would leave our list and start deciding
+    /// their triage.
+    /// </summary>
+    [Fact]
+    public async Task Our_own_rule_cannot_be_moved_into_another_tenant()
+    {
+        MailTriageRule ours = await Add(
+            MailSignal.Priority, "journalen svarar inte", TicketPriority.P1, "records unreachable");
+
+        ours.TenantId = otherTenantId;
+        ours.Criterion = "records unreachable, edited";
+        await rules.SaveAsync(tenantId, ours);
+
+        MailTriageRule stored = await db.MailTriageRules.AsNoTracking()
+            .FirstAsync(r => r.Id == ours.Id);
+
+        stored.Criterion.Should().Be("records unreachable, edited");
+        stored.TenantId.Should().Be(tenantId);
+
+        // Their triage is unchanged: they still run on the built-in set.
+        (await rules.GetEffectiveAsync(otherTenantId)).Should().BeSameAs(MailTriageRuleSet.BuiltIn);
+    }
+    /// <summary>
+    /// The same thing on the create path, which has no row to check and so can only stamp.
+    /// A rule carrying somebody else's TenantId would otherwise be created <i>in their
+    /// tenant</i> — and a planted rule is not noise: one that marks a phrase as third-party
+    /// work demotes every message matching it out of their priority triage.
+    /// </summary>
+    [Fact]
+    public async Task A_new_rule_cannot_be_filed_under_another_tenant()
+    {
+        MailTriageRule planted = await rules.SaveAsync(tenantId, new MailTriageRule
+        {
+            TenantId = otherTenantId,
+            Signal = MailSignal.ThirdParty,
+            Phrase = "brandlarm",
+        });
+
+        MailTriageRule stored = await db.MailTriageRules.AsNoTracking()
+            .FirstAsync(r => r.Id == planted.Id);
+
+        stored.TenantId.Should().Be(tenantId);
+
+        // Their triage never saw it: they are still on the built-in set.
+        (await rules.GetEffectiveAsync(otherTenantId)).Should().BeSameAs(MailTriageRuleSet.BuiltIn);
+        (await rules.ListAsync(otherTenantId)).Should().BeEmpty();
+        (await rules.ListAsync(tenantId)).Should().ContainSingle();
     }
 }

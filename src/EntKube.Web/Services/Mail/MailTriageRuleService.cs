@@ -74,7 +74,18 @@ public class MailTriageRuleService(IDbContextFactory<SupportDbContext> dbFactory
         return copies.Count;
     }
 
-    public async Task<MailTriageRule> SaveAsync(MailTriageRule rule, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose rule. A triage rule decides what inbound support mail is classified as — the
+    /// priority an operator is shown, and whether a message reads as development or
+    /// third-party work — so rewriting one by Id alone was deciding how somebody else's
+    /// support mail gets triaged.
+    ///
+    /// <para>Not read off <paramref name="rule"/>: a detached <c>Update</c> writes every
+    /// column of the row the Id names, so the TenantId on the entity is a claim about where
+    /// the row should end up, not an authorization to write it.</para>
+    /// </param>
+    public async Task<MailTriageRule> SaveAsync(
+        Guid tenantId, MailTriageRule rule, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
@@ -92,10 +103,21 @@ public class MailTriageRuleService(IDbContextFactory<SupportDbContext> dbFactory
         if (rule.Id == Guid.Empty)
         {
             rule.Id = Guid.NewGuid();
+            rule.TenantId = tenantId;
             db.MailTriageRules.Add(rule);
         }
         else
         {
+            if (!await db.MailTriageRules
+                    .AnyAsync(r => r.Id == rule.Id && r.TenantId == tenantId, ct))
+            {
+                throw new InvalidOperationException(
+                    "Rule not found, or it is not this tenant's.");
+            }
+
+            // Where the row lives is not the entity's to say — see the remark on tenantId.
+            rule.TenantId = tenantId;
+
             db.MailTriageRules.Update(rule);
         }
 
@@ -103,11 +125,15 @@ public class MailTriageRuleService(IDbContextFactory<SupportDbContext> dbFactory
         return rule;
     }
 
-    public async Task DeleteAsync(Guid ruleId, CancellationToken ct = default)
+    public async Task DeleteAsync(
+        Guid tenantId, Guid ruleId, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        MailTriageRule? rule = await db.MailTriageRules.FindAsync([ruleId], ct);
+        // FindAsync takes a key and cannot carry a predicate, which is how this came to have
+        // no tenant in it.
+        MailTriageRule? rule = await db.MailTriageRules
+            .FirstOrDefaultAsync(r => r.Id == ruleId && r.TenantId == tenantId, ct);
 
         if (rule is not null)
         {
