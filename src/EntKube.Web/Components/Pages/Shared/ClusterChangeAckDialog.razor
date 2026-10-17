@@ -3,6 +3,24 @@
 @implements IDisposable
 @inject IClusterChangeGate Gate
 
+@* ⚠️ Interactive, and it has to be declared here.
+
+   This component lives in MainLayout, and App.razor mounts the router as a bare <Routes />.
+   A page that declares its own render mode becomes an interactive island INSIDE a statically
+   rendered layout — render modes apply down a subtree, never up — so without this line the
+   dialog rendered in static SSR while the page ran in a circuit.
+
+   Two consequences, both fatal. Its decision is a TaskCompletionSource resolved by a button
+   click, and a statically rendered button has no handler to fire. And IClusterChangeGate is
+   scoped: OnInitialized registered this sink into the HTTP REQUEST's scope, which is disposed
+   when the response completes, so the circuit's own gate instance had _sink == null. Every
+   gated change from an interactive page was therefore refused with "There is no operator to
+   acknowledge it" — which is what helm releases hit as soon as they came under the gate.
+
+   prerender: false to match the pages: prerendering would run OnInitialized once in the SSR
+   scope, registering a sink that nothing can ever reach, and paint a dialog nobody can click. *@
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+
 @if (_change is not null && _diff is not null)
 {
     <div class="ccack-backdrop" role="dialog" aria-modal="true" aria-labelledby="ccack-title">

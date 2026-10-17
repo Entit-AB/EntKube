@@ -1,6 +1,12 @@
 @implements IDisposable
 @inject EntKube.Web.Services.ToastService Toasts
 
+@* Same defect as ClusterChangeAckDialog, same cause: this is in the static layout while the
+   pages are interactive islands, and ToastService is scoped. OnInitialized subscribed to the
+   request scope's ToastService, so every Toasts.Success(...) raised from a page went to an
+   instance with no listener and no toast was ever shown. *@
+@rendermode @(new InteractiveServerRenderMode(prerender: false))
+
 <div class="toast-host" aria-live="polite" aria-atomic="true">
     @foreach (ToastMessage toast in Toasts.Toasts)
     {
