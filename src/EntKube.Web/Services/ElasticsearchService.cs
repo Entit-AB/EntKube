@@ -665,7 +665,7 @@ public class ElasticsearchService(
                     ? "Provisioning..."
                     : $"{phase ?? "Starting"} ({readyPods}/{detail.Pods.Count} pods ready)";
 
-            await ReconcileStatusAsync(cluster.Id, detail.Ready, detail.Health, ct);
+            await ReconcileStatusAsync(tenantId, cluster.Id, detail.Ready, detail.Health, ct);
         }
         catch
         {
@@ -679,11 +679,19 @@ public class ElasticsearchService(
     /// Updates the stored status from a live reading. Safe to call from a background loop, and
     /// deliberately does not regress a Running cluster on a transient failure to read it.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose cluster. An input: ReconcileAllAsync already walks one tenant at a time and
+    /// passes the tenant it is acting as to RefreshSnapshotStatusAsync — this call and
+    /// RefreshInsightAsync were the two that dropped it on the way.
+    /// </param>
     public async Task ReconcileStatusAsync(
-        Guid clusterId, bool ready, string? health, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, bool ready, string? health, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
-        ElasticsearchCluster? tracked = await db.ElasticsearchClusters.FindAsync([clusterId], ct);
+
+        // FindAsync takes a key and cannot carry a predicate.
+        ElasticsearchCluster? tracked = await db.ElasticsearchClusters
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
         if (tracked is null) return;
 
         ElasticsearchClusterStatus newStatus = ready
@@ -756,7 +764,7 @@ public class ElasticsearchService(
                          ct: ct);
                     (string? health, string? phase, _) = ParseElasticsearchStatus(json);
                     ready = string.Equals(phase, "Ready", StringComparison.OrdinalIgnoreCase);
-                    await ReconcileStatusAsync(cluster.Id, ready, health, ct);
+                    await ReconcileStatusAsync(tenantId, cluster.Id, ready, health, ct);
                 }
                 catch { /* cluster unreachable — leave status as-is */ }
 
@@ -764,7 +772,7 @@ public class ElasticsearchService(
                 if (!ready) continue;
 
                 if (cluster.InsightCheckedAt is null || now - cluster.InsightCheckedAt.Value > InsightMaxAge)
-                    await RefreshInsightAsync(cluster.Id, ct);
+                    await RefreshInsightAsync(tenantId, cluster.Id, ct);
 
                 if (cluster.SnapshotsEnabled
                     && (cluster.SnapshotLastCheckedAt is null
@@ -810,14 +818,24 @@ public class ElasticsearchService(
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose cluster. ⚠️ This used to compare <c>c.TenantId == policy.TenantId</c> — both sides
+    /// off the caller's own entity, so the predicate asked whether the caller agreed with
+    /// itself. A policy naming another tenant's cluster <i>and</i> that tenant satisfied it.
+    /// </param>
     public async Task<ElasticsearchIlmPolicy> CreatePolicyAsync(
-        ElasticsearchIlmPolicy policy, CancellationToken ct = default)
+        Guid tenantId, ElasticsearchIlmPolicy policy, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
-            .FirstOrDefaultAsync(c => c.Id == policy.ElasticsearchClusterId && c.TenantId == policy.TenantId, ct)
-            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+            .FirstOrDefaultAsync(
+                c => c.Id == policy.ElasticsearchClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Elasticsearch cluster not found, or it is not this tenant's.");
+
+        // The entity's own TenantId is a claim; the row is filed under the parameter.
+        policy.TenantId = tenantId;
 
         if (await db.ElasticsearchIlmPolicies.AnyAsync(
                 p => p.ElasticsearchClusterId == policy.ElasticsearchClusterId && p.Name == policy.Name, ct))
@@ -830,18 +848,23 @@ public class ElasticsearchService(
         db.ElasticsearchIlmPolicies.Add(policy);
         await db.SaveChangesAsync(ct);
 
-        await ApplyPoliciesAsync(policy.TenantId, policy.ElasticsearchClusterId, ct);
+        await ApplyPoliciesAsync(tenantId, policy.ElasticsearchClusterId, ct);
         return policy;
     }
 
+    /// <param name="tenantId">
+    /// Whose policy. ⚠️ Same shape as CreatePolicyAsync: <c>p.TenantId == edited.TenantId</c>
+    /// read both sides off the caller's entity.
+    /// </param>
     public async Task UpdatePolicyAsync(
-        ElasticsearchIlmPolicy edited, CancellationToken ct = default)
+        Guid tenantId, ElasticsearchIlmPolicy edited, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchIlmPolicy policy = await db.ElasticsearchIlmPolicies
-            .FirstOrDefaultAsync(p => p.Id == edited.Id && p.TenantId == edited.TenantId, ct)
-            ?? throw new InvalidOperationException("Policy not found.");
+            .FirstOrDefaultAsync(p => p.Id == edited.Id && p.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Policy not found, or it is not this tenant's.");
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .FirstAsync(c => c.Id == policy.ElasticsearchClusterId, ct);
@@ -860,7 +883,7 @@ public class ElasticsearchService(
         ValidatePolicy(policy, cluster);
         await db.SaveChangesAsync(ct);
 
-        await ApplyPoliciesAsync(policy.TenantId, policy.ElasticsearchClusterId, ct);
+        await ApplyPoliciesAsync(tenantId, policy.ElasticsearchClusterId, ct);
     }
 
     /// <summary>
@@ -1125,15 +1148,23 @@ public class ElasticsearchService(
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose cluster. ⚠️ Same shape again: <c>c.TenantId == pipeline.TenantId</c>, both sides
+    /// from the caller.
+    /// </param>
     public async Task<ElasticsearchIngestPipeline> SavePipelineAsync(
-        ElasticsearchIngestPipeline pipeline, CancellationToken ct = default)
+        Guid tenantId, ElasticsearchIngestPipeline pipeline, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
-            .FirstOrDefaultAsync(c => c.Id == pipeline.ElasticsearchClusterId && c.TenantId == pipeline.TenantId, ct)
-            ?? throw new InvalidOperationException("Elasticsearch cluster not found.");
+            .FirstOrDefaultAsync(
+                c => c.Id == pipeline.ElasticsearchClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Elasticsearch cluster not found, or it is not this tenant's.");
+
+        pipeline.TenantId = tenantId;
 
         ValidatePipeline(pipeline);
 
@@ -2290,18 +2321,24 @@ public class ElasticsearchService(
     /// Records what a live look found, so the advisor and the list can read it without touching the
     /// cluster. Called by the poller; never throws at the caller.
     /// </summary>
-    public async Task RefreshInsightAsync(Guid clusterId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose cluster. ⚠️ The lookup was by bare id and the seam was then asked with
+    /// <c>cluster.TenantId</c> — the tenant read back off the row it had just found, so the
+    /// check compared the row to itself and any cluster id refreshed any tenant's cluster.
+    /// </param>
+    public async Task RefreshInsightAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         ElasticsearchCluster? cluster = await db.ElasticsearchClusters
             .Include(c => c.KubernetesCluster)
-            .FirstOrDefaultAsync(c => c.Id == clusterId, ct);
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
 
         if (cluster is null) return;
 
         Clusters.IClusterClient? reachable =
-            await clusterAccess.ForAsync(cluster.TenantId, cluster.KubernetesClusterId, ct);
+            await clusterAccess.ForAsync(tenantId, cluster.KubernetesClusterId, ct);
 
         if (reachable is null) return;
 

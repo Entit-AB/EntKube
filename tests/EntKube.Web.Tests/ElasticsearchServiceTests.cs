@@ -649,7 +649,7 @@ public class ElasticsearchServiceTests : IDisposable
         p.ElasticsearchClusterId = c.Id;
         p.ColdAfterDays = null;
 
-        Func<Task> act = () => sut.CreatePolicyAsync(p);
+        Func<Task> act = () => sut.CreatePolicyAsync(tenantId, p);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*warm tier the cluster does not have*");
     }
@@ -673,7 +673,7 @@ public class ElasticsearchServiceTests : IDisposable
         p.WarmAfterDays = 30;
         p.ColdAfterDays = 7;
 
-        Func<Task> act = () => sut.CreatePolicyAsync(p);
+        Func<Task> act = () => sut.CreatePolicyAsync(tenantId, p);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*cold phase must come after*");
     }
@@ -1594,7 +1594,7 @@ public class ElasticsearchServiceTests : IDisposable
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>(), It.IsAny<string>()))
             .ReturnsAsync("""[{"shards":"9","disk.used":"88","disk.total":"100","node":"search-es-hot-0"}]""");
 
-        await sut.RefreshInsightAsync(c.Id);
+        await sut.RefreshInsightAsync(tenantId, c.Id);
 
         ElasticsearchCluster stored = await db.ElasticsearchClusters.AsNoTracking().SingleAsync();
         stored.Health.Should().Be("yellow");
@@ -1616,7 +1616,7 @@ public class ElasticsearchServiceTests : IDisposable
 
         // Not throwing matters — this runs in the background poller — and so does not moving
         // InsightCheckedAt, which is how the advisor tells stale figures from good news.
-        await sut.RefreshInsightAsync(c.Id);
+        await sut.RefreshInsightAsync(tenantId, c.Id);
 
         ElasticsearchCluster stored = await db.ElasticsearchClusters.AsNoTracking().SingleAsync();
         stored.HighestNodeDiskPercent.Should().Be(42);
@@ -2614,7 +2614,7 @@ public class ElasticsearchServiceTests : IDisposable
         p.ElasticsearchClusterId = c.Id;
         p.GrokField = null;
 
-        Func<Task> act = () => sut.SavePipelineAsync(p);
+        Func<Task> act = () => sut.SavePipelineAsync(tenantId, p);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*needs a field to read from*");
     }
@@ -2630,7 +2630,7 @@ public class ElasticsearchServiceTests : IDisposable
         p.ElasticsearchClusterId = c.Id;
         p.RenameFields = pairs;
 
-        Func<Task> act = () => sut.SavePipelineAsync(p);
+        Func<Task> act = () => sut.SavePipelineAsync(tenantId, p);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage(message);
     }
@@ -2644,7 +2644,7 @@ public class ElasticsearchServiceTests : IDisposable
         p.ElasticsearchClusterId = c.Id;
         p.CustomProcessorsJson = """{"lowercase": {"field": "level"}}""";
 
-        Func<Task> act = () => sut.SavePipelineAsync(p);
+        Func<Task> act = () => sut.SavePipelineAsync(tenantId, p);
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*must be a JSON array*");
     }
@@ -2664,7 +2664,7 @@ public class ElasticsearchServiceTests : IDisposable
         p.TenantId = tenantId;
         p.ElasticsearchClusterId = c.Id;
 
-        await sut.SavePipelineAsync(p);
+        await sut.SavePipelineAsync(tenantId, p);
 
         applied.Should().Contain(m => m.Contains("_ingest/pipeline/app-logs"));
         ElasticsearchIngestPipeline stored = await db.ElasticsearchIngestPipelines.AsNoTracking().SingleAsync();
@@ -2685,13 +2685,13 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchIngestPipeline p = SamplePipeline();
         p.TenantId = tenantId;
         p.ElasticsearchClusterId = c.Id;
-        ElasticsearchIngestPipeline saved = await sut.SavePipelineAsync(p);
+        ElasticsearchIngestPipeline saved = await sut.SavePipelineAsync(tenantId, p);
 
         ElasticsearchIlmPolicy policy = SamplePolicy();
         policy.TenantId = tenantId;
         policy.ElasticsearchClusterId = c.Id;
         policy.DefaultPipelineName = saved.Name;
-        await sut.CreatePolicyAsync(policy);
+        await sut.CreatePolicyAsync(tenantId, policy);
 
         // A template naming a pipeline that does not exist fails every write through it.
         Func<Task> act = () => sut.DeletePipelineAsync(tenantId, saved.Id);
@@ -2735,7 +2735,7 @@ public class ElasticsearchServiceTests : IDisposable
         ElasticsearchIngestPipeline p = SamplePipeline();
         p.TenantId = tenantId;
         p.ElasticsearchClusterId = c.Id;
-        ElasticsearchIngestPipeline saved = await sut.SavePipelineAsync(p);
+        ElasticsearchIngestPipeline saved = await sut.SavePipelineAsync(tenantId, p);
 
         Func<Task> act = () => sut.SimulatePipelineAsync(tenantId, saved.Id, "not json at all");
 
@@ -3030,5 +3030,224 @@ public class ElasticsearchServiceTests : IDisposable
             tenantId, c.Id, null, "logs-orders-*", null, "@timestamp");
 
         view.Name.Should().Be("logs-orders-*");
+    }
+    // ---- Somebody else's search cluster ---------------------------------------------------
+
+    /// <summary>
+    /// A second tenant with a search cluster of its own, and an ILM policy on it.
+    /// </summary>
+    private async Task<(Guid Tenant, ElasticsearchCluster Cluster, ElasticsearchIlmPolicy Policy)>
+        SeedStrangerAsync()
+    {
+        Guid strangerTenant = Guid.NewGuid();
+        Guid strangerK8s = Guid.NewGuid();
+
+        db.Tenants.Add(new Tenant
+        {
+            Id = strangerTenant, Name = "Annan", Slug = $"annan-{strangerTenant:N}",
+        });
+        Data.Environment env = new()
+        {
+            Id = Guid.NewGuid(), TenantId = strangerTenant, Name = "Production",
+        };
+        db.Set<Data.Environment>().Add(env);
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = strangerK8s, TenantId = strangerTenant, EnvironmentId = env.Id,
+            Name = "annan-prod", ApiServerUrl = "https://annan.example.com",
+        });
+
+        ElasticsearchCluster cluster = SampleCluster();
+        cluster.TenantId = strangerTenant;
+        cluster.KubernetesClusterId = strangerK8s;
+        db.ElasticsearchClusters.Add(cluster);
+
+        ElasticsearchIlmPolicy policy = SamplePolicy();
+        policy.Id = Guid.NewGuid();
+        policy.TenantId = strangerTenant;
+        policy.ElasticsearchClusterId = cluster.Id;
+        db.Set<ElasticsearchIlmPolicy>().Add(policy);
+
+        await db.SaveChangesAsync();
+
+        // ⚠️ Their cluster must be REACHABLE. Without a kubeconfig, RefreshInsightAsync returns
+        // at `reachable is null` whatever the tenant was — so the test would pass against a
+        // build with the tenant check removed, having proved only that an unreachable cluster
+        // is not refreshed.
+        await testDb.SeedKubeconfigAsync(
+            testDb.CreateVaultService(), strangerTenant, strangerK8s, TestKubeconfig.Valid);
+        db.ChangeTracker.Clear();
+
+        return (strangerTenant, cluster, policy);
+    }
+
+    /// <summary>
+    /// ⚠️ <b>The predicate used to read both of its sides off the caller's own entity</b> —
+    /// <c>c.TenantId == policy.TenantId</c> — so it asked whether the caller agreed with
+    /// itself. A policy naming another tenant's cluster <i>and</i> that tenant satisfied it,
+    /// and the policy was then applied to their Elasticsearch.
+    /// </summary>
+    [Fact]
+    public async Task A_policy_cannot_be_created_on_another_tenants_cluster()
+    {
+        await SeedClusterAsync();
+        (Guid strangerTenant, ElasticsearchCluster theirCluster, _) = await SeedStrangerAsync();
+
+        ElasticsearchIlmPolicy p = SamplePolicy();
+        p.TenantId = strangerTenant;          // the claim the old predicate believed
+        p.ElasticsearchClusterId = theirCluster.Id;
+
+        Func<Task> act = () => sut.CreatePolicyAsync(tenantId, p);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Elasticsearch cluster not found, or it is not this tenant's.");
+
+        (await db.Set<ElasticsearchIlmPolicy>().AsNoTracking()
+            .CountAsync(x => x.ElasticsearchClusterId == theirCluster.Id)).Should().Be(1);
+    }
+
+    [Fact]
+    public async Task Another_tenants_policy_cannot_be_edited()
+    {
+        await SeedClusterAsync();
+        (Guid strangerTenant, _, ElasticsearchIlmPolicy theirs) = await SeedStrangerAsync();
+
+        ElasticsearchIlmPolicy edited = SamplePolicy();
+        edited.Id = theirs.Id;
+        edited.TenantId = strangerTenant;     // the claim the old predicate believed
+        edited.DeleteAfterDays = 1;
+
+        Func<Task> act = () => sut.UpdatePolicyAsync(tenantId, edited);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Policy not found, or it is not this tenant's.");
+
+        (await db.Set<ElasticsearchIlmPolicy>().AsNoTracking().FirstAsync(x => x.Id == theirs.Id))
+            .DeleteAfterDays.Should().Be(90);
+    }
+
+    /// <summary>
+    /// An ingest pipeline transforms every document written through it, so placing one on
+    /// somebody else's cluster rewrites their data on the way in.
+    /// </summary>
+    [Fact]
+    public async Task A_pipeline_cannot_be_saved_onto_another_tenants_cluster()
+    {
+        await SeedClusterAsync();
+        (Guid strangerTenant, ElasticsearchCluster theirCluster, _) = await SeedStrangerAsync();
+
+        ElasticsearchIngestPipeline p = new()
+        {
+            Name = "planted",
+            TenantId = strangerTenant,        // the claim the old predicate believed
+            ElasticsearchClusterId = theirCluster.Id,
+        };
+
+        Func<Task> act = () => sut.SavePipelineAsync(tenantId, p);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Elasticsearch cluster not found, or it is not this tenant's.");
+
+        (await db.Set<ElasticsearchIngestPipeline>().AsNoTracking()
+            .AnyAsync(x => x.ElasticsearchClusterId == theirCluster.Id)).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// ⚠️ The status write and the insight refresh took a bare cluster id. The insight path
+    /// then asked the cluster seam with <c>cluster.TenantId</c> — the tenant read back off the
+    /// row it had just found — so the check compared the row to itself.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_cluster_is_not_reconciled_or_refreshed()
+    {
+        await SeedClusterAsync();
+        (_, ElasticsearchCluster theirCluster, _) = await SeedStrangerAsync();
+
+        ElasticsearchClusterStatus before = theirCluster.Status;
+
+        await sut.ReconcileStatusAsync(tenantId, theirCluster.Id, ready: true, health: "green");
+        await sut.RefreshInsightAsync(tenantId, theirCluster.Id);
+
+        ElasticsearchCluster stored = await db.ElasticsearchClusters.AsNoTracking()
+            .FirstAsync(c => c.Id == theirCluster.Id);
+
+        stored.Status.Should().Be(before);
+
+        // ⚠️ InsightCheckedAt staying null proves nothing on its own: the k8s mock answers
+        // nothing useful, so no refresh completes for ANYONE and the field is null either
+        // way. What discriminates is whether their cluster was contacted at all — with the
+        // tenant dropped, RefreshInsightAsync gets past the seam (their kubeconfig is
+        // seeded) and asks their namespace for pods.
+        k8s.Verify(f => f.GetJsonAsync("pods", theirCluster.Namespace, It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "a tenant that does not own the cluster should not get as far as kubectl");
+
+        stored.InsightCheckedAt.Should().BeNull();
+    }
+    /// <summary>
+    /// The create paths file the row under the <i>parameter</i>, not under the TenantId the
+    /// caller put on the entity. Refusing a foreign cluster does not cover this: here the
+    /// cluster is ours and only the claim is false.
+    /// </summary>
+    [Fact]
+    public async Task A_policy_or_pipeline_cannot_be_filed_under_another_tenant()
+    {
+        await SeedClusterAsync();
+        (Guid strangerTenant, _, _) = await SeedStrangerAsync();
+
+        // Ours, but on a Kubernetes cluster with no kubeconfig — so the push that follows the
+        // save fails at the seam immediately. The alternative is the apply job's five-minute
+        // wait, which would make this test slow and its outcome a matter of timing.
+        Guid unreachableK8s = Guid.NewGuid();
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = unreachableK8s,
+            TenantId = tenantId,
+            EnvironmentId = db.Set<Data.Environment>().First(e => e.TenantId == tenantId).Id,
+            Name = "no-credential",
+            ApiServerUrl = "https://nowhere.example.com",
+        });
+
+        ElasticsearchCluster ours = SampleCluster();
+        ours.TenantId = tenantId;
+        ours.KubernetesClusterId = unreachableK8s;
+        // Warm and cold nodes, because SamplePolicy ages into both and ValidatePolicy refuses
+        // a policy whose tiers the cluster lacks — the input has to be valid in every respect
+        // except the one this test names, or it fails for the wrong reason.
+        ours.WarmCount = 2;
+        ours.ColdCount = 2;
+        db.ElasticsearchClusters.Add(ours);
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        ElasticsearchIlmPolicy policy = SamplePolicy();
+        policy.TenantId = strangerTenant;     // the lie
+        policy.ElasticsearchClusterId = ours.Id;
+
+        // ⚠️ Both methods save the row and THEN push it to the cluster, and the fake cluster
+        // answers that an apply job is already running. So the expected outcome here is that
+        // apply failure — asserting its message is what shows we got PAST the tenancy check
+        // rather than being refused by it, which an unqualified ThrowAsync would not.
+        Func<Task> createPolicy = () => sut.CreatePolicyAsync(tenantId, policy);
+        await createPolicy.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("*kubeconfig*");
+
+        ElasticsearchIngestPipeline pipeline = new()
+        {
+            Name = "ours",
+            TenantId = strangerTenant,        // the lie
+            ElasticsearchClusterId = ours.Id,
+        };
+
+        Func<Task> savePipeline = () => sut.SavePipelineAsync(tenantId, pipeline);
+        await savePipeline.Should().ThrowAsync<InvalidOperationException>();
+
+        // The rows were written before the push, and both are filed under us.
+        db.ChangeTracker.Clear();
+        (await db.Set<ElasticsearchIlmPolicy>().AsNoTracking()
+            .FirstAsync(p => p.ElasticsearchClusterId == ours.Id)).TenantId.Should().Be(tenantId);
+        (await db.Set<ElasticsearchIngestPipeline>().AsNoTracking()
+            .FirstAsync(p => p.ElasticsearchClusterId == ours.Id)).TenantId.Should().Be(tenantId);
     }
 }
