@@ -111,13 +111,25 @@ public class StalwartService(
     }
 
     /// <summary>The config with its domains and mailboxes loaded.</summary>
-    public async Task<StalwartComponentConfig?> GetConfigAsync(Guid configId, CancellationToken ct = default)
+    /// <summary>
+    /// Whether a mail server is this tenant's.
+    ///
+    /// <para>Only <see cref="StalwartComponentConfig"/> carries a TenantId; the domains and
+    /// mailboxes under it carry a ConfigId. So a row is reached as <c>x.Config.TenantId</c>,
+    /// and a row being <i>created</i> is checked against the server the caller named.</para>
+    /// </summary>
+    private static Task<bool> ConfigIsTenantsAsync(
+        ApplicationDbContext db, Guid tenantId, Guid configId, CancellationToken ct) =>
+        db.StalwartComponentConfigs.AnyAsync(c => c.Id == configId && c.TenantId == tenantId, ct);
+
+    public async Task<StalwartComponentConfig?> GetConfigAsync(
+        Guid tenantId, Guid configId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         return await db.StalwartComponentConfigs
             .Include(c => c.Domains)
             .Include(c => c.Accounts)
-            .FirstOrDefaultAsync(c => c.Id == configId, ct);
+            .FirstOrDefaultAsync(c => c.Id == configId && c.TenantId == tenantId, ct);
     }
 
     // ── Configure ─────────────────────────────────────────────────────────────
@@ -2604,10 +2616,20 @@ public class StalwartService(
 
     // ── Domain CRUD ───────────────────────────────────────────────────────────
 
+    /// <param name="tenantId">
+    /// Whose mail server. A domain is what the server accepts and signs mail for, so adding
+    /// one by config id alone was adding a domain to somebody else's server — and the
+    /// unset-the-other-primaries sweep below runs over whatever ConfigId it is given.
+    /// </param>
     public async Task<StalwartMailDomain> AddDomainAsync(
-        Guid configId, string name, bool isPrimary, CancellationToken ct = default)
+        Guid tenantId, Guid configId, string name, bool isPrimary, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await ConfigIsTenantsAsync(db, tenantId, configId, ct))
+        {
+            throw new InvalidOperationException("Mail server not found, or it is not this tenant's.");
+        }
 
         bool first = !await db.StalwartMailDomains.AnyAsync(d => d.ConfigId == configId, ct);
 
@@ -2633,9 +2655,26 @@ public class StalwartService(
         return domain;
     }
 
-    public async Task UpdateDomainAsync(StalwartMailDomain domain, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose domain. Two separate reasons, both off the entity: a detached <c>Update</c>
+    /// writes every column of the row the Id names, and the sweep below clears IsPrimary
+    /// across whatever <c>domain.ConfigId</c> says — so an IsPrimary=true update naming a
+    /// foreign server cleared <i>their</i> primary domain, which is what Stalwart appends to
+    /// a bare login.
+    /// </param>
+    public async Task UpdateDomainAsync(
+        Guid tenantId, StalwartMailDomain domain, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        StalwartMailDomain stored = await db.StalwartMailDomains.AsNoTracking()
+            .FirstOrDefaultAsync(d => d.Id == domain.Id && d.Config.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Domain not found, or it is not this tenant's.");
+
+        // Which server the domain belongs to is the stored row's to say, not the entity's.
+        domain.ConfigId = stored.ConfigId;
+        domain.CreatedAt = stored.CreatedAt;
 
         if (domain.IsPrimary)
         {
@@ -2656,7 +2695,8 @@ public class StalwartService(
     /// reconciled, so mail already delivered to the domain stays where it is until an administrator
     /// removes it in Stalwart deliberately.</para>
     /// </summary>
-    public async Task DeleteDomainAsync(Guid domainId, CancellationToken ct = default)
+    public async Task DeleteDomainAsync(
+        Guid tenantId, Guid domainId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
@@ -2667,15 +2707,35 @@ public class StalwartService(
                 + "has no address.");
         }
 
-        await db.StalwartMailDomains.Where(d => d.Id == domainId).ExecuteDeleteAsync(ct);
+        await db.StalwartMailDomains
+            .Where(d => d.Id == domainId && d.Config.TenantId == tenantId)
+            .ExecuteDeleteAsync(ct);
     }
 
     // ── Mailbox CRUD ──────────────────────────────────────────────────────────
 
+    /// <param name="tenantId">
+    /// Whose mail server. The ConfigId and DomainId ride on the entity, so without this the
+    /// caller chose which server the mailbox was created on — and the mailbox carries
+    /// <see cref="StalwartMailAccount.Aliases"/>, which is what else delivers to it.
+    /// </param>
     public async Task<StalwartMailAccount> AddAccountAsync(
-        StalwartMailAccount account, CancellationToken ct = default)
+        Guid tenantId, StalwartMailAccount account, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await ConfigIsTenantsAsync(db, tenantId, account.ConfigId, ct))
+        {
+            throw new InvalidOperationException("Mail server not found, or it is not this tenant's.");
+        }
+
+        // The domain too: an address is a local part AND a domain, and the pair is what the
+        // server delivers to.
+        if (!await db.StalwartMailDomains
+                .AnyAsync(d => d.Id == account.DomainId && d.ConfigId == account.ConfigId, ct))
+        {
+            throw new InvalidOperationException("That domain is not on this mail server.");
+        }
 
         account.Id = Guid.NewGuid();
         account.LocalPart = account.LocalPart.Trim().ToLowerInvariant();
@@ -2684,9 +2744,31 @@ public class StalwartService(
         return account;
     }
 
-    public async Task UpdateAccountAsync(StalwartMailAccount account, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose mailbox. A detached <c>Update</c> writes every column of the row the Id names,
+    /// Aliases among them — so by id alone this decided what else delivers to somebody
+    /// else's mailbox, and could move the row onto another server.
+    /// </param>
+    public async Task UpdateAccountAsync(
+        Guid tenantId, StalwartMailAccount account, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        StalwartMailAccount stored = await db.StalwartMailAccounts.AsNoTracking()
+            .FirstOrDefaultAsync(a => a.Id == account.Id && a.Config.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Mailbox not found, or it is not this tenant's.");
+
+        // Where the mailbox lives is the stored row's to say, not the entity's.
+        account.ConfigId = stored.ConfigId;
+
+        if (account.DomainId != stored.DomainId
+            && !await db.StalwartMailDomains
+                .AnyAsync(d => d.Id == account.DomainId && d.ConfigId == stored.ConfigId, ct))
+        {
+            throw new InvalidOperationException("That domain is not on this mail server.");
+        }
+
         account.LocalPart = account.LocalPart.Trim().ToLowerInvariant();
         db.StalwartMailAccounts.Update(account);
         await db.SaveChangesAsync(ct);
@@ -2697,10 +2779,13 @@ public class StalwartService(
     /// accounts are only ever upserted, because a configuration change should never be able to
     /// destroy somebody's mail. Delete it in Stalwart's own admin UI when that is what is meant.
     /// </summary>
-    public async Task DeleteAccountAsync(Guid accountId, CancellationToken ct = default)
+    public async Task DeleteAccountAsync(
+        Guid tenantId, Guid accountId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        await db.StalwartMailAccounts.Where(a => a.Id == accountId).ExecuteDeleteAsync(ct);
+        await db.StalwartMailAccounts
+            .Where(a => a.Id == accountId && a.Config.TenantId == tenantId)
+            .ExecuteDeleteAsync(ct);
     }
 
     /// <summary>
@@ -2712,13 +2797,20 @@ public class StalwartService(
     /// <para>Returns how many were added. Existing mailboxes are left alone, and users whose
     /// address is in a domain this server does not serve are skipped.</para>
     /// </summary>
-    public async Task<int> ImportMailboxesFromLdapAsync(Guid configId, CancellationToken ct = default)
+    public async Task<int> ImportMailboxesFromLdapAsync(
+        Guid tenantId, Guid configId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        StalwartComponentConfig? config = await db.StalwartComponentConfigs
-            .FirstOrDefaultAsync(c => c.Id == configId, ct);
-        if (config?.OpenLdapConfigId is not Guid ldapConfigId)
+        // Two refusals, two messages. Folding them together would make "not this tenant's"
+        // indistinguishable from "no directory linked" — and a test asserting the second
+        // would pass against a build with the first deleted.
+        StalwartComponentConfig config = await db.StalwartComponentConfigs
+            .FirstOrDefaultAsync(c => c.Id == configId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Mail server not found, or it is not this tenant's.");
+
+        if (config.OpenLdapConfigId is not Guid ldapConfigId)
         {
             throw new InvalidOperationException(
                 "This mail server is not linked to an EntKube-managed LDAP directory, so there is no "
