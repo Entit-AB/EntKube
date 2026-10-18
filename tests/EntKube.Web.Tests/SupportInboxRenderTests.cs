@@ -327,7 +327,7 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
 
         message!.Suggestions.Should().NotContain(s => s.AppId == appId);
 
-        await mail.AssignCustomerAsync(message.Id, customerId, "nils");
+        await mail.AssignCustomerAsync(tenantId, message.Id, customerId, "nils");
 
         db.ChangeTracker.Clear();
 

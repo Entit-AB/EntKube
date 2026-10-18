@@ -639,7 +639,7 @@ public class SupportMailTests : IDisposable
         message!.CustomerId.Should().BeNull();
         message.Suggestions.Should().NotContain(s => s.AppId == appId);
 
-        InboundMailMessage? placed = await mail.AssignCustomerAsync(
+        InboundMailMessage? placed = await mail.AssignCustomerAsync(tenantId, 
             message.Id, customerId, "nils");
 
         placed!.CustomerId.Should().Be(customerId);
@@ -658,7 +658,7 @@ public class SupportMailTests : IDisposable
         InboundMailMessage? first = await Receive(
             "Fel", "Beskrivning.", from: "stranger@partner.example");
 
-        await mail.AssignCustomerAsync(first!.Id, customerId, "nils", rememberDomain: true);
+        await mail.AssignCustomerAsync(tenantId, first!.Id, customerId, "nils", rememberDomain: true);
 
         InboundMailMessage? second = await Receive(
             "Ett annat fel", "Beskrivning.", from: "somebody.new@partner.example");
@@ -676,7 +676,7 @@ public class SupportMailTests : IDisposable
         InboundMailMessage? message = await Receive(
             "Fel", "Beskrivning.", from: "someone@gmail.com");
 
-        await mail.AssignCustomerAsync(message!.Id, customerId, "nils", rememberDomain: true);
+        await mail.AssignCustomerAsync(tenantId, message!.Id, customerId, "nils", rememberDomain: true);
 
         db.CustomerEmailDomains.Should().BeEmpty();
 
@@ -698,7 +698,7 @@ public class SupportMailTests : IDisposable
         decided.DecidedBy = "nils";
         await db.SaveChangesAsync();
 
-        await mail.AssignCustomerAsync(message!.Id, customerId, "nils");
+        await mail.AssignCustomerAsync(tenantId, message!.Id, customerId, "nils");
 
         db.Set<MailSuggestion>().Any(s => s.Id == decided.Id && s.State == MailSuggestionState.Rejected)
             .Should().BeTrue();
@@ -728,7 +728,7 @@ public class SupportMailTests : IDisposable
             "Fel", "Beskrivning.", from: "stranger@elsewhere.example");
 
         InboundMailMessage? placed =
-            await mail.AssignCustomerAsync(message!.Id, theirCustomer, "nils");
+            await mail.AssignCustomerAsync(tenantId, message!.Id, theirCustomer, "nils");
 
         placed!.CustomerId.Should().Be(theirCustomer);
     }
@@ -752,13 +752,13 @@ public class SupportMailTests : IDisposable
             "Fel", "Beskrivning.", from: "stranger@elsewhere.example");
 
         InboundMailMessage? placed =
-            await mail.AssignCustomerAsync(message!.Id, theirCustomer, "nils");
+            await mail.AssignCustomerAsync(tenantId, message!.Id, theirCustomer, "nils");
 
         MailSuggestion open = placed!.Suggestions
             .First(s => s.Kind == MailSuggestionKind.OpenTicket
                         && s.State == MailSuggestionState.Pending);
 
-        Ticket? ticket = await mail.AcceptAsync(open.Id, "nils", Tue(11));
+        Ticket? ticket = await mail.AcceptAsync(tenantId, open.Id, "nils", Tue(11));
 
         ticket!.TenantId.Should().Be(elsewhere);
         ticket.CustomerId.Should().Be(theirCustomer);
@@ -771,7 +771,7 @@ public class SupportMailTests : IDisposable
         InboundMailMessage? message = await Receive(
             "Fel", "Beskrivning.", from: "stranger@elsewhere.example");
 
-        Func<Task> assign = () => mail.AssignCustomerAsync(message!.Id, Guid.NewGuid(), "nils");
+        Func<Task> assign = () => mail.AssignCustomerAsync(tenantId, message!.Id, Guid.NewGuid(), "nils");
 
         await assign.Should().ThrowAsync<InvalidOperationException>();
     }
@@ -794,7 +794,7 @@ public class SupportMailTests : IDisposable
 
         open.AppId.Should().BeNull();
 
-        Ticket? ticket = await tickets.GetAsync(tenantId, (await mail.AcceptAsync(open.Id, "nils", Tue(11)))!.Id);
+        Ticket? ticket = await tickets.GetAsync(tenantId, (await mail.AcceptAsync(tenantId, open.Id, "nils", Tue(11)))!.Id);
 
         ticket!.AppId.Should().BeNull();
     }
@@ -812,7 +812,7 @@ public class SupportMailTests : IDisposable
         MailSuggestion open = message!.Suggestions.Single(
             s => s.Kind == MailSuggestionKind.OpenTicket);
 
-        Ticket? created = await mail.AcceptAsync(
+        Ticket? created = await mail.AcceptAsync(tenantId, 
             open.Id, "nils", Tue(11), new AppChoice(appId));
 
         (await tickets.GetAsync(tenantId, created!.Id))!.AppId.Should().Be(appId);
@@ -834,7 +834,7 @@ public class SupportMailTests : IDisposable
 
         open.AppId.Should().Be(appId, "the name is in the subject");
 
-        Ticket? created = await mail.AcceptAsync(open.Id, "nils", Tue(11), AppChoice.None);
+        Ticket? created = await mail.AcceptAsync(tenantId, open.Id, "nils", Tue(11), AppChoice.None);
 
         (await tickets.GetAsync(tenantId, created!.Id))!.AppId.Should().BeNull();
     }
@@ -849,7 +849,7 @@ public class SupportMailTests : IDisposable
         MailSuggestion open = message!.Suggestions.Single(
             s => s.Kind == MailSuggestionKind.OpenTicket);
 
-        Ticket? created = await mail.AcceptAsync(open.Id, "nils", Tue(11));
+        Ticket? created = await mail.AcceptAsync(tenantId, open.Id, "nils", Tue(11));
 
         (await tickets.GetAsync(tenantId, created!.Id))!.AppId.Should().Be(appId);
     }
@@ -867,7 +867,7 @@ public class SupportMailTests : IDisposable
         MailSuggestion open = message!.Suggestions.Single(
             s => s.Kind == MailSuggestionKind.OpenTicket);
 
-        await mail.AcceptAsync(open.Id, "nils", Tue(11), AppChoice.None);
+        await mail.AcceptAsync(tenantId, open.Id, "nils", Tue(11), AppChoice.None);
 
         db.ChangeTracker.Clear();
         db.Set<MailSuggestion>().Single(s => s.Id == open.Id).AppId.Should().BeNull();
@@ -1347,7 +1347,7 @@ public class SupportMailTests : IDisposable
 
         MailSuggestion open = message!.Suggestions.Single(s => s.Kind == MailSuggestionKind.OpenTicket);
 
-        Ticket? ticket = await mail.AcceptAsync(open.Id, "nils", Swedish(2026, 9, 28, 9));
+        Ticket? ticket = await mail.AcceptAsync(tenantId, open.Id, "nils", Swedish(2026, 9, 28, 9));
 
         ticket!.ReportedAt.Should().Be(fridayEvening);
         ticket.ClockStartsAt.Should().Be(Swedish(2026, 9, 28, 8));
@@ -1365,7 +1365,7 @@ public class SupportMailTests : IDisposable
             "Akut", "Ingen kan logga in i Journalportalen.");
 
         MailSuggestion open = message!.Suggestions.Single(s => s.Kind == MailSuggestionKind.OpenTicket);
-        Ticket? ticket = await mail.AcceptAsync(open.Id, "nils", Tue(11));
+        Ticket? ticket = await mail.AcceptAsync(tenantId, open.Id, "nils", Tue(11));
 
         ticket!.ProposedPriority.Should().Be(TicketPriority.P1);
         ticket.Priority.Should().Be(TicketPriority.P1);
@@ -1379,7 +1379,7 @@ public class SupportMailTests : IDisposable
         InboundMailMessage? message = await Receive("Fel", "Trasigt.");
         MailSuggestion open = message!.Suggestions.Single(s => s.Kind == MailSuggestionKind.OpenTicket);
 
-        await mail.AcceptAsync(open.Id, "nils", Tue(11));
+        await mail.AcceptAsync(tenantId, open.Id, "nils", Tue(11));
 
         MailSuggestion decided = db.MailSuggestions.Single(s => s.Id == open.Id);
 
@@ -1394,8 +1394,8 @@ public class SupportMailTests : IDisposable
         InboundMailMessage? message = await Receive("Fel", "Trasigt.");
         MailSuggestion open = message!.Suggestions.Single(s => s.Kind == MailSuggestionKind.OpenTicket);
 
-        await mail.AcceptAsync(open.Id, "nils", Tue(11));
-        Ticket? second = await mail.AcceptAsync(open.Id, "anna", Tue(12));
+        await mail.AcceptAsync(tenantId, open.Id, "nils", Tue(11));
+        Ticket? second = await mail.AcceptAsync(tenantId, open.Id, "anna", Tue(12));
 
         second.Should().BeNull();
         db.Tickets.Count().Should().Be(1);
@@ -1414,7 +1414,7 @@ public class SupportMailTests : IDisposable
         MailSuggestion append = message!.Suggestions
             .Single(s => s.Kind == MailSuggestionKind.AppendToTicket);
 
-        await mail.AcceptAsync(append.Id, "nils", Tue(11));
+        await mail.AcceptAsync(tenantId, append.Id, "nils", Tue(11));
 
         Ticket? loaded = await tickets.GetAsync(tenantId, existing.Id);
 
@@ -1427,7 +1427,7 @@ public class SupportMailTests : IDisposable
         InboundMailMessage? message = await Receive("Fel", "Trasigt.");
         MailSuggestion open = message!.Suggestions.Single(s => s.Kind == MailSuggestionKind.OpenTicket);
 
-        await mail.RejectAsync(open.Id, "nils", Tue(11));
+        await mail.RejectAsync(tenantId, open.Id, "nils", Tue(11));
 
         db.Tickets.Should().BeEmpty();
         db.MailSuggestions.Single(s => s.Id == open.Id).State
@@ -1439,7 +1439,7 @@ public class SupportMailTests : IDisposable
     {
         InboundMailMessage? message = await Receive("Out of office", "Jag är på semester.");
 
-        await mail.DismissAsync(message!.Id, "nils", Tue(11));
+        await mail.DismissAsync(tenantId, message!.Id, "nils", Tue(11));
 
         List<InboundMailMessage> queue = await mail.GetQueueAsync(tenantId);
 
@@ -1943,5 +1943,113 @@ public class SupportMailTests : IDisposable
         read.DeliveredTo = "support@entit.se";
 
         return read;
+    }
+    // ---- Somebody else's queue -----------------------------------------------------------
+
+    /// <summary>
+    /// A second tenant with a customer and a message of their own, sitting in their queue
+    /// with a pending suggestion — the state an operator acts on.
+    /// </summary>
+    private async Task<(Guid Tenant, Guid Customer, InboundMailMessage Message)> StrangerAsync()
+    {
+        Guid strangerTenant = Guid.NewGuid();
+        Guid strangerCustomer = Guid.NewGuid();
+
+        db.Tenants.Add(new Tenant
+        {
+            Id = strangerTenant, Name = "Annan", Slug = $"annan-{strangerTenant:N}",
+        });
+        db.Customers.Add(new Customer
+        {
+            Id = strangerCustomer, TenantId = strangerTenant, Name = "Annan AB",
+        });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        InboundMailMessage? theirs = await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = strangerTenant,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = "patient@vard.example",
+            Subject = "Journalen går inte att öppna",
+            Body = "Ingenting syns.",
+            SentAt = Tue(10),
+            CustomerId = strangerCustomer,
+        });
+
+        theirs.Should().NotBeNull();
+        return (strangerTenant, strangerCustomer, theirs!);
+    }
+
+    /// <summary>
+    /// <b>Accepting opens a ticket.</b> The suggestion carries no tenant of its own — the
+    /// message it belongs to does — so by id alone a pending proposal on somebody else's mail
+    /// could be acted on, raising a ticket out of their correspondence.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_suggestion_cannot_be_accepted_or_rejected()
+    {
+        (Guid _, Guid _, InboundMailMessage theirs) = await StrangerAsync();
+
+        MailSuggestion pending = theirs.Suggestions
+            .First(s => s.State == MailSuggestionState.Pending);
+
+        (await mail.AcceptAsync(tenantId, pending.Id, "nils", Tue(11))).Should().BeNull();
+        await mail.RejectAsync(tenantId, pending.Id, "nils", Tue(11));
+
+        db.ChangeTracker.Clear();
+        MailSuggestion stored = await db.Set<MailSuggestion>().AsNoTracking()
+            .FirstAsync(s => s.Id == pending.Id);
+
+        stored.State.Should().Be(MailSuggestionState.Pending);
+        stored.DecidedBy.Should().BeNull();
+    }
+
+    /// <summary>
+    /// Dismissing takes a message out of triage. By id alone that made somebody else's
+    /// support mail disappear from the queue they were watching it in.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_message_cannot_be_dismissed()
+    {
+        (Guid _, Guid _, InboundMailMessage theirs) = await StrangerAsync();
+
+        await mail.DismissAsync(tenantId, theirs.Id, "nils", Tue(11));
+
+        db.ChangeTracker.Clear();
+        InboundMailMessage stored = await db.InboundMailMessages.AsNoTracking()
+            .FirstAsync(m => m.Id == theirs.Id);
+
+        stored.State.Should().NotBe(MailTriageState.Dismissed);
+        stored.HandledBy.Should().BeNull();
+    }
+
+    /// <summary>
+    /// <b>The message is scoped; the customer deliberately is not.</b> Placing a message we
+    /// were never sent is refused — but placing one of OUR messages against ANOTHER tenant's
+    /// customer stays allowed, because a support address takes what it is sent and retyping a
+    /// misdirected report would lose the arrival time §14.3 counts from.
+    /// </summary>
+    [Fact]
+    public async Task A_message_we_were_not_sent_cannot_be_placed_but_a_foreign_customer_still_can_be()
+    {
+        (Guid _, Guid strangerCustomer, InboundMailMessage theirs) = await StrangerAsync();
+
+        (await mail.AssignCustomerAsync(tenantId, theirs.Id, customerId, "nils")).Should().BeNull();
+
+        db.ChangeTracker.Clear();
+        (await db.InboundMailMessages.AsNoTracking().FirstAsync(m => m.Id == theirs.Id))
+            .CustomerId.Should().NotBe(customerId);
+
+        // Ours, placed against their customer: still allowed, and the point of the remark in
+        // AssignCustomerAsync.
+        InboundMailMessage? ourMessage = await Receive("Fel i portalen", "Det kraschar.");
+        ourMessage.Should().NotBeNull();
+
+        InboundMailMessage? placed =
+            await mail.AssignCustomerAsync(tenantId, ourMessage!.Id, strangerCustomer, "nils");
+
+        placed.Should().NotBeNull();
+        placed!.CustomerId.Should().Be(strangerCustomer);
     }
 }

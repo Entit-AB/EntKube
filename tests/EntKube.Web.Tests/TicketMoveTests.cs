@@ -458,7 +458,7 @@ public class TicketMoveTests : IDisposable
         MailSuggestion open = message!.Suggestions
             .Single(s => s.Kind == MailSuggestionKind.OpenTicket);
 
-        Ticket? ticket = await mail.AcceptAsync(open.Id, "nils", Tue(10), new AppChoice(ourApp));
+        Ticket? ticket = await mail.AcceptAsync(ours, open.Id, "nils", Tue(10), new AppChoice(ourApp));
 
         await tickets.MoveAsync(ticket!.Id, theirCustomer, theirApp, "nils", null, Tue(11));
 

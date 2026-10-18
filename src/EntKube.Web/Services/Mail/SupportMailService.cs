@@ -181,7 +181,8 @@ public class SupportMailService(
                 MailSuggestion failure = message.Suggestions
                     .First(s => s.Kind == MailSuggestionKind.FlagDeliveryFailure);
 
-                await AcceptAsync(failure.Id, ArrivalPolicy.Actor, DateTime.UtcNow, ct: ct);
+                await AcceptAsync(
+                    message.TenantId, failure.Id, ArrivalPolicy.Actor, DateTime.UtcNow, ct: ct);
 
                 logger?.LogWarning(
                     "Mail we sent about ticket #{Number} was refused{For}: {Reason}",
@@ -197,7 +198,8 @@ public class SupportMailService(
                 MailSuggestion reply = message.Suggestions
                     .First(s => s.Kind == MailSuggestionKind.ReplyToCustomer);
 
-                await AcceptAsync(reply.Id, ArrivalPolicy.Actor, DateTime.UtcNow, ct: ct);
+                await AcceptAsync(
+                    message.TenantId, reply.Id, ArrivalPolicy.Actor, DateTime.UtcNow, ct: ct);
 
                 logger?.LogInformation(
                     "Support mail from {From} was sent on to the customer on ticket "
@@ -226,7 +228,8 @@ public class SupportMailService(
                     return message;
                 }
 
-                await AcceptAsync(append.Id, ArrivalPolicy.Actor, DateTime.UtcNow, ct: ct);
+                await AcceptAsync(
+                    message.TenantId, append.Id, ArrivalPolicy.Actor, DateTime.UtcNow, ct: ct);
 
                 logger?.LogInformation(
                     "Support mail from {From} was added to ticket #{Number} on arrival: {Reason}",
@@ -239,7 +242,7 @@ public class SupportMailService(
                 message.Suggestions.First(s => s.Kind == MailSuggestionKind.OpenTicket);
 
             Ticket? ticket = await AcceptAsync(
-                open.Id, ArrivalPolicy.Actor, DateTime.UtcNow, ct: ct);
+                    message.TenantId, open.Id, ArrivalPolicy.Actor, DateTime.UtcNow, ct: ct);
 
             logger?.LogInformation(
                 "Support mail from {From} opened ticket #{Number} on arrival: {Reason}",
@@ -443,15 +446,20 @@ public class SupportMailService(
     /// anyone there is placed without being asked about. Offered rather than done, because
     /// it is a statement about every future sender at that domain and not only this one.
     /// </param>
+    /// <param name="tenantId">
+    /// Whose queue the message is in. Note that this scopes the <b>message</b> and
+    /// deliberately not the customer — see the remark below, which is a decision rather than
+    /// an oversight.
+    /// </param>
     public async Task<InboundMailMessage?> AssignCustomerAsync(
-        Guid messageId, Guid customerId, string actor, bool rememberDomain = false,
+        Guid tenantId, Guid messageId, Guid customerId, string actor, bool rememberDomain = false,
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         InboundMailMessage? message = await db.InboundMailMessages
             .Include(m => m.Suggestions)
-            .FirstOrDefaultAsync(m => m.Id == messageId, ct);
+            .FirstOrDefaultAsync(m => m.Id == messageId && m.TenantId == tenantId, ct);
 
         if (message is null)
         {
@@ -472,6 +480,11 @@ public class SupportMailService(
         // alternative is retyping it there and losing the arrival time §14.3 counts from.
         // Who may say it is settled by the screen, which only offers the tenants that
         // person can already reach; what is enforced here is that the customer is real.
+        //
+        // The MESSAGE is scoped, which does not weaken that: the case this allows is a
+        // message in OUR queue turning out to be about THEIR customer. Being able to act on
+        // a message we were never sent is a different thing, and not one this reasoning
+        // covers.
         message.CustomerId = customerId;
 
         // Only the proposals nobody has acted on. A suggestion already accepted or
@@ -586,15 +599,21 @@ public class SupportMailService(
     /// the analyst guesses from a name appearing in a sentence and is sometimes wrong in
     /// the direction of confidence.
     /// </param>
+    /// <param name="tenantId">
+    /// Whose queue the suggestion's message is in. Accepting opens a <see cref="Ticket"/>, so
+    /// by id alone this raised a ticket out of somebody else's mail. The suggestion carries no
+    /// tenant of its own; the message it belongs to does.
+    /// </param>
     public async Task<Ticket?> AcceptAsync(
-        Guid suggestionId, string actor, DateTime at, AppChoice? chosenApp = null,
+        Guid tenantId, Guid suggestionId, string actor, DateTime at, AppChoice? chosenApp = null,
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         MailSuggestion? suggestion = await db.MailSuggestions
             .Include(s => s.Message)
-            .FirstOrDefaultAsync(s => s.Id == suggestionId, ct);
+            .FirstOrDefaultAsync(
+                s => s.Id == suggestionId && s.Message.TenantId == tenantId, ct);
 
         if (suggestion is null || suggestion.State != MailSuggestionState.Pending)
         {
@@ -711,11 +730,14 @@ public class SupportMailService(
     }
 
     public async Task RejectAsync(
-        Guid suggestionId, string actor, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid suggestionId, string actor, DateTime at, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        MailSuggestion? suggestion = await db.MailSuggestions.FindAsync([suggestionId], ct);
+        // FindAsync takes a key and cannot carry a predicate, which is how this came to have
+        // no tenant in it.
+        MailSuggestion? suggestion = await db.MailSuggestions
+            .FirstOrDefaultAsync(s => s.Id == suggestionId && s.Message.TenantId == tenantId, ct);
 
         if (suggestion is not null)
         {
@@ -727,12 +749,17 @@ public class SupportMailService(
     }
 
     /// <summary>Marks a message as needing nothing — an autoreply, a bounce, spam.</summary>
+    /// <param name="tenantId">
+    /// Whose queue. Dismissing takes the message out of triage, so by id alone this made
+    /// somebody else's support mail disappear from the queue nobody is now watching it in.
+    /// </param>
     public async Task DismissAsync(
-        Guid messageId, string actor, DateTime at, CancellationToken ct = default)
+        Guid tenantId, Guid messageId, string actor, DateTime at, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        InboundMailMessage? message = await db.InboundMailMessages.FindAsync([messageId], ct);
+        InboundMailMessage? message = await db.InboundMailMessages
+            .FirstOrDefaultAsync(m => m.Id == messageId && m.TenantId == tenantId, ct);
 
         if (message is not null)
         {
