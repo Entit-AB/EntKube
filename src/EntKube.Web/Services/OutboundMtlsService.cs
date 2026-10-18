@@ -34,28 +34,32 @@ public class OutboundMtlsService(
     // ──────── CRUD ────────
 
     public async Task<List<OutboundMtlsCredential>> GetForAppAsync(
-        Guid appId, Guid? environmentId = null, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid? environmentId = null, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         return await db.OutboundMtlsCredentials
-            .Where(c => c.AppId == appId
+            .Where(c => c.TenantId == tenantId && c.AppId == appId
                      && (environmentId == null || c.EnvironmentId == null || c.EnvironmentId == environmentId))
             .OrderBy(c => c.Name)
             .ToListAsync(ct);
     }
 
-    public async Task<OutboundMtlsCredential?> GetAsync(Guid id, CancellationToken ct = default)
+    public async Task<OutboundMtlsCredential?> GetAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
-        return await db.OutboundMtlsCredentials.FirstOrDefaultAsync(c => c.Id == id, ct);
+        return await db.OutboundMtlsCredentials
+            .FirstOrDefaultAsync(c => c.Id == id && c.TenantId == tenantId, ct);
     }
 
     /// <param name="tenantId">
-    /// Whose vault to read the client certificate from. The credential entity carries an app and
-    /// a vault secret id but no tenant, so without this the certificate for ANY secret id would
-    /// be fetched — and <c>VaultService</c> used to unseal whichever tenant owned it.
+    /// Whose credential, and whose vault the client certificate is read from.
+    ///
+    /// <para>The entity <i>does</i> carry a TenantId — this comment used to say it did not,
+    /// which was wrong — but a TenantId on a caller-supplied entity is a claim rather than an
+    /// authorization, so the row is stamped from this parameter instead of trusting it.</para>
     /// </param>
     public async Task<OutboundMtlsCredential> CreateAsync(
         Guid tenantId, OutboundMtlsCredential credential, CancellationToken ct = default)
@@ -81,6 +85,7 @@ public class OutboundMtlsService(
                 "its key — upload the key alongside it in the vault.");
 
         credential.Id = Guid.NewGuid();
+        credential.TenantId = tenantId;
         credential.Name = name;
         credential.Host = credential.Host.Trim().ToLowerInvariant();
 
@@ -93,15 +98,22 @@ public class OutboundMtlsService(
         return credential;
     }
 
-    public async Task UpdateAsync(OutboundMtlsCredential credential, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose credential. Host is the partner endpoint the app presents its client certificate
+    /// to, and VaultSecretId is which certificate that is — so by id alone this repointed
+    /// somebody else's outbound mTLS at a different host, or at a different certificate.
+    /// </param>
+    public async Task UpdateAsync(
+        Guid tenantId, OutboundMtlsCredential credential, CancellationToken ct = default)
     {
         Validate(credential);
 
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         OutboundMtlsCredential existing = await db.OutboundMtlsCredentials
-            .FirstOrDefaultAsync(c => c.Id == credential.Id, ct)
-            ?? throw new InvalidOperationException("Credential not found.");
+            .FirstOrDefaultAsync(c => c.Id == credential.Id && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Credential not found, or it is not this tenant's.");
 
         existing.Name = SanitizeName(credential.Name);
         existing.Host = credential.Host.Trim().ToLowerInvariant();
@@ -115,12 +127,16 @@ public class OutboundMtlsService(
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task DeleteAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose credential. Removing one takes the client certificate off the next apply, and a
+    /// partner that requires mTLS refuses the connection without it.
+    /// </param>
+    public async Task DeleteAsync(Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
 
         OutboundMtlsCredential? credential = await db.OutboundMtlsCredentials
-            .FirstOrDefaultAsync(c => c.Id == id, ct);
+            .FirstOrDefaultAsync(c => c.Id == id && c.TenantId == tenantId, ct);
         if (credential is null) return;
 
         db.OutboundMtlsCredentials.Remove(credential);
