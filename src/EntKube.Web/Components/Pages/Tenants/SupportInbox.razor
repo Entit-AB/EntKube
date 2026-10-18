@@ -404,7 +404,7 @@
         try
         {
             await Mail.AssignCustomerAsync(
-                messageId, customerId, await Actor.NameAsync(), remembering.Contains(messageId));
+                TenantId, messageId, customerId, await Actor.NameAsync(), remembering.Contains(messageId));
 
             assigning.Remove(messageId);
             remembering.Remove(messageId);
@@ -528,7 +528,7 @@
             : null;
 
         Ticket? ticket = await Mail.AcceptAsync(
-            suggestion.Id, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow, chosen);
+            TenantId, suggestion.Id, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow, chosen);
 
         chosenApps.Remove(suggestion.Id);
 
@@ -547,13 +547,13 @@
 
     private async Task RejectAsync(Guid suggestionId)
     {
-        await Mail.RejectAsync(suggestionId, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow);
+        await Mail.RejectAsync(TenantId, suggestionId, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow);
         await LoadAsync();
     }
 
     private async Task DismissAsync(Guid messageId)
     {
-        await Mail.DismissAsync(messageId, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow);
+        await Mail.DismissAsync(TenantId, messageId, ActorName ?? await Actor.NameAsync(), DateTime.UtcNow);
         await LoadAsync();
     }
 
