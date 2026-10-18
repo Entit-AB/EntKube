@@ -520,7 +520,7 @@
     {
         if (selected?.Config is not null)
         {
-            cfg = await OpenLdap.GetConfigAsync(selected.Config.Id);
+            cfg = await OpenLdap.GetConfigAsync(TenantId, selected.Config.Id);
         }
         else if (selected is not null)
         {
@@ -538,7 +538,7 @@
 
     private async Task ReloadConfigAsync()
     {
-        if (cfg is not null) cfg = await OpenLdap.GetConfigAsync(cfg.Id);
+        if (cfg is not null) cfg = await OpenLdap.GetConfigAsync(TenantId, cfg.Id);
     }
 
     private async Task<bool> PersistConfigAsync()
@@ -635,13 +635,13 @@
     {
         if (cfg is null) return;
         busy = true;
-        try { await OpenLdap.AddOuAsync(cfg.Id, newOuName, newOuDesc); newOuName = ""; newOuDesc = null; await ReloadConfigAsync(); }
+        try { await OpenLdap.AddOuAsync(TenantId, cfg.Id, newOuName, newOuDesc); newOuName = ""; newOuDesc = null; await ReloadConfigAsync(); }
         catch (Exception ex) { Toasts.Error($"Add OU failed: {ex.Message}"); }
         finally { busy = false; }
     }
     private void ConfirmDeleteOu(OpenLdapOrganizationalUnit ou) =>
         pendingConfirm = ($"Delete organizational unit \"ou={ou.Name}\"? Users/groups in it fall back to the base DN.", "Delete", async () =>
-        { await OpenLdap.DeleteOuAsync(ou.Id); await ReloadConfigAsync(); });
+        { await OpenLdap.DeleteOuAsync(TenantId, ou.Id); await ReloadConfigAsync(); });
 
     // ── Users ──
     private async Task AddUserAsync()
@@ -652,7 +652,7 @@
         {
             nu.ConfigId = cfg.Id;
             if (nu.OrganizationalUnitId == Guid.Empty) nu.OrganizationalUnitId = null;
-            await OpenLdap.AddUserAsync(nu, newUserPassword);
+            await OpenLdap.AddUserAsync(TenantId, nu, newUserPassword);
             nu = NewUser(); newUserPassword = null;
             await ReloadConfigAsync();
         }
@@ -661,7 +661,7 @@
     }
     private void ConfirmDeleteUser(OpenLdapUser u) =>
         pendingConfirm = ($"Delete user \"uid={u.Uid}\"?", "Delete", async () =>
-        { await OpenLdap.DeleteUserAsync(u.Id); await ReloadConfigAsync(); });
+        { await OpenLdap.DeleteUserAsync(TenantId, u.Id); await ReloadConfigAsync(); });
 
     // ── Groups ──
     private async Task AddGroupAsync()
@@ -672,7 +672,7 @@
         {
             ng.ConfigId = cfg.Id;
             if (ng.OrganizationalUnitId == Guid.Empty) ng.OrganizationalUnitId = null;
-            await OpenLdap.AddGroupAsync(ng);
+            await OpenLdap.AddGroupAsync(TenantId, ng);
             ng = NewGroup();
             await ReloadConfigAsync();
         }
@@ -681,7 +681,7 @@
     }
     private void ConfirmDeleteGroup(OpenLdapGroup g) =>
         pendingConfirm = ($"Delete group \"cn={g.Cn}\"?", "Delete", async () =>
-        { await OpenLdap.DeleteGroupAsync(g.Id); await ReloadConfigAsync(); });
+        { await OpenLdap.DeleteGroupAsync(TenantId, g.Id); await ReloadConfigAsync(); });
 
     private void ToggleMembers(OpenLdapGroup g)
     {
@@ -696,7 +696,7 @@
     private async Task SaveMembersAsync(OpenLdapGroup g)
     {
         busy = true;
-        try { await OpenLdap.SetGroupMembersAsync(g.Id, memberSelection); editingMembersGroupId = null; await ReloadConfigAsync(); }
+        try { await OpenLdap.SetGroupMembersAsync(TenantId, g.Id, memberSelection); editingMembersGroupId = null; await ReloadConfigAsync(); }
         catch (Exception ex) { Toasts.Error($"Save members failed: {ex.Message}"); }
         finally { busy = false; }
     }
