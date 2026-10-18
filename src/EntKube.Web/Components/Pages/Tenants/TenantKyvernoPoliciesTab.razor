@@ -672,7 +672,7 @@
             KyvernoPolicy? existing = GetPolicy(type);
             if (existing is not null)
             {
-                await KyvernoService.DeletePolicyAsync(existing.Id);
+                await KyvernoService.DeletePolicyAsync(TenantId, existing.Id);
                 kyvernoPolicies.Remove(existing);
             }
         }
@@ -682,7 +682,7 @@
     {
         KyvernoPolicy? existing = GetPolicy(type);
         if (existing is null) return;
-        KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(existing.Id, mode, existing.Configuration);
+        KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(TenantId, existing.Id, mode, existing.Configuration);
         int idx = kyvernoPolicies.IndexOf(existing);
         if (idx >= 0) kyvernoPolicies[idx] = updated;
     }
@@ -734,8 +734,7 @@
                 Required = sigRequiredInput,
             };
 
-        KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(
-            policy.Id, policy.ValidationFailureAction,
+        KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(TenantId, policy.Id, policy.ValidationFailureAction,
             KyvernoPolicyService.SerializeVerifyImagesConfig(config));
 
         kyvernoPolicies[kyvernoPolicies.IndexOf(policy)] = updated;
@@ -757,7 +756,7 @@
         }
         else
         {
-            KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(p.Id, p.ValidationFailureAction, config);
+            KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(TenantId, p.Id, p.ValidationFailureAction, config);
             kyvernoPolicies[kyvernoPolicies.IndexOf(p)] = updated;
         }
         registryInput = "";
@@ -769,7 +768,7 @@
         if (p is null) return;
         List<string> list = KyvernoPolicyService.GetConfigList(p);
         list.Remove(registry);
-        KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(p.Id, p.ValidationFailureAction,
+        KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(TenantId, p.Id, p.ValidationFailureAction,
             KyvernoPolicyService.SerializeConfigList(list));
         kyvernoPolicies[kyvernoPolicies.IndexOf(p)] = updated;
     }
@@ -790,7 +789,7 @@
         }
         else
         {
-            KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(p.Id, p.ValidationFailureAction, config);
+            KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(TenantId, p.Id, p.ValidationFailureAction, config);
             kyvernoPolicies[kyvernoPolicies.IndexOf(p)] = updated;
         }
         labelInput = "";
@@ -802,7 +801,7 @@
         if (p is null) return;
         List<string> list = KyvernoPolicyService.GetConfigList(p);
         list.Remove(labelKey);
-        KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(p.Id, p.ValidationFailureAction,
+        KyvernoPolicy updated = await KyvernoService.UpdatePolicyAsync(TenantId, p.Id, p.ValidationFailureAction,
             KyvernoPolicyService.SerializeConfigList(list));
         kyvernoPolicies[kyvernoPolicies.IndexOf(p)] = updated;
     }
@@ -830,7 +829,7 @@
 
     private async Task DeleteCustom(Guid id)
     {
-        await KyvernoService.DeletePolicyAsync(id);
+        await KyvernoService.DeletePolicyAsync(TenantId, id);
         kyvernoPolicies.RemoveAll(p => p.Id == id);
         confirmDeleteId = null;
     }
