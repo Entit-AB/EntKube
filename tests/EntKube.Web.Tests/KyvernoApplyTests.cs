@@ -2,6 +2,7 @@ using EntKube.Web.Data;
 using EntKube.Web.Services;
 using EntKube.Web.Services.Clusters;
 using FluentAssertions;
+using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
 using Moq;
 
@@ -213,5 +214,103 @@ public class KyvernoApplyTests : IDisposable
         {
             public void Dispose() { }
         }
+    }
+
+    /// <summary>
+    /// A second tenant with an environment of its own. Both rows are needed: KyvernoPolicy
+    /// has FKs to Tenant and Environment, so a policy with fabricated ids cannot be inserted
+    /// at all — which is also the check that the crossing being tested is constructable.
+    /// </summary>
+    private async Task<(Guid Tenant, Guid Environment)> SeedStrangerAsync()
+    {
+        Guid strangerTenant = Guid.NewGuid();
+        Guid strangerEnv = Guid.NewGuid();
+
+        db.Tenants.Add(new Tenant
+        {
+            Id = strangerTenant, Name = "Annan", Slug = $"annan-{strangerTenant:N}",
+        });
+        db.Set<Data.Environment>().Add(new Data.Environment
+        {
+            Id = strangerEnv, TenantId = strangerTenant, Name = "production",
+        });
+        await db.SaveChangesAsync();
+
+        return (strangerTenant, strangerEnv);
+    }
+
+    // ---- Somebody else's policy ----------------------------------------------------------
+
+    /// <summary>
+    /// <b>The enforcement mode is the policy.</b> Moving a policy from Enforce to Audit leaves
+    /// it listed, named and reporting — and stops it blocking anything. That is the difference
+    /// between a privileged pod being refused and being admitted with a warning nobody reads,
+    /// and by id alone it could be done to another tenant's environment.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_policy_cannot_be_moved_to_audit()
+    {
+        await SeedClusterAsync();
+        (Guid strangerTenant, Guid strangerEnv) = await SeedStrangerAsync();
+
+        KyvernoPolicy theirs = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = strangerTenant,
+            EnvironmentId = strangerEnv,
+            PolicyType = KyvernoPolicyType.DisallowPrivilegedContainers,
+            ValidationFailureAction = KyvernoValidationFailureAction.Enforce,
+        };
+        db.Set<KyvernoPolicy>().Add(theirs);
+        await db.SaveChangesAsync();
+
+        Func<Task> act = () => sut.UpdatePolicyAsync(
+            tenantId, theirs.Id, KyvernoValidationFailureAction.Audit, null);
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Kyverno policy not found, or it is not this tenant's.");
+
+        KyvernoPolicy stored = await db.Set<KyvernoPolicy>().AsNoTracking()
+            .FirstAsync(p => p.Id == theirs.Id);
+
+        stored.ValidationFailureAction.Should().Be(KyvernoValidationFailureAction.Enforce);
+    }
+
+    /// <summary>
+    /// Deleting removes the admission rule outright on the next apply. The owner's own delete
+    /// still works, or the refusal above says nothing.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_policy_cannot_be_deleted()
+    {
+        await SeedClusterAsync();
+        (Guid strangerTenant, Guid strangerEnv) = await SeedStrangerAsync();
+
+        KyvernoPolicy theirs = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = strangerTenant,
+            EnvironmentId = strangerEnv,
+            PolicyType = KyvernoPolicyType.DisallowPrivilegedContainers,
+            ValidationFailureAction = KyvernoValidationFailureAction.Enforce,
+        };
+        KyvernoPolicy ours = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenantId,
+            EnvironmentId = environmentId,
+            PolicyType = KyvernoPolicyType.DisallowPrivilegedContainers,
+            ValidationFailureAction = KyvernoValidationFailureAction.Enforce,
+        };
+        db.Set<KyvernoPolicy>().AddRange(theirs, ours);
+        await db.SaveChangesAsync();
+
+        (await sut.DeletePolicyAsync(tenantId, theirs.Id)).Should().BeFalse();
+        (await db.Set<KyvernoPolicy>().AsNoTracking().AnyAsync(p => p.Id == theirs.Id))
+            .Should().BeTrue();
+
+        (await sut.DeletePolicyAsync(tenantId, ours.Id)).Should().BeTrue();
+        (await db.Set<KyvernoPolicy>().AsNoTracking().AnyAsync(p => p.Id == ours.Id))
+            .Should().BeFalse();
     }
 }

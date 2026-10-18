@@ -105,15 +105,27 @@ public class KyvernoPolicyService(
     }
 
     /// <summary>Updates the validation mode and/or configuration of an existing policy by ID.</summary>
+    /// <param name="tenantId">
+    /// Whose policy. <paramref name="mode"/> is the admission-control enforcement mode, so by
+    /// id alone this moved somebody else's policy from Enforce to Audit — the policy keeps
+    /// reporting and stops blocking, which looks identical in the UI and is the difference
+    /// between a privileged pod being refused and being admitted with a warning nobody reads.
+    /// </param>
     public async Task<KyvernoPolicy> UpdatePolicyAsync(
+        Guid tenantId,
         Guid id,
         KyvernoValidationFailureAction mode,
         string? configuration,
         CancellationToken ct = default)
     {
         using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
-        KyvernoPolicy policy = await db.KyvernoPolicies.FindAsync([id], ct)
-            ?? throw new InvalidOperationException($"Kyverno policy {id} not found.");
+
+        // FindAsync takes a key and cannot carry a predicate, which is how this came to have
+        // no tenant in it.
+        KyvernoPolicy policy = await db.KyvernoPolicies
+            .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Kyverno policy not found, or it is not this tenant's.");
         policy.ValidationFailureAction = mode;
         policy.Configuration = configuration;
         policy.UpdatedAt = DateTime.UtcNow;
@@ -146,10 +158,15 @@ public class KyvernoPolicyService(
     }
 
     /// <summary>Disables (deletes) a policy by ID.</summary>
-    public async Task<bool> DeletePolicyAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose policy. Deleting one removes the admission rule entirely on the next apply.
+    /// </param>
+    public async Task<bool> DeletePolicyAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
-        KyvernoPolicy? policy = await db.KyvernoPolicies.FindAsync([id], ct);
+        KyvernoPolicy? policy = await db.KyvernoPolicies
+            .FirstOrDefaultAsync(p => p.Id == id && p.TenantId == tenantId, ct);
         if (policy is null) return false;
         db.KyvernoPolicies.Remove(policy);
         await db.SaveChangesAsync(ct);
