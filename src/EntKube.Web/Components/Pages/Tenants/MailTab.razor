@@ -1119,7 +1119,7 @@
                 // preselect it when the cluster has exactly one.
                 OpenLdapConfigId = directories.Count == 1 ? directories[0].Id : null,
             }
-            : await Mail.GetConfigAsync(instance.Config.Id) ?? instance.Config;
+            : await Mail.GetConfigAsync(TenantId, instance.Config.Id) ?? instance.Config;
     }
 
     private async Task ReloadConfigAsync()
@@ -1131,7 +1131,7 @@
         }
         if (cfg is not null && cfg.Id != Guid.Empty)
         {
-            cfg = await Mail.GetConfigAsync(cfg.Id) ?? cfg;
+            cfg = await Mail.GetConfigAsync(TenantId, cfg.Id) ?? cfg;
         }
     }
 
@@ -1314,7 +1314,7 @@
         busy = true;
         try
         {
-            await Mail.AddDomainAsync(cfg.Id, newDomainName, newDomainPrimary);
+            await Mail.AddDomainAsync(TenantId, cfg.Id, newDomainName, newDomainPrimary);
             newDomainName = "";
             newDomainPrimary = false;
             await ReloadConfigAsync();
@@ -1325,7 +1325,7 @@
 
     private async Task SaveDomainAsync(StalwartMailDomain domain)
     {
-        try { await Mail.UpdateDomainAsync(domain); }
+        try { await Mail.UpdateDomainAsync(TenantId, domain); }
         catch (Exception ex) { Toasts.Error($"Save failed: {ex.Message}"); }
     }
 
@@ -1343,7 +1343,7 @@
             "Remove",
             async () =>
             {
-                await Mail.DeleteDomainAsync(domain.Id);
+                await Mail.DeleteDomainAsync(TenantId, domain.Id);
                 await ReloadConfigAsync();
             });
 
@@ -1361,7 +1361,7 @@
         busy = true;
         try
         {
-            await Mail.AddAccountAsync(new StalwartMailAccount
+            await Mail.AddAccountAsync(TenantId, new StalwartMailAccount
             {
                 ConfigId = cfg.Id,
                 DomainId = domainId,
@@ -1378,7 +1378,7 @@
 
     private async Task SaveAccountAsync(StalwartMailAccount account)
     {
-        try { await Mail.UpdateAccountAsync(account); }
+        try { await Mail.UpdateAccountAsync(TenantId, account); }
         catch (Exception ex) { Toasts.Error($"Save failed: {ex.Message}"); }
     }
 
@@ -1389,7 +1389,7 @@
             "Remove",
             async () =>
             {
-                await Mail.DeleteAccountAsync(account.Id);
+                await Mail.DeleteAccountAsync(TenantId, account.Id);
                 await ReloadConfigAsync();
             });
 
@@ -1399,7 +1399,7 @@
         busy = true;
         try
         {
-            int added = await Mail.ImportMailboxesFromLdapAsync(cfg.Id);
+            int added = await Mail.ImportMailboxesFromLdapAsync(TenantId, cfg.Id);
             Toasts.Success(added == 0
                 ? "Every directory user with an address in these domains already has a mailbox."
                 : $"Added {added} mailbox(es) from the directory.");
