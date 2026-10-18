@@ -106,14 +106,27 @@ public class OpenLdapService(
             .FirstOrDefaultAsync(c => c.ClusterComponentId == clusterComponentId && c.TenantId == tenantId, ct);
     }
 
-    public async Task<OpenLdapComponentConfig?> GetConfigAsync(Guid configId, CancellationToken ct = default)
+    /// <summary>
+    /// Whether a directory is this tenant's.
+    ///
+    /// <para>Only <see cref="OpenLdapComponentConfig"/> carries a TenantId; the OUs, users and
+    /// groups under it carry a ConfigId. So a row is reached through
+    /// <c>x.Config.TenantId</c>, and a row being <i>created</i> — which has no row to compare
+    /// yet — is checked against the directory the caller named.</para>
+    /// </summary>
+    private static Task<bool> ConfigIsTenantsAsync(
+        DataServicesDbContext db, Guid tenantId, Guid configId, CancellationToken ct) =>
+        db.OpenLdapComponentConfigs.AnyAsync(c => c.Id == configId && c.TenantId == tenantId, ct);
+
+    public async Task<OpenLdapComponentConfig?> GetConfigAsync(
+        Guid tenantId, Guid configId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
         return await db.OpenLdapComponentConfigs
             .Include(c => c.OrganizationalUnits)
             .Include(c => c.Users)
             .Include(c => c.Groups).ThenInclude(g => g.Members)
-            .FirstOrDefaultAsync(c => c.Id == configId, ct);
+            .FirstOrDefaultAsync(c => c.Id == configId && c.TenantId == tenantId, ct);
     }
 
     // ── Configure (mirrors KeycloakService.ConfigureAsync) ────────────────────
@@ -543,9 +556,16 @@ public class OpenLdapService(
 
     // ── Directory CRUD ────────────────────────────────────────────────────────
 
-    public async Task<OpenLdapOrganizationalUnit> AddOuAsync(Guid configId, string name, string? description, CancellationToken ct = default)
+    public async Task<OpenLdapOrganizationalUnit> AddOuAsync(
+        Guid tenantId, Guid configId, string name, string? description, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        if (!await ConfigIsTenantsAsync(db, tenantId, configId, ct))
+        {
+            throw new InvalidOperationException("Directory not found, or it is not this tenant's.");
+        }
+
         OpenLdapOrganizationalUnit ou = new()
         {
             Id = Guid.NewGuid(), ConfigId = configId, Name = name.Trim().ToLowerInvariant(), Description = description,
@@ -555,15 +575,29 @@ public class OpenLdapService(
         return ou;
     }
 
-    public async Task DeleteOuAsync(Guid ouId, CancellationToken ct = default)
+    public async Task DeleteOuAsync(Guid tenantId, Guid ouId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
-        await db.OpenLdapOrganizationalUnits.Where(o => o.Id == ouId).ExecuteDeleteAsync(ct);
+        await db.OpenLdapOrganizationalUnits
+            .Where(o => o.Id == ouId && o.Config.TenantId == tenantId)
+            .ExecuteDeleteAsync(ct);
     }
 
-    public async Task<OpenLdapUser> AddUserAsync(OpenLdapUser user, string? password, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose directory. The ConfigId is on the entity, so without this the caller chose which
+    /// directory the account was created in — and <paramref name="password"/> is hashed into
+    /// the row, so that is an account with a known password in a directory that is not ours.
+    /// </param>
+    public async Task<OpenLdapUser> AddUserAsync(
+        Guid tenantId, OpenLdapUser user, string? password, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        if (!await ConfigIsTenantsAsync(db, tenantId, user.ConfigId, ct))
+        {
+            throw new InvalidOperationException("Directory not found, or it is not this tenant's.");
+        }
+
         user.Id = user.Id == Guid.Empty ? Guid.NewGuid() : user.Id;
         user.Uid = user.Uid.Trim();
         if (!string.IsNullOrEmpty(password))
@@ -575,10 +609,18 @@ public class OpenLdapService(
         return user;
     }
 
-    public async Task UpdateUserAsync(OpenLdapUser user, string? newPassword, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose directory. <paramref name="newPassword"/> is written to whichever row the Id
+    /// names, so by id alone this set the password of any account in any directory in the
+    /// installation — and an LDAP account is what the applications behind it authenticate.
+    /// </param>
+    public async Task UpdateUserAsync(
+        Guid tenantId, OpenLdapUser user, string? newPassword, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
-        OpenLdapUser existing = await db.OpenLdapUsers.FirstAsync(u => u.Id == user.Id, ct);
+        OpenLdapUser existing = await db.OpenLdapUsers
+            .FirstOrDefaultAsync(u => u.Id == user.Id && u.Config.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("User not found, or it is not this tenant's.");
         existing.OrganizationalUnitId = user.OrganizationalUnitId;
         existing.Cn = user.Cn;
         existing.Sn = user.Sn;
@@ -598,18 +640,31 @@ public class OpenLdapService(
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task DeleteUserAsync(Guid userId, CancellationToken ct = default)
+    public async Task DeleteUserAsync(Guid tenantId, Guid userId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
         // Remove memberships first — the join's user FK is Restrict (no cascade) to keep
-        // SQL Server happy with a single cascade path through the group.
-        await db.OpenLdapGroupMembers.Where(m => m.UserId == userId).ExecuteDeleteAsync(ct);
-        await db.OpenLdapUsers.Where(u => u.Id == userId).ExecuteDeleteAsync(ct);
+        // SQL Server happy with a single cascade path through the group. Both halves carry
+        // the tenant: deleting the memberships of somebody else's user and leaving the user
+        // would be its own kind of damage.
+        await db.OpenLdapGroupMembers
+            .Where(m => m.UserId == userId && m.User.Config.TenantId == tenantId)
+            .ExecuteDeleteAsync(ct);
+        await db.OpenLdapUsers
+            .Where(u => u.Id == userId && u.Config.TenantId == tenantId)
+            .ExecuteDeleteAsync(ct);
     }
 
-    public async Task<OpenLdapGroup> AddGroupAsync(OpenLdapGroup group, CancellationToken ct = default)
+    public async Task<OpenLdapGroup> AddGroupAsync(
+        Guid tenantId, OpenLdapGroup group, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        if (!await ConfigIsTenantsAsync(db, tenantId, group.ConfigId, ct))
+        {
+            throw new InvalidOperationException("Directory not found, or it is not this tenant's.");
+        }
+
         group.Id = group.Id == Guid.Empty ? Guid.NewGuid() : group.Id;
         group.Cn = group.Cn.Trim();
         db.OpenLdapGroups.Add(group);
@@ -617,17 +672,54 @@ public class OpenLdapService(
         return group;
     }
 
-    public async Task DeleteGroupAsync(Guid groupId, CancellationToken ct = default)
+    public async Task DeleteGroupAsync(Guid tenantId, Guid groupId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
-        await db.OpenLdapGroups.Where(g => g.Id == groupId).ExecuteDeleteAsync(ct);
+        await db.OpenLdapGroups
+            .Where(g => g.Id == groupId && g.Config.TenantId == tenantId)
+            .ExecuteDeleteAsync(ct);
     }
 
-    public async Task SetGroupMembersAsync(Guid groupId, IEnumerable<Guid> userIds, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose directory. <b>Group membership in a directory is authorization</b> — what the
+    /// group grants, whoever is in it gets — so setting the members of a group by id alone
+    /// was granting ourselves whatever somebody else's group grants.
+    /// </param>
+    /// <param name="userIds">
+    /// Checked against the group's own directory, not merely against the tenant: a user from
+    /// another directory has no DN under this one, and <see cref="BuildSeedLdif"/> drops a
+    /// member it cannot resolve — so the row would persist as membership the generated LDIF
+    /// silently omits.
+    /// </param>
+    public async Task SetGroupMembersAsync(
+        Guid tenantId, Guid groupId, IEnumerable<Guid> userIds, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        Guid configId = await db.OpenLdapGroups
+            .Where(g => g.Id == groupId && g.Config.TenantId == tenantId)
+            .Select(g => g.ConfigId)
+            .FirstOrDefaultAsync(ct);
+
+        if (configId == Guid.Empty)
+        {
+            throw new InvalidOperationException("Group not found, or it is not this tenant's.");
+        }
+
+        List<Guid> wanted = userIds.Distinct().ToList();
+        List<Guid> allowed = await db.OpenLdapUsers
+            .Where(u => wanted.Contains(u.Id) && u.ConfigId == configId)
+            .Select(u => u.Id)
+            .ToListAsync(ct);
+
+        if (allowed.Count != wanted.Count)
+        {
+            throw new InvalidOperationException(
+                "A member does not belong to this directory.");
+        }
+
         await db.OpenLdapGroupMembers.Where(m => m.GroupId == groupId).ExecuteDeleteAsync(ct);
-        foreach (Guid uid in userIds.Distinct())
+        foreach (Guid uid in allowed)
         {
             db.OpenLdapGroupMembers.Add(new OpenLdapGroupMember { Id = Guid.NewGuid(), GroupId = groupId, UserId = uid });
         }
