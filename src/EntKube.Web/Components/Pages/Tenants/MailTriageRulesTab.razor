@@ -301,7 +301,7 @@
 
         try
         {
-            await Rules.SaveAsync(editing);
+            await Rules.SaveAsync(TenantId, editing);
             editing = null;
             await LoadAsync();
         }
@@ -314,7 +314,7 @@
     private async Task ToggleAsync(MailTriageRule rule)
     {
         rule.IsEnabled = !rule.IsEnabled;
-        await Rules.SaveAsync(rule);
+        await Rules.SaveAsync(TenantId, rule);
         await LoadAsync();
     }
 
@@ -322,7 +322,7 @@
     {
         if (pendingDeleteId is Guid id)
         {
-            await Rules.DeleteAsync(id);
+            await Rules.DeleteAsync(TenantId, id);
             pendingDeleteId = null;
             await LoadAsync();
         }
