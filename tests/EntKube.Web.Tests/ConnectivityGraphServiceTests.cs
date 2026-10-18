@@ -241,7 +241,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         db.Apps.Add(new App { Id = peerAppId, CustomerId = customerId, Name = "worker" });
         db.SaveChanges();
 
-        await sut.AddRuleAsync(new ConnectivityRule
+        await sut.AddRuleAsync(tenantId, new ConnectivityRule
         {
             AppId = appId,
             EnvironmentId = envId,
@@ -252,7 +252,7 @@ public class ConnectivityGraphServiceTests : IDisposable
             Protocol = L4Protocol.Tcp
         });
 
-        List<ConnectivityRule> rules = await sut.GetRulesAsync(appId, envId);
+        List<ConnectivityRule> rules = await sut.GetRulesAsync(tenantId, appId, envId);
 
         rules.Should().ContainSingle();
         rules[0].Source.Should().Be(ConnectivitySource.Declared);
@@ -304,7 +304,7 @@ public class ConnectivityGraphServiceTests : IDisposable
     public async Task GenerateNetworkPolicies_ExternalDependency_ProducesUnenforceableWarning()
     {
         SeedDeployment();
-        await sut.AddExternalDependencyAsync(new ExternalDependency
+        await sut.AddExternalDependencyAsync(tenantId, new ExternalDependency
         {
             AppId = appId,
             EnvironmentId = envId,
@@ -332,7 +332,7 @@ public class ConnectivityGraphServiceTests : IDisposable
             Status = ComponentStatus.Installed
         });
         db.SaveChanges();
-        await sut.AddExternalDependencyAsync(new ExternalDependency
+        await sut.AddExternalDependencyAsync(tenantId, new ExternalDependency
         {
             AppId = appId,
             EnvironmentId = envId,
@@ -419,7 +419,7 @@ public class ConnectivityGraphServiceTests : IDisposable
     public async Task GenerateNetworkPolicies_DeclaredCidrEgress_ProducesIpBlock()
     {
         SeedDeployment();
-        await sut.AddRuleAsync(new ConnectivityRule
+        await sut.AddRuleAsync(tenantId, new ConnectivityRule
         {
             AppId = appId,
             EnvironmentId = envId,
@@ -440,7 +440,7 @@ public class ConnectivityGraphServiceTests : IDisposable
     [Fact]
     public async Task AddRule_AppPeerWithoutPeerApp_Throws()
     {
-        Func<Task> act = () => sut.AddRuleAsync(new ConnectivityRule
+        Func<Task> act = () => sut.AddRuleAsync(tenantId, new ConnectivityRule
         {
             AppId = appId,
             EnvironmentId = envId,
@@ -457,7 +457,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         Guid peerAppId = Guid.NewGuid();
         db.Apps.Add(new App { Id = peerAppId, CustomerId = customerId, Name = "worker" });
         db.SaveChanges();
-        await sut.AddRuleAsync(new ConnectivityRule
+        await sut.AddRuleAsync(tenantId, new ConnectivityRule
         {
             AppId = appId,
             EnvironmentId = envId,
@@ -489,7 +489,7 @@ public class ConnectivityGraphServiceTests : IDisposable
     [InlineData(-1)]
     public async Task AddRule_OutOfRangePort_Throws(int port)
     {
-        Func<Task> act = () => sut.AddRuleAsync(new ConnectivityRule
+        Func<Task> act = () => sut.AddRuleAsync(tenantId, new ConnectivityRule
         {
             AppId = appId,
             EnvironmentId = envId,
@@ -505,7 +505,7 @@ public class ConnectivityGraphServiceTests : IDisposable
     public async Task AddRule_InvalidNamespaceOrSelector_Throws()
     {
         // A namespace value that would break/inject YAML.
-        Func<Task> badNs = () => sut.AddRuleAsync(new ConnectivityRule
+        Func<Task> badNs = () => sut.AddRuleAsync(tenantId, new ConnectivityRule
         {
             AppId = appId,
             EnvironmentId = envId,
@@ -515,7 +515,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         await badNs.Should().ThrowAsync<InvalidOperationException>();
 
         // A selector value containing a newline (injection attempt).
-        Func<Task> badSel = () => sut.AddRuleAsync(new ConnectivityRule
+        Func<Task> badSel = () => sut.AddRuleAsync(tenantId, new ConnectivityRule
         {
             AppId = appId,
             EnvironmentId = envId,
@@ -528,7 +528,7 @@ public class ConnectivityGraphServiceTests : IDisposable
     [Fact]
     public async Task AddExternalDependency_InvalidHost_Throws()
     {
-        Func<Task> act = () => sut.AddExternalDependencyAsync(new ExternalDependency
+        Func<Task> act = () => sut.AddExternalDependencyAsync(tenantId, new ExternalDependency
         {
             AppId = appId,
             EnvironmentId = envId,
@@ -666,7 +666,7 @@ public class ConnectivityGraphServiceTests : IDisposable
         p.FromCluster.Should().BeTrue();
         graph.LiveLookupFailed.Should().BeFalse();
 
-        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(graph, appId, envId);
+        List<ConnectivityFinding> findings = await sut.AnalyzeAsync(tenantId, graph, appId, envId);
         findings.Should().NotContain(f => f.Category == "Broken dependency");
     }
 
@@ -756,6 +756,323 @@ public class ConnectivityGraphServiceTests : IDisposable
         // The credential the service never saw is the one the cluster is reached with.
         k8s.Verify(f => f.ApplyManifestAsync(It.IsAny<string>(), TestKubeconfig.Valid,
             It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+
+    // ---- Somebody else's application ---------------------------------------------------
+
+    /// <summary>
+    /// A second tenant with their own customer, application, environment and one declared
+    /// rule and external dependency. The returned ids are all a caller would need to have
+    /// held to reach them.
+    /// </summary>
+    private (Guid Tenant, Guid App, Guid Env, Guid Rule, Guid Dependency) Stranger()
+    {
+        Guid t = Guid.NewGuid();
+        Guid customer = Guid.NewGuid();
+        Guid app = Guid.NewGuid();
+        Guid sibling = Guid.NewGuid();
+        Guid env = Guid.NewGuid();
+        Guid cluster = Guid.NewGuid();
+        Guid rule = Guid.NewGuid();
+        Guid dep = Guid.NewGuid();
+
+        db.Tenants.Add(new Tenant { Id = t, Name = "Annan AB", Slug = $"annan-{t:N}" });
+        db.Environments.Add(new Data.Environment { Id = env, TenantId = t, Name = "production" });
+        db.Customers.Add(new Customer { Id = customer, TenantId = t, Name = "Annan" });
+        db.Apps.Add(new App { Id = app, CustomerId = customer, Name = "journal-api" });
+
+        // A SIBLING app under the same customer, or GetCandidatePeerAppsAsync returns nothing
+        // even unscoped (it excludes the app itself) and the assertion passes against the bug.
+        db.Apps.Add(new App { Id = sibling, CustomerId = customer, Name = "journal-worker" });
+
+        // A cluster and a DEPLOYMENT, or BuildGraph has no namespaces and
+        // GenerateNetworkPoliciesAsync bails at `namespaces.Count == 0` — so all three of those
+        // assertions would be empty for want of data rather than for want of permission.
+        db.KubernetesClusters.Add(new KubernetesCluster
+        {
+            Id = cluster,
+            TenantId = t,
+            EnvironmentId = env,
+            Name = "annan-cluster",
+            ApiServerUrl = "https://annan.example.com",
+        });
+        db.AppDeployments.Add(new AppDeployment
+        {
+            Id = Guid.NewGuid(),
+            AppId = app,
+            Name = "journal-deploy",
+            Type = DeploymentType.Yaml,
+            EnvironmentId = env,
+            ClusterId = cluster,
+            Namespace = "journal",
+        });
+        db.ConnectivityRules.Add(new ConnectivityRule
+        {
+            Id = rule,
+            AppId = app,
+            EnvironmentId = env,
+            Direction = ConnectivityDirection.Ingress,
+            PeerType = ConnectivityPeerType.Cidr,
+            PeerCidr = "10.90.0.0/16",
+            Port = 8443,
+            Protocol = L4Protocol.Tcp,
+            Source = ConnectivitySource.Declared,
+        });
+        db.ExternalDependencies.Add(new ExternalDependency
+        {
+            Id = dep,
+            AppId = app,
+            EnvironmentId = env,
+            Host = "journal.inera.se",
+            Port = 443,
+            Tls = true,
+            Source = ConnectivitySource.Declared,
+        });
+        db.SaveChanges();
+
+        return (t, app, env, rule, dep);
+    }
+
+    /// <summary>
+    /// Nothing about another tenant's application in another tenant's environment is
+    /// readable by naming the pair: not the declared rules, not the external hosts it
+    /// reaches, not its sibling applications' names, and not a generated policy set.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_connectivity_is_not_readable()
+    {
+        (Guid _, Guid theirApp, Guid theirEnv, Guid _, Guid _) = Stranger();
+
+        // A positive first, so that every BeEmpty below is about the tenant and not about an
+        // empty database.
+        await sut.AddRuleAsync(tenantId, new ConnectivityRule
+        {
+            AppId = appId,
+            EnvironmentId = envId,
+            Direction = ConnectivityDirection.Egress,
+            PeerType = ConnectivityPeerType.Cidr,
+            PeerCidr = "10.1.0.0/16",
+            Port = 5432,
+            Protocol = L4Protocol.Tcp,
+        });
+        (await sut.GetRulesAsync(tenantId, appId, envId)).Should().ContainSingle();
+
+        (await sut.GetRulesAsync(tenantId, theirApp, theirEnv)).Should().BeEmpty();
+        (await sut.GetExternalDependenciesAsync(tenantId, theirApp, theirEnv)).Should().BeEmpty();
+        // Their customer has a sibling app, so an unscoped picker WOULD list "journal-worker".
+        (await sut.GetCandidatePeerAppsAsync(tenantId, theirApp)).Should().BeEmpty();
+
+        // They have a deployment in namespace "journal" on their own cluster, so an unscoped
+        // graph WOULD carry a namespace and the generator WOULD get past namespaces.Count == 0.
+        ConnectivityGraph graph = await sut.BuildGraphAsync(tenantId, theirApp, theirEnv);
+        //
+        // Namespaces is the assertion that carries this: without the guard BuildGraph reads
+        // their AppDeployments and the list becomes ["journal"].
+        graph.Namespaces.Should().BeEmpty();
+        //
+        // LiveLookupFailed, by contrast, is a SHAPE assertion and not proof the guard fired —
+        // without the guard the cluster seam would refuse the live lookup on its own and set
+        // this too. It is here because an empty graph that does not say so reads as a fact
+        // about their application rather than as us not being allowed to look.
+        graph.LiveLookupFailed.Should().BeTrue();
+
+        (await sut.AnalyzeAsync(tenantId, theirApp, theirEnv)).Should().BeEmpty();
+        (await sut.AnalyzeAsync(tenantId, graph, theirApp, theirEnv)).Should().BeEmpty();
+        (await sut.GenerateNetworkPoliciesAsync(tenantId, theirApp, theirEnv)).Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// The scope is a <i>pair</i>, and each half has to be checked: a rule names an
+    /// application and an environment, and a generated NetworkPolicy lands in the namespace
+    /// the environment decides. One crossing per half, so neither can be deleted and leave
+    /// the other covering for it.
+    /// </summary>
+    [Fact]
+    public async Task The_scope_is_an_app_and_an_environment_and_both_are_checked()
+    {
+        (Guid _, Guid theirApp, Guid theirEnv, Guid _, Guid _) = Stranger();
+
+        // A rule in EACH crossing, so each half of the guard has something it alone can refuse.
+        // Without these the lists come back empty for want of data and both halves could be
+        // deleted with the test still green.
+        db.ConnectivityRules.Add(new ConnectivityRule
+        {
+            Id = Guid.NewGuid(), AppId = appId, EnvironmentId = theirEnv,
+            Direction = ConnectivityDirection.Ingress, PeerType = ConnectivityPeerType.Cidr,
+            PeerCidr = "10.70.0.0/16", Port = 1234, Protocol = L4Protocol.Tcp,
+        });
+        db.ConnectivityRules.Add(new ConnectivityRule
+        {
+            Id = Guid.NewGuid(), AppId = theirApp, EnvironmentId = envId,
+            Direction = ConnectivityDirection.Ingress, PeerType = ConnectivityPeerType.Cidr,
+            PeerCidr = "10.80.0.0/16", Port = 5678, Protocol = L4Protocol.Tcp,
+        });
+        db.SaveChanges();
+
+        // Our application, their environment — only the environment half catches this.
+        (await sut.GetRulesAsync(tenantId, appId, theirEnv)).Should().BeEmpty();
+
+        // Their application, our environment — only the application half catches this.
+        (await sut.GetRulesAsync(tenantId, theirApp, envId)).Should().BeEmpty();
+
+        // And our own pair still works, or the two above prove nothing.
+        (await sut.GetRulesAsync(tenantId, appId, envId)).Should().BeEmpty();
+        db.ConnectivityRules.Add(new ConnectivityRule
+        {
+            Id = Guid.NewGuid(), AppId = appId, EnvironmentId = envId,
+            Direction = ConnectivityDirection.Ingress, PeerType = ConnectivityPeerType.Cidr,
+            PeerCidr = "10.1.0.0/16", Port = 9999, Protocol = L4Protocol.Tcp,
+        });
+        db.SaveChanges();
+        (await sut.GetRulesAsync(tenantId, appId, envId)).Should().ContainSingle();
+    }
+
+    /// <summary>
+    /// <b>A rule is an allow.</b> It is generated into a NetworkPolicy and, for an app peer,
+    /// an AuthorizationPolicy — so writing one against an application by Id alone was opening
+    /// a hole in whichever application the entity named, and deleting one was closing a hole
+    /// somebody else was relying on.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_rule_cannot_be_added_or_deleted()
+    {
+        (Guid _, Guid theirApp, Guid theirEnv, Guid theirRule, Guid _) = Stranger();
+
+        Func<Task> add = () => sut.AddRuleAsync(tenantId, new ConnectivityRule
+        {
+            AppId = theirApp,
+            EnvironmentId = theirEnv,
+            Direction = ConnectivityDirection.Ingress,
+            PeerType = ConnectivityPeerType.Cidr,
+            PeerCidr = "0.0.0.0/0",
+            Port = 8443,
+            Protocol = L4Protocol.Tcp,
+        });
+
+        await add.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("App or environment not found, or it is not this tenant's.");
+
+        await sut.DeleteRuleAsync(tenantId, theirRule);
+
+        using ApplicationDbContext check = dbFactory.CreateDbContext();
+        (await check.ConnectivityRules.AnyAsync(r => r.Id == theirRule)).Should().BeTrue();
+        (await check.ConnectivityRules.CountAsync(r => r.AppId == theirApp)).Should().Be(1);
+    }
+
+    /// <summary>
+    /// <b>The peer, not only the subject.</b> An app-to-app rule names a second application
+    /// and generates an AuthorizationPolicy principal for it, so a peer belonging to another
+    /// tenant is an allow for their workload into ours. The picker only ever offers
+    /// applications of the same customer, which is not a check — it is a convenience.
+    /// </summary>
+    [Fact]
+    public async Task A_peer_app_from_another_tenant_is_refused()
+    {
+        (Guid _, Guid theirApp, Guid _, Guid _, Guid _) = Stranger();
+
+        Func<Task> act = () => sut.AddRuleAsync(tenantId, new ConnectivityRule
+        {
+            AppId = appId,
+            EnvironmentId = envId,
+            Direction = ConnectivityDirection.Ingress,
+            PeerType = ConnectivityPeerType.App,
+            PeerAppId = theirApp,
+            Port = 8080,
+            Protocol = L4Protocol.Tcp,
+        });
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Peer app not found, or it is not this tenant's.");
+
+        (await sut.GetRulesAsync(tenantId, appId, envId)).Should().BeEmpty();
+    }
+
+    /// <summary>
+    /// <b>An external dependency is an egress allow to a host of the caller's choosing</b> —
+    /// an Istio ServiceEntry and a NetworkPolicy egress rule. Writing one against somebody
+    /// else's application granted that application a route out to a host they never named.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_external_dependency_cannot_be_added_or_deleted()
+    {
+        (Guid _, Guid theirApp, Guid theirEnv, Guid _, Guid theirDep) = Stranger();
+
+        Func<Task> add = () => sut.AddExternalDependencyAsync(tenantId, new ExternalDependency
+        {
+            AppId = theirApp,
+            EnvironmentId = theirEnv,
+            Host = "collect.example.net",
+            Port = 443,
+            Tls = true,
+        });
+
+        await add.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("App or environment not found, or it is not this tenant's.");
+
+        await sut.DeleteExternalDependencyAsync(tenantId, theirDep);
+
+        using ApplicationDbContext check = dbFactory.CreateDbContext();
+        ExternalDependency theirs = await check.ExternalDependencies
+            .AsNoTracking().FirstAsync(d => d.Id == theirDep);
+
+        theirs.Host.Should().Be("journal.inera.se");
+    }
+
+
+    /// <summary>
+    /// <b>Analyzing an already-built graph still has to check the pair it is handed.</b>
+    ///
+    /// <para>This overload exists so the topology view can analyse the graph it already has
+    /// instead of rebuilding it — so it takes the graph as data and the application and
+    /// environment as ids, and then reads <c>AppNetworkPolicies</c> and
+    /// <c>ConnectivityRules</c> for that pair. Handing it our graph and somebody else's ids
+    /// made it analyse their policy rows.</para>
+    ///
+    /// <para>⚠️ My first version of this passed the <em>refused</em> (empty) graph, and every
+    /// finding needs graph content combined with their rows — so it came back empty whether
+    /// the guard was there or not, and the clause sweep reported the guard as uncovered. The
+    /// graph has to carry an edge for the crossing to be visible at all.</para>
+    /// </summary>
+    [Fact]
+    public async Task Analyzing_an_already_built_graph_still_checks_the_pair_it_is_given()
+    {
+        (Guid _, Guid theirApp, Guid theirEnv, Guid _, Guid _) = Stranger();
+
+        // Our graph, carrying an internal egress edge (a managed database binding).
+        AppDeployment dep = SeedDeployment();
+        db.DatabaseBindings.Add(new DatabaseBinding
+        {
+            Id = Guid.NewGuid(),
+            AppDeploymentId = dep.Id,
+            KubernetesSecretName = "billing-db",
+        });
+
+        // A deny-all policy on each pair. Against an egress edge that is a policy conflict,
+        // which is the finding that shows whose rows were read.
+        db.AppNetworkPolicies.Add(new AppNetworkPolicy
+        {
+            Id = Guid.NewGuid(), AppId = appId, EnvironmentId = envId,
+            Name = "deny-all", PolicyType = AppNetworkPolicyType.DenyAll,
+        });
+        db.AppNetworkPolicies.Add(new AppNetworkPolicy
+        {
+            Id = Guid.NewGuid(), AppId = theirApp, EnvironmentId = theirEnv,
+            Name = "deny-all", PolicyType = AppNetworkPolicyType.DenyAll,
+        });
+        db.SaveChanges();
+
+        ConnectivityGraph ours = await sut.BuildGraphAsync(tenantId, appId, envId);
+        ours.InternalEgress.Should().NotBeEmpty("the crossing is invisible without an edge");
+
+        // Our own pair reports the conflict, so the refusal below is about the tenant and not
+        // about a finding that cannot fire.
+        (await sut.AnalyzeAsync(tenantId, ours, appId, envId))
+            .Should().Contain(f => f.Category == "Policy conflict");
+
+        // Their pair, our graph: nothing, because their policy rows are not ours to read.
+        (await sut.AnalyzeAsync(tenantId, ours, theirApp, theirEnv))
+            .Should().NotContain(f => f.Category == "Policy conflict");
     }
 
     public void Dispose()

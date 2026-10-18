@@ -575,10 +575,10 @@ else
         try
         {
             graph = await ConnectivityService.BuildGraphAsync(TenantId, AppId, EnvironmentId);
-            findings = await ConnectivityService.AnalyzeAsync(graph, AppId, EnvironmentId);
-            rules = await ConnectivityService.GetRulesAsync(AppId, EnvironmentId);
-            deps = await ConnectivityService.GetExternalDependenciesAsync(AppId, EnvironmentId);
-            peerApps = await ConnectivityService.GetCandidatePeerAppsAsync(AppId);
+            findings = await ConnectivityService.AnalyzeAsync(TenantId, graph, AppId, EnvironmentId);
+            rules = await ConnectivityService.GetRulesAsync(TenantId, AppId, EnvironmentId);
+            deps = await ConnectivityService.GetExternalDependenciesAsync(TenantId, AppId, EnvironmentId);
+            peerApps = await ConnectivityService.GetCandidatePeerAppsAsync(TenantId, AppId);
             policyPlans = null;
             applyResults = null;
             loadedFor = (AppId, EnvironmentId);
@@ -598,7 +598,7 @@ else
             newRule.EnvironmentId = EnvironmentId;
             newRule.Port = newRulePort;
             if (newRule.PeerAppId == Guid.Empty) { newRule.PeerAppId = null; }
-            await ConnectivityService.AddRuleAsync(newRule);
+            await ConnectivityService.AddRuleAsync(TenantId, newRule);
             newRule = NewRule();
             newRulePort = null;
             Toast.Success("Connectivity rule added.");
@@ -616,7 +616,7 @@ else
 
     private async Task DeleteRule(Guid id)
     {
-        await ConnectivityService.DeleteRuleAsync(id);
+        await ConnectivityService.DeleteRuleAsync(TenantId, id);
         Toast.Info("Rule removed.");
         await Reload();
     }
@@ -628,7 +628,7 @@ else
         {
             newDep.AppId = AppId;
             newDep.EnvironmentId = EnvironmentId;
-            await ConnectivityService.AddExternalDependencyAsync(newDep);
+            await ConnectivityService.AddExternalDependencyAsync(TenantId, newDep);
             newDep = NewDep();
             Toast.Success("Internet egress added.");
             await Reload();
@@ -645,7 +645,7 @@ else
 
     private async Task DeleteDep(Guid id)
     {
-        await ConnectivityService.DeleteExternalDependencyAsync(id);
+        await ConnectivityService.DeleteExternalDependencyAsync(TenantId, id);
         Toast.Info("Internet egress removed.");
         await Reload();
     }
