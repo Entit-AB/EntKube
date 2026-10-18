@@ -188,7 +188,7 @@
         loading = true;
         try
         {
-            credentials = await OutboundMtls.GetForAppAsync(AppId, EnvironmentId);
+            credentials = await OutboundMtls.GetForAppAsync(TenantId, AppId, EnvironmentId);
             certificates = await Vault.GetTenantCertificatesAsync(TenantId);
         }
         catch (Exception ex) { Toasts.Error(ex.Message); }
@@ -246,7 +246,7 @@
         busy = true;
         try
         {
-            await OutboundMtls.DeleteAsync(id);
+            await OutboundMtls.DeleteAsync(TenantId, id);
             Toasts.Success("Credential removed. The Secret stays on the cluster until you remove it there.");
             await LoadAsync();
         }
