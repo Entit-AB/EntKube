@@ -98,7 +98,7 @@ public class KnowledgeServiceTests : IDisposable
             tenantId, appId, section.Id, KnowledgeSectionKind.Runbook, "Runbook", "Second.",
             "nils", "Corrected the restore order.");
 
-        KnowledgeSection? loaded = await knowledge.GetSectionAsync(section.Id);
+        KnowledgeSection? loaded = await knowledge.GetSectionAsync(tenantId, section.Id);
 
         loaded!.Body.Should().Be("Second.");
         loaded.Revisions.Should().ContainSingle();
@@ -115,7 +115,7 @@ public class KnowledgeServiceTests : IDisposable
             tenantId, appId, section.Id, KnowledgeSectionKind.Runbook, "Runbook", "Same.",
             "nils", null);
 
-        KnowledgeSection? loaded = await knowledge.GetSectionAsync(section.Id);
+        KnowledgeSection? loaded = await knowledge.GetSectionAsync(tenantId, section.Id);
 
         loaded!.Revisions.Should().BeEmpty();
     }
@@ -129,9 +129,9 @@ public class KnowledgeServiceTests : IDisposable
     {
         KnowledgeSection section = await Write(KnowledgeSectionKind.Architecture, "Architecture");
 
-        await knowledge.MarkReviewedAsync(section.Id, "anna", Now);
+        await knowledge.MarkReviewedAsync(tenantId, section.Id, "anna", Now);
 
-        KnowledgeSection? loaded = await knowledge.GetSectionAsync(section.Id);
+        KnowledgeSection? loaded = await knowledge.GetSectionAsync(tenantId, section.Id);
 
         loaded!.ReviewedAt.Should().Be(Now);
         loaded.ReviewedBy.Should().Be("anna");
@@ -173,7 +173,7 @@ public class KnowledgeServiceTests : IDisposable
     public async Task A_section_nobody_has_reviewed_for_a_quarter_is_stale()
     {
         KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Runbook");
-        await knowledge.MarkReviewedAsync(section.Id, "nils", Now.AddDays(-120));
+        await knowledge.MarkReviewedAsync(tenantId, section.Id, "nils", Now.AddDays(-120));
 
         List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
@@ -184,7 +184,7 @@ public class KnowledgeServiceTests : IDisposable
     public async Task A_recently_reviewed_section_is_not_stale()
     {
         KnowledgeSection section = await Write(KnowledgeSectionKind.Runbook, "Runbook");
-        await knowledge.MarkReviewedAsync(section.Id, "nils", Now.AddDays(-10));
+        await knowledge.MarkReviewedAsync(tenantId, section.Id, "nils", Now.AddDays(-10));
 
         List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, appId, Now);
 
@@ -200,7 +200,7 @@ public class KnowledgeServiceTests : IDisposable
     {
         GiveSupportWindow(SupportWindow.S4);
 
-        await knowledge.SaveDependencyAsync(new AppServiceDependency
+        await knowledge.SaveDependencyAsync(tenantId, new AppServiceDependency
         {
             TenantId = tenantId,
             AppId = appId,
@@ -221,7 +221,7 @@ public class KnowledgeServiceTests : IDisposable
     {
         GiveSupportWindow(SupportWindow.S1);
 
-        await knowledge.SaveDependencyAsync(new AppServiceDependency
+        await knowledge.SaveDependencyAsync(tenantId, new AppServiceDependency
         {
             TenantId = tenantId,
             AppId = appId,
@@ -241,7 +241,7 @@ public class KnowledgeServiceTests : IDisposable
     {
         GiveSupportWindow(SupportWindow.S4);
 
-        await knowledge.SaveDependencyAsync(new AppServiceDependency
+        await knowledge.SaveDependencyAsync(tenantId, new AppServiceDependency
         {
             TenantId = tenantId,
             AppId = appId,
@@ -310,7 +310,7 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task An_unnotified_end_of_life_component_is_reported_as_a_gap()
     {
-        await knowledge.SaveEndOfLifeAsync(new EndOfLifeNotice
+        await knowledge.SaveEndOfLifeAsync(tenantId, new EndOfLifeNotice
         {
             TenantId = tenantId,
             AppId = appId,
@@ -326,7 +326,7 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task An_expired_notice_period_is_reported_as_critical()
     {
-        await knowledge.SaveEndOfLifeAsync(new EndOfLifeNotice
+        await knowledge.SaveEndOfLifeAsync(tenantId, new EndOfLifeNotice
         {
             TenantId = tenantId,
             AppId = appId,
@@ -343,7 +343,7 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task An_upgraded_component_is_not_reported()
     {
-        await knowledge.SaveEndOfLifeAsync(new EndOfLifeNotice
+        await knowledge.SaveEndOfLifeAsync(tenantId, new EndOfLifeNotice
         {
             TenantId = tenantId,
             AppId = appId,
@@ -370,7 +370,7 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task Recording_the_classification_clears_it()
     {
-        await knowledge.SaveProfileAsync(new AppKnowledgeProfile
+        await knowledge.SaveProfileAsync(tenantId, new AppKnowledgeProfile
         {
             TenantId = tenantId,
             AppId = appId,
@@ -387,18 +387,18 @@ public class KnowledgeServiceTests : IDisposable
     [Fact]
     public async Task Saving_a_profile_twice_updates_rather_than_duplicates()
     {
-        await knowledge.SaveProfileAsync(new AppKnowledgeProfile
+        await knowledge.SaveProfileAsync(tenantId, new AppKnowledgeProfile
         {
             TenantId = tenantId, AppId = appId, DataClassification = DataClassification.Personal,
         });
 
-        await knowledge.SaveProfileAsync(new AppKnowledgeProfile
+        await knowledge.SaveProfileAsync(tenantId, new AppKnowledgeProfile
         {
             TenantId = tenantId, AppId = appId,
             DataClassification = DataClassification.SensitivePersonal, HandlesPatientData = true,
         });
 
-        AppKnowledgeProfile? profile = await knowledge.GetProfileAsync(appId);
+        AppKnowledgeProfile? profile = await knowledge.GetProfileAsync(tenantId, appId);
 
         profile!.DataClassification.Should().Be(DataClassification.SensitivePersonal);
         profile.HandlesPatientData.Should().BeTrue();
@@ -429,8 +429,8 @@ public class KnowledgeServiceTests : IDisposable
     {
         KnowledgeSection runbook = await Write(KnowledgeSectionKind.Runbook, "Runbook");
         KnowledgeSection architecture = await Write(KnowledgeSectionKind.Architecture, "Architecture");
-        await knowledge.MarkReviewedAsync(runbook.Id, "nils", Now.AddDays(-200));
-        await knowledge.MarkReviewedAsync(architecture.Id, "nils", Now.AddDays(-200));
+        await knowledge.MarkReviewedAsync(tenantId, runbook.Id, "nils", Now.AddDays(-200));
+        await knowledge.MarkReviewedAsync(tenantId, architecture.Id, "nils", Now.AddDays(-200));
 
         KnowledgeHealth health = await knowledge.GetHealthAsync(tenantId, appId, Now);
 
@@ -443,7 +443,7 @@ public class KnowledgeServiceTests : IDisposable
     {
         await Write(KnowledgeSectionKind.Runbook, "Runbook");
         await Write(KnowledgeSectionKind.Architecture, "Architecture");
-        await knowledge.SaveProfileAsync(new AppKnowledgeProfile
+        await knowledge.SaveProfileAsync(tenantId, new AppKnowledgeProfile
         {
             TenantId = tenantId, AppId = appId,
             DataClassification = DataClassification.SensitivePersonal, HandlesPatientData = true,
@@ -470,7 +470,7 @@ public class KnowledgeServiceTests : IDisposable
     public async Task Gaps_are_ordered_worst_first()
     {
         GiveSupportWindow(SupportWindow.S4);
-        await knowledge.SaveDependencyAsync(new AppServiceDependency
+        await knowledge.SaveDependencyAsync(tenantId, new AppServiceDependency
         {
             TenantId = tenantId, AppId = appId, Name = "IdP",
             Kind = DependencyKind.Infrastructure, OfficeHoursOnly = true,
@@ -481,5 +481,342 @@ public class KnowledgeServiceTests : IDisposable
         gaps.Should().HaveCountGreaterThan(1);
         gaps.Should().BeInAscendingOrder(g => g.Severity);
         gaps[0].Severity.Should().Be(KnowledgeGapSeverity.Critical);
+    }
+    // ---- Somebody else's application ---------------------------------------------------
+
+    /// <summary>
+    /// A second tenant with their own application, and one of everything written about it.
+    /// Returned ids are the only thing a caller would need to have held to reach them.
+    /// </summary>
+    private (Guid Tenant, Guid App, Guid Section, Guid Dependency, Guid Notice) Stranger()
+    {
+        Guid strangerTenant = Guid.NewGuid();
+        Guid strangerCustomer = Guid.NewGuid();
+        Guid strangerApp = Guid.NewGuid();
+
+        db.Tenants.Add(new Tenant
+        {
+            Id = strangerTenant, Name = "Annan AB", Slug = $"annan-{strangerTenant:N}",
+        });
+        db.Customers.Add(new Customer
+        {
+            Id = strangerCustomer, TenantId = strangerTenant, Name = "Annan AB",
+        });
+        db.Apps.Add(new App { Id = strangerApp, CustomerId = strangerCustomer, Name = "Journal" });
+
+        KnowledgeSection section = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = strangerTenant,
+            AppId = strangerApp,
+            Kind = KnowledgeSectionKind.Runbook,
+            Title = "Runbook",
+            Body = "Restore from the 02:00 snapshot, then start the API.",
+        };
+
+        AppServiceDependency dependency = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = strangerTenant,
+            AppId = strangerApp,
+            Name = "Region Skåne IdP",
+            Kind = DependencyKind.Infrastructure,
+        };
+
+        EndOfLifeNotice notice = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = strangerTenant,
+            AppId = strangerApp,
+            Component = "PostgreSQL 11",
+            NoticeGivenAt = Now.AddMonths(-6),
+        };
+
+        db.KnowledgeSections.Add(section);
+        db.AppServiceDependencies.Add(dependency);
+        db.EndOfLifeNotices.Add(notice);
+        db.AppKnowledgeProfiles.Add(new AppKnowledgeProfile
+        {
+            Id = Guid.NewGuid(),
+            TenantId = strangerTenant,
+            AppId = strangerApp,
+            DataClassification = DataClassification.SensitivePersonal,
+            HandlesPatientData = true,
+        });
+        db.SaveChanges();
+
+        return (strangerTenant, strangerApp, section.Id, dependency.Id, notice.Id);
+    }
+
+    /// <summary>
+    /// Nothing another tenant has written about their application is readable by naming its
+    /// id — not the sections, not the dependencies, not the end-of-life notices, not the
+    /// classification, and not the gap list, whose text quotes section titles and component
+    /// names back at whoever asks.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_knowledge_is_not_readable()
+    {
+        (Guid _, Guid strangerApp, Guid strangerSection, Guid _, Guid _) = Stranger();
+
+        // The owner can see it, so the assertions below are about the tenant and not about
+        // an empty database.
+        (await knowledge.GetSectionsAsync(tenantId, appId)).Should().BeEmpty();
+        await Write(KnowledgeSectionKind.Runbook, "Ours");
+        (await knowledge.GetSectionsAsync(tenantId, appId)).Should().ContainSingle();
+
+        (await knowledge.GetSectionsAsync(tenantId, strangerApp)).Should().BeEmpty();
+        (await knowledge.GetSectionAsync(tenantId, strangerSection)).Should().BeNull();
+        (await knowledge.GetDependenciesAsync(tenantId, strangerApp)).Should().BeEmpty();
+        (await knowledge.GetEndOfLifeAsync(tenantId, strangerApp)).Should().BeEmpty();
+        (await knowledge.GetProfileAsync(tenantId, strangerApp)).Should().BeNull();
+
+        // Asked about their application we answer as if nothing had been written about it,
+        // which is what we are entitled to know: their runbook does not satisfy the check,
+        // their classification does not either, and their out-of-support PostgreSQL is not
+        // quoted back at us.
+        List<KnowledgeGap> gaps = await knowledge.GetGapsAsync(tenantId, strangerApp, Now);
+
+        gaps.Should().Contain(g => g.Check == KnowledgeCheck.Runbook);
+        gaps.Should().Contain(g => g.Check == KnowledgeCheck.Classification);
+        gaps.Should().NotContain(g => g.Check == KnowledgeCheck.EndOfLife);
+        gaps.Should().AllSatisfy(gap =>
+        {
+            gap.Title.Should().NotContain("PostgreSQL 11");
+            gap.Title.Should().NotContain("Region Skåne IdP");
+        });
+    }
+
+    /// <summary>
+    /// <b>Saving a section by an id that is not ours does not reach their row.</b> The old
+    /// body would have gone into a revision and the runbook been replaced in place — under
+    /// their application, with their history showing the edit as theirs.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_section_cannot_be_rewritten()
+    {
+        (Guid _, Guid _, Guid strangerSection, Guid _, Guid _) = Stranger();
+
+        await knowledge.SaveSectionAsync(
+            tenantId, appId, strangerSection, KnowledgeSectionKind.Runbook, "Runbook",
+            "Delete the volume, then page nobody.", "nils", "Improved");
+
+        KnowledgeSection theirs = await db.KnowledgeSections.AsNoTracking()
+            .Include(s => s.Revisions)
+            .FirstAsync(s => s.Id == strangerSection);
+
+        theirs.Body.Should().StartWith("Restore from the 02:00 snapshot");
+        theirs.Revisions.Should().BeEmpty();
+        theirs.UpdatedBy.Should().BeNull();
+    }
+
+    [Fact]
+    public async Task Another_tenants_section_cannot_be_reviewed_or_deleted()
+    {
+        (Guid _, Guid _, Guid strangerSection, Guid _, Guid _) = Stranger();
+
+        await knowledge.MarkReviewedAsync(tenantId, strangerSection, "nils", Now);
+        await knowledge.DeleteSectionAsync(tenantId, strangerSection);
+
+        KnowledgeSection theirs = await db.KnowledgeSections.AsNoTracking()
+            .FirstOrDefaultAsync(s => s.Id == strangerSection)
+            ?? throw new InvalidOperationException("The section was deleted.");
+
+        theirs.ReviewedBy.Should().NotBe("nils");
+    }
+
+    /// <summary>
+    /// <b>A dependency and an end-of-life notice were updated whole, detached, by Id.</b> So
+    /// the Id alone said which row was rewritten and the entity said where it ended up — the
+    /// row left the stranger's list and arrived in ours, carrying its history.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_dependency_cannot_be_rewritten_or_taken()
+    {
+        (Guid _, Guid _, Guid _, Guid strangerDependency, Guid _) = Stranger();
+
+        Func<Task> take = () => knowledge.SaveDependencyAsync(tenantId, new AppServiceDependency
+        {
+            Id = strangerDependency,
+            TenantId = tenantId,
+            AppId = appId,
+            Name = "Ours now",
+            Kind = DependencyKind.Infrastructure,
+        });
+
+        await take.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Dependency not found, or it is not this tenant's.");
+
+        AppServiceDependency theirs = await db.AppServiceDependencies.AsNoTracking()
+            .FirstAsync(d => d.Id == strangerDependency);
+
+        theirs.Name.Should().Be("Region Skåne IdP");
+        theirs.AppId.Should().NotBe(appId);
+        theirs.TenantId.Should().NotBe(tenantId);
+
+        await knowledge.DeleteDependencyAsync(tenantId, strangerDependency);
+        (await db.AppServiceDependencies.AsNoTracking()
+            .AnyAsync(d => d.Id == strangerDependency)).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// §14.7's exemption runs from the date on this row, which is why being able to rewrite
+    /// one by Id was being able to rewrite when somebody else's exemption started.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_end_of_life_notice_cannot_be_rewritten()
+    {
+        (Guid _, Guid _, Guid _, Guid _, Guid strangerNotice) = Stranger();
+
+        Func<Task> rewrite = () => knowledge.SaveEndOfLifeAsync(tenantId, new EndOfLifeNotice
+        {
+            Id = strangerNotice,
+            TenantId = tenantId,
+            AppId = appId,
+            Component = "PostgreSQL 11",
+            NoticeGivenAt = null,
+            UpgradedAt = Now,
+        });
+
+        await rewrite.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Notice not found, or it is not this tenant's.");
+
+        EndOfLifeNotice theirs = await db.EndOfLifeNotices.AsNoTracking()
+            .FirstAsync(n => n.Id == strangerNotice);
+
+        theirs.NoticeGivenAt.Should().Be(Now.AddMonths(-6));
+        theirs.UpgradedAt.Should().BeNull();
+        theirs.AppId.Should().NotBe(appId);
+    }
+
+    /// <summary>
+    /// The classification is the one row here keyed only by its application — AppId is
+    /// unique — so naming somebody else's application was enough to overwrite theirs, and
+    /// §24 limits access to patient systems to the ones that say they are one.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_classification_cannot_be_overwritten()
+    {
+        (Guid _, Guid strangerApp, Guid _, Guid _, Guid _) = Stranger();
+
+        Func<Task> overwrite = () => knowledge.SaveProfileAsync(tenantId, new AppKnowledgeProfile
+        {
+            TenantId = tenantId,
+            AppId = strangerApp,
+            DataClassification = DataClassification.None,
+            HandlesPatientData = false,
+        });
+
+        await overwrite.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Application not found, or it is not this tenant's.");
+
+        AppKnowledgeProfile theirs = await db.AppKnowledgeProfiles.AsNoTracking()
+            .FirstAsync(p => p.AppId == strangerApp);
+
+        theirs.HandlesPatientData.Should().BeTrue();
+        theirs.DataClassification.Should().Be(DataClassification.SensitivePersonal);
+    }
+
+    /// <summary>
+    /// A created row has no row to compare a tenant against, so the application is what is
+    /// checked — otherwise a section, dependency or notice could be filed against somebody
+    /// else's application and the tenant stamped on it would be ours.
+    /// </summary>
+    [Fact]
+    public async Task Nothing_can_be_written_against_another_tenants_application()
+    {
+        (Guid _, Guid strangerApp, Guid _, Guid _, Guid _) = Stranger();
+
+        Func<Task> section = () => knowledge.SaveSectionAsync(
+            tenantId, strangerApp, null, KnowledgeSectionKind.Runbook, "Ours", "Text.",
+            "nils", null);
+
+        Func<Task> dependency = () => knowledge.SaveDependencyAsync(
+            tenantId, new AppServiceDependency
+            {
+                TenantId = tenantId, AppId = strangerApp, Name = "Ours",
+                Kind = DependencyKind.Infrastructure,
+            });
+
+        Func<Task> notice = () => knowledge.SaveEndOfLifeAsync(
+            tenantId, new EndOfLifeNotice
+            {
+                TenantId = tenantId, AppId = strangerApp, Component = "Ours",
+            });
+
+        await section.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Application not found, or it is not this tenant's.");
+        await dependency.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Application not found, or it is not this tenant's.");
+        await notice.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Application not found, or it is not this tenant's.");
+
+        (await knowledge.GetSectionsAsync(tenantId, strangerApp)).Should().BeEmpty();
+    }
+    /// <summary>
+    /// <b>The other direction: planting a row in somebody else's application.</b>
+    ///
+    /// <para>The row predicate answers "may I write this row", and once it says yes the
+    /// detached <c>Update</c> writes every column — TenantId and AppId among them. So an
+    /// authorized edit of our <i>own</i> row could still move it into another tenant's
+    /// application. That is the inverse of reaching across for theirs, and no test that only
+    /// tries to reach across can see it.</para>
+    ///
+    /// <para>For an end-of-life notice that is forging §14.7 evidence: a notice planted in
+    /// their application, dated six months ago with no upgrade ordered, makes
+    /// <see cref="KnowledgeService.ExemptionApplies"/> true — and §14.7 reads that as licence
+    /// to exempt the application from the SLA times and from liability for security faults in
+    /// that component. The row is the only thing that says the notice was given.</para>
+    /// </summary>
+    [Fact]
+    public async Task Our_own_rows_cannot_be_moved_into_another_tenants_application()
+    {
+        (Guid strangerTenant, Guid strangerApp, Guid _, Guid _, Guid _) = Stranger();
+
+        AppServiceDependency ours = await knowledge.SaveDependencyAsync(
+            tenantId, new AppServiceDependency
+            {
+                TenantId = tenantId, AppId = appId, Name = "Planted dependency",
+                Kind = DependencyKind.Infrastructure,
+            });
+
+        EndOfLifeNotice notice = await knowledge.SaveEndOfLifeAsync(
+            tenantId, new EndOfLifeNotice
+            {
+                TenantId = tenantId, AppId = appId, Component = "Planted runtime",
+            });
+
+        // Authorized edits of our own rows — that name their tenant and their application.
+        ours.TenantId = strangerTenant;
+        ours.AppId = strangerApp;
+        ours.Notes = "Edited";
+        await knowledge.SaveDependencyAsync(tenantId, ours);
+
+        notice.TenantId = strangerTenant;
+        notice.AppId = strangerApp;
+        notice.NoticeGivenAt = Now.AddMonths(-6);
+        await knowledge.SaveEndOfLifeAsync(tenantId, notice);
+
+        AppServiceDependency storedDependency = await db.AppServiceDependencies.AsNoTracking()
+            .FirstAsync(d => d.Id == ours.Id);
+        EndOfLifeNotice storedNotice = await db.EndOfLifeNotices.AsNoTracking()
+            .FirstAsync(n => n.Id == notice.Id);
+
+        // The edit landed; where the row lives did not move.
+        storedDependency.Notes.Should().Be("Edited");
+        storedDependency.TenantId.Should().Be(tenantId);
+        storedDependency.AppId.Should().Be(appId);
+        storedNotice.NoticeGivenAt.Should().Be(Now.AddMonths(-6));
+        storedNotice.TenantId.Should().Be(tenantId);
+        storedNotice.AppId.Should().Be(appId);
+
+        // So nothing of ours shows up in their application, and in particular their §14.7
+        // position is still the one their own notice gives them.
+        (await knowledge.GetDependenciesAsync(strangerTenant, strangerApp))
+            .Should().NotContain(d => d.Name == "Planted dependency");
+        (await knowledge.GetEndOfLifeAsync(strangerTenant, strangerApp))
+            .Should().NotContain(n => n.Component == "Planted runtime");
+        (await knowledge.GetGapsAsync(strangerTenant, strangerApp, Now))
+            .Should().NotContain(g => g.Title.Contains("Planted runtime"));
     }
 }
