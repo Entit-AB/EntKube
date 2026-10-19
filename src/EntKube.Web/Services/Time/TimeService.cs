@@ -148,11 +148,19 @@ public class TimeService(
         return entry;
     }
 
-    public async Task DeleteAsync(Guid entryId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose entry. A time entry is billable work — it is what the hour bank is drawn against
+    /// and what §20 wants validatable — so by id alone this removed another tenant's record
+    /// of work done.
+    /// </param>
+    public async Task DeleteAsync(
+        Guid tenantId, Guid entryId, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        TimeEntry? entry = await db.TimeEntries.FindAsync([entryId], ct);
+        // FindAsync takes a key and cannot carry a predicate.
+        TimeEntry? entry = await db.TimeEntries
+            .FirstOrDefaultAsync(e => e.Id == entryId && e.TenantId == tenantId, ct);
         if (entry is not null)
         {
             db.TimeEntries.Remove(entry);
@@ -161,12 +169,27 @@ public class TimeService(
     }
 
     /// <summary>Records the customer's approval for work beyond the bank or above a cap.</summary>
+    /// <param name="tenantId">
+    /// Whose customer approved it. ⚠️ This row <b>is</b> the record that a customer agreed to
+    /// pay for work past the bank, so writing one with the ids off a caller-supplied entity
+    /// was writing somebody else's customer's approval. It is reachable from the customer
+    /// portal, not only from an operator page.
+    /// </param>
     public async Task<WorkAuthorisation> AuthoriseAsync(
-        WorkAuthorisation authorisation, CancellationToken ct = default)
+        Guid tenantId, WorkAuthorisation authorisation, CancellationToken ct = default)
     {
+        if (!await CustomerBelongsToTenantAsync(tenantId, authorisation.CustomerId, ct))
+        {
+            throw new InvalidOperationException(
+                "Customer not found, or it is not this tenant's.");
+        }
+
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         authorisation.Id = authorisation.Id == Guid.Empty ? Guid.NewGuid() : authorisation.Id;
+        // The TenantId on the entity is the caller's to fill in; the row is filed under the
+        // parameter the customer was just checked against.
+        authorisation.TenantId = tenantId;
         authorisation.ApprovedAt = authorisation.ApprovedAt == default
             ? DateTime.UtcNow
             : authorisation.ApprovedAt;
@@ -208,7 +231,7 @@ public class TimeService(
             ? agreement.HourBankHoursPerMonth
             : null;
 
-        IReadOnlyList<WorkPass> passes = await PassesAsync(customerId, from, to, ct);
+        IReadOnlyList<WorkPass> passes = await PassesAsync(tenantId, customerId, from, to, ct);
 
         Dictionary<SupportTimeCategory, decimal> byCategory = [];
         decimal drawn = 0m;
@@ -261,7 +284,7 @@ public class TimeService(
             .ToDictionaryAsync(t => t.Id, t => t.Number, ct);
 
         List<TimeEntry> entries = await EntriesAsync(db, customerId, from, to, ct);
-        IReadOnlyList<WorkPass> passes = await PassesAsync(customerId, from, to, ct);
+        IReadOnlyList<WorkPass> passes = await PassesAsync(tenantId, customerId, from, to, ct);
 
         // The description of the first entry in a pass stands for the pass; §20 wants the
         // activities to be validatable, not every keystroke.
@@ -303,9 +326,19 @@ public class TimeService(
     }
 
     /// <summary>The work passes in a period, with the §13 rounding applied.</summary>
+    /// <param name="tenantId">
+    /// Whose customer. The interior queries key off the customer alone, which is what the
+    /// boundary check here licenses — the same shape GetTimebankAsync and
+    /// GetCommittedHoursAsync in this file already use.
+    /// </param>
     public async Task<IReadOnlyList<WorkPass>> PassesAsync(
-        Guid customerId, DateTime from, DateTime to, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, DateTime from, DateTime to, CancellationToken ct = default)
     {
+        if (!await CustomerBelongsToTenantAsync(tenantId, customerId, ct))
+        {
+            return [];
+        }
+
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         List<TimeEntry> entries = await EntriesAsync(db, customerId, from, to, ct);

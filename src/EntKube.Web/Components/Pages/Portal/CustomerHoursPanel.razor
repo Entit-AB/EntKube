@@ -274,7 +274,7 @@
     {
         try
         {
-            await Time.AuthoriseAsync(new WorkAuthorisation
+            await Time.AuthoriseAsync(Customer.TenantId, new WorkAuthorisation
             {
                 TenantId = Customer.TenantId,
                 CustomerId = Customer.Id,
