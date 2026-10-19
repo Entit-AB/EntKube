@@ -334,14 +334,14 @@
             bool isNew = editing.Id == Guid.Empty;
             editing.Instance = editing.Instance.Trim();
 
-            TicketBridgeConnection saved = await Bridge.SaveAsync(editing);
+            TicketBridgeConnection saved = await Bridge.SaveAsync(TenantId, editing);
 
             // A new connection is useless without one, and asking somebody to press a
             // second button to make the thing they just made work is not a decision worth
             // offering.
             if (isNew)
             {
-                issued = await Bridge.IssueSecretAsync(saved.Id);
+                issued = await Bridge.IssueSecretAsync(TenantId, saved.Id);
                 issuedFor = customers.FirstOrDefault(c => c.Id == saved.CustomerId)?.Name;
             }
 
@@ -357,7 +357,7 @@
 
     private async Task IssueAsync(BridgeConnectionSummary row)
     {
-        issued = await Bridge.IssueSecretAsync(row.Connection.Id);
+        issued = await Bridge.IssueSecretAsync(TenantId, row.Connection.Id);
         issuedFor = row.CustomerName;
 
         if (issued is not null)
@@ -370,7 +370,7 @@
 
     private async Task DeleteAsync(TicketBridgeConnection connection)
     {
-        string? refused = await Bridge.DeleteAsync(connection.Id);
+        string? refused = await Bridge.DeleteAsync(TenantId, connection.Id);
 
         if (refused is not null)
         {
