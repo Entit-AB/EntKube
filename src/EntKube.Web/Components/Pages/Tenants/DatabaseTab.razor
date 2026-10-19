@@ -6203,7 +6203,7 @@
         try
         {
             await RegisteredPostgresService.RestoreDumpToCnpgAsync(
-                dump.Id, restoreFormCnpgClusterId, restoreFormNewDbName);
+                TenantId, dump.Id, restoreFormCnpgClusterId, restoreFormNewDbName);
 
             dumpRestoreSuccess = $"Database '{restoreFormNewDbName}' restored successfully.";
             showRestoreFormForDumpId = null;
@@ -6224,7 +6224,7 @@
 
         try
         {
-            await RegisteredPostgresService.DeleteDumpAsync(dump.Id);
+            await RegisteredPostgresService.DeleteDumpAsync(TenantId, dump.Id);
             await LoadDumpsForInstance(instanceId);
             Toasts.Success("Dump deleted.");
         }
@@ -6253,7 +6253,7 @@
 
             foreach (RegisteredPostgresDatabase db in inst.Databases)
             {
-                byDb[db.Id] = await RegisteredPostgresService.GetDumpsAsync(db.Id);
+                byDb[db.Id] = await RegisteredPostgresService.GetDumpsAsync(TenantId, db.Id);
             }
 
             dumpsByDatabase = byDb;

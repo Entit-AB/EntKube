@@ -537,14 +537,19 @@ public class RegisteredPostgresService(
     /// <summary>
     /// Returns all pg_dump backups for a specific database, newest first.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose database. A dump row names the storage link and the S3 key its backup lives
+    /// under, so listing them by database id alone described somebody else's backups.
+    /// </param>
     public async Task<List<RegisteredPostgresDump>> GetDumpsAsync(
-        Guid databaseId, CancellationToken ct = default)
+        Guid tenantId, Guid databaseId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         return await db.RegisteredPostgresDumps
             .Include(d => d.StorageLink)
-            .Where(d => d.RegisteredPostgresDatabaseId == databaseId)
+            .Where(d => d.RegisteredPostgresDatabaseId == databaseId
+                     && d.RegisteredPostgresDatabase.RegisteredPostgresInstance.TenantId == tenantId)
             .OrderByDescending(d => d.CreatedAt)
             .ToListAsync(ct);
     }
@@ -561,11 +566,18 @@ public class RegisteredPostgresService(
 
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
+        // Both ids arrive from the caller beside a tenant this method already has. The
+        // database has to be on the instance it was loaded with, and the storage link has to
+        // be ours — it is the bucket the dump is written to.
         RegisteredPostgresDatabase database = await db.RegisteredPostgresDatabases
-            .FirstAsync(d => d.Id == databaseId, ct);
+            .FirstOrDefaultAsync(
+                d => d.Id == databaseId && d.RegisteredPostgresInstanceId == instance.Id, ct)
+            ?? throw new InvalidOperationException("Database not found on this instance.");
 
         StorageLink storageLink = await db.StorageLinks
-            .FirstAsync(sl => sl.Id == storageLinkId, ct);
+            .FirstOrDefaultAsync(sl => sl.Id == storageLinkId && sl.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Storage link not found, or it is not this tenant's.");
 
         string dumpSql = await (await ClusterFor(tenantId, cluster.Id, ct)).RunCommandOnPodAsync(
             instance.AdminPodName, instance.Namespace,
@@ -596,7 +608,15 @@ public class RegisteredPostgresService(
     /// <summary>
     /// Deletes the S3 object and the dump record.
     /// </summary>
-    public async Task DeleteDumpAsync(Guid dumpId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose backup. ⚠️ This found the dump by bare id and then <i>derived</i> the tenant from
+    /// the row it had just found — and handed that derived tenant to the storage service, which
+    /// unseals the owner's own credentials with it. So the derivation did not protect the
+    /// backup; it was what made deleting it possible. By dump id alone this removed another
+    /// tenant's database backup from S3 and then its record, with the S3 failure swallowed.
+    /// </param>
+    public async Task DeleteDumpAsync(
+        Guid tenantId, Guid dumpId, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
@@ -604,9 +624,10 @@ public class RegisteredPostgresService(
             .Include(d => d.StorageLink)
             .Include(d => d.RegisteredPostgresDatabase)
                 .ThenInclude(d => d.RegisteredPostgresInstance)
-            .FirstAsync(d => d.Id == dumpId, ct);
-
-        Guid tenantId = dump.RegisteredPostgresDatabase.RegisteredPostgresInstance.TenantId;
+            .FirstOrDefaultAsync(
+                d => d.Id == dumpId
+                  && d.RegisteredPostgresDatabase.RegisteredPostgresInstance.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Dump not found, or it is not this tenant's.");
 
         try { await storageBrowserService.DeleteAsync(tenantId, dump.StorageLink, dump.S3Key, ct); }
         catch { }
@@ -619,8 +640,17 @@ public class RegisteredPostgresService(
     /// Downloads a dump from S3 and restores it into a new database on a CNPG cluster.
     /// Creates the target database, then pipes the SQL via psql stdin.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose backup, and whose cluster. ⚠️ Same derivation as DeleteDumpAsync: the dump was
+    /// found by bare id and the tenant read back off it, then handed to the storage service —
+    /// so the download ran as the dump's owner. The restore that follows was refused by the
+    /// cluster seam, because a derived tenant and somebody else's cluster do not match, so no
+    /// data reached the caller. What did happen is that their backup was read out of their
+    /// storage on our say-so.
+    /// </param>
     public async Task RestoreDumpToCnpgAsync(
-        Guid dumpId, Guid cnpgClusterId, string newDatabaseName, CancellationToken ct = default)
+        Guid tenantId, Guid dumpId, Guid cnpgClusterId, string newDatabaseName,
+        CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
@@ -628,16 +658,23 @@ public class RegisteredPostgresService(
             .Include(d => d.StorageLink)
             .Include(d => d.RegisteredPostgresDatabase)
                 .ThenInclude(d => d.RegisteredPostgresInstance)
-            .FirstAsync(d => d.Id == dumpId, ct);
+            .FirstOrDefaultAsync(
+                d => d.Id == dumpId
+                  && d.RegisteredPostgresDatabase.RegisteredPostgresInstance.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException("Dump not found, or it is not this tenant's.");
 
-        Guid tenantId = dump.RegisteredPostgresDatabase.RegisteredPostgresInstance.TenantId;
+        // Resolve where it is going BEFORE reading it out of storage. The order used to be
+        // the other way round, so an unusable target was discovered only after the backup had
+        // been downloaded — work done, and a read of the object, for a restore that could
+        // never happen.
+        CnpgCluster cnpgCluster = await db.CnpgClusters
+            .Include(c => c.KubernetesCluster)
+            .FirstOrDefaultAsync(c => c.Id == cnpgClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "CNPG cluster not found, or it is not this tenant's.");
 
         byte[] dumpBytes = await storageBrowserService.DownloadAsync(tenantId, dump.StorageLink, dump.S3Key, ct);
         string dumpSql = Encoding.UTF8.GetString(dumpBytes);
-
-        CnpgCluster cnpgCluster = await db.CnpgClusters
-            .Include(c => c.KubernetesCluster)
-            .FirstAsync(c => c.Id == cnpgClusterId, ct);
 
         await RestoreSqlToCnpgAsync(tenantId, dumpSql, cnpgCluster, newDatabaseName, ct);
     }
@@ -663,7 +700,9 @@ public class RegisteredPostgresService(
         using DataServicesDbContext db = dbFactory.CreateDbContext();
 
         RegisteredPostgresDatabase database = await db.RegisteredPostgresDatabases
-            .FirstAsync(d => d.Id == databaseId, ct);
+            .FirstOrDefaultAsync(
+                d => d.Id == databaseId && d.RegisteredPostgresInstanceId == instance.Id, ct)
+            ?? throw new InvalidOperationException("Database not found on this instance.");
 
         logger.LogInformation("Migrate→CNPG: running pg_dump of '{DbName}' on pod {Pod}", database.Name, instance.AdminPodName);
         string dumpSql = await (await ClusterFor(tenantId, cluster.Id, ct)).RunCommandOnPodAsync(
@@ -692,7 +731,9 @@ public class RegisteredPostgresService(
 
         CnpgCluster cnpgCluster = await db.CnpgClusters
             .Include(c => c.KubernetesCluster)
-            .FirstAsync(c => c.Id == cnpgClusterId, ct);
+            .FirstOrDefaultAsync(c => c.Id == cnpgClusterId && c.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "CNPG cluster not found, or it is not this tenant's.");
 
         await RestoreSqlToCnpgAsync(tenantId, dumpSql, cnpgCluster, newDatabaseName, ct);
         logger.LogInformation("Migrate→CNPG: done, database '{NewName}' created on cluster {Cluster}", newDatabaseName, cnpgCluster.Name);
