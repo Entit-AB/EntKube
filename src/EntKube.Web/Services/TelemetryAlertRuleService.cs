@@ -16,8 +16,21 @@ public class TelemetryAlertRuleService(IDbContextFactory<TelemetryDbContext> dbF
             .ToListAsync(ct);
     }
 
-    /// <summary>Inserts a new rule (Id empty) or updates an existing one; enforces tenant ownership.</summary>
-    public async Task UpsertAsync(TelemetryAlertRule rule, CancellationToken ct = default)
+    /// <summary>Inserts a new rule (Id empty) or updates an existing one.</summary>
+    /// <param name="tenantId">
+    /// Whose rule. An alert rule decides what fires an incident — the threshold, the window,
+    /// the severity, the text it matches, the cluster or site it watches — so editing
+    /// somebody else's changes when they get paged, and clearing IsEnabled stops them being
+    /// paged at all.
+    ///
+    /// <para>⚠️ This summary used to end "enforces tenant ownership", and the predicate was
+    /// <c>r.Id == rule.Id &amp;&amp; r.TenantId == rule.TenantId</c> — both sides off the
+    /// caller's own entity, so it asked whether the caller agreed with itself and could not
+    /// fail. A comment claiming a guarantee the code does not make is worse than no comment:
+    /// it tells the next reader not to look.</para>
+    /// </param>
+    public async Task UpsertAsync(
+        Guid tenantId, TelemetryAlertRule rule, CancellationToken ct = default)
     {
         using TelemetryDbContext db = dbFactory.CreateDbContext();
         DateTime now = DateTime.UtcNow;
@@ -31,6 +44,8 @@ public class TelemetryAlertRuleService(IDbContextFactory<TelemetryDbContext> dbF
         if (rule.Id == Guid.Empty)
         {
             rule.Id = Guid.NewGuid();
+            // The entity's own TenantId is a claim; the row is filed under the parameter.
+            rule.TenantId = tenantId;
             rule.CreatedAt = now;
             rule.UpdatedAt = now;
             db.TelemetryAlertRules.Add(rule);
@@ -38,7 +53,7 @@ public class TelemetryAlertRuleService(IDbContextFactory<TelemetryDbContext> dbF
         else
         {
             TelemetryAlertRule? existing = await db.TelemetryAlertRules
-                .FirstOrDefaultAsync(r => r.Id == rule.Id && r.TenantId == rule.TenantId, ct);
+                .FirstOrDefaultAsync(r => r.Id == rule.Id && r.TenantId == tenantId, ct);
             if (existing is null) return;
 
             existing.Name = rule.Name;

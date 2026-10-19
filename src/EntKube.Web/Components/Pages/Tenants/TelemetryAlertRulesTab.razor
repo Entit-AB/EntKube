@@ -200,7 +200,7 @@ else if (rules.Count > 0)
             editing.SiteId = null;
             editing.ClusterId = string.IsNullOrEmpty(clusterIdStr) ? null : Guid.Parse(clusterIdStr);
         }
-        await Rules.UpsertAsync(editing);
+        await Rules.UpsertAsync(TenantId, editing);
         editing = null;
         await Reload();
     }
