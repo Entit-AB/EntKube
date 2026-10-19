@@ -701,7 +701,7 @@ else
     private async Task FetchAsync()
     {
         Task<KubernetesOperationResult<List<NodeInfo>>> nodeTask = NodeService.GetNodesAsync(TenantId, ClusterId);
-        Task<List<ClusterServer>> serverTask = NodeService.GetServersAsync(ClusterId);
+        Task<List<ClusterServer>> serverTask = NodeService.GetServersAsync(TenantId, ClusterId);
         await Task.WhenAll(nodeTask, serverTask);
         KubernetesOperationResult<List<NodeInfo>> nodeResult = nodeTask.Result;
         List<ClusterServer> serverList = serverTask.Result;
@@ -937,7 +937,7 @@ else
 
     private async Task SaveServerAsync(ClusterServer server)
     {
-        await NodeService.SaveServerAsync(server);
+        await NodeService.SaveServerAsync(TenantId, server);
         editingServer = null;
         showAddUnlinked = false;
         await LoadAsync();
@@ -953,7 +953,7 @@ else
     {
         try
         {
-            await NodeService.DeleteServerAsync(serverId);
+            await NodeService.DeleteServerAsync(TenantId, serverId);
             await LoadAsync();
             Toasts.Success($"Removed server record \"{name}\".");
         }
