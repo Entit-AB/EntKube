@@ -134,7 +134,7 @@ public class TicketMoveTests : IDisposable
         Ticket ticket = await Reported();
         int number = ticket.Number;
 
-        TicketService.TicketMove? moved = await tickets.MoveAsync(
+        TicketService.TicketMove? moved = await tickets.MoveAsync(ours, 
             ticket.Id, theirCustomer, theirApp, "nils", "It is their application.", Tue(11));
 
         moved!.Value.Ticket.Number.Should().Be(number);
@@ -169,7 +169,7 @@ public class TicketMoveTests : IDisposable
         Ticket ticket = await Reported();
         int eventsBefore = db.TicketEvents.Count(e => e.TicketId == ticket.Id);
 
-        await tickets.MoveAsync(ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
+        await tickets.MoveAsync(ours, ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
 
         db.ChangeTracker.Clear();
         Ticket after = db.Tickets.Single(t => t.Id == ticket.Id);
@@ -190,7 +190,7 @@ public class TicketMoveTests : IDisposable
     {
         Ticket ticket = await Reported();
 
-        await tickets.MoveAsync(
+        await tickets.MoveAsync(ours, 
             ticket.Id, theirCustomer, theirApp, "nils", "Reported to the wrong address.", Tue(11));
 
         db.ChangeTracker.Clear();
@@ -218,7 +218,7 @@ public class TicketMoveTests : IDisposable
         Ticket ticket = await Reported();
         ticket.SupportWindow.Should().Be(SupportWindow.S1);
 
-        TicketService.TicketMove? moved = await tickets.MoveAsync(
+        TicketService.TicketMove? moved = await tickets.MoveAsync(ours, 
             ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
 
         moved!.Value.Ticket.SupportWindow.Should().Be(SupportWindow.S4);
@@ -238,7 +238,7 @@ public class TicketMoveTests : IDisposable
         Ticket ticket = await Reported(saturday);
         ticket.ClockStartsAt.Should().NotBe(saturday, "S1 does not cover a Saturday");
 
-        TicketService.TicketMove? moved = await tickets.MoveAsync(
+        TicketService.TicketMove? moved = await tickets.MoveAsync(ours, 
             ticket.Id, theirCustomer, theirApp, "nils", null, saturday.AddHours(1));
 
         moved!.Value.Ticket.ClockStartsAt.Should().Be(saturday);
@@ -259,7 +259,7 @@ public class TicketMoveTests : IDisposable
 
         await tickets.RecordResponseAsync(ours, ticket.Id, "nils", saturday.AddHours(2));
 
-        await tickets.MoveAsync(
+        await tickets.MoveAsync(ours, 
             ticket.Id, theirCustomer, theirApp, "nils", null, saturday.AddHours(3));
 
         db.ChangeTracker.Clear();
@@ -278,7 +278,7 @@ public class TicketMoveTests : IDisposable
     {
         Ticket ticket = await Reported();
 
-        Func<Task> move = () => tickets.MoveAsync(
+        Func<Task> move = () => tickets.MoveAsync(ours, 
             ticket.Id, theirCustomer, ourApp, "nils", null, Tue(11));
 
         await move.Should().ThrowAsync<InvalidOperationException>()
@@ -312,7 +312,7 @@ public class TicketMoveTests : IDisposable
         });
         await db.SaveChangesAsync();
 
-        Func<Task> move = () => tickets.MoveAsync(
+        Func<Task> move = () => tickets.MoveAsync(ours, 
             ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
 
         await move.Should().ThrowAsync<InvalidOperationException>()
@@ -333,7 +333,7 @@ public class TicketMoveTests : IDisposable
     {
         Ticket ticket = await Reported();
 
-        await tickets.MoveAsync(ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
+        await tickets.MoveAsync(ours, ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
 
         // The sender is still recognised as the original customer's contact.
         db.CustomerEmailDomains.Add(new CustomerEmailDomain
@@ -374,7 +374,7 @@ public class TicketMoveTests : IDisposable
     {
         Ticket ticket = await Reported();
 
-        await tickets.MoveAsync(ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
+        await tickets.MoveAsync(ours, ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
 
         db.CustomerEmailDomains.Add(new CustomerEmailDomain
         {
@@ -411,7 +411,7 @@ public class TicketMoveTests : IDisposable
     {
         Ticket ticket = await Reported();
 
-        await tickets.MoveAsync(ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
+        await tickets.MoveAsync(ours, ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
 
         db.CustomerEmailDomains.Add(new CustomerEmailDomain
         {
@@ -460,12 +460,72 @@ public class TicketMoveTests : IDisposable
 
         Ticket? ticket = await mail.AcceptAsync(ours, open.Id, "nils", Tue(10), new AppChoice(ourApp));
 
-        await tickets.MoveAsync(ticket!.Id, theirCustomer, theirApp, "nils", null, Tue(11));
+        await tickets.MoveAsync(ours, ticket!.Id, theirCustomer, theirApp, "nils", null, Tue(11));
 
         db.ChangeTracker.Clear();
         InboundMailMessage after = db.InboundMailMessages.Single(m => m.Id == message.Id);
 
         after.CustomerId.Should().Be(theirCustomer);
         after.TenantId.Should().Be(ours, "it really did arrive in that mailbox");
+    }
+    // ---- Whose ticket, and whose destination ---------------------------------------------
+
+    /// <summary>
+    /// <b>The destination stays deliberately cross-tenant.</b> Moving a misfiled report to the
+    /// right customer in another tenant is the whole point of the feature, and this pins it so
+    /// a later tightening cannot quietly remove it: the one test below that refuses a move must
+    /// not be read as "moves across tenants are refused".
+    /// </summary>
+    [Fact]
+    public async Task A_ticket_still_moves_to_another_tenants_customer()
+    {
+        Ticket ticket = await Reported();
+
+        TicketService.TicketMove? moved = await tickets.MoveAsync(
+            ours, ticket.Id, theirCustomer, theirApp, "nils", "Misfiled", Tue(11));
+
+        moved.Should().NotBeNull();
+
+        db.ChangeTracker.Clear();
+        Ticket stored = await db.Tickets.AsNoTracking().FirstAsync(t => t.Id == ticket.Id);
+
+        stored.CustomerId.Should().Be(theirCustomer);
+        stored.TenantId.Should().Be(theirs);
+    }
+
+    /// <summary>
+    /// What is scoped is the <b>source</b>. An operator notices a misfiled report because it
+    /// arrived in their own queue; moving a ticket out of a queue they cannot see is a
+    /// different act, and not one the remark on MoveAsync covers.
+    /// </summary>
+    [Fact]
+    public async Task A_ticket_we_were_not_sent_cannot_be_moved()
+    {
+        Ticket ticket = await Reported();
+
+        // The same move, asked for by the other tenant.
+        (await tickets.MoveAsync(
+            theirs, ticket.Id, theirCustomer, theirApp, "anna", "Mine now", Tue(11)))
+            .Should().BeNull();
+
+        db.ChangeTracker.Clear();
+        Ticket stored = await db.Tickets.AsNoTracking().FirstAsync(t => t.Id == ticket.Id);
+
+        stored.CustomerId.Should().Be(ourCustomer);
+        stored.TenantId.Should().Be(ours);
+    }
+
+    /// <summary>The queue reads describe what was worked and when it is due.</summary>
+    [Fact]
+    public async Task Another_tenants_queue_is_not_readable()
+    {
+        await Reported();
+
+        // A positive first, so the empty below is a refusal rather than an empty period.
+        (await tickets.GetOpenQueueAsync(ours, ourCustomer, Tue(12))).Should().NotBeEmpty();
+
+        (await tickets.GetOpenQueueAsync(theirs, ourCustomer, Tue(12))).Should().BeEmpty();
+        (await tickets.GetForPeriodAsync(theirs, ourCustomer, Tue(0), Tue(23), Tue(23)))
+            .Should().BeEmpty();
     }
 }

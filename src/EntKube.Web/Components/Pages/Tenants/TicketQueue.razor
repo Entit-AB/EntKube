@@ -245,7 +245,7 @@ else
         {
             now = DateTime.UtcNow;
             queue = CustomerId is Guid customer
-                ? await Tickets.GetOpenQueueAsync(customer, now)
+                ? await Tickets.GetOpenQueueAsync(DetailTenantId, customer, now)
                 : TenantId is Guid tenant
                     ? await Tickets.GetTenantQueueAsync(tenant, now)
                     : [];

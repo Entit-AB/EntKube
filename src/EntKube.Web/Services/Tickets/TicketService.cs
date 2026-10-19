@@ -284,6 +284,17 @@ public class TicketService(
     /// reporting time, the history, the priority and its effective date all stand, and the
     /// clock start is only re-derived while nothing has been measured against it yet.</para>
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose ticket is being moved — the <b>source</b>, not the destination.
+    ///
+    /// <para>⚠️ The destination stays deliberately cross-tenant: <paramref name="toCustomerId"/>
+    /// may be in any tenant, which is the whole point of a move, and the checks that matter
+    /// there are already below (the application must belong to the destination customer, and
+    /// the number must not collide in the destination tenant). What this adds is that the
+    /// ticket being moved has to be one we were sent. An operator notices a misfiled report
+    /// because it arrived in their own queue; moving a ticket out of a queue we cannot see is
+    /// a different act, and not one the reasoning above covers.</para>
+    /// </param>
     /// <param name="ticketId">The ticket to move.</param>
     /// <param name="toCustomerId">The customer it belongs to, in any tenant.</param>
     /// <param name="toAppId">
@@ -294,6 +305,7 @@ public class TicketService(
     /// <param name="reason">Why, in their words. Recorded, because the move changes terms.</param>
     /// <param name="at">When the move was made.</param>
     public async Task<TicketMove?> MoveAsync(
+        Guid tenantId,
         Guid ticketId,
         Guid toCustomerId,
         Guid? toAppId,
@@ -304,7 +316,8 @@ public class TicketService(
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        Ticket? ticket = await db.Tickets.FirstOrDefaultAsync(t => t.Id == ticketId, ct);
+        Ticket? ticket = await db.Tickets
+            .FirstOrDefaultAsync(t => t.Id == ticketId && t.TenantId == tenantId, ct);
 
         if (ticket is null)
         {
@@ -1055,8 +1068,12 @@ public class TicketService(
     /// <summary>
     /// The open queue for a customer, worst first, each with its clocks evaluated.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose customer. A customer belongs to one tenant, so this is the row predicate the
+    /// customer id on its own was standing in for.
+    /// </param>
     public async Task<List<TicketSlaStatus>> GetOpenQueueAsync(
-        Guid customerId, DateTime now, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, DateTime now, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
@@ -1066,7 +1083,7 @@ public class TicketService(
             // every ticket looks as though nobody has said anything since it arrived.
             .Include(t => t.Events)
             .AsNoTracking()
-            .Where(t => t.CustomerId == customerId
+            .Where(t => t.CustomerId == customerId && t.TenantId == tenantId
                         && t.Status != TicketStatus.Closed
                         && t.Status != TicketStatus.Rejected)
             .OrderBy(t => t.Priority)
@@ -1113,7 +1130,8 @@ public class TicketService(
     /// §14.6.
     /// </summary>
     public async Task<List<TicketSlaStatus>> GetForPeriodAsync(
-        Guid customerId, DateTime from, DateTime to, DateTime now, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, DateTime from, DateTime to, DateTime now,
+        CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
@@ -1123,7 +1141,8 @@ public class TicketService(
             // every ticket looks as though nobody has said anything since it arrived.
             .Include(t => t.Events)
             .AsNoTracking()
-            .Where(t => t.CustomerId == customerId && t.ReportedAt >= from && t.ReportedAt < to)
+            .Where(t => t.CustomerId == customerId && t.TenantId == tenantId
+                     && t.ReportedAt >= from && t.ReportedAt < to)
             .OrderBy(t => t.ReportedAt)
             .ToListAsync(ct);
 

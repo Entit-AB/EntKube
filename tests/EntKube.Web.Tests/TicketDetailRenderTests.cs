@@ -402,7 +402,7 @@ public class TicketDetailRenderTests : BunitContext, IDisposable
         await tickets.AddEventAsync(tenantId, ticket.Id, TicketEventKind.Note, "Still working on it.", "nils", Tue(11),
             customerVisible: true);
 
-        TicketSlaStatus fromQueue = (await tickets.GetOpenQueueAsync(customerId, Tue(12)))
+        TicketSlaStatus fromQueue = (await tickets.GetOpenQueueAsync(tenantId, customerId, Tue(12)))
             .Single(t => t.Ticket.Id == ticket.Id);
 
         fromQueue.LastUpdateAt.Should().Be(Tue(11), "the queue has to read the same events");

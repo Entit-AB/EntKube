@@ -612,7 +612,7 @@
         try
         {
             TicketService.TicketMove? moved = await Tickets.MoveAsync(
-                TicketId, customerId, appId, Actor, moveReason, DateTime.UtcNow);
+                TenantId, TicketId, customerId, appId, Actor, moveReason, DateTime.UtcNow);
 
             if (moved is not TicketService.TicketMove result)
             {
