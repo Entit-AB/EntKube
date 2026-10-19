@@ -2209,7 +2209,7 @@
         policyError = null;
         try
         {
-            await Search.CreatePolicyAsync(new ElasticsearchIlmPolicy
+            await Search.CreatePolicyAsync(TenantId, new ElasticsearchIlmPolicy
             {
                 TenantId = TenantId,
                 ElasticsearchClusterId = cluster.Id,
@@ -2672,7 +2672,7 @@
         pipelineError = null;
         try
         {
-            ElasticsearchIngestPipeline saved = await Search.SavePipelineAsync(PipelineFromForm(cluster));
+            ElasticsearchIngestPipeline saved = await Search.SavePipelineAsync(TenantId, PipelineFromForm(cluster));
             editingPipelineId = saved.Id;
             allPipelines[cluster.Id] = await Search.GetPipelinesAsync(TenantId, cluster.Id);
             Toasts.Success($"Applied \"{saved.Name}\".");
