@@ -76,7 +76,7 @@ public class TicketBridgeAdminTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private Task<TicketBridgeConnection> Existing() => admin.SaveAsync(new TicketBridgeConnection
+    private Task<TicketBridgeConnection> Existing() => admin.SaveAsync(tenantId, new TicketBridgeConnection
     {
         TenantId = tenantId,
         CustomerId = customerId,
@@ -109,7 +109,7 @@ public class TicketBridgeAdminTests : IDisposable
             intended[property.Name] = value;
         }
 
-        await admin.SaveAsync(changed);
+        await admin.SaveAsync(tenantId, changed);
 
         TicketBridgeConnection? stored = await db.TicketBridgeConnections.AsNoTracking()
             .FirstOrDefaultAsync(c => c.Id == saved.Id);
@@ -167,7 +167,7 @@ public class TicketBridgeAdminTests : IDisposable
     {
         TicketBridgeConnection saved = await Existing();
 
-        string? secret = await admin.IssueSecretAsync(saved.Id);
+        string? secret = await admin.IssueSecretAsync(tenantId, saved.Id);
 
         secret.Should().NotBeNullOrWhiteSpace();
 
@@ -188,8 +188,8 @@ public class TicketBridgeAdminTests : IDisposable
     {
         TicketBridgeConnection saved = await Existing();
 
-        string? first = await admin.IssueSecretAsync(saved.Id);
-        await admin.IssueSecretAsync(saved.Id);
+        string? first = await admin.IssueSecretAsync(tenantId, saved.Id);
+        await admin.IssueSecretAsync(tenantId, saved.Id);
 
         TicketBridgeConnection stored = await db.TicketBridgeConnections
             .AsNoTracking().FirstAsync(c => c.Id == saved.Id);
@@ -204,7 +204,7 @@ public class TicketBridgeAdminTests : IDisposable
     {
         TicketBridgeConnection saved = await Existing();
 
-        (await admin.DeleteAsync(saved.Id)).Should().BeNull();
+        (await admin.DeleteAsync(tenantId, saved.Id)).Should().BeNull();
         (await db.TicketBridgeConnections.CountAsync()).Should().Be(0);
     }
 
@@ -244,8 +244,147 @@ public class TicketBridgeAdminTests : IDisposable
 
         await db.SaveChangesAsync();
 
-        (await admin.DeleteAsync(saved.Id)).Should().NotBeNullOrWhiteSpace();
+        (await admin.DeleteAsync(tenantId, saved.Id)).Should().NotBeNullOrWhiteSpace();
         (await db.TicketBridgeConnections.CountAsync()).Should().Be(1);
+    }
+    // ---- Somebody else's bridge ----------------------------------------------------------
+
+    /// <summary>
+    /// A second tenant with a customer and a bridge connection of their own, seeded directly
+    /// so no scoped method is needed to create it.
+    /// </summary>
+    private (Guid Tenant, Guid Customer, TicketBridgeConnection Connection) Stranger()
+    {
+        Guid strangerTenant = Guid.NewGuid();
+        Guid strangerCustomer = Guid.NewGuid();
+
+        db.Tenants.Add(new Tenant
+        {
+            Id = strangerTenant, Name = "Annan", Slug = $"annan-{strangerTenant:N}",
+        });
+        db.Customers.Add(new Customer
+        {
+            Id = strangerCustomer, TenantId = strangerTenant, Name = "Annan AB",
+        });
+
+        TicketBridgeConnection theirs = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = strangerTenant,
+            CustomerId = strangerCustomer,
+            System = TicketSystem.ServiceNow,
+            Instance = "annan.service-now.com",
+            SecretHash = BridgeSecret.Store("their-original-secret"),
+            IsEnabled = true,
+        };
+        db.Set<TicketBridgeConnection>().Add(theirs);
+        db.SaveChanges();
+        db.ChangeTracker.Clear();
+
+        return (strangerTenant, strangerCustomer, theirs);
+    }
+
+    /// <summary>
+    /// ⚠️ <b>IssueSecretAsync both returns a working secret and stops the previous one
+    /// working.</b> By id alone it handed the caller a credential for another tenant's bridge
+    /// — which can then submit tickets as that customer's system — and broke whatever was
+    /// using the old one.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_bridge_secret_cannot_be_reissued()
+    {
+        (Guid _, Guid _, TicketBridgeConnection theirs) = Stranger();
+        string? before = theirs.SecretHash;
+
+        (await admin.IssueSecretAsync(tenantId, theirs.Id)).Should().BeNull();
+
+        TicketBridgeConnection stored = await db.Set<TicketBridgeConnection>().AsNoTracking()
+            .FirstAsync(c => c.Id == theirs.Id);
+
+        stored.SecretHash.Should().Be(before, "their integration still has to work");
+    }
+
+    [Fact]
+    public async Task Another_tenants_bridge_is_not_readable_or_deletable()
+    {
+        (Guid _, Guid _, TicketBridgeConnection theirs) = Stranger();
+
+        // A positive first, so the null below is a refusal rather than an empty table.
+        TicketBridgeConnection ours = await Existing();
+        (await admin.GetAsync(tenantId, ours.Id)).Should().NotBeNull();
+
+        (await admin.GetAsync(tenantId, theirs.Id)).Should().BeNull();
+
+        // Their connection has taken no tickets, so the only thing that can refuse the delete
+        // is the tenant.
+        (await admin.DeleteAsync(tenantId, theirs.Id)).Should().BeNull();
+        (await db.Set<TicketBridgeConnection>().AsNoTracking().AnyAsync(c => c.Id == theirs.Id))
+            .Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The save copies CustomerId straight across, so without the row check it repointed
+    /// somebody else's connection — and without the customer check it could point ours at
+    /// their customer.
+    /// </summary>
+    [Fact]
+    public async Task A_bridge_cannot_be_repointed_across_tenants_in_either_direction()
+    {
+        (Guid strangerTenant, Guid strangerCustomer, TicketBridgeConnection theirs) = Stranger();
+
+        // ⚠️ Their connection with OUR customer on it. Naming their customer instead would be
+        // refused by the customer check above before the row check was reached — an earlier
+        // guard answering for the one under test. This is also the sharper attack: repointing
+        // their bridge at our customer sends their tickets to us.
+        Func<Task> editTheirs = () => admin.SaveAsync(tenantId, new TicketBridgeConnection
+        {
+            Id = theirs.Id,
+            TenantId = strangerTenant,
+            CustomerId = customerId,
+            System = TicketSystem.Jira,
+            Instance = "ours.atlassian.net",
+        });
+
+        await editTheirs.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Connection not found, or it is not this tenant's.");
+
+        Func<Task> theirCustomer = () => admin.SaveAsync(tenantId, new TicketBridgeConnection
+        {
+            TenantId = tenantId,
+            CustomerId = strangerCustomer,
+            System = TicketSystem.Jira,
+            Instance = "ours.atlassian.net",
+        });
+
+        await theirCustomer.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Customer not found, or it is not this tenant's.");
+
+        (await db.Set<TicketBridgeConnection>().AsNoTracking().FirstAsync(c => c.Id == theirs.Id))
+            .Instance.Should().Be("annan.service-now.com");
+    }
+
+    /// <summary>
+    /// The create path files the row under the parameter, not under the TenantId the caller
+    /// put on the entity.
+    /// </summary>
+    [Fact]
+    public async Task A_new_bridge_cannot_be_filed_under_another_tenant()
+    {
+        (Guid strangerTenant, Guid _, TicketBridgeConnection _) = Stranger();
+
+        TicketBridgeConnection created = await admin.SaveAsync(tenantId, new TicketBridgeConnection
+        {
+            TenantId = strangerTenant,      // the lie
+            CustomerId = customerId,        // ours, so the customer check passes
+            System = TicketSystem.Jira,
+            Instance = "ours.atlassian.net",
+        });
+
+        created.TenantId.Should().Be(tenantId);
+
+        db.ChangeTracker.Clear();
+        (await db.Set<TicketBridgeConnection>().AsNoTracking().FirstAsync(c => c.Id == created.Id))
+            .TenantId.Should().Be(tenantId);
     }
 }
 
@@ -307,7 +446,7 @@ public class TicketBridgeRenderTests : BunitContext, IDisposable
     [Fact]
     public async Task An_existing_connection_shows_the_address_to_post_to()
     {
-        TicketBridgeConnection saved = await admin.SaveAsync(new TicketBridgeConnection
+        TicketBridgeConnection saved = await admin.SaveAsync(tenantId, new TicketBridgeConnection
         {
             TenantId = tenantId,
             CustomerId = customerId,
@@ -329,7 +468,7 @@ public class TicketBridgeRenderTests : BunitContext, IDisposable
     [Fact]
     public async Task A_connection_without_a_secret_is_flagged()
     {
-        await admin.SaveAsync(new TicketBridgeConnection
+        await admin.SaveAsync(tenantId, new TicketBridgeConnection
         {
             TenantId = tenantId,
             CustomerId = customerId,
@@ -349,7 +488,7 @@ public class TicketBridgeRenderTests : BunitContext, IDisposable
     [Fact]
     public async Task A_newly_issued_secret_is_shown_once()
     {
-        TicketBridgeConnection saved = await admin.SaveAsync(new TicketBridgeConnection
+        TicketBridgeConnection saved = await admin.SaveAsync(tenantId, new TicketBridgeConnection
         {
             TenantId = tenantId,
             CustomerId = customerId,

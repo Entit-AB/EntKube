@@ -52,30 +52,48 @@ public class TicketBridgeAdmin(IDbContextFactory<SupportDbContext> dbFactory)
         return summaries;
     }
 
-    public async Task<TicketBridgeConnection?> GetAsync(Guid id, CancellationToken ct = default)
+    public async Task<TicketBridgeConnection?> GetAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.TicketBridgeConnections.AsNoTracking()
-            .FirstOrDefaultAsync(c => c.Id == id, ct);
+            .FirstOrDefaultAsync(c => c.Id == id && c.TenantId == tenantId, ct);
     }
 
     /// <summary>
     /// Creates or updates a connection. Every field is copied, because a field left out of
     /// this list saves silently and leaves the bridge using the old value.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose connection. The TenantId on the entity is the caller's to fill in, so the row is
+    /// filed under this instead — and the customer is checked too, because the update copies
+    /// CustomerId straight across and would otherwise point the connection at somebody
+    /// else's customer.
+    /// </param>
     public async Task<TicketBridgeConnection> SaveAsync(
-        TicketBridgeConnection settings, CancellationToken ct = default)
+        Guid tenantId, TicketBridgeConnection settings, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
+        if (!await db.Customers.AnyAsync(
+                c => c.Id == settings.CustomerId && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException(
+                "Customer not found, or it is not this tenant's.");
+        }
+
         TicketBridgeConnection? existing = settings.Id == Guid.Empty
             ? null
-            : await db.TicketBridgeConnections.FirstOrDefaultAsync(c => c.Id == settings.Id, ct);
+            : await db.TicketBridgeConnections.FirstOrDefaultAsync(
+                  c => c.Id == settings.Id && c.TenantId == tenantId, ct)
+              ?? throw new InvalidOperationException(
+                  "Connection not found, or it is not this tenant's.");
 
         if (existing is null)
         {
             settings.Id = settings.Id == Guid.Empty ? Guid.NewGuid() : settings.Id;
+            settings.TenantId = tenantId;
             settings.CreatedAt = DateTime.UtcNow;
             settings.UpdatedAt = DateTime.UtcNow;
             db.TicketBridgeConnections.Add(settings);
@@ -107,12 +125,19 @@ public class TicketBridgeAdmin(IDbContextFactory<SupportDbContext> dbFactory)
     /// <para>Reissuing immediately stops the old one working, which is the point: it is
     /// what you do when a secret has leaked, and a grace period would defeat that.</para>
     /// </summary>
-    public async Task<string?> IssueSecretAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose connection. ⚠️ This method both <b>returns a working secret</b> and stops the
+    /// previous one working, so by id alone it handed the caller a credential for another
+    /// tenant's bridge — which can then submit tickets as that customer's system — and broke
+    /// the integration that was using the old one.
+    /// </param>
+    public async Task<string?> IssueSecretAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         TicketBridgeConnection? connection = await db.TicketBridgeConnections
-            .FirstOrDefaultAsync(c => c.Id == id, ct);
+            .FirstOrDefaultAsync(c => c.Id == id && c.TenantId == tenantId, ct);
 
         if (connection is null)
         {
@@ -135,12 +160,13 @@ public class TicketBridgeAdmin(IDbContextFactory<SupportDbContext> dbFactory)
     /// came from, and §14.6 makes that part of the record. A connection that should stop
     /// receiving is switched off, which keeps the history and stops the traffic.</para>
     /// </summary>
-    public async Task<string?> DeleteAsync(Guid id, CancellationToken ct = default)
+    public async Task<string?> DeleteAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using SupportDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         TicketBridgeConnection? connection = await db.TicketBridgeConnections
-            .FirstOrDefaultAsync(c => c.Id == id, ct);
+            .FirstOrDefaultAsync(c => c.Id == id && c.TenantId == tenantId, ct);
 
         if (connection is null)
         {
