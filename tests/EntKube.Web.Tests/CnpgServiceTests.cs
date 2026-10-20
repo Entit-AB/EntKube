@@ -25,6 +25,9 @@ public class CnpgServiceTests : IDisposable
     private readonly InterceptingTestDb.InterceptingFactory dbFactory;
     private readonly VaultService vaultService;
     private readonly Mock<IKubernetesClientFactory> k8sFactory;
+
+    /// <summary>Kept so a test can register a sink and count the dialogs one action raises.</summary>
+    private readonly EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate;
     private readonly CnpgService sut;
 
     public CnpgServiceTests()
@@ -36,13 +39,14 @@ public class CnpgServiceTests : IDisposable
 
         vaultService = testDb.CreateVaultService();
         k8sFactory = new Mock<IKubernetesClientFactory>();
+        gate = (EntKube.Web.Services.ClusterChanges.ClusterChangeGate)TestServices.NewGate();
         // The real factory, over the real interceptor: the kubeconfig these tests seed into the
         // vault is resolved the way production resolves it, and then handed to the mock. So the
         // existing k8sFactory assertions keep working and additionally prove the delegation.
         sut = new CnpgService(dbFactory, vaultService,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory.Object),
             new EntKube.Web.Modules.Api.CatalogApi(dbFactory),
-            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory), TestServices.NewGate());
+            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory), gate);
     }
 
     public void Dispose()
@@ -1415,5 +1419,85 @@ public class CnpgServiceTests : IDisposable
         result.IsSuccess.Should().BeFalse();
         k8sFactory.Verify(f => f.ApplyManifestAsync(
             It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  One action, one acknowledgment
+    // ════════════════════════════════════════════════════════════════
+
+    private sealed class CountingSink : EntKube.Web.Services.ClusterChanges.IClusterChangeAckSink
+    {
+        public int Calls { get; private set; }
+
+        public Task<EntKube.Web.Services.ClusterChanges.ClusterChangeDecision> RequestAsync(
+            EntKube.Web.Services.ClusterChanges.PlannedClusterChange change,
+            EntKube.Web.Services.ClusterChanges.ClusterChangeDiff diff,
+            CancellationToken ct)
+        {
+            Calls++;
+            return Task.FromResult(
+                EntKube.Web.Services.ClusterChanges.ClusterChangeDecision.Acknowledged);
+        }
+    }
+
+    /// <summary>
+    /// Makes the mocked factory gate its applies the way the real one does. The gate lives inside
+    /// the real <see cref="KubernetesClientFactory"/>, so a mocked seam never reaches it and a
+    /// count would sit at zero however the service behaved.
+    /// </summary>
+    private void GateEveryApply()
+    {
+        k8sFactory.Setup(f => f.ApplyManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string manifest, string kubeconfig, CancellationToken ct) =>
+            {
+                await gate.AcknowledgeAsync(
+                    new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                    {
+                        Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                        Manifest = manifest,
+                        Kubeconfig = kubeconfig,
+                    }, ct);
+                return string.Empty;
+            });
+    }
+
+    /// <summary>
+    /// Creating a Postgres cluster applies the S3 credentials Secret, the Cluster CR and — when a
+    /// schedule is configured — the ScheduledBackup. One decision, one dialog.
+    /// </summary>
+    [Fact]
+    public async Task CreatingAClusterAsksTheOperatorExactlyOnce()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryApply();
+
+        await sut.CreateClusterAsync(
+            tenant.Id, cluster.Id, "pg-ack", "databases", 1, "5Gi", storageLink.Id, null);
+
+        sink.Calls.Should().Be(1, "one action, one dialog");
+    }
+
+    /// <summary>
+    /// And the window closes with the action, so a second cluster asks again.
+    /// </summary>
+    [Fact]
+    public async Task CreatingASecondClusterAsksAgain()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryApply();
+
+        await sut.CreateClusterAsync(
+            tenant.Id, cluster.Id, "pg-one", "databases", 1, "5Gi", storageLink.Id, null);
+        await sut.CreateClusterAsync(
+            tenant.Id, cluster.Id, "pg-two", "databases", 1, "5Gi", storageLink.Id, null);
+
+        sink.Calls.Should().Be(2, "each action is its own decision");
     }
 }
