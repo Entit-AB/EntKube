@@ -1158,6 +1158,69 @@ Two things deliberately not done, both recorded in code rather than left to be d
   eighteen factory methods receives a cluster to put in the model. One `ClusterId` on
   `PlannedClusterChange` fixes both, and belongs with that work rather than ahead of it.
 
+### 5.4.2 The write family the gate cannot see: execution inside a pod (measured 2026-10-20)
+
+Every Kubernetes mutation that goes through `IKubernetesClientFactory` raises an acknowledgment,
+because the factory raises it itself. **Nine verbs on that same factory do not**, and they are the
+most consequential writes in the product:
+
+| verb | sites |
+|---|---|
+| `ExecuteSqlAsync`, `ExecuteSqlOnPodAsync`, `ExecuteSqlOnPodWithOutputAsync` | 9 |
+| `ExecuteSqlInCnpgDatabaseAsync`, `ExecuteSqlInCnpgDatabaseWithOutputAsync` | 8 |
+| `ExecuteMongoAsync`, `ExecuteMongoWithOutputAsync` | 4 |
+| `RunCommandOnPodAsync`, `RunCommandOnPodWithStdinAsync` | 9 |
+
+**30 call sites across 8 services**, carrying `CREATE ROLE`, `CREATE DATABASE`, `DROP DATABASE`,
+`ALTER ROLE … PASSWORD`, `REASSIGN OWNED`, Mongo `createUser`/`dropUser`, and
+`rabbitmqctl import_definitions`. None of it is gated, none of it is recorded by
+`IClusterChangeRecorder` — there is no outcome to record when nothing asked.
+
+**The obvious fix is wrong.** Gating the nine verbs would make reads prompt, because *reads share
+the verbs*. `ExecuteSqlOnPodAsync` carries `CREATE ROLE "x" … CREATE DATABASE "y"` at
+`RegisteredPostgresService.cs:231` and `SELECT 1;` at `:822`. That is the defect #307 had just
+removed from the Postgres detail panel, reintroduced across eight services.
+
+**A classifier is worse than wrong, it is dangerous.** A regex over the SQL left **9 of the 30
+undecidable** and mis-read at least one: `ExecuteMongoWithOutputAsync` — the *output-returning*
+variant, which looks like a read by signature — performs the password rotation at
+`MongoService.cs:1386`. A classifier that answers "read" for a write produces an unasked,
+unrecorded change while appearing to have checked, which is strictly worse than today's honest
+silence.
+
+#### What to do instead: the caller declares, and a ratchet checks that it did
+
+The caller knows what its SQL does; nothing else can. So each of the nine verbs takes an explicit
+intent — no default value, so every one of the 30 sites has to state it — and the factory gates
+only the ones that declare a change:
+
+```csharp
+Task ExecuteSqlOnPodAsync(
+    string podName, string ns, string sql, ChangeIntent intent, …);
+```
+
+- **No default.** A defaulted parameter would make the 30 existing sites compile unchanged and
+  declare nothing, which is how this gap got here.
+- **`ChangeIntent.Read` is a claim, not a hint.** It is auditable in review and in the diff, and
+  it is the thing to be suspicious of — a ratchet can list every site that claims `Read`, which is
+  a short list a human can actually check (currently 4 or 5 of the 30).
+- **The dialog can show the statement.** `SecretRedaction` already strips values out of a
+  `ClusterChangeDiff`; SQL carrying a password (`CREATE ROLE … PASSWORD '…'`) needs the same
+  treatment before it reaches an operator's screen, and that is the one piece of new work this
+  needs beyond signatures.
+- Cost: 9 signatures, 30 call sites, and the redaction. Mechanical, but it changes a
+  security-relevant contract, which is why it is written down here rather than done.
+
+#### Two questions this cannot settle on its own
+
+1. **Should a probe be exempt?** `TestConnectionCoreAsync` runs `SELECT 1;` to decide whether
+   credentials work. It is a read by any reading, and it is also the cheapest possible place to
+   hide something. The answer decides whether `Read` is a trusted declaration or merely a quieter
+   one.
+2. **Does `rabbitmqctl import_definitions` belong to this family or to the one above it?** It is
+   not SQL and not a manifest; it replaces a broker's entire topology from stdin. Today it is
+   invisible on both counts.
+
 ---
 
 ## 6. Sequence
