@@ -3459,7 +3459,7 @@
             if (identityRealm is null) { identityBindingError = "No realm linked to this app."; return; }
 
             IdentityBinding binding = await KeycloakService.CreateIdentityBindingAsync(
-                identityRealm.Id, attachIdentityModel.DeploymentId!.Value,
+                TenantId, identityRealm.Id, attachIdentityModel.DeploymentId!.Value,
                 client.Id, client.ClientId, attachIdentityModel.SecretName.Trim());
 
             try { await KeycloakService.SyncIdentityBindingAsync(TenantId, binding.Id); }
@@ -3479,7 +3479,7 @@
         identityBindingSyncErrors.Remove(bindingId);
         try
         {
-            await KeycloakService.RemoveIdentityBindingAsync(bindingId);
+            await KeycloakService.RemoveIdentityBindingAsync(TenantId, bindingId);
             await LoadAppIdentityBindings();
         }
         catch (Exception ex) { identityBindingError = ex.Message; }
