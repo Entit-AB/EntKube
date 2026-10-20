@@ -25,6 +25,9 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
     private readonly ApplicationDbContext db;
     private readonly VaultService vaultService;
     private readonly Mock<IKubernetesClientFactory> k8s;
+
+    /// <summary>Kept so a test can register a sink and count the dialogs one action raises.</summary>
+    private readonly EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate;
     private readonly RabbitMQService sut;
 
     public RabbitMQExternalDiscoveryTests()
@@ -33,6 +36,7 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         db = testDb.CreateContext();
         vaultService = testDb.CreateVaultService();
         k8s = new Mock<IKubernetesClientFactory>();
+        gate = (EntKube.Web.Services.ClusterChanges.ClusterChangeGate)TestServices.NewGate();
         // Real factory over the intercepting test database: the vault-seeded kubeconfig resolves
         // as production resolves it, then reaches the same mock — so the existing k8s assertions
         // keep working and additionally prove the delegation.
@@ -40,7 +44,9 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
             testDb.Factory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
             vaultService, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
-            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory));
+            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory),
+            logger: null,
+            gate: gate);
     }
 
     public void Dispose()
@@ -804,5 +810,107 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
 
         RabbitMQCluster after = await db.RabbitMQClusters.AsNoTracking().SingleAsync(c => c.Id == clusterId);
         after.Status.Should().Be(RabbitMQClusterStatus.Failed);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  One action, one acknowledgment
+    // ════════════════════════════════════════════════════════════════
+
+    private sealed class CountingSink : EntKube.Web.Services.ClusterChanges.IClusterChangeAckSink
+    {
+        public int Calls { get; private set; }
+
+        public Task<EntKube.Web.Services.ClusterChanges.ClusterChangeDecision> RequestAsync(
+            EntKube.Web.Services.ClusterChanges.PlannedClusterChange change,
+            EntKube.Web.Services.ClusterChanges.ClusterChangeDiff diff,
+            CancellationToken ct)
+        {
+            Calls++;
+            return Task.FromResult(
+                EntKube.Web.Services.ClusterChanges.ClusterChangeDecision.Acknowledged);
+        }
+    }
+
+    /// <summary>
+    /// The mock gates its applies the way the real factory does — the gate lives inside
+    /// <see cref="KubernetesClientFactory"/>, so a mocked seam never reaches it and a count would
+    /// sit at zero however the service behaved.
+    /// </summary>
+    private int gatedChanges;
+
+    private void GateEveryApply()
+    {
+        k8s.Setup(x => x.ApplyManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string manifest, string kubeconfig, CancellationToken ct) =>
+            {
+                gatedChanges++;
+                await gate.AcknowledgeAsync(
+                    new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                    {
+                        Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                        Manifest = manifest,
+                        Kubeconfig = kubeconfig,
+                    }, ct);
+                return string.Empty;
+            });
+
+        // ⚠️ EnsureNamespaceAsync too. It is a separate method on the mocked factory, and the
+        // real one reaches the gate through its own apply — so a helper that gated only
+        // ApplyManifestAsync left CreateClusterAsync raising exactly one acknowledgment whether
+        // or not it opened an operation, and the first version of the test below passed with the
+        // fix removed. The removal check is what caught it.
+        k8s.Setup(x => x.EnsureNamespaceAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string ns, string kubeconfig, CancellationToken ct) =>
+            {
+                gatedChanges++;
+                await gate.AcknowledgeAsync(
+                    new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                    {
+                        Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                        Manifest = $"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {ns}\n",
+                        Kubeconfig = kubeconfig,
+                    }, ct);
+            });
+    }
+
+    /// <summary>
+    /// Creating a RabbitMQ cluster applies the cluster CR and its auth Secret — and the S3
+    /// credentials too when a storage link is given. One decision, one dialog.
+    /// </summary>
+    [Fact]
+    public async Task CreatingAClusterAsksTheOperatorExactlyOnce()
+    {
+        (Tenant tenant, KubernetesCluster cluster) = await SeedTenantWithClusterAsync();
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryApply();
+
+        await sut.CreateClusterAsync(
+            tenant.Id, cluster.Id, "rmq-ack", "messaging", "3.13", 1, "5Gi", null, null);
+
+        // Without this the test is vacuous: if the action makes one gated change, the count is
+        // one whether or not an operation was opened.
+        gatedChanges.Should().BeGreaterThan(1, "the action must still make several gated changes");
+        sink.Calls.Should().Be(1, "one action, one dialog");
+    }
+
+    [Fact]
+    public async Task CreatingASecondClusterAsksAgain()
+    {
+        (Tenant tenant, KubernetesCluster cluster) = await SeedTenantWithClusterAsync();
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryApply();
+
+        await sut.CreateClusterAsync(
+            tenant.Id, cluster.Id, "rmq-one", "messaging", "3.13", 1, "5Gi", null, null);
+        await sut.CreateClusterAsync(
+            tenant.Id, cluster.Id, "rmq-two", "messaging", "3.13", 1, "5Gi", null, null);
+
+        sink.Calls.Should().Be(2, "each action is its own decision");
     }
 }

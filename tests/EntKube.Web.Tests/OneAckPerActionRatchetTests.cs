@@ -32,7 +32,7 @@ public class OneAckPerActionRatchetTests
     /// so they are a change of their own rather than a silent widening of this one. Driving this
     /// to zero is the work; the ratchet is here so it cannot grow while that waits.</para>
     /// </summary>
-    private const int Baseline = 38;
+    private const int Baseline = 22;
 
     /// <summary>
     /// How far below <see cref="Baseline"/> the count may sit before this test asks to be

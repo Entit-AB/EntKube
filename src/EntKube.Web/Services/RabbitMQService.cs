@@ -161,7 +161,11 @@ public class RabbitMQService(
     VaultService vaultService,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     EntKube.Contracts.Delivery.IDeliveryApi delivery,
-    ILogger<RabbitMQService>? logger = null)
+    ILogger<RabbitMQService>? logger = null,
+    // Optional, and last, so the existing positional constructions keep compiling. Safe to be
+    // absent: BeginOperation only ever suppresses the second and later questions of one action,
+    // never a refusal — so a null gate means more dialogs, never fewer.
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null)
 {
     /// <summary>
     /// A client for one of the tenant's clusters, or a refusal that says why. Keeps the cluster
@@ -345,6 +349,9 @@ public class RabbitMQService(
 
         db.RabbitMQClusters.Add(cluster);
         await db.SaveChangesAsync(ct);
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable? operation = gate?.BeginOperation("create a RabbitMQ cluster");
 
         try
         {
@@ -1958,6 +1965,9 @@ public class RabbitMQService(
             }
         }
 
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable? operation = gate?.BeginOperation("delete a RabbitMQ topology and everything that depends on it");
+
         foreach (RabbitMQCascadeItem dep in dependents)
             await client.DeleteManifestAsync(dep.Kind, dep.K8sName, cluster.Namespace, ct);
 
@@ -2062,6 +2072,9 @@ public class RabbitMQService(
               username: {B64(username)}
               password: {B64(password)}
             """;
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable? operation = gate?.BeginOperation("create a RabbitMQ user");
+
         await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(credSecret, ct);
 
         string tagsYaml = tags.Any()
@@ -2097,6 +2110,9 @@ public class RabbitMQService(
             await RunCtlAsync(cluster, ["delete_user", username], ct);
             return;
         }
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable? operation = gate?.BeginOperation("delete a RabbitMQ user");
 
         await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).DeleteManifestAsync("user", k8sName, cluster.Namespace,
              ct);
@@ -2276,6 +2292,9 @@ public class RabbitMQService(
             ?? throw new InvalidOperationException("Messaging binding not found.");
 
         // Best-effort: remove the K8s secret from the app's namespace.
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable? operation = gate?.BeginOperation("remove a RabbitMQ binding");
+
         try
         {
             Clusters.IClusterClient client = await ClusterFor(binding.TenantId, binding.AppDeployment.ClusterId, ct);
@@ -2345,6 +2364,9 @@ public class RabbitMQService(
         string amqpUrl = $"amqp://{appUsername}:{appPassword}@{host}:5672/{encodedVhost}";
 
         Clusters.IClusterClient appCluster = await ClusterFor(binding.TenantId, binding.AppDeployment.ClusterId, ct);
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable? operation = gate?.BeginOperation("sync a RabbitMQ binding");
+
         await appCluster.EnsureNamespaceAsync(binding.AppDeployment.Namespace, ct);
 
         // Named keys, not a whole Secret: a binding may share the app's own Secret on purpose,
@@ -2648,6 +2670,9 @@ public class RabbitMQService(
 
         Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
         string cronName = $"{cluster.Name}-scheduled-backup";
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable? operation = gate?.BeginOperation("update the RabbitMQ backup schedule");
 
         if (!string.IsNullOrWhiteSpace(cluster.BackupSchedule) && cluster.StorageLink is not null)
         {
