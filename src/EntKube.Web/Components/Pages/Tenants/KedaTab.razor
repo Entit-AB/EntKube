@@ -569,7 +569,7 @@
         loadError = null;
         try
         {
-            scalers = await KedaService.GetScalersAsync(AppId, EnvironmentId);
+            scalers = await KedaService.GetScalersAsync(TenantId, AppId, EnvironmentId);
             kedaAvailable = await KedaService.IsKedaAvailableAsync(TenantId, EnvironmentId);
         }
         catch (Exception ex)
@@ -700,7 +700,7 @@
     {
         try
         {
-            await KedaService.DeleteScalerAsync(s.Id);
+            await KedaService.DeleteScalerAsync(TenantId, s.Id);
             await LoadAsync();
             Toasts.Success($"Deleted autoscaler \"{s.Name}\".");
         }

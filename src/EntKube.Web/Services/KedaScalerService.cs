@@ -26,12 +26,26 @@ public class KedaScalerService(
 {
     // ── CRUD ──────────────────────────────────────────────────────────────────
 
+    /// <summary>
+    /// Whether an app and an environment are both this tenant's.
+    ///
+    /// <para>Every entry point here is keyed on the (app, environment) pair rather than on a
+    /// scaler id, so this is where the boundary has to be drawn: without it, naming somebody
+    /// else's app is enough to read, replace or delete the autoscalers that decide how many
+    /// replicas their workloads run.</para>
+    /// </summary>
+    private static async Task<bool> PairIsTenantsAsync(
+        EntKube.Web.Data.Modules.DeliveryDbContext db, Guid tenantId,
+        Guid appId, Guid environmentId, CancellationToken ct) =>
+        await db.Apps.AnyAsync(a => a.Id == appId && a.Customer.TenantId == tenantId, ct)
+        && await db.Environments.AnyAsync(e => e.Id == environmentId && e.TenantId == tenantId, ct);
+
     public async Task<List<KedaScaler>> GetScalersAsync(
-        Guid appId, Guid environmentId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
         using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
         return await db.KedaScalers
-            .Where(s => s.AppId == appId && s.EnvironmentId == environmentId)
+            .Where(s => s.TenantId == tenantId && s.AppId == appId && s.EnvironmentId == environmentId)
             .OrderBy(s => s.Name)
             .ToListAsync(ct);
     }
@@ -51,10 +65,16 @@ public class KedaScalerService(
         name = NormalizeName(name);
         using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
+        if (!await PairIsTenantsAsync(db, tenantId, appId, environmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "App or environment not found, or it is not this tenant's.");
+        }
+
         await EnsureNameAvailableAsync(db, appId, environmentId, name, id, ct);
 
         KedaScaler scaler = id is { } existingId
-            ? await db.KedaScalers.FirstOrDefaultAsync(s => s.Id == existingId, ct)
+            ? await db.KedaScalers.FirstOrDefaultAsync(s => s.Id == existingId && s.TenantId == tenantId, ct)
                 ?? throw new InvalidOperationException($"KEDA scaler {existingId} not found.")
             : new KedaScaler { Id = Guid.NewGuid(), TenantId = tenantId, AppId = appId, EnvironmentId = environmentId, Name = name };
 
@@ -120,10 +140,16 @@ public class KedaScalerService(
 
         using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
+        if (!await PairIsTenantsAsync(db, tenantId, appId, environmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "App or environment not found, or it is not this tenant's.");
+        }
+
         await EnsureNameAvailableAsync(db, appId, environmentId, name, id, ct);
 
         KedaScaler scaler = id is { } existingId
-            ? await db.KedaScalers.FirstOrDefaultAsync(s => s.Id == existingId, ct)
+            ? await db.KedaScalers.FirstOrDefaultAsync(s => s.Id == existingId && s.TenantId == tenantId, ct)
                 ?? throw new InvalidOperationException($"Autoscaler {existingId} not found.")
             : new KedaScaler { Id = Guid.NewGuid(), TenantId = tenantId, AppId = appId, EnvironmentId = environmentId, Name = name };
 
@@ -158,10 +184,16 @@ public class KedaScalerService(
         name = NormalizeName(name);
         using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
+        if (!await PairIsTenantsAsync(db, tenantId, appId, environmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "App or environment not found, or it is not this tenant's.");
+        }
+
         await EnsureNameAvailableAsync(db, appId, environmentId, name, id, ct);
 
         KedaScaler scaler = id is { } existingId
-            ? await db.KedaScalers.FirstOrDefaultAsync(s => s.Id == existingId, ct)
+            ? await db.KedaScalers.FirstOrDefaultAsync(s => s.Id == existingId && s.TenantId == tenantId, ct)
                 ?? throw new InvalidOperationException($"KEDA scaler {existingId} not found.")
             : new KedaScaler { Id = Guid.NewGuid(), TenantId = tenantId, AppId = appId, EnvironmentId = environmentId, Name = name };
 
@@ -175,28 +207,56 @@ public class KedaScalerService(
         return scaler;
     }
 
-    public async Task<bool> DeleteScalerAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose autoscaler. Deleting one does not stop the live ScaledObject — but it removes the
+    /// record EntKube re-applies from, so the next apply drops it.
+    /// </param>
+    public async Task<bool> DeleteScalerAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
-        KedaScaler? scaler = await db.KedaScalers.FindAsync([id], ct);
+        // FindAsync takes a key and cannot carry a predicate.
+        KedaScaler? scaler = await db.KedaScalers
+            .FirstOrDefaultAsync(s => s.Id == id && s.TenantId == tenantId, ct);
         if (scaler is null) return false;
         db.KedaScalers.Remove(scaler);
         await db.SaveChangesAsync(ct);
         return true;
     }
 
-    /// <summary>Copies all autoscalers for an app from one environment to another, replacing the target.</summary>
+    /// <summary>
+    /// Copies all autoscalers for an app from one environment to another, replacing the target.
+    ///
+    /// <para>⚠️ This replaces the target environment's autoscalers — it deletes before it
+    /// copies — so it took the broadest authority in the file from the narrowest argument list:
+    /// an app id and two environment ids, and no tenant. Both environments are checked, because
+    /// the destructive half is the target and the readable half is the source.</para>
+    ///
+    /// <para>The copies used to be stamped <c>TenantId = src.TenantId</c>, taken off the row
+    /// being read. That is the derived-tenant shape: it cannot refuse anything, and it would
+    /// have written rows belonging to the source's owner into whatever app was named.</para>
+    ///
+    /// <para>No caller today — the KEDA tab offers no copy button. It is public surface, so it
+    /// is scoped like the rest.</para>
+    /// </summary>
     public async Task CopyFromEnvironmentAsync(
-        Guid appId, Guid sourceEnvId, Guid targetEnvId, CancellationToken ct = default)
+        Guid tenantId, Guid appId, Guid sourceEnvId, Guid targetEnvId, CancellationToken ct = default)
     {
         using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
+        if (!await PairIsTenantsAsync(db, tenantId, appId, sourceEnvId, ct)
+            || !await PairIsTenantsAsync(db, tenantId, appId, targetEnvId, ct))
+        {
+            throw new InvalidOperationException(
+                "App or environment not found, or it is not this tenant's.");
+        }
+
         List<KedaScaler> source = await db.KedaScalers
-            .Where(s => s.AppId == appId && s.EnvironmentId == sourceEnvId)
+            .Where(s => s.TenantId == tenantId && s.AppId == appId && s.EnvironmentId == sourceEnvId)
             .ToListAsync(ct);
 
         List<KedaScaler> target = await db.KedaScalers
-            .Where(s => s.AppId == appId && s.EnvironmentId == targetEnvId)
+            .Where(s => s.TenantId == tenantId && s.AppId == appId && s.EnvironmentId == targetEnvId)
             .ToListAsync(ct);
 
         db.KedaScalers.RemoveRange(target);
@@ -206,7 +266,7 @@ public class KedaScalerService(
             db.KedaScalers.Add(new KedaScaler
             {
                 Id = Guid.NewGuid(),
-                TenantId = src.TenantId,
+                TenantId = tenantId,
                 AppId = appId,
                 EnvironmentId = targetEnvId,
                 Name = src.Name,
@@ -338,7 +398,13 @@ public class KedaScalerService(
     {
         using EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext();
 
-        List<KedaScaler> scalers = await GetScalersAsync(appId, environmentId, ct);
+        if (!await PairIsTenantsAsync(db, tenantId, appId, environmentId, ct))
+        {
+            throw new InvalidOperationException(
+                "App or environment not found, or it is not this tenant's.");
+        }
+
+        List<KedaScaler> scalers = await GetScalersAsync(tenantId, appId, environmentId, ct);
         if (scalers.Count == 0)
             return [("(no scalers)", false, "No autoscalers configured — nothing to apply.")];
 
@@ -458,11 +524,20 @@ public class KedaScalerService(
     public async Task<AutoscalerScanResult> ScanEnvironmentAsync(
         Guid tenantId, Guid appId, Guid environmentId, CancellationToken ct = default)
     {
-        List<KedaScaler> configured = await GetScalersAsync(appId, environmentId, ct);
+        List<KedaScaler> configured = await GetScalersAsync(tenantId, appId, environmentId, ct);
 
         List<(Guid ClusterId, string ClusterName, string Namespace)> targets;
         using (EntKube.Web.Data.Modules.DeliveryDbContext db = dbFactory.CreateDbContext())
         {
+            // Before ResolveTargetsAsync, not after: the scan reports every cluster and
+            // namespace it looked at, so a foreign app leaks that list even though the
+            // cluster seam goes on to refuse each one.
+            if (!await PairIsTenantsAsync(db, tenantId, appId, environmentId, ct))
+            {
+                throw new InvalidOperationException(
+                    "App or environment not found, or it is not this tenant's.");
+            }
+
             targets = await ResolveTargetsAsync(db, appId, environmentId, ct);
         }
 
