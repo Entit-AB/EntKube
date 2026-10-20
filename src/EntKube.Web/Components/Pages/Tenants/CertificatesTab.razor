@@ -423,7 +423,7 @@ else
         busy = true;
         try
         {
-            await DistService.CreateDistributionAsync(new CertificateDistribution
+            await DistService.CreateDistributionAsync(TenantId, new CertificateDistribution
             {
                 TenantId = TenantId,
                 ClusterId = null, // resolved dynamically (app deployments / all tenant clusters)
