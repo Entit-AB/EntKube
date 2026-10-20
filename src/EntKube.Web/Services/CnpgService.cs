@@ -21,7 +21,8 @@ public class CnpgService(
     VaultService vaultService,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
-    EntKube.Contracts.Delivery.IDeliveryApi delivery)
+    EntKube.Contracts.Delivery.IDeliveryApi delivery,
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate)
 {
     /// <summary>
     /// A client for one of the tenant's clusters, or a refusal that says why.
@@ -1756,11 +1757,25 @@ public class CnpgService(
 
             await ReconcileClusterStatusAsync(cluster, detail, ct);
 
-            // Push any code-level config changes (e.g. archive_timeout, target:primary on
-            // ScheduledBackup) to the K8s resources. kubectl apply is idempotent — when the
-            // manifest is already in sync this is a cheap no-op GET with no write. Best-effort:
-            // a failure here must not prevent the detail view from loading.
-            _ = ReconcileClusterManifestsAsync(cluster, ct);
+            // ⚠️ This used to APPLY the generated manifest here, fire-and-forget, so that a
+            // configuration change shipped in a new release (archive_timeout, target:primary on
+            // the ScheduledBackup) reached the cluster the next time somebody opened the panel.
+            // Three things were wrong with it, and the comment that stood here asserted the
+            // opposite of the first:
+            //
+            //   * "kubectl apply is idempotent — a cheap no-op GET with no write" is not what
+            //     the gate sees. The gate asks before every apply, whatever the apply would do,
+            //     so EXPANDING A POSTGRES CLUSTER RAISED AN ACKNOWLEDGMENT DIALOG. A read must
+            //     never ask: an operator cannot tell a prompt they caused from one they did not.
+            //   * It was not even a no-op. kubectl rewrites last-applied-configuration, and the
+            //     reported diff was exactly that annotation and nothing else.
+            //   * `_ =` meant the write outlived the request that started it, raced with the
+            //     render, and reported its failures to nobody.
+            //
+            // Detected instead, by server-side dry run — which writes nothing and asks nothing.
+            // Re-applying is ReapplyClusterManifestsAsync, an action with one dialog, taken by an
+            // operator who can see what it would change.
+            await DetectManifestDriftAsync(cluster, detail, ct);
 
             // Query K8s Backup CRs and populate detail.Backups directly so the UI always
             // reflects live state. DB persistence is a separate best-effort step below.
@@ -1801,26 +1816,92 @@ public class CnpgService(
     /// idempotent — when the spec is already in sync it issues no write. Errors
     /// are swallowed because this is a best-effort background reconcile.
     /// </summary>
-    private async Task ReconcileClusterManifestsAsync(CnpgCluster cluster, CancellationToken ct)
+    /// <summary>
+    /// Asks the cluster how it differs from the manifest EntKube would generate, and records the
+    /// answer on the detail. Writes nothing, so it raises no acknowledgment.
+    ///
+    /// <para>Three outcomes, not two: "could not tell" is kept distinct from "no difference",
+    /// because collapsing them reports a drifted cluster as healthy the moment the cluster stops
+    /// answering — which is when an operator most wants to know.</para>
+    /// </summary>
+    private async Task DetectManifestDriftAsync(
+        CnpgCluster cluster, CnpgClusterDetail detail, CancellationToken ct)
     {
         if (cluster.StorageLink is null)
+        {
             return;
+        }
 
         try
         {
-            Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
-            string s3SecretName = $"{cluster.Name}-s3-credentials";
+            Clusters.IClusterClient client =
+                await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
 
-            await client.ApplyManifestAsync(
-                BuildClusterManifest(cluster, cluster.StorageLink, s3SecretName), ct);
+            Clusters.ManifestDiff diff = await client.DiffManifestAsync(
+                BuildClusterManifest(cluster, cluster.StorageLink, $"{cluster.Name}-s3-credentials"),
+                cluster.Namespace, ct);
+
+            detail.ConfigurationDrift = diff.Outcome;
+            detail.ConfigurationDriftText = diff.Text;
+        }
+        catch
+        {
+            detail.ConfigurationDrift = Clusters.DiffOutcome.Unknown;
+        }
+    }
+
+    /// <summary>
+    /// Applies the manifest EntKube would generate for this cluster — the Cluster CR and, when
+    /// one is configured, the ScheduledBackup. This is what the detail panel's "re-apply" offers
+    /// once <see cref="CnpgClusterDetail.ConfigurationDrift"/> says the live object differs.
+    ///
+    /// <para>One action, one acknowledgment: the two applies are one decision, and the operator
+    /// has already seen the diff that prompted it.</para>
+    /// </summary>
+    public async Task<KubernetesOperationResult<string>> ReapplyClusterManifestsAsync(
+        Guid tenantId, Guid cnpgClusterId, CancellationToken ct = default)
+    {
+        using DataServicesDbContext db = dbFactory.CreateDbContext();
+
+        CnpgCluster? cluster = await db.CnpgClusters
+            .Include(c => c.StorageLink)
+            .FirstOrDefaultAsync(c => c.Id == cnpgClusterId && c.TenantId == tenantId, ct);
+
+        if (cluster is null)
+        {
+            return KubernetesOperationResult<string>.Failure("Cluster not found, or not this tenant's.");
+        }
+
+        if (cluster.StorageLink is null)
+        {
+            return KubernetesOperationResult<string>.Failure(
+                "This cluster has no storage link, so there is no manifest to apply.");
+        }
+
+        using IDisposable operation = gate.BeginOperation(
+            $"re-apply the configuration of {cluster.Name} in {cluster.Namespace}");
+
+        try
+        {
+            Clusters.IClusterClient client =
+                await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
+
+            string output = await client.ApplyManifestAsync(
+                BuildClusterManifest(cluster, cluster.StorageLink, $"{cluster.Name}-s3-credentials"), ct);
 
             if (!string.IsNullOrWhiteSpace(cluster.BackupSchedule))
             {
                 await client.ApplyManifestAsync(
-                    BuildScheduledBackupManifest(cluster.Name, cluster.Namespace, cluster.BackupSchedule), ct);
+                    BuildScheduledBackupManifest(
+                        cluster.Name, cluster.Namespace, cluster.BackupSchedule), ct);
             }
+
+            return KubernetesOperationResult<string>.Success(output);
         }
-        catch { /* non-fatal */ }
+        catch (Exception ex)
+        {
+            return KubernetesOperationResult<string>.Failure(ex.Message);
+        }
     }
 
     /// <summary>
