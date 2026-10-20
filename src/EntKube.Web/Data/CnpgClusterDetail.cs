@@ -18,6 +18,27 @@ public class CnpgClusterDetail
     public List<CnpgPodInfo> Pods { get; set; } = [];
 
     /// <summary>
+    /// Whether the live Cluster CR differs from the manifest EntKube would generate for it, and
+    /// how.
+    ///
+    /// <para><b>Why this is reported rather than repaired.</b> Opening this panel used to
+    /// <i>apply</i> the generated manifest, so that a configuration change shipped in a new
+    /// EntKube release reached the cluster the next time somebody looked at it. An apply is a
+    /// change, the change gate asks before every one, and so expanding a Postgres cluster raised
+    /// an acknowledgment dialog — for a read. Worse, it was fire-and-forget, so the write
+    /// outlived the request that started it and its failures went nowhere.</para>
+    ///
+    /// <para>So the drift is <em>detected</em> here, by server-side dry run, which writes nothing
+    /// and asks nothing — and re-applying is an action the operator takes, with one dialog, when
+    /// they can see what it would change.</para>
+    /// </summary>
+    public EntKube.Web.Services.Clusters.DiffOutcome ConfigurationDrift { get; set; }
+        = EntKube.Web.Services.Clusters.DiffOutcome.Unknown;
+
+    /// <summary>The drift itself, when <see cref="ConfigurationDrift"/> is Differs.</summary>
+    public string? ConfigurationDriftText { get; set; }
+
+    /// <summary>
     /// The CNPG cluster phase as reported by the Cluster status (e.g. "Cluster in healthy state").
     /// </summary>
     public string Phase { get; set; } = "Unknown";

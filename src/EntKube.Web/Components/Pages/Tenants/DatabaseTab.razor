@@ -1234,6 +1234,46 @@
                                         </div>
                                     </div>
 
+                                    @* ── Configuration drift ──
+                                       Opening this panel used to APPLY the generated manifest, which
+                                       raised an acknowledgment dialog for a read. The drift is shown
+                                       here instead, and re-applying is a button. *@
+                                    @if (clusterDetail.ConfigurationDrift == EntKube.Web.Services.Clusters.DiffOutcome.Differs)
+                                    {
+                                        <div class="alert alert-warning py-2 px-3 small mb-3">
+                                            <div class="d-flex justify-content-between align-items-start gap-2">
+                                                <div>
+                                                    <i class="bi bi-exclamation-triangle me-1"></i>
+                                                    <strong>The live configuration differs from what EntKube would apply.</strong>
+                                                    <div class="text-muted mt-1">
+                                                        Usually a setting that changed in a newer EntKube release and has not
+                                                        been pushed to this cluster yet.
+                                                    </div>
+                                                </div>
+                                                <button class="btn btn-sm btn-outline-dark py-0 flex-shrink-0"
+                                                        @onclick="() => ReapplyCnpgConfiguration(clusterDetail.Cluster.Id)"
+                                                        disabled="@(reapplyingCnpgId == clusterDetail.Cluster.Id)">
+                                                    @if (reapplyingCnpgId == clusterDetail.Cluster.Id)
+                                                    {
+                                                        <span class="spinner-border spinner-border-sm me-1"></span>
+                                                    }
+                                                    Re-apply
+                                                </button>
+                                            </div>
+                                            @if (!string.IsNullOrWhiteSpace(clusterDetail.ConfigurationDriftText))
+                                            {
+                                                <details class="mt-2">
+                                                    <summary class="text-muted">What would change</summary>
+                                                    <pre class="mb-0 mt-1 small" style="max-height: 16rem; overflow: auto;">@clusterDetail.ConfigurationDriftText</pre>
+                                                </details>
+                                            }
+                                        </div>
+                                    }
+                                    @if (reapplyCnpgError is not null)
+                                    {
+                                        <div class="alert alert-danger py-2 px-3 small mb-3">@reapplyCnpgError</div>
+                                    }
+
                                     @* ── Pod Table ── *@
                                     <h6 class="small text-muted mb-2"><i class="bi bi-hdd-stack me-1"></i>Pods</h6>
                                     @if (clusterDetail.Pods.Count > 0)
@@ -4022,6 +4062,43 @@
         finally
         {
             refreshing = false;
+        }
+    }
+
+    private Guid? reapplyingCnpgId;
+    private string? reapplyCnpgError;
+
+    /// <summary>
+    /// Pushes the generated manifest to the cluster, deliberately. One acknowledgment: the
+    /// service opens an operation around both applies, and the operator has just read the diff
+    /// that prompted this.
+    /// </summary>
+    private async Task ReapplyCnpgConfiguration(Guid cnpgClusterId)
+    {
+        reapplyingCnpgId = cnpgClusterId;
+        reapplyCnpgError = null;
+
+        try
+        {
+            KubernetesOperationResult<string> result =
+                await CnpgService.ReapplyClusterManifestsAsync(TenantId, cnpgClusterId);
+
+            if (!result.IsSuccess)
+            {
+                reapplyCnpgError = result.Error;
+            }
+            else
+            {
+                clusterDetail = await CnpgService.GetClusterDetailAsync(TenantId, cnpgClusterId);
+            }
+        }
+        catch (Exception ex)
+        {
+            reapplyCnpgError = ex.Message;
+        }
+        finally
+        {
+            reapplyingCnpgId = null;
         }
     }
 

@@ -42,7 +42,7 @@ public class CnpgServiceTests : IDisposable
         sut = new CnpgService(dbFactory, vaultService,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory.Object),
             new EntKube.Web.Modules.Api.CatalogApi(dbFactory),
-            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory));
+            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory), TestServices.NewGate());
     }
 
     public void Dispose()
@@ -1239,5 +1239,181 @@ public class CnpgServiceTests : IDisposable
         };
         db.AppDeployments.Add(deployment);
         return deployment.Id;
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  A read must not write
+    // ════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Opening the detail panel for a Postgres cluster must not change the cluster.
+    ///
+    /// <para><b>Reported from production:</b> expanding a Postgres cluster raised an
+    /// acknowledgment dialog, and the diff in it was a CNPG <c>Cluster</c> apply whose only
+    /// difference was the <c>last-applied-configuration</c> annotation. This read was firing
+    /// <c>ReconcileClusterManifestsAsync</c> — two applies, fire-and-forget — so that a setting
+    /// changed in a newer release reached the cluster next time somebody looked at it.</para>
+    ///
+    /// <para>The comment above it claimed "kubectl apply is idempotent — a cheap no-op GET with
+    /// no write". The gate does not care whether an apply would change anything: it asks before
+    /// every one. And it was not a no-op either, because kubectl rewrites that annotation.</para>
+    ///
+    /// <para>So: nothing is applied, and the drift is reported instead.</para>
+    /// </summary>
+    [Fact]
+    public async Task GetClusterDetailAsync_AppliesNothing()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        CnpgCluster pg = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = cluster.Id,
+            Name = "postgres",
+            Namespace = "databases",
+            PostgresVersion = "18",
+            StorageSize = "50Gi",
+            StorageLinkId = storageLink.Id,
+            BackupSchedule = "0 0 2 * * *",
+            Status = CnpgClusterStatus.Running,
+        };
+        db.CnpgClusters.Add(pg);
+        await db.SaveChangesAsync();
+
+        k8sFactory.Setup(f => f.GetJsonAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync("{}");
+
+        k8sFactory.Setup(f => f.DiffManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new EntKube.Web.Services.Clusters.ManifestDiff(
+                EntKube.Web.Services.Clusters.DiffOutcome.Differs, "- old\n+ new"));
+
+        CnpgClusterDetail? detail = await sut.GetClusterDetailAsync(tenant.Id, pg.Id);
+
+        detail.Should().NotBeNull();
+
+        // The whole point. Asserted with Verify rather than on a captured list, because the old
+        // call was fire-and-forget: a list assertion could pass simply by running before the
+        // write it was meant to catch.
+        k8sFactory.Verify(f => f.ApplyManifestAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+        k8sFactory.Verify(f => f.ApplyManifestInNamespaceAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>(),
+            It.IsAny<CancellationToken>()), Times.Never);
+
+        detail!.ConfigurationDrift.Should().Be(EntKube.Web.Services.Clusters.DiffOutcome.Differs);
+        detail.ConfigurationDriftText.Should().Be("- old\n+ new");
+    }
+
+    /// <summary>
+    /// And "could not tell" is not reported as "no difference" — the three-state outcome is
+    /// carried through, because a cluster that has stopped answering is exactly when an operator
+    /// wants to know that EntKube cannot vouch for its configuration.
+    /// </summary>
+    [Fact]
+    public async Task GetClusterDetailAsync_WhenTheDiffCannotBeTaken_SaysUnknownNotMatches()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        CnpgCluster pg = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = cluster.Id,
+            Name = "postgres",
+            Namespace = "databases",
+            PostgresVersion = "18",
+            StorageSize = "50Gi",
+            StorageLinkId = storageLink.Id,
+            Status = CnpgClusterStatus.Running,
+        };
+        db.CnpgClusters.Add(pg);
+        await db.SaveChangesAsync();
+
+        k8sFactory.Setup(f => f.GetJsonAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ReturnsAsync("{}");
+
+        k8sFactory.Setup(f => f.DiffManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("apiserver unreachable"));
+
+        CnpgClusterDetail? detail = await sut.GetClusterDetailAsync(tenant.Id, pg.Id);
+
+        detail!.ConfigurationDrift.Should()
+            .Be(EntKube.Web.Services.Clusters.DiffOutcome.Unknown);
+    }
+
+    /// <summary>
+    /// Re-applying is the deliberate half: it does apply, both documents, and it is an action
+    /// the operator chose after reading the diff.
+    /// </summary>
+    [Fact]
+    public async Task ReapplyClusterManifestsAsync_AppliesTheClusterAndItsSchedule()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        CnpgCluster pg = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = cluster.Id,
+            Name = "postgres",
+            Namespace = "databases",
+            PostgresVersion = "18",
+            StorageSize = "50Gi",
+            StorageLinkId = storageLink.Id,
+            BackupSchedule = "0 0 2 * * *",
+            Status = CnpgClusterStatus.Running,
+        };
+        db.CnpgClusters.Add(pg);
+        await db.SaveChangesAsync();
+
+        List<string> applied = [];
+        k8sFactory.Setup(f => f.ApplyManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, CancellationToken>((m, _, _) => applied.Add(m))
+            .ReturnsAsync(string.Empty);
+
+        KubernetesOperationResult<string> result =
+            await sut.ReapplyClusterManifestsAsync(tenant.Id, pg.Id);
+
+        result.IsSuccess.Should().BeTrue(result.Error);
+        applied.Should().Contain(m => m.Contains("kind: Cluster"));
+        applied.Should().Contain(m => m.Contains("kind: ScheduledBackup"));
+    }
+
+    [Fact]
+    public async Task ReapplyClusterManifestsAsync_ForAnotherTenant_AppliesNothing()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        CnpgCluster pg = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = cluster.Id,
+            Name = "postgres",
+            Namespace = "databases",
+            PostgresVersion = "18",
+            StorageSize = "50Gi",
+            StorageLinkId = storageLink.Id,
+            Status = CnpgClusterStatus.Running,
+        };
+        db.CnpgClusters.Add(pg);
+        await db.SaveChangesAsync();
+
+        KubernetesOperationResult<string> result =
+            await sut.ReapplyClusterManifestsAsync(Guid.NewGuid(), pg.Id);
+
+        result.IsSuccess.Should().BeFalse();
+        k8sFactory.Verify(f => f.ApplyManifestAsync(
+            It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 }

@@ -30,11 +30,23 @@ public static class TestServices
         CnpgService cnpgService = new(dbFactory, vaultService,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory),
             new EntKube.Web.Modules.Api.CatalogApi(dbFactory),
-            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory));
+            new EntKube.Web.Modules.Api.DeliveryApi(dbFactory), TestServices.NewGate());
         return new KeycloakService(dbFactory, vaultService, httpFactory, cnpgService,
             new EntKube.Web.Modules.Api.CatalogApi(dbFactory),
             new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, k8sFactory));
     }
+
+    /// <summary>
+    /// A real change gate, as production registers one: empty configuration, so acknowledgment is
+    /// required, and no sink, so nothing silently approves. Tests that drive a mocked
+    /// <see cref="IKubernetesClientFactory"/> never reach it — the gate lives inside the real
+    /// factory — but a service that opens an operation needs one to open.
+    /// </summary>
+    public static EntKube.Web.Services.ClusterChanges.IClusterChangeGate NewGate() =>
+        new EntKube.Web.Services.ClusterChanges.ClusterChangeGate(
+            new ConfigurationBuilder().Build(),
+            Microsoft.Extensions.Logging.Abstractions
+                .NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance);
 
     /// <summary>A 32-byte base64 key — enough for the vault encryption service and to derive ingest tokens.</summary>
     /// <summary>
@@ -90,7 +102,7 @@ public static class TestServices
         CnpgService cnpg = new(testDb.Factory, vaultService,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory),
             new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
-            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory));
+            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory), TestServices.NewGate());
 
         return new ComponentLifecycleService(
             testDb.Factory, vaultService,
