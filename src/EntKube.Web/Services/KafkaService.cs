@@ -180,6 +180,18 @@ public class KafkaService(
     /// re-applies the CRs. Note: Strimzi does not shrink storage; increasing the
     /// broker replica count is safe, decreasing may require partition reassignment.
     /// </summary>
+    // ── On the seam calls below ───────────────────────────────────────────────
+    //
+    // Eight calls used to pass cluster.TenantId — the tenant read off the KafkaCluster row —
+    // with cluster.KubernetesClusterId as the cluster. That is the CROSS-ROW shape, not the
+    // tautological one: it compares two tables, so it would catch a KafkaCluster pointing at
+    // another tenant's Kubernetes cluster. They were never no-ops, and VacuousTenantCheckTests
+    // was right not to count them.
+    //
+    // They pass tenantId now because every one of those methods already had it as a parameter,
+    // and each row was fetched with `c.TenantId == tenantId` two lines above — so the two
+    // expressions carry the same value and this changes no behaviour. What it changes is where
+    // the authorization reads from: the caller, not a row the caller named.
     public async Task UpdateClusterAsync(
         Guid tenantId, Guid clusterId,
         int replicas, string kafkaVersion, string storageSize, string? storageClass,
@@ -205,7 +217,7 @@ public class KafkaService(
 
         try
         {
-            Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
+            Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
             await client.ApplyManifestAsync(BuildNodePoolManifest(cluster), ct);
             await client.ApplyManifestAsync(BuildClusterManifest(cluster), ct);
         }
@@ -234,7 +246,7 @@ public class KafkaService(
 
         try
         {
-            Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
+            Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
             // Deleting the Kafka CR cascades to broker pods/PVCs; remove the node pool too.
             await client.DeleteManifestAsync("kafka", cluster.Name, cluster.Namespace, ct);
             await client.DeleteManifestAsync("kafkanodepool", $"{cluster.Name}-pool", cluster.Namespace, ct);
@@ -268,7 +280,7 @@ public class KafkaService(
 
         try
         {
-            Clusters.IClusterClient client = await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
+            Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
 
             string crdJson = await client.GetJsonAsync(
                 $"kafka.kafka.strimzi.io/{cluster.Name}", cluster.Namespace, ct: ct);
@@ -283,7 +295,7 @@ public class KafkaService(
                 ? "Cluster ready"
                 : detail.Pods.Count == 0 ? "Provisioning..." : $"Starting ({readyPods}/{detail.Pods.Count} ready)";
 
-            await ReconcileStatusAsync(cluster.Id, detail.Ready, ct);
+            await ReconcileStatusAsync(tenantId, cluster.Id, detail.Ready, ct);
         }
         catch
         {
@@ -297,10 +309,21 @@ public class KafkaService(
     /// Polls the live Kafka CR and updates the stored status. Safe to call from a
     /// background loop. Does not regress a Running cluster to Creating on a transient blip.
     /// </summary>
-    public async Task ReconcileStatusAsync(Guid clusterId, bool ready, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose cluster. Both callers below reach this with an id from a tenant-scoped query, so
+    /// nothing in the app could cross it — this closes the <em>public surface</em>, which is
+    /// the thing an API exposes whatever its current callers do. The two sibling services say
+    /// the same: <c>RabbitMQService</c> and <c>ElasticsearchService</c> both declare
+    /// <c>ReconcileStatusAsync(tenantId, clusterId, …)</c>. This one was the odd one out.
+    /// </param>
+    public async Task ReconcileStatusAsync(
+        Guid tenantId, Guid clusterId, bool ready, CancellationToken ct = default)
     {
         using DataServicesDbContext db = dbFactory.CreateDbContext();
-        KafkaCluster? tracked = await db.KafkaClusters.FindAsync([clusterId], ct);
+
+        // FindAsync takes a key and cannot carry a predicate.
+        KafkaCluster? tracked = await db.KafkaClusters
+            .FirstOrDefaultAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
         if (tracked is null) return;
 
         KafkaClusterStatus newStatus = ready
@@ -352,7 +375,7 @@ public class KafkaService(
                     string crdJson = await (await ClusterFor(tenantId, cluster.KubernetesClusterId, ct)).GetJsonAsync(
                         $"kafka.kafka.strimzi.io/{cluster.Name}", cluster.Namespace,
                          ct: ct);
-                    await ReconcileStatusAsync(cluster.Id, ParseReadyCondition(crdJson), ct);
+                    await ReconcileStatusAsync(tenantId, cluster.Id, ParseReadyCondition(crdJson), ct);
                 }
                 catch { /* cluster unreachable — leave status as-is */ }
             }
@@ -396,7 +419,7 @@ public class KafkaService(
             RetentionMs = retentionMs
         };
 
-        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(BuildTopicManifest(cluster, topic), ct);
+        await (await ClusterFor(tenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(BuildTopicManifest(cluster, topic), ct);
 
         db.KafkaTopics.Add(topic);
         await db.SaveChangesAsync(ct);
@@ -466,7 +489,7 @@ public class KafkaService(
             SuperUser = superUser
         };
 
-        await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(BuildUserManifest(cluster, user), ct);
+        await (await ClusterFor(tenantId, cluster.KubernetesClusterId, ct)).ApplyManifestAsync(BuildUserManifest(cluster, user), ct);
 
         db.KafkaUsers.Add(user);
         await db.SaveChangesAsync(ct);
@@ -609,7 +632,7 @@ public class KafkaService(
             ?? throw new InvalidOperationException("Kafka binding not found.");
 
         KafkaCluster cluster = binding.KafkaCluster;
-        Clusters.IClusterClient appCluster = await ClusterFor(cluster.TenantId, binding.AppDeployment.ClusterId, ct);
+        Clusters.IClusterClient appCluster = await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct);
         string appNs = binding.AppDeployment.Namespace;
 
         Dictionary<string, string> data = new()
@@ -623,13 +646,13 @@ public class KafkaService(
                 throw new InvalidOperationException(
                     "This cluster requires SASL authentication — select a Kafka user for the binding.");
 
-            string? password = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetSecretValueAsync(
+            string? password = await (await ClusterFor(tenantId, cluster.KubernetesClusterId, ct)).GetSecretValueAsync(
                 binding.KafkaUser.CredentialsSecretName, "password",
                 cluster.Namespace, ct)
                 ?? throw new InvalidOperationException(
                     "The Kafka user's password secret is not available yet — the user may still be provisioning.");
 
-            string? caCert = await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).GetSecretValueAsync(
+            string? caCert = await (await ClusterFor(tenantId, cluster.KubernetesClusterId, ct)).GetSecretValueAsync(
                 $"{cluster.Name}-cluster-ca-cert", "ca.crt",
                 cluster.Namespace, ct);
 
