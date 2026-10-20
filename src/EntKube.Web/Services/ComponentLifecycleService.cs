@@ -876,7 +876,7 @@ public class ComponentLifecycleService(
         // missing volumes and failing the upgrade.
         if (component.HelmChartName == "keycloakx")
         {
-            string themeExtras = await keycloakService.BuildKeycloakThemeHelmExtrasAsync(component.Id, ct);
+            string themeExtras = await keycloakService.BuildKeycloakThemeHelmExtrasAsync(tenantId, component.Id, ct);
             valuesYaml = MergeYamlBlocks(valuesYaml, themeExtras);
         }
 

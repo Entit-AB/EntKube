@@ -1730,12 +1730,36 @@ public class KeycloakService(
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose realm, and whose deployment. ⚠️ <b>Two ids, both naming rows, both from the
+    /// caller</b> — so this wired a realm to a deployment without either being ours. The row
+    /// it writes is what SyncIdentityBindingAsync then follows to put an OIDC client secret
+    /// into the deployment's namespace, so a binding across tenants is a client secret
+    /// crossing with it.
+    ///
+    /// <para>The caller passes the tenant to SyncIdentityBindingAsync on the very next line
+    /// and dropped it here.</para>
+    /// </param>
     public async Task<IdentityBinding> CreateIdentityBindingAsync(
-        Guid realmId, Guid appDeploymentId,
+        Guid tenantId, Guid realmId, Guid appDeploymentId,
         string clientUuid, string clientId, string k8sSecretName,
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (!await db.KeycloakRealms.AnyAsync(r => r.Id == realmId && r.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException("Realm not found, or it is not this tenant's.");
+        }
+
+        // AppDeployment has no TenantId either; the scope runs through its app's customer, the
+        // same traversal SyncIdentityBindingAsync below already uses.
+        if (!await db.AppDeployments.AnyAsync(
+                d => d.Id == appDeploymentId && d.App.Customer.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException(
+                "Deployment not found, or it is not this tenant's.");
+        }
 
         IdentityBinding binding = new()
         {
@@ -1752,11 +1776,20 @@ public class KeycloakService(
         return binding;
     }
 
-    public async Task RemoveIdentityBindingAsync(Guid bindingId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose binding. Removing one takes an application's OIDC configuration away, so by id
+    /// alone this stopped somebody else's app authenticating.
+    /// </param>
+    public async Task RemoveIdentityBindingAsync(
+        Guid tenantId, Guid bindingId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         IdentityBinding binding = await db.IdentityBindings
-            .FirstOrDefaultAsync(b => b.Id == bindingId, ct)
+            .FirstOrDefaultAsync(
+                b => b.Id == bindingId
+                  && b.AppDeployment.App.Customer.TenantId == tenantId, ct)
+            // The same wording SyncIdentityBindingAsync uses for the same condition — and it
+            // does not say whether somebody else's binding exists.
             ?? throw new InvalidOperationException("Identity binding not found.");
         db.IdentityBindings.Remove(binding);
         await db.SaveChangesAsync(ct);
@@ -2866,14 +2899,21 @@ public class KeycloakService(
     /// ConfigMap, copier command) so the two paths produce no churn. Returns an empty string
     /// when the component has no themes.
     /// </summary>
+    /// <param name="tenantId">
+    /// Whose component. The extras built here are spliced into the Helm values a component is
+    /// installed with, so a theme read across tenants is another tenant's login page on our
+    /// install. KeycloakTheme carries its own TenantId — stamped where themes are created —
+    /// so this is a direct comparison rather than a traversal through the config.
+    /// </param>
     public async Task<string> BuildKeycloakThemeHelmExtrasAsync(
-        Guid componentId, CancellationToken ct = default)
+        Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         List<KeycloakTheme> themes = await db.KeycloakThemes
             .Include(t => t.ComponentConfig)
-            .Where(t => t.ComponentConfig.ClusterComponentId == componentId)
+            .Where(t => t.ComponentConfig.ClusterComponentId == componentId
+                     && t.TenantId == tenantId)
             .OrderBy(t => t.Name)
             .ToListAsync(ct);
 

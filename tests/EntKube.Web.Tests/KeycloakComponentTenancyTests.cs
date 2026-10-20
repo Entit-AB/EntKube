@@ -162,4 +162,124 @@ public class KeycloakComponentTenancyTests : IDisposable
                 "the binding must read as absent here, not be resolved and then refused later "
                 + "for a different reason");
     }
+    /// <summary>
+    /// Seeds a realm, an app deployment and a binding under <paramref name="tenantId"/>, and
+    /// returns their ids. Lifted out of the Sync test so the three below can share it.
+    /// </summary>
+    private (Guid Realm, Guid Deployment, Guid Binding) SeedBinding(Guid tenantId, Guid componentId)
+    {
+        Guid customerId = Guid.NewGuid(), appId = Guid.NewGuid(), bindingId = Guid.NewGuid();
+        Guid realmId = Guid.NewGuid(), deploymentId = Guid.NewGuid(), configId = Guid.NewGuid();
+
+        KubernetesCluster cluster = db.KubernetesClusters.First(c => c.TenantId == tenantId);
+
+        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "C" });
+        db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "app" });
+        db.AppDeployments.Add(new AppDeployment
+        {
+            Id = deploymentId, AppId = appId, Name = "deploy", Type = DeploymentType.Manual,
+            EnvironmentId = cluster.EnvironmentId, ClusterId = cluster.Id, Namespace = "ns",
+        });
+        db.Set<KeycloakComponentConfig>().Add(new KeycloakComponentConfig
+        {
+            Id = configId, TenantId = tenantId, ClusterComponentId = componentId,
+            AdminUrl = "https://keycloak.example",
+        });
+        db.Set<KeycloakRealm>().Add(new KeycloakRealm
+        {
+            Id = realmId, TenantId = tenantId, KeycloakComponentConfigId = configId,
+            RealmName = "r", DisplayName = "R", LinkedAppId = appId,
+        });
+        db.Set<IdentityBinding>().Add(new IdentityBinding
+        {
+            Id = bindingId, KeycloakRealmId = realmId, AppDeploymentId = deploymentId,
+            ClientId = "client", ClientUuid = "uuid", KubernetesSecretName = "oidc",
+        });
+        db.SaveChanges();
+        db.ChangeTracker.Clear();
+
+        return (realmId, deploymentId, bindingId);
+    }
+
+    /// <summary>
+    /// ⚠️ <b>CreateIdentityBindingAsync took two ids, both naming rows, both from the
+    /// caller</b> — so it wired a realm to a deployment without either being ours. The row it
+    /// writes is what SyncIdentityBindingAsync follows to put an OIDC client secret into the
+    /// deployment's namespace, so a binding across tenants is a client secret crossing with it.
+    ///
+    /// <para>Both halves are tested, because each is refused by its own guard: our realm with
+    /// their deployment, and their realm with our deployment.</para>
+    /// </summary>
+    [Fact]
+    public async Task An_identity_binding_cannot_be_created_across_tenants()
+    {
+        (Guid ourRealm, Guid ourDeployment, Guid _) = SeedBinding(ourTenant, ourComponent);
+        (Guid theirRealm, Guid theirDeployment, Guid _) = SeedBinding(theirTenant, theirComponent);
+
+        Func<Task> theirDeploy = () => sut.CreateIdentityBindingAsync(
+            ourTenant, ourRealm, theirDeployment, "uuid", "client", "oidc");
+
+        await theirDeploy.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Deployment not found, or it is not this tenant's.");
+
+        Func<Task> theirRealmCall = () => sut.CreateIdentityBindingAsync(
+            ourTenant, theirRealm, ourDeployment, "uuid", "client", "oidc");
+
+        await theirRealmCall.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Realm not found, or it is not this tenant's.");
+
+        // And ours still binds, or the two refusals say nothing.
+        IdentityBinding ok = await sut.CreateIdentityBindingAsync(
+            ourTenant, ourRealm, ourDeployment, "uuid", "client", "oidc");
+
+        ok.KeycloakRealmId.Should().Be(ourRealm);
+    }
+
+    /// <summary>
+    /// Removing a binding takes an application's OIDC configuration away, so by id alone this
+    /// stopped somebody else's app authenticating.
+    /// </summary>
+    [Fact]
+    public async Task An_identity_binding_cannot_be_removed_across_tenants()
+    {
+        (Guid _, Guid _, Guid theirBinding) = SeedBinding(theirTenant, theirComponent);
+
+        Func<Task> act = () => sut.RemoveIdentityBindingAsync(ourTenant, theirBinding);
+
+        // The exact message, for the reason the Sync test above gives.
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Identity binding not found.");
+
+        db.ChangeTracker.Clear();
+        db.Set<IdentityBinding>().Any(b => b.Id == theirBinding).Should().BeTrue();
+    }
+
+    /// <summary>
+    /// The theme extras are spliced into the Helm values a component is installed with, so a
+    /// theme read across tenants is another tenant's login page on our install. KeycloakTheme
+    /// carries its own TenantId, stamped where themes are created.
+    /// </summary>
+    [Fact]
+    public async Task Theme_extras_are_not_read_across_tenants()
+    {
+        (Guid _, Guid _, Guid _) = SeedBinding(theirTenant, theirComponent);
+
+        Guid theirConfigId = db.Set<KeycloakComponentConfig>()
+            .First(c => c.TenantId == theirTenant).Id;
+
+        db.Set<KeycloakTheme>().Add(new KeycloakTheme
+        {
+            Id = Guid.NewGuid(), TenantId = theirTenant,
+            KeycloakComponentConfigId = theirConfigId,
+            Name = "their-theme", LoginTheme = "their-theme",
+        });
+        db.SaveChanges();
+        db.ChangeTracker.Clear();
+
+        // Asked as them it renders; asked as us their theme is not there to render.
+        (await sut.BuildKeycloakThemeHelmExtrasAsync(theirTenant, theirComponent))
+            .Should().Contain("their-theme");
+        (await sut.BuildKeycloakThemeHelmExtrasAsync(ourTenant, theirComponent))
+            .Should().BeEmpty();
+    }
 }
