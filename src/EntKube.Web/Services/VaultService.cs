@@ -18,7 +18,11 @@ public class VaultService(
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
     // Optional: used only to evict the cached kubeconfig plaintext after an update. Absent in
     // unit tests, where there is no resolver cache to invalidate.
-    KubeconfigResolver? kubeconfigResolver = null)
+    KubeconfigResolver? kubeconfigResolver = null,
+    // Optional for the same reason, and safe to be absent: BeginOperation only ever suppresses
+    // the SECOND and later questions of one action, never a refusal — so a null gate means more
+    // dialogs, never fewer, and never a change that went unasked.
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null)
 {
     // --- Vault Lifecycle ---
 
@@ -2747,6 +2751,18 @@ public class VaultService(
                 Output = results.Count > 0 ? string.Join("\n", results) : "No app secrets with both a K8s Secret name and a target cluster."
             };
         }
+
+        // One action, one acknowledgment. This is the sync an operator triggers by saving a
+        // secret, and it walks one group per (K8s secret name, namespace) per cluster — each
+        // ensuring its namespace and writing its keys, each separately gated. So saving one
+        // secret asked several times, which is the first thing an operator reported about this
+        // gate.
+        //
+        // ⚠️ This method's gated writes go through SharedSecretKeys, which reaches the seam one
+        // level down — invisible to a scan for seam verbs, which is why this one outlasted the
+        // obvious cases.
+        using IDisposable? operation = gate?.BeginOperation(
+            $"sync {actionable.Count} app secret(s) to Kubernetes");
 
         // Unseal once; we decrypt each secret directly from its entity below
         // (a name lookup would be ambiguous now that shared and environment-bound
