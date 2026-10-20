@@ -608,7 +608,7 @@ else
 
     private async Task LoadAccesses()
     {
-        customerAccesses = await CustomerAccessService.GetCustomerUsersAsync(selectedCustomer!.Id);
+        customerAccesses = await CustomerAccessService.GetCustomerUsersAsync(TenantId, selectedCustomer!.Id);
     }
 
     private async Task GrantAccess()
@@ -627,7 +627,7 @@ else
 
         try
         {
-            await CustomerAccessService.GrantAccessAsync(user.Id, selectedCustomer!.Id, grantRole);
+            await CustomerAccessService.GrantAccessAsync(TenantId, user.Id, selectedCustomer!.Id, grantRole);
             accessSuccess = $"Access granted to {grantEmail}.";
             grantEmail = "";
             await LoadAccesses();
@@ -641,7 +641,7 @@ else
     private async Task RevokeAccess(string userId)
     {
         confirmRevokeUserId = null;
-        await CustomerAccessService.RevokeAccessAsync(userId, selectedCustomer!.Id);
+        await CustomerAccessService.RevokeAccessAsync(TenantId, userId, selectedCustomer!.Id);
         await LoadAccesses();
     }
 
