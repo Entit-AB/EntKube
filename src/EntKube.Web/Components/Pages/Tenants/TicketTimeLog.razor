@@ -203,7 +203,7 @@ else
 
     private async Task DeleteAsync(Guid entryId)
     {
-        await Time.DeleteAsync(entryId);
+        await Time.DeleteAsync(Ticket.TenantId, entryId);
         await LoadAsync();
         await OnChanged.InvokeAsync();
     }

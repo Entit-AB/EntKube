@@ -376,7 +376,7 @@ public class TimeServiceTests : IDisposable
         Guid ticket = AddTicket(TicketPriority.P3);
         await Log(Tue(9), Tue(14), ticket);
 
-        await time.AuthoriseAsync(new WorkAuthorisation
+        await time.AuthoriseAsync(tenantId, new WorkAuthorisation
         {
             TenantId = tenantId,
             CustomerId = customerId,
@@ -398,7 +398,7 @@ public class TimeServiceTests : IDisposable
         Guid ticket = AddTicket(TicketPriority.P3);
         await Log(Tue(9), Tue(14), ticket);
 
-        await time.AuthoriseAsync(new WorkAuthorisation
+        await time.AuthoriseAsync(tenantId, new WorkAuthorisation
         {
             TenantId = tenantId,
             CustomerId = customerId,
@@ -651,5 +651,123 @@ public class TimeServiceTests : IDisposable
         (await time.GetTimebankAsync(tenantId, customerId, month)).Should().NotBeNull();
         (await time.GetCommittedHoursAsync(tenantId, customerId, month, month.AddMonths(1)))
             .Should().NotBeNull();
+    }
+    // ---- Somebody else's hours -----------------------------------------------------------
+
+    /// <summary>A second tenant with a customer and an hour of logged work.</summary>
+    private async Task<(Guid Tenant, Guid Customer, TimeEntry Entry)> StrangerAsync()
+    {
+        Guid strangerTenant = Guid.NewGuid();
+        Guid strangerCustomer = Guid.NewGuid();
+
+        db.Tenants.Add(new Tenant
+        {
+            Id = strangerTenant, Name = "Annan", Slug = $"annan-{strangerTenant:N}",
+        });
+        db.Customers.Add(new Customer
+        {
+            Id = strangerCustomer, TenantId = strangerTenant, Name = "Annan AB",
+        });
+        await db.SaveChangesAsync();
+        db.ChangeTracker.Clear();
+
+        TimeEntry theirs = await time.LogAsync(
+            strangerTenant, strangerCustomer, null, null,
+            Tue(9), Tue(10), WorkKind.Management, "Their work", "anna");
+
+        return (strangerTenant, strangerCustomer, theirs);
+    }
+
+    /// <summary>
+    /// A time entry is billable work — what the hour bank is drawn against and what §20 wants
+    /// validatable. By id alone this removed another tenant's record of work done.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_time_entry_cannot_be_deleted()
+    {
+        (Guid _, Guid _, TimeEntry theirs) = await StrangerAsync();
+
+        await time.DeleteAsync(tenantId, theirs.Id);
+
+        db.ChangeTracker.Clear();
+        (await db.Set<TimeEntry>().AsNoTracking().AnyAsync(e => e.Id == theirs.Id))
+            .Should().BeTrue();
+
+        // Ours does go, or the survival above proves nothing.
+        TimeEntry ours = await Log(Tue(11), Tue(12));
+        await time.DeleteAsync(tenantId, ours.Id);
+
+        db.ChangeTracker.Clear();
+        (await db.Set<TimeEntry>().AsNoTracking().AnyAsync(e => e.Id == ours.Id))
+            .Should().BeFalse();
+    }
+
+    /// <summary>
+    /// ⚠️ <b>A WorkAuthorisation is the record that a customer agreed to pay for work past
+    /// the bank.</b> Writing one with the ids off a caller-supplied entity was writing
+    /// somebody else's customer's approval — and this is reachable from the customer portal,
+    /// not only from an operator page.
+    /// </summary>
+    [Fact]
+    public async Task An_authorisation_cannot_be_recorded_against_another_tenants_customer()
+    {
+        (Guid strangerTenant, Guid strangerCustomer, TimeEntry _) = await StrangerAsync();
+
+        Func<Task> act = () => time.AuthoriseAsync(tenantId, new WorkAuthorisation
+        {
+            TenantId = strangerTenant,
+            CustomerId = strangerCustomer,
+            Month = September,
+            Hours = 40,
+            ApprovedBy = "nobody",
+        });
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Customer not found, or it is not this tenant's.");
+
+        db.ChangeTracker.Clear();
+        (await db.Set<WorkAuthorisation>().AsNoTracking()
+            .AnyAsync(a => a.CustomerId == strangerCustomer)).Should().BeFalse();
+    }
+
+    /// <summary>
+    /// The create path files the row under the parameter, not the TenantId on the entity —
+    /// otherwise an approval for our customer lands in their ledger.
+    /// </summary>
+    [Fact]
+    public async Task An_authorisation_is_filed_under_the_tenant_it_was_authorised_by()
+    {
+        (Guid strangerTenant, Guid _, TimeEntry _) = await StrangerAsync();
+
+        WorkAuthorisation saved = await time.AuthoriseAsync(tenantId, new WorkAuthorisation
+        {
+            TenantId = strangerTenant,      // the lie
+            CustomerId = customerId,        // ours, so the customer check passes
+            Month = September,
+            Hours = 10,
+            ApprovedBy = "karin",
+        });
+
+        saved.TenantId.Should().Be(tenantId);
+
+        db.ChangeTracker.Clear();
+        (await db.Set<WorkAuthorisation>().AsNoTracking().FirstAsync(a => a.Id == saved.Id))
+            .TenantId.Should().Be(tenantId);
+    }
+
+    /// <summary>
+    /// The passes read is what the committed-hours statement is built from, so it describes
+    /// what was worked and when.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_work_passes_are_not_readable()
+    {
+        (Guid _, Guid strangerCustomer, TimeEntry _) = await StrangerAsync();
+        await Log(Tue(9), Tue(11));
+
+        // A positive first, so the empty below is a refusal and not an empty period.
+        (await time.PassesAsync(tenantId, customerId, Tue(0), Tue(23))).Should().NotBeEmpty();
+
+        (await time.PassesAsync(tenantId, strangerCustomer, Tue(0), Tue(23))).Should().BeEmpty();
     }
 }
