@@ -67,7 +67,7 @@ public class PostDeployRouteRefreshTests : IDisposable
         Func<Guid, KubernetesOperationResult<string>> applyBehaviour)
         : KubernetesOperationsService(
             dbFactory,
-            new AuditService(dbFactory),
+            new AuditService(dbFactory, new EntKube.Web.Modules.Api.DeliveryApi(dbFactory)),
             new KyvernoPolicyService(dbFactory, new Mock<IKubernetesClientFactory>().Object,
                 new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, new Mock<IKubernetesClientFactory>().Object), gate,
                 new EntKube.Web.Modules.Api.CatalogApi(dbFactory), NullLogger<KyvernoPolicyService>.Instance),

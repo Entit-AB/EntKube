@@ -75,7 +75,7 @@ public class DeploymentImportTenancyTests : IDisposable
         return new DeploymentImportService(
             testDb.Factory,
             clusters,
-            new DeploymentService(testDb.Factory, new AuditService(testDb.Factory),
+            new DeploymentService(testDb.Factory, new AuditService(testDb.Factory, new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory)),
                 new DeploymentStatusNotifier(), NullLogger<DeploymentService>.Instance),
             vault,
             new RegisteredPostgresService(testDb.Factory, vault, clusters,

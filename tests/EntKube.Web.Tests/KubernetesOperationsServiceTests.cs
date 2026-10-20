@@ -41,7 +41,7 @@ public class KubernetesOperationsServiceTests : IDisposable
         // A gate with no interactive sink registered passes straight through (background/test scope).
         ClusterChangeGate gate = new(new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
 
-        sut = new KubernetesOperationsService(dbFactory, new AuditService(dbFactory),
+        sut = new KubernetesOperationsService(dbFactory, new AuditService(dbFactory, new EntKube.Web.Modules.Api.DeliveryApi(dbFactory)),
             new KyvernoPolicyService(dbFactory, new Mock<IKubernetesClientFactory>().Object,
                 new EntKube.Web.Services.Clusters.ClusterClientFactory(dbFactory, new Mock<IKubernetesClientFactory>().Object), gate,
                 new EntKube.Web.Modules.Api.CatalogApi(dbFactory), NullLogger<KyvernoPolicyService>.Instance),

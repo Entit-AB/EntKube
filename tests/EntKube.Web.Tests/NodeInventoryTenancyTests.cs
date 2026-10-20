@@ -84,7 +84,7 @@ public class NodeInventoryTenancyTests : IDisposable
         db.ChangeTracker.Clear();
 
         sut = new NodeManagementService(
-            factory, new AuditService(factory), null!,
+            factory, new AuditService(factory, new EntKube.Web.Modules.Api.DeliveryApi(factory)), null!,
             NullLogger<NodeManagementService>.Instance);
     }
 

@@ -221,7 +221,7 @@ public class ClusterChangeRecordTests
         db.Database.EnsureCreated();
 
         AuditClusterChangeRecorder recorder = new(
-            new AuditService(factory), NullLogger<AuditClusterChangeRecorder>.Instance);
+            new AuditService(factory, new EntKube.Web.Modules.Api.DeliveryApi(factory)), NullLogger<AuditClusterChangeRecorder>.Instance);
 
         PlannedClusterChange change = PatchChange();
         ClusterChangeDiff diff = new()
@@ -269,7 +269,7 @@ public class ClusterChangeRecordTests
         db.Database.EnsureCreated();
 
         AuditClusterChangeRecorder recorder = new(
-            new AuditService(factory), NullLogger<AuditClusterChangeRecorder>.Instance);
+            new AuditService(factory, new EntKube.Web.Modules.Api.DeliveryApi(factory)), NullLogger<AuditClusterChangeRecorder>.Instance);
 
         await recorder.RecordAsync(
             new PlannedClusterChange { Verb = ChangeVerb.Apply, Kubeconfig = "x" },

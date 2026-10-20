@@ -56,7 +56,7 @@ public class JitProxyServiceTests : IDisposable
             factory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(
                 factory, new Mock<IKubernetesClientFactory>().Object),
-            pool, encryption, new AuditService(factory), NullLogger<JitProxyService>.Instance);
+            pool, encryption, new AuditService(factory, new EntKube.Web.Modules.Api.DeliveryApi(factory)), NullLogger<JitProxyService>.Instance);
     }
 
     // ── Authentication ────────────────────────────────────────────────────────

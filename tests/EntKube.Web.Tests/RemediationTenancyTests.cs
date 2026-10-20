@@ -67,7 +67,7 @@ public class RemediationTenancyTests : IDisposable
 
     private RemediationService Build()
         => new(new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
-            new AuditService(testDb.Factory),
+            new AuditService(testDb.Factory, new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory)),
             NullLogger<RemediationService>.Instance);
 
     private static AlertRemediation DeletePod() => new(

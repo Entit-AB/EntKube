@@ -1496,9 +1496,20 @@ public class ExternalRouteService(
         return hasTraefik ? "traefik" : "istio";
     }
 
+    /// <param name="tenantId">
+    /// Whose route. The reachability history says when somebody else's hostname was down and
+    /// for how long — an availability record of a service you are not supposed to know exists.
+    ///
+    /// <para>A route carries no tenant, so this goes through the same
+    /// <see cref="LoadRouteAsync"/> funnel as every other route method: the component
+    /// resolution is the authorization, and it throws "Route not found." for a route whose
+    /// component this tenant cannot see.</para>
+    /// </summary>
     public async Task<RouteUptimeSummary> GetRouteUptimeAsync(
-        Guid routeId, int windowDays = 7, CancellationToken ct = default)
+        Guid tenantId, Guid routeId, int windowDays = 7, CancellationToken ct = default)
     {
+        _ = await LoadRouteAsync(tenantId, routeId, ct);
+
         using ConnectivityDbContext db = dbFactory.CreateDbContext();
         DateTime from = DateTime.UtcNow.AddDays(-windowDays);
 

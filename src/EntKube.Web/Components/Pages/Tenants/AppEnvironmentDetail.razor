@@ -3530,7 +3530,7 @@
         deploymentSection = "activity";
         if (selectedDeployment is null) return;
         activityLoading = true; deploymentAuditEvents = null; StateHasChanged();
-        deploymentAuditEvents = await AuditService.GetDeploymentEventsAsync(selectedDeployment.Id);
+        deploymentAuditEvents = await AuditService.GetDeploymentEventsAsync(TenantId, selectedDeployment.Id);
         activityLoading = false;
     }
 
