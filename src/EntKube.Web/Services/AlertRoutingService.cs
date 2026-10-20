@@ -17,6 +17,19 @@ public class AlertRoutingService(IDbContextFactory<TelemetryDbContext> dbFactory
             .ToListAsync(ct);
     }
 
+    /// <summary>
+    /// Whether a notification channel is this tenant's.
+    ///
+    /// <para>⚠️ The channel is where an incident is <b>delivered</b> — a Teams webhook, a
+    /// mail recipient. So a rule may only ever name one of ours: pointing a rule at somebody
+    /// else's channel sends our incidents to them, and pointing <i>their</i> rule at ours
+    /// delivers theirs to us.</para>
+    /// </summary>
+    private static async Task<bool> ChannelIsTenantsAsync(
+        TelemetryDbContext db, Guid tenantId, Guid? channelId, CancellationToken ct) =>
+        channelId is not Guid id
+        || await db.NotificationChannels.AnyAsync(c => c.Id == id && c.TenantId == tenantId, ct);
+
     public async Task<Guid> CreateRuleAsync(Guid tenantId, string name, int priority, Guid? channelId,
         string? matchAlertName, string? matchNamespace, string? matchSeverity,
         string? matchLabelKey, string? matchLabelValue,
@@ -24,6 +37,13 @@ public class AlertRoutingService(IDbContextFactory<TelemetryDbContext> dbFactory
         CancellationToken ct = default)
     {
         using TelemetryDbContext db = dbFactory.CreateDbContext();
+
+        if (!await ChannelIsTenantsAsync(db, tenantId, channelId, ct))
+        {
+            throw new InvalidOperationException(
+                "Notification channel not found, or it is not this tenant's.");
+        }
+
         AlertRoutingRule rule = new()
         {
             TenantId = tenantId,
@@ -43,14 +63,28 @@ public class AlertRoutingService(IDbContextFactory<TelemetryDbContext> dbFactory
         return rule.Id;
     }
 
-    public async Task UpdateRuleAsync(Guid id, string name, int priority, Guid? channelId,
+    /// <param name="tenantId">
+    /// Whose rule. ⚠️ Two things, both off a bare id: the rule itself, and the channel it is
+    /// repointed at. Taking somebody else's rule and giving it our channel delivers their
+    /// incident notifications to us.
+    /// </param>
+    public async Task UpdateRuleAsync(
+        Guid tenantId, Guid id, string name, int priority, Guid? channelId,
         string? matchAlertName, string? matchNamespace, string? matchSeverity,
         string? matchLabelKey, string? matchLabelValue, bool isEnabled,
         bool suppressIncident = false, Guid? matchClusterId = null,
         CancellationToken ct = default)
     {
         using TelemetryDbContext db = dbFactory.CreateDbContext();
-        AlertRoutingRule? rule = await db.AlertRoutingRules.FindAsync([id], ct);
+        if (!await ChannelIsTenantsAsync(db, tenantId, channelId, ct))
+        {
+            throw new InvalidOperationException(
+                "Notification channel not found, or it is not this tenant's.");
+        }
+
+        // FindAsync takes a key and cannot carry a predicate.
+        AlertRoutingRule? rule = await db.AlertRoutingRules
+            .FirstOrDefaultAsync(r => r.Id == id && r.TenantId == tenantId, ct);
         if (rule is null) return;
 
         rule.Name = name;
@@ -67,10 +101,15 @@ public class AlertRoutingService(IDbContextFactory<TelemetryDbContext> dbFactory
         await db.SaveChangesAsync(ct);
     }
 
-    public async Task DeleteRuleAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose rule. Removing one stops the alerts it routed being delivered at all.
+    /// </param>
+    public async Task DeleteRuleAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using TelemetryDbContext db = dbFactory.CreateDbContext();
-        AlertRoutingRule? rule = await db.AlertRoutingRules.FindAsync([id], ct);
+        AlertRoutingRule? rule = await db.AlertRoutingRules
+            .FirstOrDefaultAsync(r => r.Id == id && r.TenantId == tenantId, ct);
         if (rule is not null) db.AlertRoutingRules.Remove(rule);
         await db.SaveChangesAsync(ct);
     }

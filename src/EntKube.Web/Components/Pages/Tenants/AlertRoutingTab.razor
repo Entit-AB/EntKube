@@ -454,7 +454,7 @@ else
 
             if (editId.HasValue)
             {
-                await AlertRoutingService.UpdateRuleAsync(editId.Value, ruleForm.Name.Trim(), ruleForm.Priority, channelGuid,
+                await AlertRoutingService.UpdateRuleAsync(TenantId, editId.Value, ruleForm.Name.Trim(), ruleForm.Priority, channelGuid,
                     ruleForm.AlertName, ruleForm.Namespace, ruleForm.Severity, ruleForm.LabelKey, ruleForm.LabelValue, ruleForm.Enabled,
                     ruleForm.SuppressIncident, ruleForm.MatchClusterId);
             }
@@ -491,7 +491,7 @@ else
     {
         try
         {
-            await AlertRoutingService.DeleteRuleAsync(rule.Id);
+            await AlertRoutingService.DeleteRuleAsync(TenantId, rule.Id);
             await Load();
             Toasts.Success($"Deleted routing rule \"{rule.Name}\".");
         }
