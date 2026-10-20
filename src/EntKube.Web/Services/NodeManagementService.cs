@@ -520,21 +520,40 @@ public class NodeManagementService(
 
     // ── Server inventory CRUD ─────────────────────────────────────────────────
 
+    /// <param name="tenantId">
+    /// Whose cluster. A server record carries the node's address, its <b>management
+    /// address</b>, the SSH user and port and the jump host used to reach it — so listing
+    /// them by cluster id alone described another tenant's hardware and how it is reached.
+    /// ClusterServer has no TenantId of its own; the cluster it belongs to does.
+    /// </param>
     public async Task<List<ClusterServer>> GetServersAsync(
-        Guid clusterId, CancellationToken ct = default)
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
         using FleetDbContext db = dbFactory.CreateDbContext();
         return await db.ClusterServers
-            .Where(s => s.ClusterId == clusterId)
+            .Where(s => s.ClusterId == clusterId && s.Cluster.TenantId == tenantId)
             .OrderBy(s => s.DisplayName)
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose cluster. These are inventory records rather than live connection settings — the
+    /// screen says as much when it offers to remove one — so what this protects is the record
+    /// being correct, not a connection being redirected. The ClusterId rides on the entity, so
+    /// a create needs the cluster checked; an edit needs the row.
+    /// </param>
     public async Task<ClusterServer> SaveServerAsync(
-        ClusterServer server, CancellationToken ct = default)
+        Guid tenantId, ClusterServer server, CancellationToken ct = default)
     {
         using FleetDbContext db = dbFactory.CreateDbContext();
         server.UpdatedAt = DateTime.UtcNow;
+
+        if (!await db.KubernetesClusters.AnyAsync(
+                c => c.Id == server.ClusterId && c.TenantId == tenantId, ct))
+        {
+            throw new InvalidOperationException(
+                "Cluster not found, or it is not this tenant's.");
+        }
 
         if (server.Id == Guid.Empty)
         {
@@ -544,8 +563,12 @@ public class NodeManagementService(
         }
         else
         {
-            ClusterServer existing = await db.ClusterServers.FindAsync([server.Id], ct)
-                ?? throw new InvalidOperationException("Server not found.");
+            // FindAsync takes a key and cannot carry a predicate.
+            ClusterServer existing = await db.ClusterServers
+                .FirstOrDefaultAsync(
+                    s => s.Id == server.Id && s.Cluster.TenantId == tenantId, ct)
+                ?? throw new InvalidOperationException(
+                    "Server not found, or it is not this tenant's.");
 
             existing.DisplayName = server.DisplayName;
             existing.NodeName = server.NodeName;
@@ -569,10 +592,12 @@ public class NodeManagementService(
         return server;
     }
 
-    public async Task DeleteServerAsync(Guid serverId, CancellationToken ct = default)
+    public async Task DeleteServerAsync(
+        Guid tenantId, Guid serverId, CancellationToken ct = default)
     {
         using FleetDbContext db = dbFactory.CreateDbContext();
-        ClusterServer? server = await db.ClusterServers.FindAsync([serverId], ct);
+        ClusterServer? server = await db.ClusterServers
+            .FirstOrDefaultAsync(s => s.Id == serverId && s.Cluster.TenantId == tenantId, ct);
         if (server is not null)
         {
             db.ClusterServers.Remove(server);
