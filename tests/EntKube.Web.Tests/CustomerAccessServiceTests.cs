@@ -74,7 +74,7 @@ public class CustomerAccessServiceTests : IDisposable
         (ApplicationUser user, Customer customer, _) = CreateUserAndCustomer();
 
         // Act — grant the user access to the customer.
-        CustomerAccess access = await sut.GrantAccessAsync(user.Id, customer.Id);
+        CustomerAccess access = await sut.GrantAccessAsync(customer.TenantId, user.Id, customer.Id);
 
         // Assert — access is created with Viewer role by default.
         access.UserId.Should().Be(user.Id);
@@ -90,7 +90,7 @@ public class CustomerAccessServiceTests : IDisposable
 
         // Act
         CustomerAccess access = await sut.GrantAccessAsync(
-            user.Id, customer.Id, CustomerAccessRole.Operator);
+            customer.TenantId, user.Id, customer.Id, CustomerAccessRole.Operator);
 
         // Assert
         access.Role.Should().Be(CustomerAccessRole.Operator);
@@ -101,10 +101,10 @@ public class CustomerAccessServiceTests : IDisposable
     {
         // Arrange — grant access once.
         (ApplicationUser user, Customer customer, _) = CreateUserAndCustomer();
-        await sut.GrantAccessAsync(user.Id, customer.Id);
+        await sut.GrantAccessAsync(customer.TenantId, user.Id, customer.Id);
 
         // Act & Assert — granting again should fail (composite key violation).
-        Func<Task> act = () => sut.GrantAccessAsync(user.Id, customer.Id);
+        Func<Task> act = () => sut.GrantAccessAsync(customer.TenantId, user.Id, customer.Id);
         await act.Should().ThrowAsync<InvalidOperationException>();
     }
 
@@ -117,10 +117,10 @@ public class CustomerAccessServiceTests : IDisposable
     {
         // Arrange
         (ApplicationUser user, Customer customer, _) = CreateUserAndCustomer();
-        await sut.GrantAccessAsync(user.Id, customer.Id);
+        await sut.GrantAccessAsync(customer.TenantId, user.Id, customer.Id);
 
         // Act
-        await sut.RevokeAccessAsync(user.Id, customer.Id);
+        await sut.RevokeAccessAsync(customer.TenantId, user.Id, customer.Id);
 
         // Assert
         List<Customer> customers = await sut.GetAccessibleCustomersAsync(user.Id);
@@ -136,10 +136,10 @@ public class CustomerAccessServiceTests : IDisposable
     {
         // Arrange — user starts as Viewer.
         (ApplicationUser user, Customer customer, _) = CreateUserAndCustomer();
-        await sut.GrantAccessAsync(user.Id, customer.Id, CustomerAccessRole.Viewer);
+        await sut.GrantAccessAsync(customer.TenantId, user.Id, customer.Id, CustomerAccessRole.Viewer);
 
         // Act — promote to Admin.
-        await sut.UpdateRoleAsync(user.Id, customer.Id, CustomerAccessRole.Admin);
+        await sut.UpdateRoleAsync(customer.TenantId, user.Id, customer.Id, CustomerAccessRole.Admin);
 
         // Assert
         CustomerAccess? access = await sut.GetAccessAsync(user.Id, customer.Id);
@@ -161,7 +161,7 @@ public class CustomerAccessServiceTests : IDisposable
         db.Customers.Add(fabrikam);
         db.SaveChanges();
 
-        await sut.GrantAccessAsync(user.Id, contoso.Id);
+        await sut.GrantAccessAsync(contoso.TenantId, user.Id, contoso.Id);
 
         // Act
         List<Customer> customers = await sut.GetAccessibleCustomersAsync(user.Id);
@@ -181,7 +181,7 @@ public class CustomerAccessServiceTests : IDisposable
         db.Apps.Add(app);
         db.SaveChanges();
 
-        await sut.GrantAccessAsync(user.Id, customer.Id);
+        await sut.GrantAccessAsync(customer.TenantId, user.Id, customer.Id);
 
         // Act
         List<Customer> customers = await sut.GetAccessibleCustomersAsync(user.Id);
@@ -222,11 +222,11 @@ public class CustomerAccessServiceTests : IDisposable
         db.Users.Add(bob);
         db.SaveChanges();
 
-        await sut.GrantAccessAsync(alice.Id, customer.Id, CustomerAccessRole.Admin);
-        await sut.GrantAccessAsync(bob.Id, customer.Id, CustomerAccessRole.Viewer);
+        await sut.GrantAccessAsync(customer.TenantId, alice.Id, customer.Id, CustomerAccessRole.Admin);
+        await sut.GrantAccessAsync(customer.TenantId, bob.Id, customer.Id, CustomerAccessRole.Viewer);
 
         // Act
-        List<CustomerAccess> accesses = await sut.GetCustomerUsersAsync(customer.Id);
+        List<CustomerAccess> accesses = await sut.GetCustomerUsersAsync(customer.TenantId, customer.Id);
 
         // Assert
         accesses.Should().HaveCount(2);
