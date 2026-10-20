@@ -685,8 +685,12 @@ public class KubernetesClientFactory : IKubernetesClientFactory
 
         try
         {
-            // SecretFile, not File.WriteAllTextAsync: the patch carries the secret values, and
-            // the default 0644 on a temp file makes them world-readable for as long as it exists.
+            // SecretFile rather than File.WriteAllTextAsync. ⚠️ Not because the path above is
+            // exposed — Path.GetTempFileName goes through mkstemp and yields 0600, which
+            // SecretTempFileTests checks on this platform rather than assuming — but because the
+            // guarantee should not rest on remembering which of two temp-path idioms this line
+            // used. The patch carries the secret values; SecretFile states the requirement at
+            // the point of the write instead of leaving it to be re-derived.
             await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
             await SecretFile.WriteAsync(patchPath, patch, ct);
 
@@ -936,8 +940,9 @@ public class KubernetesClientFactory : IKubernetesClientFactory
 
         try
         {
-            // SecretFile: a kubeconfig is a credential, and the default 0644 on a temp file
-            // makes it world-readable for as long as the call runs.
+            // SecretFile for the same reason as above: a kubeconfig is a credential, and the
+            // owner-only mode is asserted here rather than inherited from GetTempFileName's
+            // mkstemp behaviour.
             await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
 
             string nsArg = string.IsNullOrEmpty(ns) ? "" : $" -n {ns}";

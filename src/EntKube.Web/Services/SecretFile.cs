@@ -19,6 +19,15 @@ namespace EntKube.Web.Services;
 /// <para>Note that <see cref="Path.GetTempFileName"/> already yields 0600, so the writes using it
 /// — <c>KubernetesClientFactory</c>'s thirteen among them — were never exposed. This is for the
 /// ones that build their own path, which is the more common habit here.</para>
+///
+/// <para>⚠️ <b>Which means counting calls to this helper measures nothing.</b> Exposure is decided
+/// by how the <em>path</em> was created, not by which write API followed — so a file written with
+/// <c>File.WriteAllTextAsync</c> to a <c>GetTempFileName</c> path is owner-only, and one written
+/// with this helper to a path that was already world-readable is too. A tally of
+/// "<c>File.WriteAllTextAsync</c> sites remaining" therefore says nothing about whether any
+/// credential is exposed, and reporting one as though it did is a mistake this note exists to
+/// stop. <c>SecretTempFileTests</c> checks the two modes on the platform and is the measurement
+/// that counts.</para>
 /// </summary>
 public static class SecretFile
 {
