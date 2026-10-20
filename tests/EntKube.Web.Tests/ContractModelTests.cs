@@ -620,7 +620,7 @@ public class ContractModelTests : IDisposable
     public async Task Deleting_a_price_list_takes_its_amounts_with_it()
     {
         PriceList extra = StandardPriceList.Create(tenantId, June);
-        await contracts.AddPriceListAsync(extra);
+        await contracts.AddPriceListAsync(tenantId, extra);
 
         await contracts.DeletePriceListAsync(tenantId, extra.Id);
 

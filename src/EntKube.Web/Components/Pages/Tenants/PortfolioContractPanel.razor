@@ -1000,8 +1000,8 @@
             fee = await Contracts.CalculateBaseFeeAsync(TenantId, Customer.Id, at);
             agreements = await Contracts.ListPortfolioAgreementsAsync(TenantId, Customer.Id);
             contacts = await Contracts.ListContactsAsync(TenantId, Customer.Id);
-            domains = await Contracts.ListEmailDomainsAsync(Customer.Id);
-            addresses = await Contracts.ListSupportAddressesAsync(Customer.Id);
+            domains = await Contracts.ListEmailDomainsAsync(TenantId, Customer.Id);
+            addresses = await Contracts.ListSupportAddressesAsync(TenantId, Customer.Id);
 
             // A customer's own lists if any have been negotiated, otherwise the tenant's.
             priceLists = await Contracts.ListPriceListsAsync(TenantId, Customer.Id);
@@ -1252,8 +1252,8 @@
 
         try
         {
-            await Contracts.AddPriceListAsync(StandardPriceList.Create(
-                Customer.TenantId, DateTime.SpecifyKind(asOf.Date, DateTimeKind.Utc)));
+            await Contracts.AddPriceListAsync(TenantId, StandardPriceList.Create(
+                TenantId, DateTime.SpecifyKind(asOf.Date, DateTimeKind.Utc)));
 
             Toasts.Success("Standard price list created. Adjust the amounts to what was signed.");
             await LoadAsync();

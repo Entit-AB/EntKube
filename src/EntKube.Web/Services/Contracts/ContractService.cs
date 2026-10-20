@@ -366,13 +366,25 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// Whose customer. Another caller-supplied entity, so its own <c>TenantId</c> and
     /// <c>CustomerId</c> are both checked rather than trusted.
     /// </param>
+    /// <summary>
+    /// Whether a customer is this tenant's.
+    ///
+    /// <para>Two methods already asked this inline; the ones below did not, and every row in
+    /// this file hangs off a customer — a contract, a price list, the mail domains and support
+    /// addresses that decide whose ticket an arriving message becomes. A row stamped with our
+    /// tenant and somebody else's <c>CustomerId</c> is not a harmless mismatch: the mail
+    /// matcher follows the pointer.</para>
+    /// </summary>
+    private static Task<bool> CustomerIsTenantsAsync(
+        ApplicationDbContext db, Guid tenantId, Guid customerId, CancellationToken ct) =>
+        db.Customers.AnyAsync(c => c.Id == customerId && c.TenantId == tenantId, ct);
+
     public async Task<PortfolioAgreement> RecordPortfolioAgreementAsync(
         Guid tenantId, PortfolioAgreement agreement, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        if (!await db.Customers.AnyAsync(
-                c => c.Id == agreement.CustomerId && c.TenantId == tenantId, ct))
+        if (!await CustomerIsTenantsAsync(db, tenantId, agreement.CustomerId, ct))
         {
             throw new InvalidOperationException("The customer does not belong to this tenant.");
         }
@@ -439,8 +451,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        if (!await db.Customers.AnyAsync(
-                c => c.Id == contact.CustomerId && c.TenantId == tenantId, ct))
+        if (!await CustomerIsTenantsAsync(db, tenantId, contact.CustomerId, ct))
         {
             throw new InvalidOperationException("The customer does not belong to this tenant.");
         }
@@ -472,13 +483,17 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     }
 
     /// <summary>The mail domains registered to a customer, most specific first.</summary>
+    /// <param name="tenantId">
+    /// Whose customer. A customer's registered domains are the routing table for support
+    /// mail — reading another tenant's tells you which companies they serve.
+    /// </param>
     public async Task<List<CustomerEmailDomain>> ListEmailDomainsAsync(
-        Guid customerId, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.CustomerEmailDomains.AsNoTracking()
-            .Where(d => d.CustomerId == customerId)
+            .Where(d => d.TenantId == tenantId && d.CustomerId == customerId)
             .OrderBy(d => d.Domain)
             .ToListAsync(ct);
     }
@@ -508,6 +523,11 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
 
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
+        if (!await CustomerIsTenantsAsync(db, tenantId, customerId, ct))
+        {
+            return (null, "That customer does not belong to this tenant.");
+        }
+
         CustomerEmailDomain? existing = await db.CustomerEmailDomains
             .Include(d => d.Customer)
             .FirstOrDefaultAsync(d => d.TenantId == tenantId && d.Domain == domain, ct);
@@ -536,13 +556,14 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     }
 
     /// <summary>The support addresses that route to a customer.</summary>
+    /// <param name="tenantId">Whose customer. See <see cref="ListEmailDomainsAsync"/>.</param>
     public async Task<List<CustomerSupportAddress>> ListSupportAddressesAsync(
-        Guid customerId, CancellationToken ct = default)
+        Guid tenantId, Guid customerId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
         return await db.CustomerSupportAddresses.AsNoTracking()
-            .Where(a => a.CustomerId == customerId)
+            .Where(a => a.TenantId == tenantId && a.CustomerId == customerId)
             .OrderBy(a => a.Address)
             .ToListAsync(ct);
     }
@@ -567,6 +588,11 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         address = parsed.Address.ToLowerInvariant();
 
         using ApplicationDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        if (!await CustomerIsTenantsAsync(db, tenantId, customerId, ct))
+        {
+            return (null, "That customer does not belong to this tenant.");
+        }
 
         // The tenant's own generic address would route every message to one customer.
         string? generic = await db.SupportMailboxes.AsNoTracking()
@@ -594,8 +620,12 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
         // At most one address replies come from, so the newest wins if it claims that.
         if (replyFromThis)
         {
+            // Scoped: this clears a flag on rows it did not fetch by id, and without the
+            // tenant a foreign customerId would reach in and change which address another
+            // tenant's replies are sent from.
             foreach (CustomerSupportAddress other in await db.CustomerSupportAddresses
-                .Where(a => a.CustomerId == customerId && a.ReplyFromThis).ToListAsync(ct))
+                .Where(a => a.TenantId == tenantId && a.CustomerId == customerId
+                         && a.ReplyFromThis).ToListAsync(ct))
             {
                 other.ReplyFromThis = false;
             }
@@ -852,9 +882,24 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     /// is a new version, and a statement for an earlier month has to keep pricing at the
     /// list that was in force then.
     /// </summary>
-    public async Task<PriceList> AddPriceListAsync(PriceList list, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose list. The tenant used to arrive inside <paramref name="list"/>, set by whoever
+    /// built the object — and the one caller read it off the customer row it was displaying.
+    /// It is pinned here instead, so the stored row says what the caller was authorized as
+    /// rather than what it asked for.
+    /// </param>
+    public async Task<PriceList> AddPriceListAsync(
+        Guid tenantId, PriceList list, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        if (list.CustomerId is Guid listCustomerId
+            && !await CustomerIsTenantsAsync(db, tenantId, listCustomerId, ct))
+        {
+            throw new InvalidOperationException("The customer does not belong to this tenant.");
+        }
+
+        list.TenantId = tenantId;
 
         db.PriceLists.Add(list);
         await db.SaveChangesAsync(ct);
@@ -876,6 +921,12 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
     {
         decimal applied = Math.Max(percent, MinimumIndexationPercent);
 
+        // ⚠️ GetPriceListAsync falls back to the tenant's standard list when the customer has
+        // no negotiated one, so a customerId from another tenant reads OUR list rather than
+        // finding nothing, and the indexed copy would be written back bound to their customer.
+        // What stops that is AddPriceListAsync below, which refuses a list naming a customer
+        // who is not this tenant's. A second check here refused the same call earlier and
+        // cheaper, and no test could tell the two apart — so it is not here.
         PriceList? current = await GetPriceListAsync(tenantId, customerId, effectiveFrom, ct);
         if (current is null)
         {
@@ -908,7 +959,7 @@ public class ContractService(IDbContextFactory<ApplicationDbContext> dbFactory)
             });
         }
 
-        return await AddPriceListAsync(indexed, ct);
+        return await AddPriceListAsync(tenantId, indexed, ct);
     }
 
     /// <summary>
