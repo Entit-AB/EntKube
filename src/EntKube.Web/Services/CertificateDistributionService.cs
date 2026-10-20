@@ -48,10 +48,12 @@ public class CertificateDistributionService(
             .ToListAsync(ct);
     }
 
-    public async Task<CertificateDistribution?> GetDistributionAsync(Guid id, CancellationToken ct = default)
+    public async Task<CertificateDistribution?> GetDistributionAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        return await db.CertificateDistributions.FirstOrDefaultAsync(d => d.Id == id, ct);
+        return await db.CertificateDistributions
+            .FirstOrDefaultAsync(d => d.Id == id && d.TenantId == tenantId, ct);
     }
 
     /// <summary>Lists every delivery target configured for one certificate (across app and tenant-wide scopes).</summary>
@@ -65,10 +67,35 @@ public class CertificateDistributionService(
             .ToListAsync(ct);
     }
 
+    /// <param name="tenantId">
+    /// Whose certificate is being distributed. ⚠️ A distribution row says <b>which certificate
+    /// is copied into which namespaces</b>, and IncludeKey defaults to true — so the row names
+    /// a private key and where to put it. Both the TenantId and the VaultSecretId arrived on
+    /// the caller's entity and neither was checked: the row could be filed under another
+    /// tenant, and it could name a certificate that was not ours.
+    ///
+    /// <para>The vault read at apply time is itself tenant-scoped, so a foreign certificate
+    /// would fail there rather than be copied. What this stops is the row existing at all —
+    /// a reconciler entry under somebody else's tenant, which the background sweep then acts
+    /// on as them.</para>
+    /// </param>
     public async Task<CertificateDistribution> CreateDistributionAsync(
-        CertificateDistribution dist, CancellationToken ct = default)
+        Guid tenantId, CertificateDistribution dist, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        // The same traversal ListDistributableCertificatesAsync uses to decide what may be
+        // distributed at all.
+        if (!await db.VaultSecrets.AnyAsync(
+                s => s.Id == dist.VaultSecretId
+                  && s.Vault.TenantId == tenantId
+                  && s.SecretType == VaultSecretType.Certificate, ct))
+        {
+            throw new InvalidOperationException(
+                "Certificate not found, or it is not this tenant's.");
+        }
+
+        dist.TenantId = tenantId;
         dist.Id = dist.Id == Guid.Empty ? Guid.NewGuid() : dist.Id;
         dist.TargetSecretName = TrustBundleService.SanitizeName(dist.TargetSecretName, "entkube-cert");
         dist.CreatedAt = dist.UpdatedAt = DateTime.UtcNow;
@@ -77,13 +104,28 @@ public class CertificateDistributionService(
         return dist;
     }
 
+    /// <param name="tenantId">
+    /// Whose distribution. ⚠️ <paramref name="mutate"/> is an arbitrary delegate over the row,
+    /// so by id alone this could repoint another tenant's distribution — a different
+    /// certificate, a different target Secret name, different namespaces — and the background
+    /// reconciler would then carry it out as them.
+    /// </param>
     public async Task<CertificateDistribution> UpdateDistributionAsync(
-        Guid id, Action<CertificateDistribution> mutate, CancellationToken ct = default)
+        Guid tenantId, Guid id, Action<CertificateDistribution> mutate,
+        CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
-        CertificateDistribution dist = await db.CertificateDistributions.FindAsync([id], ct)
-            ?? throw new InvalidOperationException($"Certificate distribution {id} not found.");
+        CertificateDistribution dist = await db.CertificateDistributions
+            .FirstOrDefaultAsync(d => d.Id == id && d.TenantId == tenantId, ct)
+            ?? throw new InvalidOperationException(
+                "Certificate distribution not found, or it is not this tenant's.");
+
         mutate(dist);
+
+        // The delegate is handed the row, so it can set anything on it — including the column
+        // that says whose it is. Where the row lives is not the caller's to change here.
+        dist.TenantId = tenantId;
+
         dist.TargetSecretName = TrustBundleService.SanitizeName(dist.TargetSecretName, "entkube-cert");
         dist.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);

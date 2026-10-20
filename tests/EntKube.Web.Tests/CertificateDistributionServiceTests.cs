@@ -29,13 +29,29 @@ public sealed class CertificateDistributionServiceTests : IDisposable
     private readonly Guid tenantId = Guid.NewGuid();
     private readonly Guid clusterId = Guid.NewGuid();
 
+    /// <summary>
+    /// A certificate in the tenant's vault. The tests used to point distributions at a
+    /// fabricated VaultSecretId, which worked only because nothing checked it — so these
+    /// seeded rows are what make the create path's check reachable rather than vacuous.
+    /// </summary>
+    private readonly Guid certSecretId = Guid.NewGuid();
+    private readonly Guid otherCertSecretId = Guid.NewGuid();
+    private readonly Guid strangerTenantId = Guid.NewGuid();
+    private readonly Guid strangerCertSecretId = Guid.NewGuid();
+
     public CertificateDistributionServiceTests()
     {
         connection = new SqliteConnection("DataSource=:memory:");
         connection.Open();
         dbFactory = new TestDbContextFactory(connection);
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
+        {
             db.Database.EnsureCreated();
+            Guid ourVault = SeedCertificate(db, tenantId, certSecretId, "corp");
+            SeedSecret(db, ourVault, otherCertSecretId, "corp-alt");
+            SeedCertificate(db, strangerTenantId, strangerCertSecretId, "annan");
+            db.SaveChanges();
+        }
 
         VaultEncryptionService encryption = new(TestRootKey);
         VaultService vault = new(dbFactory, encryption, TestServices.NoClusterAccess);
@@ -129,12 +145,12 @@ public sealed class CertificateDistributionServiceTests : IDisposable
     [Fact]
     public async Task Create_Get_Update_Delete_RoundTrips()
     {
-        CertificateDistribution created = await sut.CreateDistributionAsync(new CertificateDistribution
+        CertificateDistribution created = await sut.CreateDistributionAsync(tenantId, new CertificateDistribution
         {
             TenantId = tenantId,
             ClusterId = clusterId,
             Name = "corp-tls",
-            VaultSecretId = Guid.NewGuid(),
+            VaultSecretId = certSecretId,
             TargetSecretName = "Corp TLS Secret",
             Scope = TrustDistributionScope.TenantNamespaces,
         });
@@ -145,8 +161,8 @@ public sealed class CertificateDistributionServiceTests : IDisposable
         List<CertificateDistribution> list = await sut.GetDistributionsAsync(tenantId, clusterId);
         list.Should().ContainSingle();
 
-        await sut.UpdateDistributionAsync(created.Id, d => d.IncludeKey = false);
-        (await sut.GetDistributionAsync(created.Id))!.IncludeKey.Should().BeFalse();
+        await sut.UpdateDistributionAsync(tenantId, created.Id, d => d.IncludeKey = false);
+        (await sut.GetDistributionAsync(tenantId, created.Id))!.IncludeKey.Should().BeFalse();
 
         // No cluster row exists → delete just removes the DB row (no kubectl).
         await sut.DeleteDistributionAsync(tenantId, created.Id);
@@ -156,24 +172,26 @@ public sealed class CertificateDistributionServiceTests : IDisposable
     [Fact]
     public async Task GetDistributionsForCert_ReturnsAppAndTenantTargets()
     {
-        Guid certId = Guid.NewGuid();
+        // Both certificates are real now: the create path checks the certificate exists and is
+        // this tenant's, so a fabricated id here would be refused for that reason instead.
+        Guid certId = otherCertSecretId;
 
-        await sut.CreateDistributionAsync(new CertificateDistribution
+        await sut.CreateDistributionAsync(tenantId, new CertificateDistribution
         {
             TenantId = tenantId, ClusterId = null, VaultSecretId = certId,
             Name = "to-app", TargetSecretName = "tls", IncludeKey = true,
             Scope = TrustDistributionScope.App, AppId = Guid.NewGuid(),
         });
-        await sut.CreateDistributionAsync(new CertificateDistribution
+        await sut.CreateDistributionAsync(tenantId, new CertificateDistribution
         {
             TenantId = tenantId, ClusterId = null, VaultSecretId = certId,
             Name = "tenant-wide", TargetSecretName = "tls", IncludeKey = false,
             Scope = TrustDistributionScope.AllNamespaces,
         });
         // A target for a different cert must not leak in.
-        await sut.CreateDistributionAsync(new CertificateDistribution
+        await sut.CreateDistributionAsync(tenantId, new CertificateDistribution
         {
-            TenantId = tenantId, ClusterId = null, VaultSecretId = Guid.NewGuid(),
+            TenantId = tenantId, ClusterId = null, VaultSecretId = certSecretId,
             Name = "other", TargetSecretName = "tls", Scope = TrustDistributionScope.AllNamespaces,
         });
 
@@ -186,12 +204,46 @@ public sealed class CertificateDistributionServiceTests : IDisposable
 
     // ── helpers ──────────────────────────────────────────────────────────────
 
+    /// <summary>A tenant, its vault and one certificate in it — the row the create path checks.</summary>
+    private static Guid SeedCertificate(
+        ApplicationDbContext db, Guid tenant, Guid secretId, string label)
+    {
+        Guid vaultId = Guid.NewGuid();
+
+        db.Tenants.Add(new Tenant { Id = tenant, Name = label, Slug = $"{label}-{tenant:N}" });
+        db.SecretVaults.Add(new SecretVault
+        {
+            Id = vaultId, TenantId = tenant, EncryptedDataKey = [], Nonce = [],
+        });
+        db.Set<VaultSecret>().Add(new VaultSecret
+        {
+            Id = secretId,
+            VaultId = vaultId,
+            Name = $"{label}-tls",
+            SecretType = VaultSecretType.Certificate,
+            EncryptedValue = [],
+            Nonce = [],
+        });
+
+        return vaultId;
+    }
+
+    /// <summary>A second certificate in a tenant's existing vault.</summary>
+    private static void SeedSecret(ApplicationDbContext db, Guid vaultId, Guid secretId, string name)
+    {
+        db.Set<VaultSecret>().Add(new VaultSecret
+        {
+            Id = secretId, VaultId = vaultId, Name = name,
+            SecretType = VaultSecretType.Certificate, EncryptedValue = [], Nonce = [],
+        });
+    }
+
     private CertificateDistribution NewDist(bool includeKey) => new()
     {
         TenantId = tenantId,
         ClusterId = clusterId,
         Name = "corp-tls",
-        VaultSecretId = Guid.NewGuid(),
+        VaultSecretId = certSecretId,
         TargetSecretName = "entkube-cert",
         IncludeKey = includeKey,
         Scope = TrustDistributionScope.TenantNamespaces,
@@ -207,4 +259,114 @@ public sealed class CertificateDistributionServiceTests : IDisposable
     }
 
     public void Dispose() => connection.Dispose();
+    // ── Somebody else's certificate ───────────────────────────────────────────
+
+    /// <summary>
+    /// ⚠️ <b>A distribution row says which certificate is copied into which namespaces, and
+    /// IncludeKey defaults to true</b> — so the row names a private key and where to put it.
+    /// Both the TenantId and the VaultSecretId arrived on the caller's entity and neither was
+    /// checked.
+    /// </summary>
+    [Fact]
+    public async Task A_distribution_cannot_name_another_tenants_certificate()
+    {
+        Func<Task> act = () => sut.CreateDistributionAsync(tenantId, new CertificateDistribution
+        {
+            TenantId = tenantId,
+            VaultSecretId = strangerCertSecretId,
+            Name = "theirs",
+            TargetSecretName = "tls",
+            Scope = TrustDistributionScope.AllNamespaces,
+        });
+
+        await act.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Certificate not found, or it is not this tenant's.");
+    }
+
+    /// <summary>
+    /// The create path files the row under the parameter. Otherwise a reconciler entry lands
+    /// under somebody else's tenant, and the background sweep then acts on it as them.
+    /// </summary>
+    [Fact]
+    public async Task A_distribution_is_filed_under_the_tenant_that_created_it()
+    {
+        CertificateDistribution created = await sut.CreateDistributionAsync(
+            tenantId, new CertificateDistribution
+            {
+                TenantId = strangerTenantId,   // the lie
+                VaultSecretId = certSecretId,  // ours, so the certificate check passes
+                Name = "ours",
+                TargetSecretName = "tls",
+                Scope = TrustDistributionScope.AllNamespaces,
+            });
+
+        created.TenantId.Should().Be(tenantId);
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        db.Set<CertificateDistribution>().First(d => d.Id == created.Id)
+            .TenantId.Should().Be(tenantId);
+    }
+
+    /// <summary>
+    /// ⚠️ The mutate delegate is handed the row, so it can set anything on it — including the
+    /// column that says whose it is. And by id alone it could repoint another tenant's
+    /// distribution at a different certificate or different namespaces, which the background
+    /// reconciler would then carry out as them.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenants_distribution_cannot_be_read_or_repointed()
+    {
+        CertificateDistribution theirs;
+        using (ApplicationDbContext seed = dbFactory.CreateDbContext())
+        {
+            theirs = new CertificateDistribution
+            {
+                Id = Guid.NewGuid(),
+                TenantId = strangerTenantId,
+                VaultSecretId = strangerCertSecretId,
+                Name = "their-tls",
+                TargetSecretName = "their-secret",
+                Scope = TrustDistributionScope.AllNamespaces,
+            };
+            seed.Set<CertificateDistribution>().Add(theirs);
+            seed.SaveChanges();
+        }
+
+        (await sut.GetDistributionAsync(tenantId, theirs.Id)).Should().BeNull();
+
+        Func<Task> repoint = () => sut.UpdateDistributionAsync(
+            tenantId, theirs.Id, d => d.TargetSecretName = "ours");
+
+        await repoint.Should().ThrowAsync<InvalidOperationException>()
+            .WithMessage("Certificate distribution not found, or it is not this tenant's.");
+
+        using ApplicationDbContext after = dbFactory.CreateDbContext();
+        after.Set<CertificateDistribution>().First(d => d.Id == theirs.Id)
+            .TargetSecretName.Should().Be("their-secret");
+    }
+
+    /// <summary>
+    /// And our own edit cannot hand the row away — the delegate setting TenantId is overruled
+    /// after it runs.
+    /// </summary>
+    [Fact]
+    public async Task Our_own_distribution_cannot_be_moved_to_another_tenant()
+    {
+        CertificateDistribution ours = await sut.CreateDistributionAsync(
+            tenantId, NewDist(includeKey: true));
+
+        CertificateDistribution edited = await sut.UpdateDistributionAsync(
+            tenantId, ours.Id, d =>
+            {
+                d.TenantId = strangerTenantId;
+                d.TargetSecretName = "renamed";
+            });
+
+        edited.TenantId.Should().Be(tenantId);
+        edited.TargetSecretName.Should().Be("renamed");
+
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        db.Set<CertificateDistribution>().First(d => d.Id == ours.Id)
+            .TenantId.Should().Be(tenantId);
+    }
 }
