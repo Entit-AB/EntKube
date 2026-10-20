@@ -42,7 +42,13 @@ public class MongoServiceTests : IDisposable
             testDb.Factory, vaultService,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory.Object),
             new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
-            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory));
+            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory),
+            // A real gate, as production registers one. These tests mock the seam, so nothing
+            // reaches it — but a service that opens an operation needs one to open.
+            new EntKube.Web.Services.ClusterChanges.ClusterChangeGate(
+                new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+                Microsoft.Extensions.Logging.Abstractions
+                    .NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance));
     }
 
     public void Dispose()

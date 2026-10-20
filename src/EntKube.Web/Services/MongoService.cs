@@ -26,7 +26,8 @@ public class MongoService(
     VaultService vaultService,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
-    EntKube.Contracts.Delivery.IDeliveryApi delivery)
+    EntKube.Contracts.Delivery.IDeliveryApi delivery,
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate)
 {
     /// <summary>
     /// A client for one of the tenant's clusters, or a refusal that says why. Keeps the cluster
@@ -157,6 +158,9 @@ public class MongoService(
         // The asking tenant, not the row's own — see the note in KafkaService.CreateClusterAsync:
         // this loaded the cluster by id with no tenant predicate and then checked that row against
         // itself, while `tenantId` was in scope and already used for the vault writes above.
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("create a MongoDB cluster");
+
         await (await ClusterFor(tenantId, k8sCluster.Id, ct)).EnsureNamespaceAsync(ns, ct);
 
         // The Community Operator sets serviceAccountName: mongodb-database on every pod it creates.
@@ -223,6 +227,9 @@ public class MongoService(
 
         // Attempt to delete the K8s resources. If the cluster never actually deployed
         // or the K8s API is unreachable, we still proceed with removing the DB record.
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("delete a MongoDB cluster");
 
         try
         {
@@ -294,6 +301,9 @@ public class MongoService(
         await db.SaveChangesAsync(ct);
 
         string? s3SecretName = mongo.StorageLinkId.HasValue ? $"{mongo.Name}-s3-credentials" : null;
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("update MongoDB backup settings");
 
         if (!string.IsNullOrWhiteSpace(mongo.BackupSchedule) && mongo.StorageLink is not null && s3SecretName is not null)
         {
@@ -492,6 +502,9 @@ public class MongoService(
         mongo.Status = MongoClusterStatus.Upgrading;
         await db.SaveChangesAsync(ct);
 
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("upgrade a MongoDB cluster");
+
         if (mongo.IsExternal)
         {
             // External clusters: patch only spec.version to avoid clobbering existing spec.users and other config.
@@ -593,6 +606,9 @@ public class MongoService(
             && storageSize.Trim() != mongo.StorageSize;
 
         // ── CPU / Memory ──────────────────────────────────────────────────────────
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("resize a MongoDB cluster");
+
         if (resourcesChanged)
         {
             mongo.CpuRequest    = string.IsNullOrWhiteSpace(cpuRequest)    ? null : cpuRequest.Trim();
@@ -773,6 +789,9 @@ public class MongoService(
 
         // Store the Atlas URI in a short-lived K8s Secret so it is not embedded in the Job manifest.
         string atlasSecretManifest = BuildAtlasUriSecret(atlasSecretName, mongo.Namespace, atlasUri);
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("restore a MongoDB cluster from Atlas");
+
         await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ApplyManifestAsync(atlasSecretManifest, ct);
 
         string manifest = BuildAtlasRestoreManifest(
@@ -1295,6 +1314,9 @@ public class MongoService(
         foreach (KeyValuePair<string, string> kv in credentials)
             sb.AppendLine($"  {kv.Key}: \"{kv.Value.Replace("\"", "\\\"")}\"");
 
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("sync MongoDB database credentials");
+
         await client.ApplyManifestAsync(sb.ToString(), ct);
 
         // Mark vault secrets as synced.
@@ -1491,6 +1513,9 @@ public class MongoService(
 
         // Store the admin password as a K8s Secret so Jobs can reference it by name,
         // exactly like managed clusters. Password is never persisted in EntKube's database.
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("update an external MongoDB cluster's settings");
+
         if (!string.IsNullOrWhiteSpace(adminPassword))
         {
             string adminSecretManifest = BuildAdminSecretManifest(mongo.Name, mongo.Namespace, adminPassword.Trim());
