@@ -32,7 +32,25 @@ public class OneAckPerActionRatchetTests
     /// so they are a change of their own rather than a silent widening of this one. Driving this
     /// to zero is the work; the ratchet is here so it cannot grow while that waits.</para>
     /// </summary>
-    private const int Baseline = 53;
+    private const int Baseline = 38;
+
+    /// <summary>
+    /// How far below <see cref="Baseline"/> the count may sit before this test asks to be
+    /// re-banked.
+    ///
+    /// <para><b>Why there is slack at all, which is a deviation from the other ratchets here.</b>
+    /// They assert the count <em>exactly</em>, so that a conversion has to bank its own number
+    /// and cannot leave room for the next regression to slip in free. That is right when one
+    /// change lands at a time, and it has now made <c>main</c> red <b>four</b> times when two did:
+    /// each PR is correct against the tree it was measured on, both lower the count, and whichever
+    /// merges second leaves a constant that no longer matches. The number has no correct value at
+    /// the moment of the merge — only after it.</para>
+    ///
+    /// <para>So growth is still refused outright, and drift is bounded: ten is small enough that
+    /// a forgotten re-bank cannot quietly become headroom for ten new offenders, and large enough
+    /// to absorb the two or three conversions that are usually in flight together.</para>
+    /// </summary>
+    private const int AllowedDrift = 10;
 
     private const string Web = "../../../../../src/EntKube.Web";
 
@@ -46,6 +64,20 @@ public class OneAckPerActionRatchetTests
     /// The seam verbs that raise an acknowledgment. Taken from the factory rather than guessed:
     /// each of these calls <c>_gate.AcknowledgeAsync</c> before it touches the cluster.
     /// </summary>
+    /// <summary>
+    /// ⚠️ <b>First-party helpers that reach a gated verb one level down.</b> Omitting these is
+    /// how the first version of this scan missed nine methods — every binding writer, because
+    /// they all write through <c>SharedSecretKeys</c> since #305, and
+    /// <c>VaultService.SyncAppSecretsToKubernetesAsync</c> among them, which was the first thing
+    /// an operator reported about this gate. A scan for calls measures one hop; the property is
+    /// transitive, so each wrapper has to be named here or counted by following it.
+    /// </summary>
+    private static readonly string[] GatedThroughHelpers =
+    [
+        @"SharedSecretKeys\.WriteAsync\(",
+        @"SharedSecretKeys\.RemoveAsync\(",
+    ];
+
     private static readonly string[] GatedVerbs =
     [
         "ApplyManifestAsync", "ApplyManifestInNamespaceAsync", "ReplaceSecretAsync",
@@ -63,7 +95,8 @@ public class OneAckPerActionRatchetTests
     /// but with a guard against the declaration.
     /// </summary>
     private static readonly Regex GatedCall = new(
-        @"\.(?:" + string.Join("|", GatedVerbs) + @")\(|(?<![.\w])ApplyRawYamlAsync\(",
+        @"\.(?:" + string.Join("|", GatedVerbs) + @")\(|(?<![.\w])ApplyRawYamlAsync\(|"
+        + string.Join("|", GatedThroughHelpers),
         RegexOptions.Compiled);
 
     /// <summary>
@@ -135,14 +168,17 @@ public class OneAckPerActionRatchetTests
     }
 
     /// <summary>
-    /// The banked number has to be re-measured when it falls, or the slack lets the next one in
-    /// for free.
+    /// The banked number has to be re-measured when it falls — but not so strictly that two
+    /// conversions landing together turn <c>main</c> red. See <see cref="AllowedDrift"/>.
     /// </summary>
     [Fact]
-    public void The_ratchet_does_not_carry_slack()
+    public void The_ratchet_does_not_carry_unbounded_slack()
     {
-        FindActionsThatAskTwice().Count.Should().Be(Baseline,
-            $"now {FindActionsThatAskTwice().Count} — bank it");
+        int found = FindActionsThatAskTwice().Count;
+
+        (Baseline - found).Should().BeLessThanOrEqualTo(AllowedDrift,
+            $"now {found}, banked {Baseline} — re-bank it, or the gap becomes headroom for "
+            + "offenders nobody converted");
     }
 
     /// <summary>

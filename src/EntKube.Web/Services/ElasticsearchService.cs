@@ -2944,6 +2944,13 @@ public class ElasticsearchService(
         Clusters.IClusterClient appCluster = await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct);
         string appNs = binding.AppDeployment.Namespace;
 
+        // One action, one acknowledgment. ⚠️ #309 converted twenty-three methods in this file and
+        // missed this one, because the scan it was measured with looked for calls to the seam's
+        // verbs and this method's write goes through SharedSecretKeys — one level down, where
+        // that scan could not see it.
+        using IDisposable operation = gate.BeginOperation(
+            $"bind Elasticsearch to {appNs}");
+
         await appCluster.EnsureNamespaceAsync(appNs, ct);
 
         // Named keys, not a whole Secret — see SharedSecretKeys for why an apply is not additive.
