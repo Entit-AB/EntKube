@@ -68,7 +68,7 @@ public class JitAccessServiceTests : IDisposable
 
         factory = new TestDbContextFactory(connection);
         sut = new JitAccessService(
-            factory, provisioner, new AuditService(factory), NullLogger<JitAccessService>.Instance);
+            factory, provisioner, new AuditService(factory, new EntKube.Web.Modules.Api.DeliveryApi(factory)), NullLogger<JitAccessService>.Instance);
     }
 
     // ── Namespace exclusivity ─────────────────────────────────────────────────

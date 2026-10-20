@@ -35,7 +35,7 @@ public class DeploymentServiceTests : IDisposable
         dbFactory = new TestDbContextFactory(connection);
         db.Database.EnsureCreated();
 
-        sut = new DeploymentService(dbFactory, new AuditService(dbFactory),
+        sut = new DeploymentService(dbFactory, new AuditService(dbFactory, new EntKube.Web.Modules.Api.DeliveryApi(dbFactory)),
             new DeploymentStatusNotifier(), NullLogger<DeploymentService>.Instance);
     }
 

@@ -917,6 +917,52 @@ Tenant availability, which is what decides whether each can move: three of the f
 `KubernetesOperationsService` entry points already take one; its private
 `ApplyGatewayForClusterAsync` does not and will have to.
 
+#### 4.0.1.6 The id-only sweep, classified (2026-10-20)
+
+The tenant-scoping programme ran out of obvious targets, so the question was measured instead of
+guessed: **which public service methods take an entity id, touch the database, and receive no
+tenant?** That is the sibling gap §4.0.1.1 left open, and it is a different shape from credential
+custody — nothing here reaches a cluster, so the seam cannot catch it.
+
+**43 methods in 21 files.** Measured per site, because the counts that matter are the ones a
+signature grep gets wrong in both directions: five of the 43 were already fixed in open PRs, and
+one file's ten "hits" turned out to be pure manifest renderers over an entity the caller had
+already loaded.
+
+The classification, and it is the point of this entry — **more of them are legitimate than not**:
+
+| Class | Count | What decides it |
+|---|---|---|
+| Fixed here or in flight | 9 | a tenant surface reads or writes somebody else's row |
+| Installation-admin surface | 17 | the only caller is an `/admin/*` page with `[Authorize(Roles = "Admin")]` |
+| Principal-keyed | 6 | the id *is* the credential, and the caller proved possession before the call |
+| Renderers and resolvers | 10 | no row is fetched by that id; it is handed in |
+| Dead | 1 | no caller at all |
+
+**The deciding question is almost never in the method.** `TenantRoleService.SavePermissionsAsync`
+reads like the worst hole in the codebase — it writes access levels onto a role found by bare id,
+which is authorization itself. Its only caller is `/admin/roles`, an installation-admin page with a
+tenant *picker*, where acting across tenants is the feature. `TicketBridgeService.DeliverAsync`
+reads nearly as badly and is reached from an HTTP endpoint, but that endpoint matches the presented
+secret against the connection's hash before it calls: the id is the address and the secret is the
+authorization. Both are correct as written. **Opening the caller is not optional diligence here, it
+is the measurement** — the same conclusion §4.0.1.1 reached from the other direction, and the same
+one two wrong exemptions cost earlier in this programme.
+
+The two fixed in this change share a shape worth naming, because it is why they outlasted the
+obvious ones: **neither row carries a tenant, and the owning table belongs to another module.**
+`AuditEvent` hangs off a deployment (Delivery's) and `ExternalRouteHealthHistory` hangs off a route
+whose tenant lives behind a Catalog component. Neither could be fixed by adding a column to a
+predicate — the tenant had to be *asked for*, through `IDeliveryApi.GetDeploymentAsync` and through
+the file's own `LoadRouteAsync` funnel. A read that cannot express its own authorization is a read
+that gets skipped, and five sibling route methods used that funnel while the sixth did not.
+
+⚠️ **One recorded gap is now closed and the note outlived it.** §4.0.1's sibling-gap paragraph named
+`AppRouteService` as keeping twelve id-only methods "through the whole programme". It has none: the
+only methods without a tenant are the ten manifest renderers, which have no row to authorize. The
+note was true when written and is not now, which is the ordinary failure mode of a recorded gap —
+it is cheaper to re-measure than to trust.
+
 ## 5. The agent model
 
 ### 5.1 What exists, and what it is not

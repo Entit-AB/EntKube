@@ -3997,7 +3997,7 @@ else if (section == "components")
         routeUptimes = new();
         foreach (ExternalRoute route in componentRoutes)
         {
-            RouteUptimeSummary summary = await RouteService.GetRouteUptimeAsync(route.Id);
+            RouteUptimeSummary summary = await RouteService.GetRouteUptimeAsync(TenantId, route.Id);
             routeUptimes[route.Id] = summary;
         }
     }
