@@ -465,7 +465,7 @@ public class TicketServiceTests : IDisposable
         Ticket done = await Raise(s1AppId, TicketPriority.P2, Tue(11));
         await tickets.CloseAsync(tenantId, done.Id, "nils", Tue(12));
 
-        List<TicketSlaStatus> queue = await tickets.GetOpenQueueAsync(customerId, Tue(13));
+        List<TicketSlaStatus> queue = await tickets.GetOpenQueueAsync(tenantId, customerId, Tue(13));
 
         queue.Should().HaveCount(2);
         queue[0].Ticket.Id.Should().Be(urgent.Id);
@@ -563,7 +563,7 @@ public class TicketServiceTests : IDisposable
         await Raise(s1AppId, TicketPriority.P2, Swedish(2026, 8, 20, 10));
         await Raise(s1AppId, TicketPriority.P1, Tue(10));
 
-        List<TicketSlaStatus> september = await tickets.GetForPeriodAsync(
+        List<TicketSlaStatus> september = await tickets.GetForPeriodAsync(tenantId, 
             customerId, Swedish(2026, 9, 1), Swedish(2026, 10, 1), Tue(13));
 
         september.Should().ContainSingle();
@@ -852,7 +852,7 @@ public class TicketServiceTests : IDisposable
 
         Ticket ticket = await Raise(s4AppId, TicketPriority.P3, Tue(9));
 
-        TicketService.TicketMove? moved = await tickets.MoveAsync(
+        TicketService.TicketMove? moved = await tickets.MoveAsync(tenantId, 
             ticket.Id, otherCustomer, null, "nils", "filed under the wrong tenant", Tue(10));
 
         moved.Should().NotBeNull();

@@ -210,7 +210,7 @@ public class MonthlyReportService(
                 "", from, [], [], 0, default, default, 0, 0m, 0m, 0, false, [], []);
         }
 
-        List<TicketSlaStatus> inMonth = await tickets.GetForPeriodAsync(customerId, from, to, to, ct);
+        List<TicketSlaStatus> inMonth = await tickets.GetForPeriodAsync(tenantId, customerId, from, to, to, ct);
 
         List<PriorityRow> byPriority = [];
 
@@ -287,8 +287,8 @@ public class MonthlyReportService(
             penaltyDeviations,
             penalty,
             fees.WindowFee,
-            await PenaltiesEarlierThisYearAsync(customerId, from, ct),
-            await ActionPlanRequiredAsync(customerId, from, ct),
+            await PenaltiesEarlierThisYearAsync(tenantId, customerId, from, ct),
+            await ActionPlanRequiredAsync(tenantId, customerId, from, ct),
             ShortNotice(maintenance),
             await OutstandingReportsAsync(db, customerId, to, ct));
     }
@@ -421,7 +421,7 @@ public class MonthlyReportService(
     /// year, so the report has to know what has already been paid out.
     /// </summary>
     private async Task<int> PenaltiesEarlierThisYearAsync(
-        Guid customerId, DateTime month, CancellationToken ct)
+        Guid tenantId, Guid customerId, DateTime month, CancellationToken ct)
     {
         DateTime yearStart = new(month.Year, 1, 1, 0, 0, 0, DateTimeKind.Utc);
 
@@ -430,8 +430,7 @@ public class MonthlyReportService(
             return 0;
         }
 
-        List<TicketSlaStatus> earlier = await tickets.GetForPeriodAsync(
-            customerId, yearStart, month, month, ct);
+        List<TicketSlaStatus> earlier = await tickets.GetForPeriodAsync(tenantId, customerId, yearStart, month, month, ct);
 
         return earlier.Count(t => t.IsPenaltyDeviation);
     }
@@ -441,14 +440,13 @@ public class MonthlyReportService(
     /// quarter the month falls in, presented at the next quarterly meeting.
     /// </summary>
     private async Task<bool> ActionPlanRequiredAsync(
-        Guid customerId, DateTime month, CancellationToken ct)
+        Guid tenantId, Guid customerId, DateTime month, CancellationToken ct)
     {
         int quarterFirstMonth = (((month.Month - 1) / 3) * 3) + 1;
         DateTime quarterStart = new(month.Year, quarterFirstMonth, 1, 0, 0, 0, DateTimeKind.Utc);
         DateTime quarterEnd = quarterStart.AddMonths(3);
 
-        List<TicketSlaStatus> quarter = await tickets.GetForPeriodAsync(
-            customerId, quarterStart, quarterEnd, quarterEnd, ct);
+        List<TicketSlaStatus> quarter = await tickets.GetForPeriodAsync(tenantId, customerId, quarterStart, quarterEnd, quarterEnd, ct);
 
         return quarter.Count(t => t.IsPenaltyDeviation) > TicketSla.DeviationsBeforeActionPlan;
     }
