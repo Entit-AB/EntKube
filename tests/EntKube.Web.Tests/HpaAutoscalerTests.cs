@@ -285,7 +285,7 @@ public class HpaAutoscalerTests : IDisposable
         saved.Kind.Should().Be(KedaScalerKind.Hpa);
         saved.TargetCpuUtilization.Should().Be(70);
 
-        List<KedaScaler> all = await sut.GetScalersAsync(appId, envId);
+        List<KedaScaler> all = await sut.GetScalersAsync(tenantId, appId, envId);
         all.Should().ContainSingle().Which.MaxReplicaCount.Should().Be(10);
     }
 
@@ -337,7 +337,7 @@ public class HpaAutoscalerTests : IDisposable
 
         await act.Should().ThrowAsync<InvalidOperationException>().WithMessage("*api-events*");
 
-        (await sut.GetScalersAsync(appId, envId)).Should().ContainSingle();
+        (await sut.GetScalersAsync(tenantId, appId, envId)).Should().ContainSingle();
     }
 
     [Fact]
@@ -356,6 +356,6 @@ public class HpaAutoscalerTests : IDisposable
 
         updated.MaxReplicaCount.Should().Be(12);
         updated.TargetMemoryUtilization.Should().Be(85);
-        (await sut.GetScalersAsync(appId, envId)).Should().ContainSingle();
+        (await sut.GetScalersAsync(tenantId, appId, envId)).Should().ContainSingle();
     }
 }
