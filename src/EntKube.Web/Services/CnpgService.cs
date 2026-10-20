@@ -132,6 +132,9 @@ public class CnpgService(
 
         // Ensure the target namespace exists before applying any resources.
 
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("create a Postgres cluster");
+
         await (await ClusterFor(tenantId, k8sCluster.Id, ct)).EnsureNamespaceAsync(ns, ct);
 
         // Now that the namespace exists, create the S3 credentials Secret.
@@ -203,6 +206,9 @@ public class CnpgService(
         // Attempt to delete the K8s resources. If the cluster never actually deployed
         // or the K8s API is unreachable, we still proceed with removing the DB record
         // so the user isn't stuck with an un-deletable entry.
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("delete a Postgres cluster");
 
         try
         {
@@ -593,6 +599,9 @@ public class CnpgService(
 
         string backupName = $"{source.Name}-pre-upgrade-{DateTime.UtcNow:yyyyMMddHHmmss}";
         string backupManifest = BuildBackupManifest(backupName, source.Name, source.Namespace);
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("major-upgrade a Postgres cluster");
+
         await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).ApplyManifestAsync(backupManifest, ct);
 
         // Step 2: Create the new cluster with a temporary name, targeting the new major version.
@@ -701,6 +710,9 @@ public class CnpgService(
         string s3SecretName = $"{cnpg.Name}-s3-credentials";
 
         // Re-apply ObjectStore so the updated retentionPolicy reaches Barman.
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("update Postgres backup settings");
+
         await client.ApplyManifestAsync(
             BuildObjectStoreManifest(cnpg.Name, cnpg.Namespace, cnpg.StorageLink, s3SecretName, cnpg.RetentionDays), ct);
 
@@ -847,6 +859,9 @@ public class CnpgService(
         // best-effort idempotent reconcile that picks up any config changes (e.g.
         // archive_timeout) without requiring a separate upgrade operation.
         // Ignored on failure — the backup itself is the critical operation.
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("back up a Postgres cluster");
+
         try
         {
             string s3SecretName = $"{cnpg.Name}-s3-credentials";
@@ -934,6 +949,9 @@ public class CnpgService(
         db.CnpgClusters.Add(restored);
         await db.SaveChangesAsync(ct);
 
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("restore a Postgres cluster");
+
         await client.EnsureNamespaceAsync(source.Namespace, ct);
 
         // Set up the new cluster's S3 credentials and ObjectStore so they exist
@@ -987,6 +1005,9 @@ public class CnpgService(
 
         // Delete only the Cluster CRD, not the ObjectStore — the recovery bootstrap
         // references the existing ObjectStore to locate WAL archives in S3.
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("restore a Postgres cluster in place");
+
         try
         {
             await (await ClusterFor(tenantId, source.KubernetesClusterId, ct)).DeleteManifestAsync(
@@ -1128,6 +1149,9 @@ public class CnpgService(
 
         string primarySecretName = $"{cnpg.Name}-{database.Name}-credentials";
         Clusters.IClusterClient client = await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct);
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("delete a Postgres database");
 
         try
         {
