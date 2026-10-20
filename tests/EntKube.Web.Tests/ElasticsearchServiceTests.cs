@@ -3306,12 +3306,35 @@ public class ElasticsearchServiceTests : IDisposable
         }
     }
 
-    private int GateEveryApply()
+    /// <summary>
+    /// How many gated changes the action made. Asserted alongside the dialog count, because "one
+    /// dialog" is trivially true of an action that makes one change — the RabbitMQ version of
+    /// this test passed with its fix removed for exactly that reason.
+    /// </summary>
+    private int gatedChanges;
+
+    private void GateEveryApply()
     {
+        // EnsureNamespaceAsync as well as the applies: it is a separate method on the mocked
+        // factory, though the real one reaches the gate through its own apply.
+        k8s.Setup(x => x.EnsureNamespaceAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string ns, string kubeconfig, CancellationToken ct) =>
+            {
+                gatedChanges++;
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                    Manifest = $"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {ns}\n",
+                    Kubeconfig = kubeconfig,
+                }, ct);
+            });
+
         k8s.Setup(x => x.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Returns(async (string manifest, string kubeconfig, CancellationToken ct) =>
             {
+                gatedChanges++;
                 await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
                 {
                     Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
@@ -3320,7 +3343,6 @@ public class ElasticsearchServiceTests : IDisposable
                 }, ct);
                 return string.Empty;
             });
-        return 0;
     }
 
     [Fact]
@@ -3335,6 +3357,7 @@ public class ElasticsearchServiceTests : IDisposable
 
         await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
 
+        gatedChanges.Should().BeGreaterThan(1, "the action must still make several gated changes");
         sink.Calls.Should().Be(1, "one action, one dialog");
     }
 
