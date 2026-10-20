@@ -1071,7 +1071,7 @@ else
 
         foreach (Customer customer in customers)
         {
-            List<Data.App> apps = await TenantService.GetAppsAsync(customer.Id);
+            List<Data.App> apps = await TenantService.GetAppsAsync(TenantId, customer.Id);
 
             foreach (Data.App app in apps)
             {

@@ -133,7 +133,7 @@ public class CustomerEnvironmentMembershipTests : IDisposable
     {
         Customer customer = await service.CreateCustomerAsync(tenantId, "Big Corp", prodId);
 
-        (await service.DeleteCustomerAsync(customer.Id)).Should().BeTrue();
+        (await service.DeleteCustomerAsync(tenantId, customer.Id)).Should().BeTrue();
 
         (await service.GetCustomerEnvironmentsAsync(tenantId)).Should().BeEmpty();
     }

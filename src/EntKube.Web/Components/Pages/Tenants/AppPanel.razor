@@ -124,7 +124,7 @@
 
     private async Task Load()
     {
-        apps = await TenantService.GetAppsAsync(Customer.Id);
+        apps = await TenantService.GetAppsAsync(TenantId, Customer.Id);
     }
 
     private async Task CreateApp()
