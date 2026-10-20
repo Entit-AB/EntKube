@@ -119,6 +119,42 @@ public interface IKubernetesClientFactory
     /// the diff they see is the real before-and-after. The delete is how that result is reached,
     /// not a separate choice.</para>
     /// </summary>
+    /// <summary>
+    /// Adds, updates and removes <b>individual keys</b> of a Secret, leaving every other key in
+    /// it untouched. Creates the Secret if it does not exist yet.
+    ///
+    /// <para><b>Why this exists.</b> A Secret in an app's namespace can have more than one
+    /// writer — the app's own vault secrets and the credentials of each service it is bound to
+    /// (Redis, RabbitMQ, Mongo, object storage) — and pointing several of them at one Secret is
+    /// intended: an app wants one <c>envFrom</c>, not five.</para>
+    ///
+    /// <para><b>Neither of the two obvious ways to write it is additive.</b>
+    /// <see cref="ReplaceSecretAsync"/> deletes and recreates, so it drops every key it does not
+    /// itself carry. And a plain <c>apply</c> is <em>not</em> additive either, which is the part
+    /// that is easy to get wrong: apply's three-way merge deletes the keys recorded in the
+    /// object's <c>last-applied-configuration</c> annotation but missing from the new config —
+    /// and that annotation belongs to the <b>object</b>, not to the writer. So two writers
+    /// applying in turn each delete the other's keys, and the one that ran last appears to have
+    /// won.</para>
+    ///
+    /// <para>A merge patch has no such memory: it names the keys it means. Removal therefore has
+    /// to be explicit — a null value deletes that key — which is why
+    /// <paramref name="keys"/> is a map to a <em>nullable</em> string.</para>
+    /// </summary>
+    /// <param name="keys">
+    /// The keys this writer owns. A non-null value is set (it is base64-encoded here, so callers
+    /// pass the plain text); a <b>null</b> value deletes that key. Keys absent from the map are
+    /// left exactly as they are.
+    /// </param>
+    /// <param name="annotations">
+    /// Annotations to set alongside, or null for none. Used to record which keys a writer owns,
+    /// so the next sync can delete the ones it has since dropped without guessing.
+    /// </param>
+    Task<string> MergeSecretKeysAsync(
+        string name, string ns, IReadOnlyDictionary<string, string?> keys,
+        IReadOnlyDictionary<string, string>? annotations, string kubeconfig,
+        string? summary = null, CancellationToken ct = default);
+
     Task<string> ReplaceSecretAsync(
         string name, string ns, string manifest, string kubeconfig, string? summary = null,
         CancellationToken ct = default);

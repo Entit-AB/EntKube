@@ -565,8 +565,12 @@ public class ElasticsearchService(
         {
             try
             {
-                await (await ClusterFor(cluster.TenantId, binding.AppDeployment.ClusterId, ct)).DeleteManifestAsync("secret", binding.KubernetesSecretName,
-                    binding.AppDeployment.Namespace, ct);
+                await EntKube.Web.Services.Clusters.SharedSecretKeys.RemoveAsync(
+                    await ClusterFor(cluster.TenantId, binding.AppDeployment.ClusterId, ct),
+                    binding.KubernetesSecretName, binding.AppDeployment.Namespace,
+                    EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Search,
+                    $"Remove Elasticsearch credentials from '{binding.KubernetesSecretName}'",
+                    ct);
             }
             catch (Exception ex)
             {
@@ -2897,8 +2901,14 @@ public class ElasticsearchService(
         string appNs = binding.AppDeployment.Namespace;
 
         await appCluster.EnsureNamespaceAsync(appNs, ct);
-        await appCluster.ApplyManifestAsync(
-            BuildBindingSecretManifest(binding.KubernetesSecretName, appNs, data), ct);
+
+        // Named keys, not a whole Secret — see SharedSecretKeys for why an apply is not additive.
+        await EntKube.Web.Services.Clusters.SharedSecretKeys.WriteAsync(
+            appCluster, binding.KubernetesSecretName, appNs,
+            EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Search,
+            data.ToDictionary(kv => kv.Key, kv => (string?)kv.Value),
+            $"Sync Elasticsearch credentials into '{binding.KubernetesSecretName}' in {appNs}",
+            ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
@@ -2916,9 +2926,14 @@ public class ElasticsearchService(
 
         try
         {
-            await (await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct))
-                .DeleteManifestAsync(
-                    "secret", binding.KubernetesSecretName, binding.AppDeployment.Namespace, ct);
+            // Its own keys, not the Secret: the app may have pointed this binding at the
+            // Secret holding its own vault secrets, and deleting the object would take those.
+            await EntKube.Web.Services.Clusters.SharedSecretKeys.RemoveAsync(
+                await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct),
+                binding.KubernetesSecretName, binding.AppDeployment.Namespace,
+                EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Search,
+                $"Remove Elasticsearch credentials from '{binding.KubernetesSecretName}'",
+                ct);
         }
         catch (Exception ex)
         {

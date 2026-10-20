@@ -1890,25 +1890,22 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
 
         await clusterAccess.EnsureNamespaceAsync(ns, ct);
 
-        string secretManifest = $"""
-            apiVersion: v1
-            kind: Secret
-            metadata:
-              name: {binding.KubernetesSecretName}
-              namespace: {ns}
-              labels:
-                app.kubernetes.io/managed-by: entkube
-                entkube.io/managed: "true"
-            type: Opaque
-            data:
-              STORAGE_ACCESS_KEY: {B64(accessKey)}
-              STORAGE_SECRET_KEY: {B64(secretKey)}
-              STORAGE_ENDPOINT: {B64(link.Endpoint ?? "")}
-              STORAGE_BUCKET: {B64(link.BucketName ?? "")}
-              STORAGE_REGION: {B64(link.Region ?? "")}
-            """;
-
-        await clusterAccess.ApplyManifestAsync(secretManifest, ct);
+        // Named keys, not a whole Secret: a binding may share the app's own Secret on purpose,
+        // and an apply deletes whatever the object's shared last-applied annotation named.
+        // See IKubernetesClientFactory.MergeSecretKeysAsync.
+        await EntKube.Web.Services.Clusters.SharedSecretKeys.WriteAsync(
+            clusterAccess, binding.KubernetesSecretName, ns,
+            EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Storage,
+            new Dictionary<string, string?>
+            {
+                ["STORAGE_ACCESS_KEY"] = accessKey,
+                ["STORAGE_SECRET_KEY"] = secretKey,
+                ["STORAGE_ENDPOINT"] = link.Endpoint ?? "",
+                ["STORAGE_BUCKET"] = link.BucketName ?? "",
+                ["STORAGE_REGION"] = link.Region ?? "",
+            },
+            summary: $"Sync storage credentials into '{binding.KubernetesSecretName}' in {ns}",
+            ct: ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
         using ApplicationDbContext db2 = dbFactory.CreateDbContext();

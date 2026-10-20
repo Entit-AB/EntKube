@@ -33,6 +33,17 @@ public class VaultSecretSyncTests : IDisposable
     /// <summary>Every secret replacement asked of a cluster, as (name, namespace, manifest).</summary>
     private readonly List<(string Name, string Namespace, string Manifest)> replaced = [];
 
+    /// <summary>
+    /// Every key-scoped write asked of a cluster. App secrets go through this now, because the
+    /// Secret they land in can have other writers — see <see cref="SharedSecretKeysTests"/>.
+    /// </summary>
+    private readonly List<(string Name, string Namespace,
+        IReadOnlyDictionary<string, string?> Keys,
+        IReadOnlyDictionary<string, string>? Annotations)> merged = [];
+
+    /// <summary>What the live Secret reports as the vault's keys, for the removal case.</summary>
+    private string? ownedKeysAnnotation;
+
     /// <summary>Every namespace the sync ensured exists.</summary>
     private readonly List<string> namespaces = [];
 
@@ -49,6 +60,27 @@ public class VaultSecretSyncTests : IDisposable
             .Callback((string name, string ns, string manifest, string _, string? _, CancellationToken _) =>
                 replaced.Add((name, ns, manifest)))
             .ReturnsAsync("secret/synced configured");
+
+        k8s.Setup(x => x.MergeSecretKeysAsync(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<IReadOnlyDictionary<string, string?>>(),
+                It.IsAny<IReadOnlyDictionary<string, string>?>(),
+                It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .Callback((string name, string ns, IReadOnlyDictionary<string, string?> keys,
+                       IReadOnlyDictionary<string, string>? annotations, string _, string? _,
+                       CancellationToken _) => merged.Add((name, ns, keys, annotations)))
+            .ReturnsAsync("secret/patched");
+
+        k8s.Setup(x => x.GetResourceJsonAsync("secret", It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(() => new HelmExecutionResult
+            {
+                Success = true,
+                Output = ownedKeysAnnotation is null
+                    ? """{"metadata":{"name":"app-secrets"}}"""
+                    : "{\"metadata\":{\"annotations\":{\"entkube.io/keys.vault\":\""
+                      + ownedKeysAnnotation + "\"}}}",
+            });
 
         k8s.Setup(x => x.EnsureNamespaceAsync(It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<CancellationToken>()))
@@ -129,13 +161,19 @@ public class VaultSecretSyncTests : IDisposable
     // ════════════════════════════════════════════════════════════════
 
     /// <summary>
-    /// The manifest carries exactly the keys the vault holds, and the operation is a replace
-    /// rather than an apply — so a key that has been removed from the vault cannot survive in the
-    /// cluster. An apply would have merged it back in, because these Secrets have no last-applied
-    /// annotation for kubectl to diff against.
+    /// The write names exactly the keys the vault holds — and <b>only</b> those, because the
+    /// Secret it lands in may also hold the keys of every service the app is bound to. Pointing
+    /// a Redis or RabbitMQ binding at the app's own Secret is intended.
+    ///
+    /// <para>⚠️ This used to be a <em>replace</em>, deliberately, so a key removed from the vault
+    /// could not survive in the cluster. That is still the property — see
+    /// <c>A_key_the_vault_no_longer_holds_is_deleted_by_name</c> below — but delete-and-recreate
+    /// is the wrong mechanism for a shared Secret: it dropped the other writers' keys, and so
+    /// did switching to a plain apply, because apply deletes whatever the object's last-applied
+    /// annotation named and that annotation belongs to the object.</para>
     /// </summary>
     [Fact]
-    public async Task The_manifest_holds_exactly_the_keys_the_vault_holds()
+    public async Task The_write_holds_exactly_the_keys_the_vault_holds()
     {
         await SeedAsync();
         await GivenAnAppSecretAsync(ours, appId, ourCluster, "DB_PASSWORD", "hunter2");
@@ -145,15 +183,54 @@ public class VaultSecretSyncTests : IDisposable
 
         result.Success.Should().BeTrue(result.Output);
 
-        (string name, string ns, string manifest) = replaced.Should().ContainSingle().Subject;
+        (string name, string ns, IReadOnlyDictionary<string, string?> keys, _) =
+            merged.Should().ContainSingle().Subject;
 
         name.Should().Be("app-secrets");
         ns.Should().Be("billing");
         namespaces.Should().Contain("billing", "the namespace is ensured before the secret lands");
 
-        manifest.Should().Contain("\"DB_PASSWORD\":").And.Contain("\"API_KEY\":");
-        manifest.Should().Contain(Convert.ToBase64String("hunter2"u8.ToArray()));
-        manifest.Should().Contain(Convert.ToBase64String("sk-live-1234"u8.ToArray()));
+        keys.Keys.Should().BeEquivalentTo(["DB_PASSWORD", "API_KEY"]);
+        keys["DB_PASSWORD"].Should().Be("hunter2");
+        keys["API_KEY"].Should().Be("sk-live-1234");
+    }
+
+    /// <summary>
+    /// The property delete-and-recreate existed for, kept without it: a credential that has been
+    /// revoked must not survive in the cluster. The keys the vault owned last time are recorded
+    /// on the Secret, so the ones it no longer holds are deleted <em>by name</em>.
+    /// </summary>
+    [Fact]
+    public async Task A_key_the_vault_no_longer_holds_is_deleted_by_name()
+    {
+        await SeedAsync();
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "DB_PASSWORD", "hunter2");
+
+        // The last sync also wrote API_KEY, which has since been removed from the vault.
+        ownedKeysAnnotation = "API_KEY,DB_PASSWORD";
+
+        await vault.SyncAppSecretsToKubernetesAsync(ours, appId);
+
+        IReadOnlyDictionary<string, string?> keys = merged.Should().ContainSingle().Subject.Keys;
+
+        keys["DB_PASSWORD"].Should().Be("hunter2");
+        keys["API_KEY"].Should().BeNull("a revoked credential must not survive in the cluster");
+    }
+
+    /// <summary>
+    /// And the keys it owns are recorded, so the next sync can do the above.
+    /// </summary>
+    [Fact]
+    public async Task The_vault_records_which_keys_are_its_own()
+    {
+        await SeedAsync();
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "DB_PASSWORD", "hunter2");
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "API_KEY", "sk-live-1234");
+
+        await vault.SyncAppSecretsToKubernetesAsync(ours, appId);
+
+        merged.Should().ContainSingle().Subject
+            .Annotations!["entkube.io/keys.vault"].Should().Be("API_KEY,DB_PASSWORD");
     }
 
     /// <summary>
@@ -163,17 +240,23 @@ public class VaultSecretSyncTests : IDisposable
     /// EntKube's own Secrets back into the vault.
     /// </summary>
     [Fact]
-    public async Task The_managed_by_labels_are_part_of_the_manifest()
+    public async Task The_managed_by_labels_are_part_of_every_write()
     {
         await SeedAsync();
         await GivenAnAppSecretAsync(ours, appId, ourCluster, "DB_PASSWORD", "hunter2");
 
         await vault.SyncAppSecretsToKubernetesAsync(ours, appId);
 
-        string manifest = replaced.Single().Manifest;
+        // Through the real patch builder, from what the sync actually asked for: the labels are
+        // added there, so asserting them anywhere else would prove only that the test knows
+        // the constants.
+        (_, _, IReadOnlyDictionary<string, string?> keys,
+         IReadOnlyDictionary<string, string>? annotations) = merged.Should().ContainSingle().Subject;
 
-        manifest.Should().Contain($"{VaultService.ManagedByLabelKey}: {VaultService.ManagedByLabelValue}");
-        manifest.Should().Contain("entkube.io/managed: \"true\"");
+        string patch = KubernetesClientFactory.BuildSecretKeyPatch(keys, annotations);
+
+        patch.Should().Contain($"\"{VaultService.ManagedByLabelKey}\":\"{VaultService.ManagedByLabelValue}\"");
+        patch.Should().Contain("\"entkube.io/managed\":\"true\"");
     }
 
     /// <summary>
@@ -198,10 +281,14 @@ public class VaultSecretSyncTests : IDisposable
     /// A replace is a delete <em>then</em> an apply, and both steps have to be there.
     ///
     /// <para>Asserted on the sequence as data because every test above reaches the cluster through
-    /// a mocked factory: a mutant that drops the delete turns the replace into a plain apply, lets
-    /// a key removed from the vault survive in the cluster, and passes every other test in this
-    /// file. <c>--ignore-not-found</c> is what makes the first sync work, when there is nothing to
-    /// remove yet.</para>
+    /// a mocked factory: a mutant that drops the delete turns the replace into a plain apply and
+    /// lets a removed key survive. <c>--ignore-not-found</c> is what makes the first sync work,
+    /// when there is nothing to remove yet.</para>
+    ///
+    /// <para><b>Still the right verb for the Secrets that keep it:</b> a certificate and an OAuth
+    /// client each get a Secret of their own, with one writer and one logical value, so there is
+    /// nothing in the object for a replace to destroy. App secrets moved off it because their
+    /// Secret is shared.</para>
     /// </summary>
     [Fact]
     public void A_replace_deletes_before_it_applies()
@@ -239,7 +326,10 @@ public class VaultSecretSyncTests : IDisposable
 
         HelmExecutionResult result = await vault.SyncAppSecretsToKubernetesAsync(ours, appId);
 
+        // Both write paths: `replaced` alone would pass whatever this method did, now that app
+        // secrets go through the key-scoped one.
         replaced.Should().BeEmpty("nothing may be written to a cluster that is not this tenant's");
+        merged.Should().BeEmpty("nor through the key-scoped path");
         namespaces.Should().BeEmpty("not even the namespace");
 
         result.Success.Should().BeFalse();

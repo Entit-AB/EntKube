@@ -33,6 +33,15 @@ public class StorageBindingSyncTests : IDisposable
     private readonly StorageService sut;
 
     private readonly List<string> applied = [];
+
+    /// <summary>
+    /// Key-scoped writes. The binding's Secret may be the app's own — an app wants one
+    /// <c>envFrom</c>, not one per service — so credentials go in key by key now rather than as
+    /// a whole manifest. See <see cref="SharedSecretKeysTests"/>.
+    /// </summary>
+    private readonly List<(string Name, string Namespace,
+        IReadOnlyDictionary<string, string?> Keys)> merged = [];
+
     private readonly List<string> namespaces = [];
 
     private Guid ours, theirs, ourBindingId, theirBindingId;
@@ -46,6 +55,20 @@ public class StorageBindingSyncTests : IDisposable
         k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback((string m, string _, CancellationToken _) => applied.Add(m))
             .ReturnsAsync("applied");
+
+        k8s.Setup(x => x.MergeSecretKeysAsync(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<IReadOnlyDictionary<string, string?>>(),
+                It.IsAny<IReadOnlyDictionary<string, string>?>(),
+                It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .Callback((string name, string ns, IReadOnlyDictionary<string, string?> keys,
+                       IReadOnlyDictionary<string, string>? _, string _, string? _,
+                       CancellationToken _) => merged.Add((name, ns, keys)))
+            .ReturnsAsync("patched");
+
+        k8s.Setup(x => x.GetResourceJsonAsync("secret", It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(new HelmExecutionResult { Success = true, Output = "{\"metadata\":{}}" });
 
         k8s.Setup(x => x.EnsureNamespaceAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Callback((string ns, string _, CancellationToken _) => namespaces.Add(ns))
@@ -152,13 +175,20 @@ public class StorageBindingSyncTests : IDisposable
 
         namespaces.Should().ContainSingle().Which.Should().Be("ours-ns");
 
-        string manifest = applied.Should().ContainSingle().Subject;
-        manifest.Should().Contain("name: ours-storage").And.Contain("namespace: ours-ns");
+        (string name, string ns, IReadOnlyDictionary<string, string?> keys) =
+            merged.Should().ContainSingle().Subject;
 
-        // The values are base64 in the manifest, which is what makes an eyeball check useless and
-        // this assertion worth making: the wrong tenant's keys would look identical.
-        manifest.Should().Contain(Convert.ToBase64String("AK-ours"u8.ToArray()));
-        manifest.Should().Contain(Convert.ToBase64String("SK-ours"u8.ToArray()));
+        name.Should().Be("ours-storage");
+        ns.Should().Be("ours-ns");
+
+        // Asserted on the values, not on an eyeballed manifest: the wrong tenant's keys would
+        // look identical in either form.
+        keys["STORAGE_ACCESS_KEY"].Should().Be("AK-ours");
+        keys["STORAGE_SECRET_KEY"].Should().Be("SK-ours");
+
+        // And only this writer's keys are named, so the app's own secrets in the same Secret
+        // are untouched.
+        keys.Keys.Should().AllSatisfy(k => k.Should().StartWith("STORAGE_"));
     }
 
     /// <summary>
@@ -176,7 +206,10 @@ public class StorageBindingSyncTests : IDisposable
         await act.Should().ThrowAsync<InvalidOperationException>()
             .WithMessage("*binding not found*");
 
+        // Both write paths: `applied` alone would pass whatever this method did, now that the
+        // credentials go through the key-scoped one.
         applied.Should().BeEmpty();
+        merged.Should().BeEmpty("nor through the key-scoped path");
         namespaces.Should().BeEmpty("not even the namespace may be created");
     }
 
@@ -187,7 +220,7 @@ public class StorageBindingSyncTests : IDisposable
 
         await sut.SyncStorageBindingAsync(theirs, theirBindingId);
 
-        applied.Should().ContainSingle().Which.Should().Contain("namespace: theirs-ns");
+        merged.Should().ContainSingle().Which.Namespace.Should().Be("theirs-ns");
     }
 
     /// <summary>
@@ -209,5 +242,6 @@ public class StorageBindingSyncTests : IDisposable
 
         namespaces.Should().BeEmpty();
         applied.Should().BeEmpty();
+        merged.Should().BeEmpty();
     }
 }

@@ -1366,19 +1366,31 @@ public class ElasticsearchServiceTests : IDisposable
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync("-----BEGIN CERTIFICATE-----");
 
-        List<(string Manifest, string Kubeconfig)> applied = [];
-        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Callback<string, string, CancellationToken>((m, kc, _) => applied.Add((m, kc)))
-            .ReturnsAsync(string.Empty);
+        // Key-scoped now, not a whole Secret manifest: the binding's Secret may be the app's
+        // own, and an apply would delete the app's keys through the object's shared last-applied
+        // annotation. See SharedSecretKeysTests.
+        List<(string Name, string Namespace, IReadOnlyDictionary<string, string?> Keys)> merged = [];
+        k8s.Setup(x => x.MergeSecretKeysAsync(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<IReadOnlyDictionary<string, string?>>(),
+                It.IsAny<IReadOnlyDictionary<string, string>?>(),
+                It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .Callback((string name, string ns, IReadOnlyDictionary<string, string?> keys,
+                       IReadOnlyDictionary<string, string>? _, string _, string? _,
+                       CancellationToken _) => merged.Add((name, ns, keys)))
+            .ReturnsAsync("patched");
 
         await sut.CreateBindingAsync(tenantId, c.Id, deployment.Id, user.Id, "elasticsearch");
 
-        string secret = applied.Select(a => a.Manifest).Single(m => m.Contains("kind: Secret"));
-        secret.Should().Contain("namespace: orders");
-        secret.Should().Contain($"ELASTICSEARCH_PASSWORD: {Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes("the-password"))}");
-        secret.Should().Contain("ELASTICSEARCH_USERNAME:");
+        (string secretName, string secretNs, IReadOnlyDictionary<string, string?> keys) =
+            merged.Should().ContainSingle().Subject;
+
+        secretName.Should().Be("elasticsearch");
+        secretNs.Should().Be("orders");
+        keys["ELASTICSEARCH_PASSWORD"].Should().Be("the-password");
+        keys.Should().ContainKey("ELASTICSEARCH_USERNAME");
         // Without the CA the app either fails or is told to skip verification.
-        secret.Should().Contain("ELASTICSEARCH_CA_CRT:");
+        keys.Should().ContainKey("ELASTICSEARCH_CA_CRT");
 
         ElasticsearchBinding stored = await db.ElasticsearchBindings.AsNoTracking().SingleAsync();
         stored.LastSyncedAt.Should().NotBeNull();
