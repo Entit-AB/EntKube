@@ -2820,16 +2820,28 @@ public class VaultService(
 
                     try
                     {
-                        // Replace rather than apply: these Secrets carry no last-applied
-                        // annotation, so an apply would merge and a key removed from the vault
-                        // would survive in the cluster. See IKubernetesClientFactory.
-                        await clusterAccess.ReplaceSecretAsync(
-                            k8sSecretName, ns,
-                            BuildSecretManifest(k8sSecretName, ns, "Opaque", values),
+                        // ⚠️ This used to delete and recreate the Secret, so that a key removed
+                        // from the vault could not survive in the cluster. That is the right
+                        // property and the wrong mechanism, because this Secret can have other
+                        // writers: an app bound to Redis or RabbitMQ may point those bindings at
+                        // the same Secret on purpose, wanting one envFrom rather than several.
+                        // Delete-and-recreate dropped their keys — and so would a plain apply,
+                        // because apply deletes whatever the object's last-applied annotation
+                        // named, and that annotation belongs to the object, not to the writer.
+                        //
+                        // So the keys this writer owns are named explicitly, and the ones it has
+                        // since dropped are deleted by name — which needs knowing what it owned
+                        // last time, hence the annotation.
+                        await EntKube.Web.Services.Clusters.SharedSecretKeys.WriteAsync(
+                            clusterAccess, k8sSecretName, ns,
+                            EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Vault,
+                            values.ToDictionary(v => v.Key, v => (string?)v.Value),
                             $"Sync {values.Count} secret key(s) into '{k8sSecretName}' in {ns}",
                             ct);
 
-                        results.Add($"✓ Secret '{k8sSecretName}' synced to '{ns}' on '{cluster!.Name}' ({group.Count()} keys)");
+                        results.Add(
+                            $"✓ Secret '{k8sSecretName}' synced to '{ns}' on '{cluster!.Name}'"
+                            + $" ({values.Count} keys)");
                     }
                     catch (OperationCanceledException)
                     {

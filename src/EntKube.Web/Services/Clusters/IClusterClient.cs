@@ -97,6 +97,16 @@ public interface IClusterClient
     /// Replaces one Secret's contents wholesale, as a single acknowledged change. See
     /// <see cref="IKubernetesClientFactory.ReplaceSecretAsync"/> for why this is not an apply.
     /// </summary>
+    /// <summary>
+    /// Adds, updates and removes individual keys of a Secret, leaving the rest of it alone.
+    /// See <see cref="EntKube.Web.Services.IKubernetesClientFactory.MergeSecretKeysAsync"/> for
+    /// why neither replace nor apply can do this.
+    /// </summary>
+    Task<string> MergeSecretKeysAsync(
+        string name, string ns, IReadOnlyDictionary<string, string?> keys,
+        IReadOnlyDictionary<string, string>? annotations = null,
+        string? summary = null, CancellationToken ct = default);
+
     Task<string> ReplaceSecretAsync(
         string name, string ns, string manifest, string? summary = null,
         CancellationToken ct = default);

@@ -2279,9 +2279,11 @@ public class RabbitMQService(
         try
         {
             Clusters.IClusterClient client = await ClusterFor(binding.TenantId, binding.AppDeployment.ClusterId, ct);
-            await client.DeleteManifestAsync(
-                "secret", binding.KubernetesSecretName,
-                binding.AppDeployment.Namespace, ct);
+            await EntKube.Web.Services.Clusters.SharedSecretKeys.RemoveAsync(
+                client, binding.KubernetesSecretName, binding.AppDeployment.Namespace,
+                EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Messaging,
+                $"Remove RabbitMQ credentials from '{binding.KubernetesSecretName}'",
+                ct);
         }
         catch { }
 
@@ -2342,37 +2344,36 @@ public class RabbitMQService(
         string encodedVhost = Uri.EscapeDataString(binding.Vhost == "/" ? "/" : binding.Vhost.TrimStart('/'));
         string amqpUrl = $"amqp://{appUsername}:{appPassword}@{host}:5672/{encodedVhost}";
 
-        StringBuilder secretData = new();
-        secretData.AppendLine($"  RABBITMQ_HOST: {B64(host)}");
-        secretData.AppendLine($"  RABBITMQ_PORT: {B64("5672")}");
-        secretData.AppendLine($"  RABBITMQ_VHOST: {B64(binding.Vhost)}");
-        secretData.AppendLine($"  RABBITMQ_USERNAME: {B64(appUsername)}");
-        secretData.AppendLine($"  RABBITMQ_PASSWORD: {B64(appPassword)}");
-        secretData.AppendLine($"  RABBITMQ_URL: {B64(amqpUrl)}");
-
-        if (!string.IsNullOrEmpty(binding.QueueName))
-            secretData.AppendLine($"  RABBITMQ_QUEUE: {B64(binding.QueueName)}");
-        if (!string.IsNullOrEmpty(binding.ExchangeName))
-            secretData.AppendLine($"  RABBITMQ_EXCHANGE: {B64(binding.ExchangeName)}");
-
         Clusters.IClusterClient appCluster = await ClusterFor(binding.TenantId, binding.AppDeployment.ClusterId, ct);
         await appCluster.EnsureNamespaceAsync(binding.AppDeployment.Namespace, ct);
 
-        string secretManifest = $"""
-            apiVersion: v1
-            kind: Secret
-            metadata:
-              name: {binding.KubernetesSecretName}
-              namespace: {binding.AppDeployment.Namespace}
-              labels:
-                app.kubernetes.io/managed-by: entkube
-                entkube.io/managed: "true"
-            type: Opaque
-            data:
-            {secretData}
-            """;
+        // Named keys, not a whole Secret: a binding may share the app's own Secret on purpose,
+        // and an apply deletes whatever the object's shared last-applied annotation named.
+        // See IKubernetesClientFactory.MergeSecretKeysAsync.
+        //
+        // The two optional keys are set to null when the binding no longer names a queue or an
+        // exchange, which deletes them. Leaving them out of the map instead would have kept a
+        // stale queue name in the cluster after it was cleared.
+        Dictionary<string, string?> keys = new()
+        {
+            ["RABBITMQ_HOST"] = host,
+            ["RABBITMQ_PORT"] = "5672",
+            ["RABBITMQ_VHOST"] = binding.Vhost,
+            ["RABBITMQ_USERNAME"] = appUsername,
+            ["RABBITMQ_PASSWORD"] = appPassword,
+            ["RABBITMQ_URL"] = amqpUrl,
+            ["RABBITMQ_QUEUE"] =
+                string.IsNullOrEmpty(binding.QueueName) ? null : binding.QueueName,
+            ["RABBITMQ_EXCHANGE"] =
+                string.IsNullOrEmpty(binding.ExchangeName) ? null : binding.ExchangeName,
+        };
 
-        await appCluster.ApplyManifestAsync(secretManifest, ct);
+        await EntKube.Web.Services.Clusters.SharedSecretKeys.WriteAsync(
+            appCluster, binding.KubernetesSecretName, binding.AppDeployment.Namespace,
+            EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Messaging, keys,
+            summary: $"Sync RabbitMQ credentials into '{binding.KubernetesSecretName}'"
+                   + $" in {binding.AppDeployment.Namespace}",
+            ct: ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
         using DataServicesDbContext db2 = dbFactory.CreateDbContext();

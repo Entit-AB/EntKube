@@ -621,8 +621,17 @@ public class RedisService(
 
             if (appCluster is not null)
             {
-                await appCluster.DeleteManifestAsync(
-                    "secret", binding.KubernetesSecretName, binding.AppDeployment.Namespace, ct);
+                // The keys, not the Secret. Deleting the object would take the app's own secrets
+                // with it whenever the binding shares their Secret, which is the supported way
+                // to set this up.
+                await EntKube.Web.Services.Clusters.SharedSecretKeys.RemoveAsync(
+                    appCluster,
+                    binding.KubernetesSecretName,
+                    binding.AppDeployment.Namespace,
+                    EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Cache,
+                    summary: $"Remove Redis credentials from '{binding.KubernetesSecretName}'"
+                           + $" in {binding.AppDeployment.Namespace}",
+                    ct: ct);
             }
         }
         catch { }
@@ -657,24 +666,28 @@ public class RedisService(
 
         await appCluster.EnsureNamespaceAsync(binding.AppDeployment.Namespace, ct);
 
-        string secretManifest = $"""
-            apiVersion: v1
-            kind: Secret
-            metadata:
-              name: {binding.KubernetesSecretName}
-              namespace: {binding.AppDeployment.Namespace}
-              labels:
-                app.kubernetes.io/managed-by: entkube
-                entkube.io/managed: "true"
-            type: Opaque
-            data:
-              REDIS_HOST: {B64(host)}
-              REDIS_PORT: {B64(port)}
-              REDIS_PASSWORD: {B64(password)}
-              REDIS_URL: {B64(redisUrl)}
-            """;
-
-        await appCluster.ApplyManifestAsync(secretManifest, ct);
+        // ⚠️ Four named keys, not a whole Secret. Pointing a binding at the app's own Secret is
+        // intended — an app wants one envFrom, not one per service it uses — so this Secret can
+        // have other writers, the app's vault secrets among them. Applying a complete manifest
+        // here looked additive and was not: apply's three-way merge deletes the keys named in
+        // the object's last-applied annotation and missing from the new config, and that
+        // annotation belongs to the object rather than to whoever wrote it. The vault had just
+        // written it, so this apply deleted the app's own keys and left only these four.
+        await EntKube.Web.Services.Clusters.SharedSecretKeys.WriteAsync(
+            appCluster,
+            binding.KubernetesSecretName,
+            binding.AppDeployment.Namespace,
+            EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Cache,
+            new Dictionary<string, string?>
+            {
+                ["REDIS_HOST"] = host,
+                ["REDIS_PORT"] = port,
+                ["REDIS_PASSWORD"] = password,
+                ["REDIS_URL"] = redisUrl,
+            },
+            summary: $"Sync Redis credentials into '{binding.KubernetesSecretName}'"
+                   + $" in {binding.AppDeployment.Namespace}",
+            ct: ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
         using DataServicesDbContext db2 = dbFactory.CreateDbContext();

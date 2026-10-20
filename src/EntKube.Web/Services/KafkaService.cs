@@ -587,9 +587,12 @@ public class KafkaService(
 
         try
         {
-            await (await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct))
-                .DeleteManifestAsync(
-                    "secret", binding.KubernetesSecretName, binding.AppDeployment.Namespace, ct);
+            await EntKube.Web.Services.Clusters.SharedSecretKeys.RemoveAsync(
+                await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct),
+                binding.KubernetesSecretName, binding.AppDeployment.Namespace,
+                EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Streaming,
+                $"Remove Kafka credentials from '{binding.KubernetesSecretName}'",
+                ct);
         }
         catch { }
 
@@ -645,7 +648,17 @@ public class KafkaService(
         }
 
         await appCluster.EnsureNamespaceAsync(appNs, ct);
-        await appCluster.ApplyManifestAsync(BuildBindingSecretManifest(binding.KubernetesSecretName, appNs, data), ct);
+
+        // Named keys, not a whole Secret — see SharedSecretKeys. The ownership annotation also
+        // handles this binding's variable key set: switching a cluster from SASL_SSL to
+        // PLAINTEXT drops KAFKA_SASL_* and KAFKA_CA_CRT, and those are deleted rather than left
+        // behind as stale credentials.
+        await EntKube.Web.Services.Clusters.SharedSecretKeys.WriteAsync(
+            appCluster, binding.KubernetesSecretName, appNs,
+            EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Streaming,
+            data.ToDictionary(kv => kv.Key, kv => (string?)kv.Value),
+            $"Sync Kafka credentials into '{binding.KubernetesSecretName}' in {appNs}",
+            ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);

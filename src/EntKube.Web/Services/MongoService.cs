@@ -1317,23 +1317,20 @@ public class MongoService(
                 await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct);
             string ns = binding.AppDeployment.Namespace;
 
-            StringBuilder bsb = new();
-            bsb.AppendLine("apiVersion: v1");
-            bsb.AppendLine("kind: Secret");
-            bsb.AppendLine("metadata:");
-            bsb.AppendLine($"  name: {binding.KubernetesSecretName}");
-            bsb.AppendLine($"  namespace: {ns}");
-            // Mark as EntKube-managed so the deployment importer won't re-adopt it.
-            bsb.AppendLine("  labels:");
-            bsb.AppendLine($"    {VaultService.ManagedByLabelKey}: {VaultService.ManagedByLabelValue}");
-            bsb.AppendLine("    entkube.io/managed: \"true\"");
-            bsb.AppendLine("type: Opaque");
-            bsb.AppendLine("stringData:");
-            foreach (KeyValuePair<string, string> kv in credentials)
-                bsb.AppendLine($"  {kv.Key}: \"{kv.Value.Replace("\"", "\\\"")}\"");
-
             await bindingCluster.EnsureNamespaceAsync(ns, ct);
-            await bindingCluster.ApplyManifestAsync(bsb.ToString(), ct);
+
+            // Named keys, not a whole Secret: a binding may share the app's own Secret on
+            // purpose, and an apply deletes whatever the object's shared last-applied
+            // annotation named. See IKubernetesClientFactory.MergeSecretKeysAsync.
+            //
+            // This also drops the hand-rolled YAML quoting the manifest needed — a credential
+            // containing a quote was escaped by hand here, and the patch is JSON-encoded.
+            await EntKube.Web.Services.Clusters.SharedSecretKeys.WriteAsync(
+                bindingCluster, binding.KubernetesSecretName, ns,
+                EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Database,
+                credentials.ToDictionary(kv => kv.Key, kv => (string?)kv.Value),
+                summary: $"Sync Mongo credentials into '{binding.KubernetesSecretName}' in {ns}",
+                ct: ct);
 
             binding.LastSyncedAt = DateTime.UtcNow;
         }

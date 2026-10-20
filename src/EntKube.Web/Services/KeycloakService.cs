@@ -1835,20 +1835,20 @@ public class KeycloakService(
 
         await cluster.EnsureNamespaceAsync(ns, ct);
 
-        string secretManifest = $"""
-            apiVersion: v1
-            kind: Secret
-            metadata:
-              name: {binding.KubernetesSecretName}
-              namespace: {ns}
-            type: Opaque
-            data:
-              OIDC_ISSUER_URL: {B64Id(issuerUrl)}
-              OIDC_CLIENT_ID: {B64Id(binding.ClientId)}
-              OIDC_CLIENT_SECRET: {B64Id(clientSecret)}
-            """;
-
-        await cluster.ApplyManifestAsync(secretManifest, ct);
+        // Named keys, not a whole Secret — see SharedSecretKeys. An OIDC binding is the one
+        // most likely to share: an app wants OIDC_* beside its own configuration, in one
+        // envFrom.
+        await EntKube.Web.Services.Clusters.SharedSecretKeys.WriteAsync(
+            cluster, binding.KubernetesSecretName, ns,
+            EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Identity,
+            new Dictionary<string, string?>
+            {
+                ["OIDC_ISSUER_URL"] = issuerUrl,
+                ["OIDC_CLIENT_ID"] = binding.ClientId,
+                ["OIDC_CLIENT_SECRET"] = clientSecret,
+            },
+            $"Sync OIDC client credentials into '{binding.KubernetesSecretName}' in {ns}",
+            ct);
 
         binding.LastSyncedAt = DateTime.UtcNow;
         using ApplicationDbContext db2 = dbFactory.CreateDbContext();

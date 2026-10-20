@@ -975,10 +975,19 @@ public class CnpgServiceTests : IDisposable
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
 
-        string? appliedManifest = null;
+        List<(string Name, string Namespace, IReadOnlyDictionary<string, string?> Keys)> merged = [];
+        k8sFactory.Setup(f => f.MergeSecretKeysAsync(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<IReadOnlyDictionary<string, string?>>(),
+                It.IsAny<IReadOnlyDictionary<string, string>?>(),
+                It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .Callback((string name, string ns, IReadOnlyDictionary<string, string?> keys,
+                       IReadOnlyDictionary<string, string>? _, string _, string? _,
+                       CancellationToken _) => merged.Add((name, ns, keys)))
+            .ReturnsAsync("patched");
+
         k8sFactory.Setup(f => f.ApplyManifestAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
-            .Callback<string, string, CancellationToken>((manifest, _, _) => appliedManifest = manifest)
             .ReturnsAsync(string.Empty);
 
         CnpgDatabase database = await sut.CreateDatabaseAsync(tenant.Id, cnpg.Id, "syncdb");
@@ -987,17 +996,16 @@ public class CnpgServiceTests : IDisposable
 
         await sut.SyncDatabaseCredentialsToK8sAsync(tenant.Id, cnpg.Id, database.Id);
 
-        // Assert — a K8s Secret manifest with all credential fields should be applied.
+        // Assert — the credential fields go in as named keys of the Secret, not as a whole
+        // manifest: a database binding's Secret may be the one holding the app's own vault
+        // secrets, and an apply would delete those. See SharedSecretKeysTests.
 
-        appliedManifest.Should().NotBeNull();
-        appliedManifest.Should().Contain("kind: Secret");
-        appliedManifest.Should().Contain("name: sync-cluster-syncdb-credentials");
-        appliedManifest.Should().Contain("namespace: databases");
-        appliedManifest.Should().Contain("HOST:");
-        appliedManifest.Should().Contain("PORT:");
-        appliedManifest.Should().Contain("DATABASE:");
-        appliedManifest.Should().Contain("USERNAME:");
-        appliedManifest.Should().Contain("PASSWORD:");
+        (string secretName, string ns, IReadOnlyDictionary<string, string?> keys) =
+            merged.Should().ContainSingle().Subject;
+
+        secretName.Should().Be("sync-cluster-syncdb-credentials");
+        ns.Should().Be("databases");
+        keys.Keys.Should().Contain(["HOST", "PORT", "DATABASE", "USERNAME", "PASSWORD"]);
     }
 
     // ════════════════════════════════════════════════════════════════

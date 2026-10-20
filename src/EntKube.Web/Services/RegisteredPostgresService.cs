@@ -342,10 +342,13 @@ public class RegisteredPostgresService(
         {
             try
             {
-                await (await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct)).DeleteManifestAsync(
-                    "Secret", binding.KubernetesSecretName,
-                    binding.AppDeployment.Namespace,
-                     ct);
+                // Its own keys, not the Secret — the binding may share the app's own.
+                await EntKube.Web.Services.Clusters.SharedSecretKeys.RemoveAsync(
+                    await ClusterFor(tenantId, binding.AppDeployment.ClusterId, ct),
+                    binding.KubernetesSecretName, binding.AppDeployment.Namespace,
+                    EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Database,
+                    $"Remove Postgres credentials from '{binding.KubernetesSecretName}'",
+                    ct);
             }
             catch { }
         }
@@ -841,31 +844,24 @@ public class RegisteredPostgresService(
         }
     }
 
-    private async Task ApplyCredentialSecretAsync(
+    /// <summary>
+    /// Writes the connection credentials as named keys of a Secret.
+    ///
+    /// <para>Used for two kinds of target: the instance's own primary Secret, which nothing else
+    /// writes, and a binding's Secret in an app's namespace, which an app may deliberately point
+    /// at the Secret holding its own vault secrets. Both go through
+    /// <see cref="EntKube.Web.Services.Clusters.SharedSecretKeys"/> — the first does not need it,
+    /// but one path is easier to keep right than two, and it costs an annotation.</para>
+    /// </summary>
+    private static async Task ApplyCredentialSecretAsync(
         Dictionary<string, string> credentials, string secretName, string ns,
         Clusters.IClusterClient client, CancellationToken ct)
-    {
-        StringBuilder sb = new();
-        sb.AppendLine("apiVersion: v1");
-        sb.AppendLine("kind: Secret");
-        sb.AppendLine("metadata:");
-        sb.AppendLine($"  name: {secretName}");
-        sb.AppendLine($"  namespace: {ns}");
-        // Mark as EntKube-managed so the deployment importer won't re-adopt it.
-        sb.AppendLine("  labels:");
-        sb.AppendLine($"    {VaultService.ManagedByLabelKey}: {VaultService.ManagedByLabelValue}");
-        sb.AppendLine("    entkube.io/managed: \"true\"");
-        sb.AppendLine("type: Opaque");
-        sb.AppendLine("data:");
-
-        foreach (KeyValuePair<string, string> kvp in credentials)
-        {
-            string encoded = Convert.ToBase64String(Encoding.UTF8.GetBytes(kvp.Value));
-            sb.AppendLine($"  {kvp.Key}: {encoded}");
-        }
-
-        await client.ApplyManifestAsync(sb.ToString(), ct);
-    }
+        => await EntKube.Web.Services.Clusters.SharedSecretKeys.WriteAsync(
+            client, secretName, ns,
+            EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Database,
+            credentials.ToDictionary(kv => kv.Key, kv => (string?)kv.Value),
+            $"Sync Postgres credentials into '{secretName}' in {ns}",
+            ct);
 
     private static List<string> ParsePsqlColumnOutput(string output) =>
         output.Split('\n', StringSplitOptions.RemoveEmptyEntries)

@@ -190,8 +190,24 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// <summary>
     /// Creates a namespace if it doesn't already exist.
     /// </summary>
+    /// <summary>
+    /// Creates the namespace if it is missing, and does nothing at all if it is already there.
+    ///
+    /// <para>⚠️ <b>The existence check is about the acknowledgment, not about kubectl.</b>
+    /// Applying a Namespace that exists is a no-op — but it is a <i>change</i> as far as the gate
+    /// is concerned, so it raised a prompt. Almost every caller does this before writing into a
+    /// namespace that has existed for months, and a secret sync walks one group per
+    /// (secret, namespace) pair, so the operator was asked to acknowledge a series of namespace
+    /// applies that could not do anything, which buries the one change they should be reading.
+    /// </para>
+    /// </summary>
     public async Task EnsureNamespaceAsync(string ns, string kubeconfig, CancellationToken ct = default)
     {
+        if (await ResourceExistsAsync("namespace", ns, "", kubeconfig, ct))
+        {
+            return;
+        }
+
         string manifest = $"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {ns}\n";
         await ApplyManifestAsync(manifest, kubeconfig, ct);
     }
@@ -598,6 +614,124 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// Replaces one Secret's contents. See <see cref="IKubernetesClientFactory.ReplaceSecretAsync"/>
     /// for why this is delete-then-apply behind a single acknowledgment.
     /// </summary>
+    /// <summary>
+    /// Builds the merge patch for <see cref="MergeSecretKeysAsync"/>. Separated so the JSON is
+    /// assertable without a cluster: a null value must appear as a JSON null (which is how a
+    /// merge patch deletes a key), and a value must be base64 — a patch carrying plain text
+    /// would be written into the Secret verbatim and read back as rubbish.
+    /// </summary>
+    public static string BuildSecretKeyPatch(
+        IReadOnlyDictionary<string, string?> keys,
+        IReadOnlyDictionary<string, string>? annotations)
+    {
+        Dictionary<string, object?> data = [];
+
+        foreach ((string key, string? value) in keys)
+        {
+            data[key] = value is null
+                ? null
+                : Convert.ToBase64String(System.Text.Encoding.UTF8.GetBytes(value));
+        }
+
+        // ⚠️ The managed-by labels go in every patch, not only in the manifest that creates the
+        // Secret. The deployment importer uses exactly that label to avoid re-adopting EntKube's
+        // own Secrets back into the vault, and a Secret written before this change — or created
+        // by another writer — would otherwise never acquire it. Setting it on each write is also
+        // how the old whole-manifest apply kept it true.
+        Dictionary<string, object?> metadata = new()
+        {
+            ["labels"] = new Dictionary<string, object?>
+            {
+                ["app.kubernetes.io/managed-by"] = "entkube",
+                ["entkube.io/managed"] = "true",
+            },
+        };
+
+        if (annotations is { Count: > 0 })
+        {
+            metadata["annotations"] = annotations.ToDictionary(a => a.Key, a => (object?)a.Value);
+        }
+
+        Dictionary<string, object?> patch = new()
+        {
+            ["metadata"] = metadata,
+            ["data"] = data,
+        };
+
+        return System.Text.Json.JsonSerializer.Serialize(patch);
+    }
+
+    public async Task<string> MergeSecretKeysAsync(
+        string name, string ns, IReadOnlyDictionary<string, string?> keys,
+        IReadOnlyDictionary<string, string>? annotations, string kubeconfig,
+        string? summary = null, CancellationToken ct = default)
+    {
+        string patch = BuildSecretKeyPatch(keys, annotations);
+
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Patch,
+            Resource = "secret",
+            Name = name,
+            Namespace = ns,
+            Patch = patch,
+            StrategicPatch = true,
+            Kubeconfig = kubeconfig,
+            Summary = summary,
+        }, ct);
+
+        string kubeconfigPath = Path.GetTempFileName();
+        string patchPath = Path.GetTempFileName();
+
+        try
+        {
+            // SecretFile, not File.WriteAllTextAsync: the patch carries the secret values, and
+            // the default 0644 on a temp file makes them world-readable for as long as it exists.
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
+            await SecretFile.WriteAsync(patchPath, patch, ct);
+
+            // kubectl patch fails on a Secret that does not exist yet, so create an empty one
+            // first. Created rather than applied with the keys in it: an apply would write a
+            // last-applied annotation naming them, and that annotation is what makes a later
+            // writer's apply delete them.
+            if (!await ResourceExistsAsync("secret", name, ns, kubeconfig, ct))
+            {
+                string empty = $"""
+                    apiVersion: v1
+                    kind: Secret
+                    metadata:
+                      name: {name}
+                      namespace: {ns}
+                      labels:
+                        app.kubernetes.io/managed-by: entkube
+                        entkube.io/managed: "true"
+                    type: Opaque
+                    """;
+
+                string emptyPath = Path.GetTempFileName();
+                try
+                {
+                    await SecretFile.WriteAsync(emptyPath, empty, ct);
+                    await RunKubectlAsync(
+                        $"create -f {emptyPath} --kubeconfig={kubeconfigPath}", ct);
+                }
+                finally
+                {
+                    File.Delete(emptyPath);
+                }
+            }
+
+            return await RunKubectlAsync(
+                $"patch secret {name} -n {ns} --type=merge --patch-file={patchPath}"
+                + $" --kubeconfig={kubeconfigPath}", ct);
+        }
+        finally
+        {
+            File.Delete(kubeconfigPath);
+            File.Delete(patchPath);
+        }
+    }
+
     public async Task<string> ReplaceSecretAsync(
         string name, string ns, string manifest, string kubeconfig, string? summary = null,
         CancellationToken ct = default)
@@ -802,7 +936,9 @@ public class KubernetesClientFactory : IKubernetesClientFactory
 
         try
         {
-            await File.WriteAllTextAsync(kubeconfigPath, kubeconfig, ct);
+            // SecretFile: a kubeconfig is a credential, and the default 0644 on a temp file
+            // makes it world-readable for as long as the call runs.
+            await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
 
             string nsArg = string.IsNullOrEmpty(ns) ? "" : $" -n {ns}";
             string output = await RunKubectlAsync(

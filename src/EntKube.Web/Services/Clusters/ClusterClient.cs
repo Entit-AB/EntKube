@@ -59,6 +59,12 @@ public sealed class ClusterClient(
         string manifest, string ns, string? summary = null, CancellationToken ct = default)
         => inner.ApplyManifestInNamespaceAsync(manifest, ns, kubeconfig, summary, ct);
 
+    public Task<string> MergeSecretKeysAsync(
+        string name, string ns, IReadOnlyDictionary<string, string?> keys,
+        IReadOnlyDictionary<string, string>? annotations = null,
+        string? summary = null, CancellationToken ct = default)
+        => inner.MergeSecretKeysAsync(name, ns, keys, annotations, kubeconfig, summary, ct);
+
     public Task<string> ReplaceSecretAsync(
         string name, string ns, string manifest, string? summary = null,
         CancellationToken ct = default)
