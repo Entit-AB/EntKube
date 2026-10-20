@@ -97,6 +97,9 @@ public class OperatorStatusViaContractTests : IDisposable
         new(testDb.Factory, Clusters(), testDb.CreateVaultService(),
             new AuditService(testDb.Factory, new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory)), Catalog(),
             new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory),
+            new EntKube.Web.Services.ClusterChanges.ClusterChangeGate(
+                new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+                NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance),
             NullLogger<ElasticsearchService>.Instance);
 
     [Theory]

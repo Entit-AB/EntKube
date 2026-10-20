@@ -28,6 +28,12 @@ public class ElasticsearchServiceTests : IDisposable
     private readonly AuditService audit;
     private readonly ElasticsearchService sut;
 
+    /// <summary>
+    /// The gate the service was built with, kept so a test can register a sink and count how
+    /// many dialogs one operator action raises.
+    /// </summary>
+    private readonly EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate;
+
     private readonly Guid tenantId = Guid.NewGuid();
     private readonly Guid k8sClusterId = Guid.NewGuid();
 
@@ -46,6 +52,9 @@ public class ElasticsearchServiceTests : IDisposable
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
             vault, audit, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
             new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory),
+            gate = new EntKube.Web.Services.ClusterChanges.ClusterChangeGate(
+                new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+                NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance),
             NullLogger<ElasticsearchService>.Instance);
     }
 
@@ -3261,5 +3270,92 @@ public class ElasticsearchServiceTests : IDisposable
             .FirstAsync(p => p.ElasticsearchClusterId == ours.Id)).TenantId.Should().Be(tenantId);
         (await db.Set<ElasticsearchIngestPipeline>().AsNoTracking()
             .FirstAsync(p => p.ElasticsearchClusterId == ours.Id)).TenantId.Should().Be(tenantId);
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  One action, one acknowledgment
+    // ════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Counts the dialogs one press of "Configure snapshots" raises.
+    ///
+    /// <para>Twenty-three methods in this service fan out into two or more separately gated
+    /// changes — a ConfigMap and a Job, a keystore Secret and a restart, a policy and the
+    /// pipeline that uses it — and each one asked. This service held 23 of the 53 such buttons
+    /// in the product.</para>
+    ///
+    /// <para><b>The mock raises the acknowledgment itself, deliberately.</b> The gate lives
+    /// inside the real <see cref="KubernetesClientFactory"/>, which shells out to kubectl; these
+    /// tests mock <see cref="IKubernetesClientFactory"/>, so nothing here reaches the gate on its
+    /// own and a count would sit at zero however the service behaved. So the mock does what the
+    /// real factory does — acknowledge, then apply — and what is under test is the window the
+    /// service opens around its fan-out.</para>
+    /// </summary>
+    private sealed class CountingSink : EntKube.Web.Services.ClusterChanges.IClusterChangeAckSink
+    {
+        public int Calls { get; private set; }
+
+        public Task<EntKube.Web.Services.ClusterChanges.ClusterChangeDecision> RequestAsync(
+            EntKube.Web.Services.ClusterChanges.PlannedClusterChange change,
+            EntKube.Web.Services.ClusterChanges.ClusterChangeDiff diff,
+            CancellationToken ct)
+        {
+            Calls++;
+            return Task.FromResult(
+                EntKube.Web.Services.ClusterChanges.ClusterChangeDecision.Acknowledged);
+        }
+    }
+
+    private int GateEveryApply()
+    {
+        k8s.Setup(x => x.ApplyManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string manifest, string kubeconfig, CancellationToken ct) =>
+            {
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                    Manifest = manifest,
+                    Kubeconfig = kubeconfig,
+                }, ct);
+                return string.Empty;
+            });
+        return 0;
+    }
+
+    [Fact]
+    public async Task ConfiguringSnapshots_AsksTheOperatorExactlyOnce()
+    {
+        (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync();
+        ArrangeSucceedingJob();
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryApply();
+
+        await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
+
+        sink.Calls.Should().Be(1, "one action, one dialog");
+    }
+
+    /// <summary>
+    /// And the window closes with the action, so the operator's next press asks again — a fix
+    /// that suppressed the question for the rest of the circuit would pass the test above and
+    /// quietly retire the gate.
+    /// </summary>
+    [Fact]
+    public async Task ASecondConfigureAsksAgain()
+    {
+        (ElasticsearchCluster c, StorageLink link) = await SeedClusterWithStorageAsync();
+        ArrangeSucceedingJob();
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryApply();
+
+        await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 1 * * ?", 30, 5, 50);
+        await sut.ConfigureSnapshotsAsync(tenantId, c.Id, link.Id, null, "0 30 2 * * ?", 30, 5, 50);
+
+        sink.Calls.Should().Be(2, "each action is its own decision");
     }
 }

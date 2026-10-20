@@ -177,6 +177,7 @@ public class ElasticsearchService(
     AuditService auditService,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
     EntKube.Contracts.Delivery.IDeliveryApi delivery,
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
     ILogger<ElasticsearchService> logger)
 {
     /// <summary>
@@ -459,6 +460,9 @@ public class ElasticsearchService(
         db.ElasticsearchClusters.Add(cluster);
         await db.SaveChangesAsync(ct);
 
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("create an Elasticsearch cluster");
+
         try
         {
             KubernetesCluster k8sCluster = await db.KubernetesClusters
@@ -512,6 +516,9 @@ public class ElasticsearchService(
 
         cluster.Status = ElasticsearchClusterStatus.Updating;
         await db.SaveChangesAsync(ct);
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("update an Elasticsearch cluster");
 
         try
         {
@@ -580,6 +587,9 @@ public class ElasticsearchService(
 
         db.ElasticsearchBindings.RemoveRange(bindings);
         await db.SaveChangesAsync(ct);
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("delete an Elasticsearch cluster");
 
         try
         {
@@ -908,6 +918,9 @@ public class ElasticsearchService(
 
         ElasticsearchCluster cluster = policy.ElasticsearchCluster;
 
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("delete an Elasticsearch ILM policy");
+
         try
         {
             Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
@@ -959,6 +972,9 @@ public class ElasticsearchService(
 
         JobOutcome outcome;
         string log;
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("apply Elasticsearch ILM policies");
 
         try
         {
@@ -1093,6 +1109,9 @@ public class ElasticsearchService(
 
         ElasticsearchCluster cluster = view.ElasticsearchCluster;
 
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("delete a Kibana data view");
+
         try
         {
             Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
@@ -1206,6 +1225,8 @@ public class ElasticsearchService(
         string configMap = SnapshotConfigMapName(cluster, $"pipeline-{existing.Name}");
         string jobName = JobName(cluster, $"pipeline-{existing.Name}");
 
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("save an Elasticsearch ingest pipeline");
         await client.ApplyManifestAsync(
             BuildScriptConfigMap(cluster, configMap, BuildPipelineApplyScript(cluster, existing)), ct);
         await client.ApplyManifestAsync(
@@ -1250,6 +1271,9 @@ public class ElasticsearchService(
                 + "Point them elsewhere first — a template naming a pipeline that does not exist fails every write.");
 
         ElasticsearchCluster cluster = pipeline.ElasticsearchCluster;
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("delete an Elasticsearch ingest pipeline");
 
         try
         {
@@ -1306,6 +1330,8 @@ public class ElasticsearchService(
         string configMap = SnapshotConfigMapName(cluster, $"pipeline-sim-{pipeline.Name}");
         string jobName = JobName(cluster, $"pipeline-sim-{pipeline.Name}");
 
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("simulate an Elasticsearch ingest pipeline");
         await client.ApplyManifestAsync(
             BuildScriptConfigMap(cluster, configMap,
                 BuildPipelineSimulateScript(cluster, pipeline, sampleDocumentJson)), ct);
@@ -1617,6 +1643,8 @@ public class ElasticsearchService(
         string configMap = SnapshotConfigMapName(cluster, $"space-{spaceId}");
         string jobName = JobName(cluster, $"space-{spaceId}");
 
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("create a Kibana space");
         await client.ApplyManifestAsync(
             BuildScriptConfigMap(cluster, configMap, BuildSpaceApplyScript(cluster, space)), ct);
         await client.ApplyManifestAsync(
@@ -1655,6 +1683,8 @@ public class ElasticsearchService(
         string configMap = SnapshotConfigMapName(cluster, $"space-{space.SpaceId}");
         string jobName = JobName(cluster, $"space-{space.SpaceId}");
 
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("apply a Kibana space");
         await client.ApplyManifestAsync(
             BuildScriptConfigMap(cluster, configMap, BuildSpaceApplyScript(cluster, space)), ct);
         await client.ApplyManifestAsync(
@@ -1705,6 +1735,9 @@ public class ElasticsearchService(
             details: $"space '{space.SpaceId}' and everything saved in it",
             performedBy: performedBy,
             ct: ct);
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("delete a Kibana space");
 
         try
         {
@@ -1860,6 +1893,8 @@ public class ElasticsearchService(
 
         // The exporter gets its own account with cluster monitor and nothing else — the metrics it
         // reads are all read-only operations, and this credential sits in a pod for years.
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("enable Elasticsearch monitoring");
         await client.ApplyManifestAsync(
             BuildExporterCredentialsSecret(cluster, password), ct);
 
@@ -2578,6 +2613,8 @@ public class ElasticsearchService(
         Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         string password = GeneratePassword();
 
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("create an Elasticsearch user");
         await client.ApplyManifestAsync(BuildUserCredentialsSecret(cluster, user, password), ct);
 
         string configMap = UserConfigMapName(cluster, user);
@@ -2621,6 +2658,8 @@ public class ElasticsearchService(
         string configMap = UserConfigMapName(cluster, user);
         string jobName = JobName(cluster, $"user-{user.Username}");
 
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("apply an Elasticsearch user");
         await client.ApplyManifestAsync(
             BuildScriptConfigMap(cluster, configMap, BuildUserApplyScript(cluster, user)), ct);
         await client.ApplyManifestAsync(
@@ -2694,6 +2733,8 @@ public class ElasticsearchService(
             performedBy: performedBy,
             ct: ct);
 
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("reset an Elasticsearch user's password");
         await client.ApplyManifestAsync(BuildUserCredentialsSecret(cluster, user, password), ct);
 
         string configMap = UserConfigMapName(cluster, user, "password");
@@ -2780,6 +2821,9 @@ public class ElasticsearchService(
 
         ElasticsearchCluster cluster = user.ElasticsearchCluster;
         Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
+
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("delete an Elasticsearch user");
 
         try
         {
@@ -3028,6 +3072,8 @@ public class ElasticsearchService(
         Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
         ElasticsearchS3Settings s3 = await BuildS3SettingsAsync(tenantId, cluster, link, ct);
 
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("configure Elasticsearch snapshots");
         await client.ApplyManifestAsync(BuildKeystoreSecretManifest(cluster, await ReadS3CredentialsAsync(tenantId, link, ct)), ct);
         await client.ApplyManifestAsync(BuildElasticsearchManifest(cluster, s3), ct);
 
@@ -3077,6 +3123,9 @@ public class ElasticsearchService(
         string configMap = SnapshotConfigMapName(cluster, "disable");
         string jobName = JobName(cluster, "snapshot-disable");
 
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable operation = gate.BeginOperation("disable Elasticsearch snapshots");
+
         try
         {
             await client.ApplyManifestAsync(
@@ -3111,6 +3160,8 @@ public class ElasticsearchService(
         string configMap = SnapshotConfigMapName(cluster, "execute");
         string jobName = JobName(cluster, "snapshot-run");
 
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("run an Elasticsearch snapshot now");
         await client.ApplyManifestAsync(
             BuildScriptConfigMap(cluster, configMap, BuildSnapshotExecuteScript(cluster)), ct);
         await client.ApplyManifestAsync(
@@ -3147,6 +3198,8 @@ public class ElasticsearchService(
         string configMap = SnapshotConfigMapName(cluster, "status");
         string jobName = JobName(cluster, "snapshot-status");
 
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("refresh the Elasticsearch snapshot status");
         await client.ApplyManifestAsync(
             BuildScriptConfigMap(cluster, configMap, BuildSnapshotStatusScript(cluster)), ct);
         await client.ApplyManifestAsync(
@@ -3214,6 +3267,8 @@ public class ElasticsearchService(
         string configMap = SnapshotConfigMapName(cluster, "list");
         string jobName = JobName(cluster, "snapshot-list");
 
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("list Elasticsearch snapshots");
         await client.ApplyManifestAsync(
             BuildScriptConfigMap(cluster, configMap, BuildSnapshotListScript(cluster)), ct);
         await client.ApplyManifestAsync(
@@ -3294,6 +3349,8 @@ public class ElasticsearchService(
             performedBy: performedBy,
             ct: ct);
 
+        // One action, one acknowledgment: the applies below are one decision.
+        using IDisposable operation = gate.BeginOperation("restore an Elasticsearch snapshot");
         await client.ApplyManifestAsync(
             BuildScriptConfigMap(cluster, configMap,
                 BuildRestoreScript(cluster, snapshotName, indexPattern, mode, renamePrefix, includeGlobalState)), ct);
