@@ -427,7 +427,7 @@
     {
         allEnvironments = await TenantService.GetEnvironmentsAsync(TenantId);
 
-        List<Data.App> apps = await TenantService.GetAppsAsync(App.CustomerId);
+        List<Data.App> apps = await TenantService.GetAppsAsync(TenantId, App.CustomerId);
         Data.App? freshApp = apps.FirstOrDefault(a => a.Id == App.Id);
         linkedEnvIds = freshApp?.AppEnvironments.Select(ae => ae.EnvironmentId).ToHashSet() ?? new();
 

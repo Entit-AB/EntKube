@@ -458,7 +458,7 @@ else
 
         foreach (Customer customer in customers)
         {
-            List<Data.App> customerApps = await TenantService.GetAppsAsync(customer.Id);
+            List<Data.App> customerApps = await TenantService.GetAppsAsync(TenantId, customer.Id);
             appCounts[customer.Id] = customerApps.Count;
         }
 
@@ -496,7 +496,7 @@ else
     private async Task Delete(Guid id)
     {
         confirmDeleteId = null;
-        await TenantService.DeleteCustomerAsync(id);
+        await TenantService.DeleteCustomerAsync(TenantId, id);
         await LoadCustomers();
     }
 
@@ -562,7 +562,7 @@ else
 
     private async Task LoadApps()
     {
-        apps = await TenantService.GetAppsAsync(selectedCustomer!.Id);
+        apps = await TenantService.GetAppsAsync(TenantId, selectedCustomer!.Id);
     }
 
     private async Task OnImportClosed()

@@ -266,11 +266,18 @@ public class TenantService(
             .ToListAsync(ct);
     }
 
-    public async Task<Customer?> GetCustomerAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose customer. No caller today — it is public surface, so it is scoped like the rest
+    /// rather than left as the one unscoped way in.
+    /// </param>
+    public async Task<Customer?> GetCustomerAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        return await db.Customers.FindAsync([id], ct);
+        // FindAsync takes a key and cannot carry a predicate.
+        return await db.Customers
+            .FirstOrDefaultAsync(c => c.Id == id && c.TenantId == tenantId, ct);
     }
 
     /// <summary>
@@ -376,11 +383,18 @@ public class TenantService(
         return true;
     }
 
-    public async Task<bool> DeleteCustomerAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose customer. ⚠️ A customer is the root of an app tree — apps, their deployments,
+    /// their routes and bindings all hang off it — so removing one is the largest single
+    /// deletion a tenant page can ask for.
+    /// </param>
+    public async Task<bool> DeleteCustomerAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        Customer? customer = await db.Customers.FindAsync([id], ct);
+        Customer? customer = await db.Customers
+            .FirstOrDefaultAsync(c => c.Id == id && c.TenantId == tenantId, ct);
 
         if (customer is null)
         {
@@ -394,12 +408,17 @@ public class TenantService(
 
     // --- App CRUD ---
 
-    public async Task<List<App>> GetAppsAsync(Guid customerId, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose customer. <c>App</c> carries no tenant of its own — it reaches one through its
+    /// customer — so the predicate is the traversal the rest of this file uses.
+    /// </param>
+    public async Task<List<App>> GetAppsAsync(
+        Guid tenantId, Guid customerId, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
         return await db.Apps
-            .Where(a => a.CustomerId == customerId)
+            .Where(a => a.CustomerId == customerId && a.Customer.TenantId == tenantId)
             .Include(a => a.AppEnvironments)
                 .ThenInclude(ae => ae.Environment)
             .OrderBy(a => a.Name)
@@ -585,11 +604,14 @@ public class TenantService(
         return group;
     }
 
-    public async Task<bool> DeleteGroupAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">Whose group.</param>
+    public async Task<bool> DeleteGroupAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        Group? group = await db.Groups.FindAsync([id], ct);
+        Group? group = await db.Groups
+            .FirstOrDefaultAsync(g => g.Id == id && g.TenantId == tenantId, ct);
 
         if (group is null)
         {
@@ -676,11 +698,18 @@ public class TenantService(
         return cluster;
     }
 
-    public async Task<bool> DeleteClusterAsync(Guid id, CancellationToken ct = default)
+    /// <param name="tenantId">
+    /// Whose cluster. ⚠️ This is the registration EntKube reaches the cluster through —
+    /// removing the row does not touch the cluster itself, which is worse than it sounds: the
+    /// cluster keeps running and serving traffic with nothing left that can manage it.
+    /// </param>
+    public async Task<bool> DeleteClusterAsync(
+        Guid tenantId, Guid id, CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
 
-        KubernetesCluster? cluster = await db.KubernetesClusters.FindAsync([id], ct);
+        KubernetesCluster? cluster = await db.KubernetesClusters
+            .FirstOrDefaultAsync(c => c.Id == id && c.TenantId == tenantId, ct);
 
         if (cluster is null)
         {

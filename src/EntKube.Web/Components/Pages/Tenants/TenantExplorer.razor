@@ -826,7 +826,7 @@ else
         // The customer joins the environment it was created under — and only that one.
         Customer c = await TenantService.CreateCustomerAsync(tenant.Id, name, envId);
         customers = await TenantService.GetCustomersAsync(tenant.Id);
-        appsByCustomer[c.Id] = await TenantService.GetAppsAsync(c.Id);
+        appsByCustomer[c.Id] = await TenantService.GetAppsAsync(tenant.Id, c.Id);
         await LoadCustomerEnvironmentsAsync(tenant.Id);
         RebuildAppIndex();
         newCustomerName = ""; addingCustomerEnv = null;
@@ -851,7 +851,7 @@ else
         if (name.Length == 0 || tenant is null) return;
         Customer c = await TenantService.CreateCustomerAsync(tenant.Id, name, null);
         customers = await TenantService.GetCustomersAsync(tenant.Id);
-        appsByCustomer[c.Id] = await TenantService.GetAppsAsync(c.Id);
+        appsByCustomer[c.Id] = await TenantService.GetAppsAsync(tenant.Id, c.Id);
         await LoadCustomerEnvironmentsAsync(tenant.Id);
         RebuildAppIndex();
         newCustomerName = ""; addingTenantCustomer = false;
@@ -891,7 +891,7 @@ else
         if (name.Length == 0) return;
         Data.App app = await TenantService.CreateAppAsync(tenant.Id, custId, name);
         await TenantService.LinkAppToEnvironmentAsync(tenant.Id, app.Id, envId);
-        appsByCustomer[custId] = await TenantService.GetAppsAsync(custId);
+        appsByCustomer[custId] = await TenantService.GetAppsAsync(tenant.Id, custId);
         if (tenant is not null) await LoadCustomerEnvironmentsAsync(tenant.Id);
         RebuildAppIndex();
         newAppName = ""; addingApp = null;
@@ -950,9 +950,12 @@ else
 
     private async Task OnAppDeleted()
     {
-        if (selectedAppCustomer is not null)
+        // tenant, not selectedAppCustomer.TenantId: the tenant has to come from what the page
+        // is open as, not off the row being queried.
+        if (selectedAppCustomer is not null && tenant is not null)
         {
-            appsByCustomer[selectedAppCustomer.Id] = await TenantService.GetAppsAsync(selectedAppCustomer.Id);
+            appsByCustomer[selectedAppCustomer.Id] =
+                await TenantService.GetAppsAsync(tenant.Id, selectedAppCustomer.Id);
             RebuildAppIndex();
         }
         ClearSelection();

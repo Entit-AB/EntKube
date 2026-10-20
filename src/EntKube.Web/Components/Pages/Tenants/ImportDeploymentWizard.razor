@@ -670,7 +670,7 @@
     {
         customerApps = selectedCustomerId == Guid.Empty
             ? []
-            : await TenantService.GetAppsAsync(selectedCustomerId);
+            : await TenantService.GetAppsAsync(TenantId, selectedCustomerId);
     }
 
     private async Task RunImport()

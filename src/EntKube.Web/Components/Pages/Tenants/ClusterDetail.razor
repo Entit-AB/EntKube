@@ -2044,7 +2044,7 @@ else if (section == "components")
 
     private async Task DeleteCluster()
     {
-        await TenantService.DeleteClusterAsync(Cluster.Id);
+        await TenantService.DeleteClusterAsync(TenantId, Cluster.Id);
         await OnDeleted.InvokeAsync();
     }
 

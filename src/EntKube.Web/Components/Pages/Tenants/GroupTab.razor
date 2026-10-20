@@ -122,7 +122,7 @@ else if (groups is not null)
     private async Task Delete(Guid id)
     {
         confirmDeleteId = null;
-        await TenantService.DeleteGroupAsync(id);
+        await TenantService.DeleteGroupAsync(TenantId, id);
         await Load();
     }
 }
