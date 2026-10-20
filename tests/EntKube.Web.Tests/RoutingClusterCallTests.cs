@@ -37,6 +37,12 @@ public class RoutingClusterCallTests : IDisposable
     private readonly Mock<IKubernetesClientFactory> k8s = new();
     private readonly KubernetesOperationsService sut;
 
+    /// <summary>
+    /// The gate, kept so a test can register a sink and count how many times one operator action
+    /// asks. Without a sink the gate is inert, which is why every other test here is silent.
+    /// </summary>
+    private readonly ClusterChangeGate gate;
+
     /// <summary>Every manifest handed to the cluster, in the order it was applied.</summary>
     private readonly List<string> applied = [];
 
@@ -73,7 +79,7 @@ public class RoutingClusterCallTests : IDisposable
                 It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync(true);
 
-        ClusterChangeGate gate = new(new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
+        gate = new(new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
 
         sut = new KubernetesOperationsService(
             testDb.Factory,
@@ -594,4 +600,187 @@ public class RoutingClusterCallTests : IDisposable
             "the gateway's address is read from the cluster, so it is not a stranger's to ask for");
     }
 
+
+    // ════════════════════════════════════════════════════════════════
+    //  One action, one acknowledgment
+    // ════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// Counts the dialogs one press of "Re-apply to cluster" raises.
+    ///
+    /// <para>Publishing a route fans out into several separately gated primitives — the Gateway,
+    /// a PeerAuthentication in each backend namespace, a DestinationRule per backend Service, and
+    /// the HTTPRoute itself — so this asked four or more times for one decision. An operator who
+    /// is asked four times about one button learns to click through dialogs without reading them,
+    /// which costs more than the extra prompts buy.</para>
+    ///
+    /// <para>Asserted on the sink's call count rather than on the manifests, because the manifests
+    /// are unchanged: this is a test about how many questions reach the operator.</para>
+    ///
+    /// <para><b>Why the mock has to raise the acknowledgment itself.</b> The gate lives inside the
+    /// real <see cref="KubernetesClientFactory"/>, which shells out to kubectl; these tests mock
+    /// <see cref="IKubernetesClientFactory"/>, so nothing in them reaches the gate on its own —
+    /// a first version of this test counted zero calls for exactly that reason, and would have
+    /// passed just as happily with the fix removed. So the mock does what the real factory does:
+    /// acknowledge, then apply. What is then under test is the window the service opens around
+    /// its fan-out, which is the part this change adds.</para>
+    /// </summary>
+    private sealed class CountingSink : IClusterChangeAckSink
+    {
+        public int Calls { get; private set; }
+
+        public Task<ClusterChangeDecision> RequestAsync(
+            PlannedClusterChange change, ClusterChangeDiff diff, CancellationToken ct)
+        {
+            Calls++;
+            return Task.FromResult(ClusterChangeDecision.Acknowledged);
+        }
+    }
+
+    /// <summary>
+    /// Makes the mocked factory gate its applies the way the real one does, so the acknowledgments
+    /// an operator would see are observable here.
+    /// </summary>
+    private void GateEveryApply()
+    {
+        k8s.Setup(x => x.ApplyManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string manifest, string kubeconfig, CancellationToken ct) =>
+            {
+                await gate.AcknowledgeAsync(new PlannedClusterChange
+                {
+                    Verb = ChangeVerb.Apply,
+                    Manifest = manifest,
+                    Kubeconfig = kubeconfig,
+                }, ct);
+
+                applied.Add(manifest);
+                return string.Empty;
+            });
+
+        // Deletes are gated too, and the withdrawal path is mostly deletes — so a helper that
+        // only covered applies would have counted one acknowledgment there no matter what.
+        k8s.Setup(x => x.DeleteManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string kind, string name, string ns, string kubeconfig,
+                            CancellationToken ct) =>
+            {
+                await gate.AcknowledgeAsync(new PlannedClusterChange
+                {
+                    Verb = ChangeVerb.Delete,
+                    Resource = kind,
+                    Name = name,
+                    Namespace = ns,
+                    Kubeconfig = kubeconfig,
+                }, ct);
+
+                deleted.Add((kind, name, ns));
+            });
+    }
+
+    /// <summary>How many gated changes an action made, applies and deletes together.</summary>
+    private int GatedChanges => applied.Count + deleted.Count;
+
+    [Fact]
+    public async Task Re_applying_a_route_asks_the_operator_exactly_once()
+    {
+        await SeedAsync();
+        AppDeploymentRoute dr = await SeedHttpRouteAsync();
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryApply();
+
+        KubernetesOperationResult<string> result = await sut.ApplyDeploymentRouteAsync(tenantId, dr.Id);
+
+        result.IsSuccess.Should().BeTrue(result.Error);
+        applied.Count.Should().BeGreaterThan(1,
+            "the point of the test is that one action still makes several gated changes");
+        sink.Calls.Should().Be(1, "one action, one dialog");
+    }
+
+    /// <summary>
+    /// And the window closes with the action: the operator's next press asks again. A fix that
+    /// suppressed the question for the rest of the circuit would pass the test above and quietly
+    /// retire the gate.
+    /// </summary>
+    [Fact]
+    public async Task A_second_re_apply_asks_again()
+    {
+        await SeedAsync();
+        AppDeploymentRoute dr = await SeedHttpRouteAsync();
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryApply();
+
+        await sut.ApplyDeploymentRouteAsync(tenantId, dr.Id);
+        await sut.ApplyDeploymentRouteAsync(tenantId, dr.Id);
+
+        sink.Calls.Should().Be(2, "each action is its own decision");
+    }
+
+    /// <summary>
+    /// Withdrawing a route is mostly deletes — the HTTPRoute, and the Gateway listener and
+    /// certificate once nothing is left on the hostname. Same decision, same single dialog.
+    /// </summary>
+    [Fact]
+    public async Task Withdrawing_a_route_asks_the_operator_exactly_once()
+    {
+        await SeedAsync();
+        AppDeploymentRoute dr = await SeedHttpRouteAsync();
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryApply();
+
+        await sut.DeleteDeploymentRouteFromClusterAsync(tenantId, dr.Id);
+
+        GatedChanges.Should().BeGreaterThan(1, "the action still makes several gated changes");
+        sink.Calls.Should().Be(1, "one action, one dialog");
+    }
+
+    /// <summary>
+    /// Publishing an L4 port fans out furthest: the dedicated Gateway, the backend
+    /// PeerAuthentication, the DestinationRule that stands gateway mTLS down, and the TCPRoute.
+    /// </summary>
+    [Fact]
+    public async Task Publishing_an_l4_port_asks_the_operator_exactly_once()
+    {
+        await SeedAsync();
+        AppL4Route route = await SeedL4RouteAsync(L4Protocol.Tcp);
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryApply();
+
+        KubernetesOperationResult<string> result = await sut.ApplyL4RouteAsync(tenantId, route.Id);
+
+        result.IsSuccess.Should().BeTrue(result.Error);
+        GatedChanges.Should().BeGreaterThan(1);
+        sink.Calls.Should().Be(1, "one action, one dialog");
+    }
+
+    /// <summary>
+    /// A namespace's mesh posture is one decision, not one per backend Service: the
+    /// PeerAuthentication and every DestinationRule that follows it are the same change.
+    /// </summary>
+    [Fact]
+    public async Task Changing_a_namespaces_mesh_posture_asks_the_operator_exactly_once()
+    {
+        await SeedAsync();
+        await SeedHttpRouteAsync();
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryApply();
+
+        KubernetesOperationResult<string> result =
+            await sut.ApplyMeshMtlsAsync(tenantId, clusterId, "billing-ns");
+
+        result.IsSuccess.Should().BeTrue(result.Error);
+        GatedChanges.Should().BeGreaterThan(1);
+        sink.Calls.Should().Be(1, "one action, one dialog");
+    }
 }

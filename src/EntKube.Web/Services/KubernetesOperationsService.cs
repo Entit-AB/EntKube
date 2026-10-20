@@ -1149,6 +1149,19 @@ public class KubernetesOperationsService(
 
         Guid clusterId = dr.AppDeployment!.ClusterId;
 
+        // One action, one acknowledgment. Publishing a route is a single decision an operator
+        // makes, and it fans out into several separately gated primitives: the Gateway, a
+        // PeerAuthentication in every backend namespace, a DestinationRule per backend Service,
+        // and then the HTTPRoute itself. Without this, "Re-apply to cluster" asked four or more
+        // times for one button press — which is how an operator learns to click through dialogs
+        // without reading them.
+        //
+        // Nesting is a no-op, so the callers that already open an operation (a manifest apply
+        // that re-applies its hostnames, the sync dispatcher) keep their own window and this
+        // changes nothing for them.
+        using IDisposable operation = gate.BeginOperation(
+            $"publish {dr.AppRoute.Hostname} to {dr.AppDeployment.Cluster?.Name ?? "the cluster"}");
+
         // Apply the Gateway first so the HTTPS listener + cert exist before the HTTPRoute attaches.
         KubernetesOperationResult<string> gatewayResult =
             await ApplyGatewayForClusterAsync(tenantId, clusterAccess, clusterId, db, ct);
@@ -1361,6 +1374,12 @@ public class KubernetesOperationsService(
 
         string ns = dr.AppDeployment!.Namespace;
         Guid clusterId = dr.AppDeployment.ClusterId;
+
+        // One action, one acknowledgment: withdrawing a route either re-applies the HTTPRoute
+        // with the remaining rules or deletes it, and the Istio teardown around it is gated
+        // separately again.
+        using IDisposable operation = gate.BeginOperation(
+            $"withdraw {dr.AppRoute.Hostname} from {dr.AppDeployment.Cluster?.Name ?? "the cluster"}");
 
         // Query remaining routes for this hostname across all AppRoutes on this cluster.
         string hostname = dr.AppRoute.Hostname;
@@ -1799,6 +1818,12 @@ public class KubernetesOperationsService(
             }
         }
 
+        // One action, one acknowledgment: the PeerAuthentication and the DestinationRules that
+        // go with it are one posture change, and an operator who has approved STRICT for a
+        // namespace has not asked to be consulted once per backend Service.
+        using IDisposable operation = gate.BeginOperation(
+            $"set mesh mTLS to {mode} in {ns}");
+
         string peerAuthYaml = MeshMtlsService.BuildPeerAuthenticationYaml(ns, mode);
         KubernetesOperationResult<string> peerAuthResult = await ApplyRawYamlAsync(clusterAccess, peerAuthYaml, ct);
         if (!peerAuthResult.IsSuccess) return peerAuthResult;
@@ -1901,6 +1926,15 @@ public class KubernetesOperationsService(
             return KubernetesOperationResult<string>.Failure(
                 $"The {AppL4RouteService.RouteKind(route.Protocol)} CRD ({crdName}) is not installed on this cluster. " +
                 "Install the experimental channel of the Gateway API CRDs to enable L4 routing.");
+
+        // One action, one acknowledgment: the L4 Gateway, the backend PeerAuthentication, the
+        // DestinationRule and the TCPRoute/UDPRoute are one published port.
+        //
+        // ⚠️ Before the Gateway apply, not after. Placed after, that first apply asked on its own
+        // and the operation then covered the rest — two dialogs for one button, which the count
+        // test caught. An operation has to open before the action's FIRST gated change.
+        using IDisposable operation = gate.BeginOperation(
+            $"publish {route.Protocol} port {route.ExternalPort} for {route.ServiceName}");
 
         // Apply the dedicated L4 Gateway first so the listener exists before the route attaches.
         KubernetesOperationResult<string> gatewayResult =
