@@ -933,11 +933,18 @@ The classification, and it is the point of this entry — **more of them are leg
 
 | Class | Count | What decides it |
 |---|---|---|
-| Fixed here or in flight | 9 | a tenant surface reads or writes somebody else's row |
-| Installation-admin surface | 17 | the only caller is an `/admin/*` page with `[Authorize(Roles = "Admin")]` |
-| Principal-keyed | 6 | the id *is* the credential, and the caller proved possession before the call |
+| Genuine — a tenant surface reads or writes somebody else's row | 17 | the caller is a `Pages/Tenants/*` or portal page |
+| Installation-admin surface | 9 | the only caller is an `/admin/*` page with `[Authorize(Roles = "Admin")]` |
+| Principal-keyed | 4 | the id *is* the credential, and the caller proved possession before the call |
 | Renderers and resolvers | 10 | no row is fetched by that id; it is handed in |
-| Dead | 1 | no caller at all |
+| Dead | 3 | no caller at all |
+
+> ⚠️ **These figures are the corrected ones.** The first version of this table said 9 genuine
+> and 17 installation-admin, because it classified `TenantService` (8 methods) and
+> `CustomerAccessService` (5) by **file** from a recorded exemption instead of opening each
+> method's callers. Eight of those thirteen are reached from tenant pages. The classification
+> is only as good as the caller survey, which is the whole point of the paragraph below — and
+> it caught me on the first pass.
 
 **The deciding question is almost never in the method.** `TenantRoleService.SavePermissionsAsync`
 reads like the worst hole in the codebase — it writes access levels onto a role found by bare id,
@@ -956,6 +963,21 @@ whose tenant lives behind a Catalog component. Neither could be fixed by adding 
 predicate — the tenant had to be *asked for*, through `IDeliveryApi.GetDeploymentAsync` and through
 the file's own `LoadRouteAsync` funnel. A read that cannot express its own authorization is a read
 that gets skipped, and five sibling route methods used that funnel while the sixth did not.
+
+⚠️ **Two recorded exemptions were wrong, and both were inherited rather than checked.**
+`TenantService` and `CustomerAccessService` were written down as installation-admin and
+principal-keyed surfaces respectively, and I carried both forward across several conversions
+before opening their callers. `TenantService` is admin surface in 3 of 8 methods — the three
+whose id *is* the tenant, which is also why a predicate on them would be vacuous — and the other
+five are reached from `ClusterDetail`, `CustomerTab`, `GroupTab` and three more tenant pages, all
+of which had their own `TenantId` one line above the unscoped call. `CustomerAccessService` is
+principal-keyed in exactly one method, `GetAccessAsync`, which asks whether *this signed-in user*
+may see a customer; the grant, the revoke and the user list beside it are reached from a tenant
+page with a bare customer id.
+
+**An exemption is per method, never per file.** One admin page among a service's callers does not
+make the service admin surface, and an exemption written at file granularity will be inherited
+wholesale — which is what happened here, twice.
 
 ⚠️ **One recorded gap is now closed and the note outlived it.** §4.0.1's sibling-gap paragraph named
 `AppRouteService` as keeping twelve id-only methods "through the whole programme". It has none: the
