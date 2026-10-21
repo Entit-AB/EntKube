@@ -18,7 +18,11 @@ public class RegisteredPostgresService(
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     StorageBrowserService storageBrowserService,
     ILogger<RegisteredPostgresService> logger,
-    EntKube.Contracts.Delivery.IDeliveryApi delivery)
+    EntKube.Contracts.Delivery.IDeliveryApi delivery,
+    // Optional, and last, so the existing positional constructions keep compiling. Safe to be
+    // absent: BeginOperation only ever suppresses the second and later questions of one action,
+    // never a refusal — so a null gate means more dialogs, never fewer.
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null)
 {
     /// <summary>
     /// A client for one of the tenant's clusters, or a refusal that says why — keeping the
@@ -325,6 +329,11 @@ public class RegisteredPostgresService(
 
         string primarySecretName = $"{instance.ServiceName}-{database.Name}-credentials";
         Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.Id, ct);
+
+        // One action, one acknowledgment, and this one grows with the data: the instance's own
+        // credential Secret plus one key-removal per app bound to the database. Dropping a
+        // database used by three apps asked four times.
+        using IDisposable? operation = gate?.BeginOperation("drop a Postgres database and remove its credentials");
 
         try
         {
