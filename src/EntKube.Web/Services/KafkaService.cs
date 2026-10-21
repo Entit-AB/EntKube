@@ -49,7 +49,11 @@ public class KafkaService(
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     VaultService vaultService,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
-    EntKube.Contracts.Delivery.IDeliveryApi delivery)
+    EntKube.Contracts.Delivery.IDeliveryApi delivery,
+    // Optional, and last, so the existing positional constructions keep compiling. Safe to be
+    // absent: BeginOperation only ever suppresses the second and later questions of one action,
+    // never a refusal — so a null gate means more dialogs, never fewer.
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null)
 {
     /// <summary>
     /// A client for one of the tenant's clusters, or a refusal that says why — keeping the
@@ -145,6 +149,9 @@ public class KafkaService(
         db.KafkaClusters.Add(cluster);
         await db.SaveChangesAsync(ct);
 
+        // One action, one acknowledgment: everything below is one decision.
+        using IDisposable? operation = gate?.BeginOperation("create a Kafka cluster");
+
         try
         {
             KubernetesCluster k8sCluster = await db.KubernetesClusters
@@ -215,6 +222,9 @@ public class KafkaService(
         cluster.Status = KafkaClusterStatus.Updating;
         await db.SaveChangesAsync(ct);
 
+        // One action, one acknowledgment: the node pool and the cluster CR are one change.
+        using IDisposable? operation = gate?.BeginOperation("update a Kafka cluster");
+
         try
         {
             Clusters.IClusterClient client = await ClusterFor(tenantId, cluster.KubernetesClusterId, ct);
@@ -243,6 +253,11 @@ public class KafkaService(
 
         cluster.Status = KafkaClusterStatus.Deleting;
         await db.SaveChangesAsync(ct);
+
+        // One action, one acknowledgment. The dialog names the whole deletion, which is what the
+        // operator chose — being asked a second time for "the node pool" after approving the
+        // cluster teaches them to click through without reading.
+        using IDisposable? operation = gate?.BeginOperation("delete a Kafka cluster and its node pool");
 
         try
         {
@@ -669,6 +684,10 @@ public class KafkaService(
         {
             data["KAFKA_SECURITY_PROTOCOL"] = "PLAINTEXT";
         }
+
+        // One action, one acknowledgment: creating the namespace and writing the credentials into
+        // it are halves of the same sync.
+        using IDisposable? operation = gate?.BeginOperation("sync Kafka credentials into an app namespace");
 
         await appCluster.EnsureNamespaceAsync(appNs, ct);
 

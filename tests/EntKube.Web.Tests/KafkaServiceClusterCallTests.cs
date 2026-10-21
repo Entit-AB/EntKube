@@ -29,6 +29,15 @@ public class KafkaServiceClusterCallTests : IDisposable
     private readonly Mock<IKubernetesClientFactory> k8s = new();
     private readonly KafkaService sut;
     private readonly List<string> applied = [];
+    private readonly EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate =
+        (EntKube.Web.Services.ClusterChanges.ClusterChangeGate)TestServices.NewGate();
+
+    /// <summary>
+    /// How many gated changes an action made. Asserted alongside the dialog count, because "one
+    /// dialog" is trivially true of an action that makes one change — the RabbitMQ version of
+    /// this test passed with its own fix removed for exactly that reason.
+    /// </summary>
+    private int gatedChanges;
 
     /// <summary>Every status poll, as (resource asked for, credential it was asked with).</summary>
     private readonly List<(string Resource, string Kubeconfig)> polled = [];
@@ -58,7 +67,8 @@ public class KafkaServiceClusterCallTests : IDisposable
             testDb.Factory,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
             vault, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
-            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory));
+            new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory),
+            gate);
     }
 
     public void Dispose()
@@ -177,5 +187,229 @@ public class KafkaServiceClusterCallTests : IDisposable
         polled.Should().NotContain(p => p.Resource.Contains("ours-events") && p.Kubeconfig.Contains("theirs.example.com"),
             "one tenant's credential must never be the one that reads another's broker");
         polled.Should().NotContain(p => p.Resource.Contains("theirs-events") && p.Kubeconfig.Contains("ours.example.com"));
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  One action, one acknowledgment
+    // ════════════════════════════════════════════════════════════════
+
+    private sealed class CountingSink : EntKube.Web.Services.ClusterChanges.IClusterChangeAckSink
+    {
+        public int Calls { get; private set; }
+
+        public Task<EntKube.Web.Services.ClusterChanges.ClusterChangeDecision> RequestAsync(
+            EntKube.Web.Services.ClusterChanges.PlannedClusterChange change,
+            EntKube.Web.Services.ClusterChanges.ClusterChangeDiff diff,
+            CancellationToken ct)
+        {
+            Calls++;
+            return Task.FromResult(
+                EntKube.Web.Services.ClusterChanges.ClusterChangeDecision.Acknowledged);
+        }
+    }
+
+    /// <summary>
+    /// Makes the mocked factory gate its writes the way the real one does.
+    ///
+    /// <para>The gate lives inside the real <see cref="KubernetesClientFactory"/>, which is mocked
+    /// here — so without this the action reaches the gate zero times and a "one dialog" assertion
+    /// passes while proving nothing. Every verb the action uses has to be gated, not just the
+    /// applies: <c>EnsureNamespaceAsync</c> and the secret write are separate methods on the mock
+    /// though the real factory reaches the gate through its own apply.</para>
+    /// </summary>
+    private void GateEveryWrite()
+    {
+        k8s.Setup(x => x.ApplyManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string manifest, string kubeconfig, CancellationToken ct) =>
+            {
+                gatedChanges++;
+                applied.Add(manifest);
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                    Manifest = manifest,
+                    Kubeconfig = kubeconfig,
+                }, ct);
+                return string.Empty;
+            });
+
+        k8s.Setup(x => x.EnsureNamespaceAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string ns, string kubeconfig, CancellationToken ct) =>
+            {
+                gatedChanges++;
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                    Manifest = $"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {ns}\n",
+                    Kubeconfig = kubeconfig,
+                }, ct);
+            });
+
+        k8s.Setup(x => x.MergeSecretKeysAsync(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<IReadOnlyDictionary<string, string?>>(),
+                It.IsAny<IReadOnlyDictionary<string, string>>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string name, string ns, IReadOnlyDictionary<string, string?> keys,
+                            IReadOnlyDictionary<string, string>? annotations, string kubeconfig,
+                            string? summary, CancellationToken ct) =>
+            {
+                gatedChanges++;
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                    Manifest = $"apiVersion: v1\nkind: Secret\nmetadata:\n  name: {name}\n",
+                    Kubeconfig = kubeconfig,
+                    Summary = summary,
+                }, ct);
+                return string.Empty;
+            });
+
+        k8s.Setup(x => x.DeleteManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(async (string kind, string name, string ns, string kubeconfig, CancellationToken ct) =>
+            {
+                gatedChanges++;
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Delete,
+                    Kind = kind,
+                    Name = name,
+                    Namespace = ns,
+                    Kubeconfig = kubeconfig,
+                }, ct);
+                return string.Empty;
+            });
+    }
+
+    /// <summary>An app deployment on the tenant's own cluster, for a binding to point at.</summary>
+    private async Task<Guid> SeedDeploymentAsync(Guid tenantId, Guid clusterId, string label)
+    {
+        Guid customerId = Guid.NewGuid(), appId = Guid.NewGuid(), deploymentId = Guid.NewGuid();
+        Guid envId = db.KubernetesClusters.First(c => c.Id == clusterId).EnvironmentId;
+
+        db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = $"{label} customer" });
+        await db.SaveChangesAsync();
+        db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = $"{label}-app" });
+        await db.SaveChangesAsync();
+        db.AppDeployments.Add(new AppDeployment
+        {
+            Id = deploymentId, AppId = appId, Name = $"{label}-deploy",
+            Type = DeploymentType.Manual, ClusterId = clusterId, EnvironmentId = envId,
+            Namespace = $"{label}-ns",
+        });
+        await db.SaveChangesAsync();
+
+        return deploymentId;
+    }
+
+    [Fact]
+    public async Task Syncing_a_binding_asks_the_operator_exactly_once()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedAsync("ours");
+
+        // No SASL: the credentials come from the cluster record alone, so the sync needs no live
+        // secret read and the two gated changes are the namespace and the secret write.
+        KafkaCluster cluster = await sut.CreateClusterAsync(
+            tenantId, clusterId, "events", "messaging", 3, "3.7.0", "10Gi", null, false,
+            null, null, null);
+        Guid deploymentId = await SeedDeploymentAsync(tenantId, clusterId, "ours");
+        KafkaBinding binding = await sut.CreateBindingAsync(
+            tenantId, cluster.Id, deploymentId, null, "kafka-credentials");
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryWrite();
+        gatedChanges = 0;
+
+        await sut.SyncBindingAsync(tenantId, binding.Id);
+
+        gatedChanges.Should().BeGreaterThan(1,
+            "the namespace and the credential write are both gated changes");
+        sink.Calls.Should().Be(1, "one action, one dialog");
+    }
+
+    [Fact]
+    public async Task Creating_a_cluster_asks_the_operator_exactly_once()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedAsync("ours");
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryWrite();
+
+        await sut.CreateClusterAsync(
+            tenantId, clusterId, "events", "messaging", 3, "3.7.0", "10Gi", null, true,
+            null, null, null);
+
+        // The namespace, the node pool and the Kafka CR: three changes, one decision.
+        gatedChanges.Should().BeGreaterThan(1, "the action must still make several gated changes");
+        sink.Calls.Should().Be(1, "one action, one dialog");
+    }
+
+    [Fact]
+    public async Task Updating_a_cluster_asks_the_operator_exactly_once()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedAsync("ours");
+        KafkaCluster cluster = await sut.CreateClusterAsync(
+            tenantId, clusterId, "events", "messaging", 3, "3.7.0", "10Gi", null, true,
+            null, null, null);
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryWrite();
+        gatedChanges = 0;
+
+        await sut.UpdateClusterAsync(
+            tenantId, cluster.Id, 5, "3.7.0", "20Gi", null, null, null, null);
+
+        gatedChanges.Should().BeGreaterThan(1, "the node pool and the cluster CR are both re-applied");
+        sink.Calls.Should().Be(1, "one action, one dialog");
+    }
+
+    /// <summary>
+    /// ⚠️ <b>There is no counting test for <c>DeleteClusterAsync</c>, deliberately.</b>
+    ///
+    /// <para>The gate decides whether a delete is worth asking about by running a real
+    /// <c>kubectl get</c> for the resource (<c>ComputeDeleteDiffAsync</c>): absent means the
+    /// delete changes nothing, so it is skipped without a dialog — the same reasoning that
+    /// stopped <c>EnsureNamespaceAsync</c> prompting for a namespace that already exists.</para>
+    ///
+    /// <para>This harness has no live cluster, so both deletes are no-ops and the sink is never
+    /// asked. A test here would assert the harness rather than the fix, and worse, it would
+    /// change answer depending on whether <c>kubectl</c> happens to be installed on the machine —
+    /// if the binary is missing the diff throws, the gate falls back to asking anyway, and the
+    /// test would pass for a reason that has nothing to do with the code under test.</para>
+    ///
+    /// <para><c>DeleteClusterAsync</c> carries the same <c>BeginOperation</c> as the two actions
+    /// above and collapses by the same mechanism; what is untested is this harness's ability to
+    /// show it, not the wrapping.</para>
+    /// </summary>
+    /// <summary>
+    /// And the window closes with the action, so the operator's next press asks again — a fix
+    /// that suppressed the question for the rest of the circuit would pass the tests above and
+    /// quietly retire the gate.
+    /// </summary>
+    [Fact]
+    public async Task The_next_action_asks_again()
+    {
+        (Guid tenantId, Guid clusterId) = await SeedAsync("ours");
+
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+        GateEveryWrite();
+
+        KafkaCluster cluster = await sut.CreateClusterAsync(
+            tenantId, clusterId, "events", "messaging", 3, "3.7.0", "10Gi", null, true,
+            null, null, null);
+        sink.Calls.Should().Be(1);
+
+        await sut.UpdateClusterAsync(
+            tenantId, cluster.Id, 5, "3.7.0", "20Gi", null, null, null, null);
+
+        sink.Calls.Should().Be(2, "a second action is a second decision");
     }
 }
