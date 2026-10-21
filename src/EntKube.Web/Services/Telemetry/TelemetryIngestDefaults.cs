@@ -31,13 +31,42 @@ public static class TelemetryIngestDefaults
     /// <summary>The bearer-token placeholder in <c>config.extensions.bearertokenauth.token</c>.</summary>
     public const string TokenPlaceholder = "REPLACE_WITH_INGEST_TOKEN";
 
-    /// <summary>Shown when there is no in-cluster destination — the one case an operator must fix by hand.</summary>
+    /// <summary>Shown when the management plane has no public ingest URL configured.</summary>
     public const string MissingUrlMessage =
-        "The EntKube Telemetry Collector has no ingest URL: this cluster has no EntKube Telemetry Indexer, "
-        + "and the collector no longer falls back to the management plane — a cluster's telemetry stays in "
-        + "the cluster and is read from its own object storage. Install the EntKube Telemetry Indexer on "
-        + "this cluster first (it is listed as a dependency), or set the component's \"Telemetry Ingest URL\" "
-        + "field to an OTLP endpoint you run yourself.";
+        "The EntKube Telemetry Collector has no ingest URL: Telemetry:PublicIngestUrl is not set, so "
+        + "EntKube does not know the address your clusters can reach it at. Set it to this installation's "
+        + "externally reachable base URL (the collector appends /ingest/otlp), or set the component's "
+        + "\"Telemetry Ingest URL\" field to an OTLP endpoint you run yourself.";
+
+    /// <summary>
+    /// Recognises an address EntKube generated to reach a telemetry indexer inside a cluster.
+    ///
+    /// <para>The address EntKube generates is <c>{fullname}-indexer.{namespace}:8080/ingest/otlp</c>
+    /// (see <see cref="EntKubeTelemetryService.IndexerServiceUrl"/>), so the test is the SERVICE NAME —
+    /// the host's first DNS label — ending in <c>-indexer</c>, together with our own
+    /// <c>/ingest/otlp</c> path. Testing the whole host would never match, because the namespace follows
+    /// it. Both halves are required: an operator's own OTLP endpoint is a different path, and a host
+    /// ending in <c>-indexer</c> may still be something of theirs.</para>
+    ///
+    /// <para>Used to decide what is ours to rewrite when moving a collector back to the management plane.
+    /// An address they chose is never rewritten, whatever it points at — so the conservative answer here
+    /// is <c>false</c>, and that is also what a release name long enough for helm's 63-character
+    /// truncation to eat the <c>-indexer</c> suffix gets: a stale address left alone, rather than
+    /// somebody's chosen destination silently redirected.</para>
+    /// </summary>
+    public static bool IsInClusterIndexerDestination(string? endpoint)
+    {
+        if (string.IsNullOrWhiteSpace(endpoint)
+            || !Uri.TryCreate(endpoint, UriKind.Absolute, out Uri? uri))
+        {
+            return false;
+        }
+
+        string service = uri.Host.Split('.')[0];
+
+        return uri.AbsolutePath.TrimEnd('/').EndsWith("/ingest/otlp", StringComparison.Ordinal)
+            && service.EndsWith("-indexer", StringComparison.Ordinal);
+    }
 
     /// <summary>True when this catalog entry is the telemetry collector.</summary>
     public static bool IsCollector(CatalogEntry? entry) => entry?.Key == CollectorKey;
@@ -51,10 +80,10 @@ public static class TelemetryIngestDefaults
     /// The management plane's own ingest base URL (<c>{PublicIngestUrl}/ingest/otlp</c>), or null when
     /// Telemetry:PublicIngestUrl is unset.
     ///
-    /// <para>RECOGNITION ONLY. Nothing is configured to point here any more: a collector ships to the
-    /// indexer in its own cluster, and this address exists so an older collector still pointed at the
-    /// management plane can be identified — to repoint it, and to know that the data it sent is in the
-    /// management plane's store rather than the cluster's. Do not reintroduce it as a destination.</para>
+    /// <para>THE DESTINATION. A collector ships here, and the management plane indexes what arrives into
+    /// its own segment store. It was recognition-only while clusters held their own telemetry; that is
+    /// reversed — see docs/telemetry-central-again.md — and the read path still asks the same question of
+    /// it, because an endpoint pointing here is what tells it the data is in this store.</para>
     /// </summary>
     public static string? IngestUrl(IConfiguration config)
     {
@@ -68,25 +97,17 @@ public static class TelemetryIngestDefaults
     /// can be derived — a blank field is still better than a placeholder, and the install-time check
     /// explains what to configure.
     /// </summary>
-    /// <param name="inClusterIngestUrl">
-    /// The cluster's own telemetry indexer, when one is installed. Preferred over the management plane's
-    /// public URL: keeping a cluster's logs inside it is the entire point of that component, and it also
-    /// removes the WAN hop, the egress cost and the need for the collector to reach EntKube at all.
-    /// Resolved by the caller, which has database access. See docs/telemetry-in-cluster.md.
-    /// </param>
     public static void ApplyTo(
         CatalogEntry entry, IDictionary<string, string> formValues,
-        Guid clusterId, Guid tenantId, IngestTokenService tokens, IConfiguration config,
-        string? inClusterIngestUrl = null)
+        Guid clusterId, Guid tenantId, IngestTokenService tokens, IConfiguration config)
     {
         if (!IsCollector(entry)) return;
 
-        // Only ever the cluster's own indexer. There is deliberately no fallback to the management
-        // plane's public ingest URL: filling one in is what made shipping telemetry out of the cluster
-        // the default, silently, at registration time. With no indexer the field is left blank and the
-        // install refuses with MissingUrlMessage, which names the component to install.
+        // The management plane, which is where telemetry is held again. Left blank when
+        // Telemetry:PublicIngestUrl is unset — blank is better than a placeholder, and the install
+        // refuses with MissingUrlMessage, which names the setting to fill in.
         formValues.TryGetValue(EndpointFieldKey, out string? endpoint);
-        if (IsBlankOrPlaceholder(endpoint) && inClusterIngestUrl is { Length: > 0 } url)
+        if (IsBlankOrPlaceholder(endpoint) && IngestUrl(config) is { Length: > 0 } url)
             formValues[EndpointFieldKey] = url;
 
         formValues.TryGetValue(TokenFieldKey, out string? existingToken);
@@ -102,8 +123,7 @@ public static class TelemetryIngestDefaults
     /// the caller can repair the vault copy too.
     /// </summary>
     public static (string? Yaml, string? MintedToken) FillPlaceholders(
-        string? valuesYaml, Guid clusterId, Guid tenantId, IngestTokenService tokens, IConfiguration config,
-        string? inClusterIngestUrl = null)
+        string? valuesYaml, Guid clusterId, Guid tenantId, IngestTokenService tokens, IConfiguration config)
     {
         if (string.IsNullOrEmpty(valuesYaml)) return (valuesYaml, null);
 
@@ -113,11 +133,11 @@ public static class TelemetryIngestDefaults
 
         if (needsUrl)
         {
-            // Fail loudly rather than install a collector that cannot reach anything — and fail rather
-            // than substitute the management plane, which is what this used to do. The placeholder is
-            // resolved to one address only: the indexer running in this cluster.
-            string url = inClusterIngestUrl is { Length: > 0 } inCluster
-                ? inCluster
+            // Fail loudly rather than install a collector that cannot reach anything. The placeholder
+            // resolves to the management plane's public ingest URL — the one address telemetry is held
+            // at now — and its absence is a configuration gap MissingUrlMessage names.
+            string url = IngestUrl(config) is { Length: > 0 } publicUrl
+                ? publicUrl
                 : throw new InvalidOperationException(MissingUrlMessage);
             valuesYaml = valuesYaml.Replace(EndpointPlaceholder, url, StringComparison.Ordinal);
             // A hand-edited endpoint line may keep only the bare host marker; its scheme is whatever the
@@ -140,31 +160,32 @@ public static class TelemetryIngestDefaults
     public const string EndpointYamlPath = "config.exporters.otlphttp/entkube.endpoint";
 
     /// <summary>
-    /// Repoints an already-installed collector at the cluster's own telemetry indexer.
+    /// Moves an already-installed collector back to the management plane.
     ///
-    /// This cannot be done when the collector is registered, because the indexer <i>depends on</i> the
-    /// collector and is therefore always installed second — at registration time there is nothing to point
-    /// at yet. So it happens on each install instead, and a collector re-applied after the indexer arrives
-    /// starts shipping into the cluster.
+    /// <para>The migration path for every collector installed while clusters held their own telemetry: on
+    /// the next apply it ships to EntKube again. New installs never take this route — the endpoint is the
+    /// management plane's from registration onwards.</para>
     ///
-    /// <para>Only a value EntKube itself generated is overwritten: the management plane's public ingest URL,
-    /// or a blank/placeholder. Anything else is an operator's deliberate choice of destination and is left
-    /// exactly as it is — repointing that would silently redirect their telemetry.</para>
+    /// <para>Only a value EntKube itself generated is overwritten: an address it derived for an in-cluster
+    /// indexer, or a blank/placeholder. Anything else is an operator's deliberate choice of destination and
+    /// is left exactly as it is — repointing that would silently redirect their telemetry, which is the
+    /// same discipline the previous direction held.</para>
     /// </summary>
-    public static (string? Yaml, bool Repointed) RepointToInCluster(
-        string? valuesYaml, string? inClusterIngestUrl, IConfiguration config)
+    public static (string? Yaml, bool Repointed) RepointToManagementPlane(
+        string? valuesYaml, IConfiguration config)
     {
-        if (string.IsNullOrWhiteSpace(inClusterIngestUrl) || string.IsNullOrEmpty(valuesYaml))
+        if (string.IsNullOrEmpty(valuesYaml) || IngestUrl(config) is not { Length: > 0 } publicUrl)
             return (valuesYaml, false);
 
         string? current = YamlFormMerger.ExtractValue(valuesYaml, EndpointYamlPath);
-        if (string.Equals(current, inClusterIngestUrl, StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(current, publicUrl, StringComparison.OrdinalIgnoreCase))
             return (valuesYaml, false);   // already there
 
-        if (!IsManagementPlaneDestination(current, config)) return (valuesYaml, false);
+        if (!IsBlankOrPlaceholder(current) && !IsInClusterIndexerDestination(current))
+            return (valuesYaml, false);
 
         return (YamlFormMerger.MergeFormValues(valuesYaml,
-            new Dictionary<string, string> { [EndpointYamlPath] = inClusterIngestUrl }), true);
+            new Dictionary<string, string> { [EndpointYamlPath] = publicUrl }), true);
     }
 
     /// <summary>
@@ -172,7 +193,7 @@ public static class TelemetryIngestDefaults
     /// public ingest URL, or a blank/placeholder that has never been anywhere.
     ///
     /// <para>Two callers need exactly this question, and they must not answer it differently.
-    /// <see cref="RepointToInCluster"/> asks it to decide whether the endpoint is EntKube's to rewrite;
+    /// <see cref="RepointToManagementPlane"/> asks it to decide whether the endpoint is already there;
     /// the read path asks it to decide whether the management plane's own store is still receiving this
     /// cluster's telemetry, and therefore whether that store or the cluster's node holds the data. An
     /// address the operator chose is neither ours to rewrite nor ours to assume about — and either way

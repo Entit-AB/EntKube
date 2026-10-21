@@ -143,16 +143,20 @@ public class EntKubeTelemetryCatalogTests
     }
 
     [Fact]
-    public void The_collector_requires_the_indexer_and_not_the_other_way_round()
+    public void The_collector_depends_on_nothing_in_the_cluster()
     {
         CatalogEntry indexer = ComponentCatalog.GetByKey(EntKubeTelemetryService.IndexerKey)!;
         CatalogEntry collector = ComponentCatalog.GetByKey(TelemetryIngestDefaults.CollectorKey)!;
 
-        // The direction is the architecture. The indexer is where a cluster's telemetry lives, so it has
-        // to exist before the collector that fills it — with the dependency the other way the collector
-        // was always installed first, with nowhere in-cluster to ship, and that is exactly how the
-        // management plane became its default destination.
-        collector.Dependencies.Should().Contain(EntKubeTelemetryService.IndexerKey);
+        // This dependency has now pointed both ways, and neither direction was arbitrary — each followed
+        // from where the telemetry was held. It required the indexer while a cluster held its own, so the
+        // destination existed before the thing that fills it. EntKube holds it again
+        // (docs/telemetry-central-again.md), and the management plane exists before any component does,
+        // so there is nothing in the cluster left to wait for.
+        //
+        // Requiring a RETIRED component would also be an install that can never complete, which is the
+        // general form RetiredCatalogEntryTests pins for the whole catalog.
+        collector.Dependencies.Should().BeEmpty();
         indexer.Dependencies.Should().NotContain(TelemetryIngestDefaults.CollectorKey);
     }
 
@@ -574,5 +578,84 @@ public class EntKubeTelemetryCatalogTests
         tokens.MintQuery(clusterId, tenantId).Should().NotBe(tokens.Mint(clusterId, tenantId));
 
         await Task.CompletedTask;
+    }
+}
+
+/// <summary>
+/// Retirement, which is not deletion. Telemetry is held by the management plane again
+/// (docs/telemetry-central-again.md), so the two in-cluster components must stop being OFFERED — while
+/// every cluster that already has one installed keeps a resolvable catalog entry behind it.
+///
+/// Dropping the entries instead would be the quiet failure: <c>ResolveForComponent</c> returns null, and
+/// then the installed component has no form fields, no title, no install timeout and no uninstall
+/// behaviour — the operator cannot remove the thing this change exists to remove.
+/// </summary>
+public class RetiredCatalogEntryTests
+{
+    private static readonly string[] Retired =
+        [EntKubeTelemetryService.IndexerKey, EntKubeTelemetryService.QuerierKey];
+
+    [Theory]
+    [InlineData(EntKubeTelemetryService.IndexerKey)]
+    [InlineData(EntKubeTelemetryService.QuerierKey)]
+    public void A_retired_entry_is_not_offered_in_any_category(string key)
+    {
+        ComponentCatalog.GetByCategory()
+            .SelectMany(g => g)
+            .Should().NotContain(e => e.Key == key);
+    }
+
+    [Theory]
+    [InlineData(EntKubeTelemetryService.IndexerKey)]
+    [InlineData(EntKubeTelemetryService.QuerierKey)]
+    public void A_retired_entry_still_resolves_for_a_component_that_has_one(string key)
+    {
+        CatalogEntry entry = ComponentCatalog.GetByKey(key)!;
+        entry.Should().NotBeNull("an installed component resolves its entry by key");
+        entry.Retired.Should().BeTrue();
+
+        // The path the Components tab and the uninstall take for a component stored under this key.
+        ComponentCatalog.ResolveForComponent(key, entry.HelmChartName).Should().NotBeNull();
+    }
+
+    [Fact]
+    public void Retirement_is_the_exception_and_stays_visible_as_one()
+    {
+        // A one-way ratchet in the sense that matters: if a third entry is ever retired, this test is
+        // where someone has to say so out loud, with the reason. Silent retirement is how a component
+        // disappears from the catalog while clusters still run it.
+        ComponentCatalog.Entries.Where(e => e.Retired).Select(e => e.Key)
+            .Should().BeEquivalentTo(Retired);
+    }
+
+    [Theory]
+    [InlineData(EntKubeTelemetryService.IndexerKey)]
+    [InlineData(EntKubeTelemetryService.QuerierKey)]
+    public void A_retired_entry_says_so_where_an_operator_would_read_it(string key)
+    {
+        // The description is the only text that reaches a tab still showing an installed one.
+        ComponentCatalog.GetByKey(key)!.Description.Should().Contain("RETIRED");
+    }
+
+    [Fact]
+    public void Nothing_installable_depends_on_a_retired_entry()
+    {
+        // A dependency on something that can no longer be installed is an install that cannot complete.
+        // This is the clause that actually broke: the collector listed the indexer as a dependency.
+        //
+        // Retired entries are exempt from the question, not overlooked by it. The querier genuinely does
+        // need the indexer and still says so; since neither can be installed, that dependency can no
+        // longer block anything, and rewriting the entry to hide it would make the pair describe an
+        // architecture that never existed.
+        foreach (CatalogEntry entry in ComponentCatalog.Entries.Where(e => !e.Retired))
+        {
+            entry.Dependencies.Should().NotIntersectWith(Retired,
+                $"'{entry.Key}' would require a component that is no longer offered");
+
+            // And the conditional kind, which is the same install blocked behind a form value.
+            entry.ConditionalDependencies.Select(d => d.DependencyKey)
+                .Should().NotIntersectWith(Retired,
+                    $"'{entry.Key}' would require a component that is no longer offered");
+        }
     }
 }

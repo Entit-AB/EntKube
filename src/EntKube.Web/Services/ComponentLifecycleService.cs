@@ -716,15 +716,8 @@ public class ComponentLifecycleService(
 
         if (TelemetryIngestDefaults.IsCollector(valuesCatalog))
         {
-            // Resolved BEFORE the placeholders are filled, because it is now the only address they can be
-            // filled with. With no indexer on the cluster, FillPlaceholders throws and names the component
-            // to install, rather than quietly addressing the management plane.
-            string? inClusterIngest =
-                await entKubeTelemetry.GetInClusterIngestUrlAsync(tenantId, component.ClusterId, ct);
-
             (string? healed, string? mintedToken) = TelemetryIngestDefaults.FillPlaceholders(
-                valuesYaml, component.ClusterId, component.Cluster.TenantId, ingestTokens, configuration,
-                inClusterIngest);
+                valuesYaml, component.ClusterId, component.Cluster.TenantId, ingestTokens, configuration);
             valuesYaml = healed;
 
             // The vault can hold the placeholder itself: InjectSecretsIntoValuesAsync recovers a missing
@@ -737,12 +730,13 @@ public class ComponentLifecycleService(
                     TelemetryIngestDefaults.TokenSecretName(valuesCatalog!), mintedToken, ct);
             }
 
-            // The migration path for collectors registered before the management plane stopped being a
-            // destination at all: anything still addressed there is moved to this cluster's indexer on
-            // the next apply. New installs never take that route — the endpoint is the indexer's from
-            // registration onwards — so this only ever heals an existing one.
+            // The migration path for every collector installed while clusters held their own telemetry:
+            // anything still addressed at an in-cluster indexer is moved back to the management plane on
+            // the next apply. New installs never take this route — the endpoint is the management plane's
+            // from registration onwards — so this only ever heals an existing one, and an endpoint the
+            // operator chose is left alone.
             (string? repointed, bool didRepoint) =
-                TelemetryIngestDefaults.RepointToInCluster(valuesYaml, inClusterIngest, configuration);
+                TelemetryIngestDefaults.RepointToManagementPlane(valuesYaml, configuration);
             valuesYaml = repointed;
 
             if (didRepoint)
@@ -755,8 +749,8 @@ public class ComponentLifecycleService(
                 //
                 // Applied to the STORED values, never to valuesYaml above: that document has had the
                 // vault's secrets merged into it and must not be written back in the clear.
-                (string? storedRepoint, bool storedChanged) = TelemetryIngestDefaults.RepointToInCluster(
-                    component.HelmValues, inClusterIngest, configuration);
+                (string? storedRepoint, bool storedChanged) =
+                    TelemetryIngestDefaults.RepointToManagementPlane(component.HelmValues, configuration);
 
                 if (storedChanged)
                 {
@@ -765,9 +759,10 @@ public class ComponentLifecycleService(
                 }
 
                 logger.LogInformation(
-                    "Repointed collector {Component} on cluster {ClusterId} at the in-cluster telemetry "
-                    + "indexer ({Url}); its logs and traces now stay in the cluster.",
-                    component.Name, component.ClusterId, inClusterIngest);
+                    "Repointed collector {Component} on cluster {ClusterId} at the management plane "
+                    + "({Url}); its logs and traces are held by EntKube again.",
+                    component.Name, component.ClusterId,
+                    TelemetryIngestDefaults.IngestUrl(configuration));
             }
         }
 
@@ -1253,77 +1248,6 @@ public class ComponentLifecycleService(
     {
         Guid? gatewayId = await ResolveWireGuardGatewayIdAsync(tenantId, wgComponentId, ct);
         return gatewayId is null ? null : await ReapplyGatewayAsync(tenantId, gatewayId.Value, ct);
-    }
-
-    /// <summary>
-    /// Completes the cutover after a telemetry indexer install: repoints the cluster's OpenTelemetry
-    /// Collector at the indexer beside it and re-applies it, so telemetry starts arriving where the
-    /// management plane has already started reading from.
-    ///
-    /// <para>Without this the two halves move at different times. Reads follow the indexer the instant it
-    /// is installed — the read path finds it by looking for it — while writes stay pointed at the
-    /// management plane until somebody happens to re-apply the collector. Nothing prompts them to, the
-    /// indexer answers queries perfectly well with nothing in it, and the result is every log and trace
-    /// view on every surface going quietly empty. Installing the indexer is the moment the operator asked
-    /// for the cutover, so it is the moment both halves move.</para>
-    ///
-    /// <para>The repointed endpoint is written back to the component's stored values, not merely rendered
-    /// into this one helm invocation: it is now the collector's real configuration, the Components tab
-    /// shows it, and the read path uses it to know that the data has moved.</para>
-    ///
-    /// <para>Returns null when there is nothing to do — the component is not an indexer, the cluster has
-    /// no installed collector, or that collector already ships somewhere the operator chose.</para>
-    /// </summary>
-    public async Task<HelmExecutionResult?> EnsureCollectorShipsInClusterAsync(
-        Guid tenantId, Guid indexerComponentId, CancellationToken ct = default)
-    {
-        if (await RepointCollectorToInClusterAsync(tenantId, indexerComponentId, ct) is not Guid collectorId)
-            return null;
-
-        HelmCommand command = await GetInstallCommandAsync(tenantId, collectorId, ct);
-        return await ExecuteHelmAsync(tenantId, collectorId, command, ct);
-    }
-
-    /// <summary>
-    /// The database half of <see cref="EnsureCollectorShipsInClusterAsync"/>: rewrites the collector's
-    /// stored endpoint to the cluster's own indexer and returns which collector to re-apply, or null when
-    /// there is nothing to move. Separated from the helm invocation so the decision — which is the part
-    /// with the rules in it — can be tested, and driven, without a helm invocation.
-    /// </summary>
-    public async Task<Guid?> RepointCollectorToInClusterAsync(
-        Guid tenantId, Guid indexerComponentId, CancellationToken ct = default)
-    {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
-
-        ClusterComponent? indexer = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.Id == indexerComponentId, ct);
-
-        if (indexer is null || indexer.Name != EntKubeTelemetryService.IndexerKey) return null;
-
-        ClusterComponent? collector = await db.ClusterComponents
-            .FirstOrDefaultAsync(c => c.ClusterId == indexer.ClusterId
-                                      && c.Name == TelemetryIngestDefaults.CollectorKey
-                                      && c.Status == ComponentStatus.Installed, ct);
-        if (collector is null) return null;
-
-        string? inClusterIngest =
-            await entKubeTelemetry.GetInClusterIngestUrlAsync(tenantId, indexer.ClusterId, ct);
-        (string? repointed, bool didRepoint) = TelemetryIngestDefaults.RepointToInCluster(
-            collector.HelmValues, inClusterIngest, configuration);
-
-        // An operator-chosen destination is left exactly as it is, and re-applying the collector for no
-        // reason would be a surprising side effect of installing something else.
-        if (!didRepoint) return null;
-
-        collector.HelmValues = repointed;
-        await db.SaveChangesAsync(ct);
-
-        logger.LogInformation(
-            "Repointed collector on cluster {ClusterId} at the in-cluster telemetry indexer ({Url}) "
-            + "after its install; re-applying so its logs and traces stay in the cluster.",
-            indexer.ClusterId, inClusterIngest);
-
-        return collector.Id;
     }
 
     private async Task<string> SubstituteManifestPlaceholdersAsync(

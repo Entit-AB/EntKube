@@ -74,16 +74,16 @@ public class CatalogComponentRegistrar(
         // collector installed without them looks healthy while dropping every batch. Fill them in rather
         // than leaving REPLACE_WITH_* placeholders for a blueprint (which has no operator to type them).
         Dictionary<string, string> values = new(formValues);
-        // Prefer the cluster's own indexer when it has one — a collector installed after the telemetry
-        // components should ship to them, not back across the WAN.
-        string? indexerUrl = await entKubeTelemetryService.GetInClusterIndexerUrlAsync(tenantId, clusterId);
-        string? inClusterIngest = indexerUrl is null ? null : indexerUrl + "/ingest/otlp";
-        TelemetryIngestDefaults.ApplyTo(entry, values, clusterId, tenantId, ingestTokens, configuration, inClusterIngest);
+        // The management plane is the destination again (docs/telemetry-central-again.md), and its address
+        // comes from configuration rather than from anything installed on the cluster.
+        TelemetryIngestDefaults.ApplyTo(entry, values, clusterId, tenantId, ingestTokens, configuration);
 
         // The query component federates from the indexer's Service, whose name carries that indexer's
         // release name — so it cannot come from a catalog literal without being wrong for any release the
-        // operator names differently, including the default one.
-        EntKubeTelemetryService.ApplyIndexerUrlDefault(entry, values, indexerUrl);
+        // operator names differently, including the default one. Retired, so this only ever runs for a
+        // querier that is already installed.
+        EntKubeTelemetryService.ApplyIndexerUrlDefault(
+            entry, values, await entKubeTelemetryService.GetInClusterIndexerUrlAsync(tenantId, clusterId));
         formValues = values;
 
         string mergedValues = MergeFormValues(entry, formValues, existing);

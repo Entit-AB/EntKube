@@ -31,32 +31,17 @@ public class TelemetryIngestDefaultsTests
 
     // ──────── Pre-fill (registration time) ────────
 
-    private const string InClusterUrl = "http://tel-entkube-telemetry-indexer.monitoring:8080/ingest/otlp";
-
     [Fact]
-    public void ApplyTo_PrefersTheClustersOwnIndexerOverTheManagementPlane()
+    public void ApplyTo_LeavesTheEndpointUnsetWhenEntKubeHasNoPublicUrl()
     {
-        (IngestTokenService tokens, IConfiguration config) = Build();
+        (IngestTokenService tokens, IConfiguration config) = Build(publicUrl: null);
         Dictionary<string, string> values = [];
 
-        TelemetryIngestDefaults.ApplyTo(Collector, values, ClusterId, TenantId, tokens, config, InClusterUrl);
+        TelemetryIngestDefaults.ApplyTo(Collector, values, ClusterId, TenantId, tokens, config);
 
-        // Keeping a cluster's logs inside it is the entire point of installing the indexer; defaulting the
-        // collector back to the public URL would leave the components running and doing nothing.
-        values[TelemetryIngestDefaults.EndpointFieldKey].Should().Be(InClusterUrl);
-    }
-
-    [Fact]
-    public void ApplyTo_LeavesTheEndpointUnsetWhenTheClusterHasNoIndexer()
-    {
-        (IngestTokenService tokens, IConfiguration config) = Build();
-        Dictionary<string, string> values = [];
-
-        TelemetryIngestDefaults.ApplyTo(Collector, values, ClusterId, TenantId, tokens, config, inClusterIngestUrl: null);
-
-        // There is no management-plane fallback any more. A cluster's telemetry stays in the cluster, so
-        // with nowhere in-cluster to ship, the right answer is an unset field and an install that says
-        // which component to add — not an address that quietly sends the data to EntKube.
+        // With Telemetry:PublicIngestUrl unset there is no address to fill in, and a blank field is
+        // better than a placeholder: the install then refuses with MissingUrlMessage, which names the
+        // setting. An address guessed from the request would be right only by luck.
         values.Should().NotContainKey(TelemetryIngestDefaults.EndpointFieldKey);
     }
 
@@ -69,23 +54,11 @@ public class TelemetryIngestDefaultsTests
             [TelemetryIngestDefaults.EndpointFieldKey] = "https://chosen.example.com/ingest/otlp",
         };
 
-        TelemetryIngestDefaults.ApplyTo(Collector, values, ClusterId, TenantId, tokens, config, InClusterUrl);
+        TelemetryIngestDefaults.ApplyTo(Collector, values, ClusterId, TenantId, tokens, config);
 
-        // An in-cluster indexer is a better default, not a licence to redirect a deliberate choice.
+        // The management plane is a better default, not a licence to redirect a deliberate choice. This
+        // discipline is the one thing that did not change with the direction.
         values[TelemetryIngestDefaults.EndpointFieldKey].Should().Be("https://chosen.example.com/ingest/otlp");
-    }
-
-    [Fact]
-    public void ApplyTo_UsesTheInClusterIndexerEvenWithNoPublicUrlConfigured()
-    {
-        // A deployment that never exposed EntKube publicly could not run native telemetry at all before;
-        // with an in-cluster indexer it can, because the collector no longer has to reach the internet.
-        (IngestTokenService tokens, IConfiguration config) = Build(publicUrl: null);
-        Dictionary<string, string> values = [];
-
-        TelemetryIngestDefaults.ApplyTo(Collector, values, ClusterId, TenantId, tokens, config, InClusterUrl);
-
-        values[TelemetryIngestDefaults.EndpointFieldKey].Should().Be(InClusterUrl);
     }
 
     [Fact]
@@ -94,9 +67,12 @@ public class TelemetryIngestDefaultsTests
         (IngestTokenService tokens, IConfiguration config) = Build();
         Dictionary<string, string> values = [];
 
-        TelemetryIngestDefaults.ApplyTo(Collector, values, ClusterId, TenantId, tokens, config, InClusterUrl);
+        TelemetryIngestDefaults.ApplyTo(Collector, values, ClusterId, TenantId, tokens, config);
 
-        values[TelemetryIngestDefaults.EndpointFieldKey].Should().Be(InClusterUrl);
+        // ⚠️ This assertion was the opposite until the telemetry store came back to the management plane
+        // (docs/telemetry-central-again.md): it used to require the cluster's own indexer and treat the
+        // public URL as a regression. The destination is EntKube again, so the default is EntKube.
+        values[TelemetryIngestDefaults.EndpointFieldKey].Should().Be(ExpectedIngestUrl);
         values[TelemetryIngestDefaults.TokenFieldKey].Should().NotBeNullOrWhiteSpace();
     }
 
@@ -140,9 +116,9 @@ public class TelemetryIngestDefaultsTests
             [TelemetryIngestDefaults.TokenFieldKey] = TelemetryIngestDefaults.TokenPlaceholder,
         };
 
-        TelemetryIngestDefaults.ApplyTo(Collector, values, ClusterId, TenantId, tokens, config, InClusterUrl);
+        TelemetryIngestDefaults.ApplyTo(Collector, values, ClusterId, TenantId, tokens, config);
 
-        values[TelemetryIngestDefaults.EndpointFieldKey].Should().Be(InClusterUrl);
+        values[TelemetryIngestDefaults.EndpointFieldKey].Should().Be(ExpectedIngestUrl);
         values[TelemetryIngestDefaults.TokenFieldKey].Should().NotContain("REPLACE_WITH");
     }
 
@@ -180,13 +156,13 @@ public class TelemetryIngestDefaultsTests
         // guards the dotted-path merge as much as the pre-fill.
         (IngestTokenService tokens, IConfiguration config) = Build();
         Dictionary<string, string> values = [];
-        TelemetryIngestDefaults.ApplyTo(Collector, values, ClusterId, TenantId, tokens, config, InClusterUrl);
+        TelemetryIngestDefaults.ApplyTo(Collector, values, ClusterId, TenantId, tokens, config);
 
         string merged = CatalogComponentRegistrar.MergeFormValues(Collector, values, []);
 
         merged.Should().NotContain(TelemetryIngestDefaults.HostMarker);
         YamlFormMerger.ExtractValue(merged, "config.exporters.otlphttp/entkube.endpoint")
-            .Should().Be(InClusterUrl);
+            .Should().Be(ExpectedIngestUrl);
     }
 
     // ──────── Heal (install time) ────────
@@ -197,13 +173,12 @@ public class TelemetryIngestDefaultsTests
         (IngestTokenService tokens, IConfiguration config) = Build();
 
         (string? yaml, string? minted) = TelemetryIngestDefaults.FillPlaceholders(
-            Collector.DefaultValues, ClusterId, TenantId, tokens, config, InClusterUrl);
+            Collector.DefaultValues, ClusterId, TenantId, tokens, config);
 
         yaml.Should().NotBeNull();
         yaml!.Should().NotContain("REPLACE_WITH");
-        // The cluster's own indexer — the placeholder resolves to nothing else.
-        yaml.Should().Contain(InClusterUrl);
-        yaml.Should().NotContain(ExpectedIngestUrl);
+        // The management plane's own ingest URL — the placeholder resolves to nothing else.
+        yaml.Should().Contain(ExpectedIngestUrl);
         minted.Should().NotBeNull();
         tokens.TryValidate(minted, out Guid tenant, out Guid cluster).Should().BeTrue();
         tenant.Should().Be(TenantId);
@@ -243,24 +218,25 @@ public class TelemetryIngestDefaultsTests
             """;
 
         (string? yaml, _) = TelemetryIngestDefaults.FillPlaceholders(
-            handEdited, ClusterId, TenantId, tokens, config, InClusterUrl);
+            handEdited, ClusterId, TenantId, tokens, config);
 
-        yaml!.Should().Contain("https://tel-entkube-telemetry-indexer.monitoring:8080/custom/path");
+        yaml!.Should().Contain("https://entkube.example.com/custom/path");
         yaml.Should().NotContain("REPLACE_WITH");
     }
 
     [Fact]
-    public void FillPlaceholders_RefusesToInstallACollectorWithNowhereInClusterToShip()
+    public void FillPlaceholders_RefusesToInstallACollectorWithNowhereToShip()
     {
-        // Even with a perfectly good public ingest URL configured: it is not a destination for a
-        // cluster's telemetry any more, so the install stops and names the component to add.
-        (IngestTokenService tokens, IConfiguration config) = Build();
+        // The whole point of this class: a collector whose endpoint stays a placeholder installs, reports
+        // Ready, and exports into a hostname that does not resolve. Refusing names the one setting that
+        // fixes it instead of leaving an empty Logs tab to diagnose.
+        (IngestTokenService tokens, IConfiguration config) = Build(publicUrl: null);
 
         Action act = () => TelemetryIngestDefaults.FillPlaceholders(
-            Collector.DefaultValues, ClusterId, TenantId, tokens, config, inClusterIngestUrl: null);
+            Collector.DefaultValues, ClusterId, TenantId, tokens, config);
 
         act.Should().Throw<InvalidOperationException>()
-            .WithMessage("*EntKube Telemetry Indexer*");
+            .WithMessage("*Telemetry:PublicIngestUrl*");
     }
 
     [Fact]
@@ -269,7 +245,15 @@ public class TelemetryIngestDefaultsTests
         TelemetryIngestDefaults.TokenSecretName(Collector).Should().Be("otel-ingest-token");
     }
 
-    // ──────── Repointing an installed collector at an in-cluster indexer ────────
+    // ──────── Repointing an installed collector back at the management plane ────────
+
+    /// <summary>
+    /// The address EntKube generated for a cluster's own indexer while clusters held their own telemetry.
+    /// It is no longer a destination anything is pointed AT — it is the address a repoint moves away from,
+    /// and the one shape <see cref="TelemetryIngestDefaults.IsInClusterIndexerDestination"/> has to
+    /// recognise as EntKube's own to rewrite.
+    /// </summary>
+    private const string InClusterUrl = "http://tel-entkube-telemetry-indexer.monitoring:8080/ingest/otlp";
 
     private const string CollectorValues = """
         config:
@@ -281,18 +265,19 @@ public class TelemetryIngestDefaultsTests
     private static string ValuesWith(string endpoint) => CollectorValues.Replace("PLACEHOLDER", endpoint);
 
     [Fact]
-    public void An_installed_collector_is_repointed_from_the_management_plane_to_the_cluster()
+    public void An_installed_collector_is_repointed_from_the_cluster_back_to_the_management_plane()
     {
         (_, IConfiguration config) = Build();
 
-        // The case that actually happens: the indexer DEPENDS on the collector, so the collector is always
-        // installed first, pointed at the management plane. Installing the indexer and re-applying the
-        // collector has to move it, or the indexer sits there receiving nothing.
-        (string? yaml, bool repointed) = TelemetryIngestDefaults.RepointToInCluster(
-            ValuesWith(ExpectedIngestUrl), InClusterUrl, config);
+        // The migration case: every collector installed while clusters held their own telemetry is pointed
+        // at an indexer that is being removed. On the next apply it has to move, or it exports into a
+        // Service that no longer exists and the cluster goes quiet with nothing looking wrong.
+        (string? yaml, bool repointed) = TelemetryIngestDefaults.RepointToManagementPlane(
+            ValuesWith(InClusterUrl), config);
 
         repointed.Should().BeTrue();
-        YamlFormMerger.ExtractValue(yaml!, TelemetryIngestDefaults.EndpointYamlPath).Should().Be(InClusterUrl);
+        YamlFormMerger.ExtractValue(yaml!, TelemetryIngestDefaults.EndpointYamlPath)
+            .Should().Be(ExpectedIngestUrl);
     }
 
     [Fact]
@@ -301,11 +286,12 @@ public class TelemetryIngestDefaultsTests
         (_, IConfiguration config) = Build();
         const string chosen = "https://collector-gateway.example.com/ingest/otlp";
 
-        (string? yaml, bool repointed) = TelemetryIngestDefaults.RepointToInCluster(
-            ValuesWith(chosen), InClusterUrl, config);
+        (string? yaml, bool repointed) = TelemetryIngestDefaults.RepointToManagementPlane(
+            ValuesWith(chosen), config);
 
         // Only a URL EntKube generated is ours to change. Redirecting a deliberate choice would silently
-        // send someone's telemetry somewhere they did not pick.
+        // send someone's telemetry somewhere they did not pick — the one rule that did not change when the
+        // direction did.
         repointed.Should().BeFalse();
         YamlFormMerger.ExtractValue(yaml!, TelemetryIngestDefaults.EndpointYamlPath).Should().Be(chosen);
     }
@@ -315,23 +301,27 @@ public class TelemetryIngestDefaultsTests
     {
         (_, IConfiguration config) = Build();
 
-        (string? yaml, bool repointed) = TelemetryIngestDefaults.RepointToInCluster(
-            ValuesWith("https://REPLACE_WITH_ENTKUBE_URL/ingest/otlp"), InClusterUrl, config);
+        (string? yaml, bool repointed) = TelemetryIngestDefaults.RepointToManagementPlane(
+            ValuesWith("https://REPLACE_WITH_ENTKUBE_URL/ingest/otlp"), config);
 
         repointed.Should().BeTrue();
-        YamlFormMerger.ExtractValue(yaml!, TelemetryIngestDefaults.EndpointYamlPath).Should().Be(InClusterUrl);
+        YamlFormMerger.ExtractValue(yaml!, TelemetryIngestDefaults.EndpointYamlPath)
+            .Should().Be(ExpectedIngestUrl);
     }
 
     [Fact]
-    public void Nothing_happens_when_the_cluster_has_no_indexer()
+    public void Nothing_happens_when_the_management_plane_has_no_public_url()
     {
-        (_, IConfiguration config) = Build();
+        (_, IConfiguration config) = Build(publicUrl: null);
 
-        (string? yaml, bool repointed) = TelemetryIngestDefaults.RepointToInCluster(
-            ValuesWith(ExpectedIngestUrl), inClusterIngestUrl: null, config);
+        // There is nowhere to move it TO. Leaving the stale in-cluster address in place is worse than
+        // nothing, but writing a blank endpoint is worse still: the values document would then merge a
+        // field that the install-time refusal can no longer explain.
+        (string? yaml, bool repointed) = TelemetryIngestDefaults.RepointToManagementPlane(
+            ValuesWith(InClusterUrl), config);
 
         repointed.Should().BeFalse();
-        YamlFormMerger.ExtractValue(yaml!, TelemetryIngestDefaults.EndpointYamlPath).Should().Be(ExpectedIngestUrl);
+        YamlFormMerger.ExtractValue(yaml!, TelemetryIngestDefaults.EndpointYamlPath).Should().Be(InClusterUrl);
     }
 
     [Fact]
@@ -340,9 +330,57 @@ public class TelemetryIngestDefaultsTests
         (_, IConfiguration config) = Build();
 
         // Runs on every install, so it has to be idempotent — otherwise every apply reports a change.
-        (_, bool repointed) = TelemetryIngestDefaults.RepointToInCluster(
-            ValuesWith(InClusterUrl), InClusterUrl, config);
+        (_, bool repointed) = TelemetryIngestDefaults.RepointToManagementPlane(
+            ValuesWith(ExpectedIngestUrl), config);
 
         repointed.Should().BeFalse();
+    }
+
+    [Fact]
+    public void Already_there_wins_over_ours_to_rewrite_when_both_are_true()
+    {
+        // The one case where "is the endpoint already the management plane?" is not answered by "is it
+        // an address EntKube generated?": an installation whose own public hostname's first label ends
+        // in -indexer. Both questions then say yes about the SAME address, and without the equality
+        // check first, every apply would merge the value it already has, save the component and log a
+        // repoint that moved nothing.
+        //
+        // Removing the equality check leaves every other test in this file green — it is subsumed by the
+        // ownership guard everywhere else — so this is the test that holds it in place.
+        (_, IConfiguration config) = Build(publicUrl: "http://tel-entkube-telemetry-indexer.monitoring:8080");
+
+        TelemetryIngestDefaults.IngestUrl(config).Should().Be(InClusterUrl, "the overlap is real, not contrived");
+        TelemetryIngestDefaults.IsInClusterIndexerDestination(InClusterUrl)
+            .Should().BeTrue("and the same address is one we would otherwise rewrite");
+
+        (_, bool repointed) = TelemetryIngestDefaults.RepointToManagementPlane(
+            ValuesWith(InClusterUrl), config);
+
+        repointed.Should().BeFalse();
+    }
+
+    // ──────── Which addresses are EntKube's own to rewrite ────────
+
+    [Fact]
+    public void An_indexer_service_address_is_recognised_as_ours_to_move()
+    {
+        TelemetryIngestDefaults.IsInClusterIndexerDestination(InClusterUrl).Should().BeTrue();
+    }
+
+    [Theory]
+    // Right path, but a host EntKube never generated.
+    [InlineData("https://collector-gateway.example.com/ingest/otlp")]
+    // Right host, but a path EntKube never generated — an operator pointing the collector's own exporter
+    // at something else that happens to run beside the indexer.
+    [InlineData("http://tel-entkube-telemetry-indexer.monitoring:8080/v1/logs")]
+    // Not an address at all.
+    [InlineData("tel-entkube-telemetry-indexer.monitoring:8080/ingest/otlp")]
+    [InlineData("")]
+    [InlineData(null)]
+    public void Anything_else_is_not_ours_to_move(string? endpoint)
+    {
+        // Both halves have to match: this decides whether a repoint overwrites somebody's chosen
+        // destination, so "probably ours" is not good enough in either direction.
+        TelemetryIngestDefaults.IsInClusterIndexerDestination(endpoint).Should().BeFalse();
     }
 }

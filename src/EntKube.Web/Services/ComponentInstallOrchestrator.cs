@@ -204,25 +204,12 @@ public class ComponentInstallOrchestrator(
                 }
             }
 
-            // Telemetry indexer: re-apply the cluster's collector so it exports to the indexer that now
-            // sits beside it. Installing the indexer is what moves READS onto it; without this the WRITES
-            // stay pointed at the management plane until somebody thinks to re-apply the collector, and
-            // in between every log and trace view reads an empty node and shows nothing, with no error to
-            // explain it. The two halves of the cutover move together or the cutover loses telemetry.
-            if (await IsComponentNamedAsync(componentId, EntKubeTelemetryService.IndexerKey, ct))
-            {
-                HelmExecutionResult? collectorResult =
-                    await lifecycleService.EnsureCollectorShipsInClusterAsync(tenantId, componentId, ct);
-
-                if (collectorResult is not null && !string.IsNullOrWhiteSpace(collectorResult.Output))
-                {
-                    result = new HelmExecutionResult
-                    {
-                        Success = result.Success && collectorResult.Success,
-                        Output = result.Output + "\n\n--- Collector Repoint ---\n" + collectorResult.Output
-                    };
-                }
-            }
+            // There used to be a hook here that re-applied the cluster's collector when the telemetry
+            // indexer was installed, so writes and reads moved into the cluster together. The indexer is
+            // retired (docs/telemetry-central-again.md) and the collector's destination is the management
+            // plane again, so there is nothing to move: a collector points there from registration
+            // onwards, and an older one addressed at an indexer is moved back on its next apply by
+            // TelemetryIngestDefaults.RepointToManagementPlane.
         }
 
         return result;

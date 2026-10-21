@@ -2330,17 +2330,18 @@ else if (section == "components")
         // The telemetry collector's ingest URL + token are ours to issue, not the operator's to look up.
         // Pre-fill them so the fields arrive complete — left blank they render as REPLACE_WITH_*
         // placeholders in the collector config, which installs and runs fine while dropping every batch.
-        // When the cluster already runs its own telemetry indexer, point the collector at that instead of
-        // back across the WAN — keeping the logs in the cluster is the whole reason it is there.
-        string? indexerUrl = await EntKubeTelemetry.GetInClusterIndexerUrlAsync(TenantId, Cluster.Id);
-        string? inClusterIngest = indexerUrl is null ? null : indexerUrl + "/ingest/otlp";
+        // The destination is the management plane (docs/telemetry-central-again.md), whose address comes
+        // from Telemetry:PublicIngestUrl rather than from anything installed on the cluster.
         EntKube.Web.Services.Telemetry.TelemetryIngestDefaults.ApplyTo(
-            entry, regFormFieldValues, Cluster.Id, TenantId, IngestTokens, Config, inClusterIngest);
+            entry, regFormFieldValues, Cluster.Id, TenantId, IngestTokens, Config);
 
         // Same reasoning for the query component's indexer address: the Service name contains the
         // indexer's release name, so the field is filled from the indexer this cluster actually has
-        // rather than from a catalog literal that is only right for one particular naming.
-        EntKubeTelemetryService.ApplyIndexerUrlDefault(entry, regFormFieldValues, indexerUrl);
+        // rather than from a catalog literal that is only right for one particular naming. Retired, so
+        // this only ever runs for a querier that is already installed — which is exactly when a wrong
+        // address is unhelpful, because the component it has to reach is the one being removed.
+        EntKubeTelemetryService.ApplyIndexerUrlDefault(
+            entry, regFormFieldValues, await EntKubeTelemetry.GetInClusterIndexerUrlAsync(TenantId, Cluster.Id));
 
         // Load available CNPG databases and ClusterIssuers if this component type needs them.
 

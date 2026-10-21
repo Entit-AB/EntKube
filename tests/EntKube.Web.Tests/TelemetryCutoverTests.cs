@@ -9,17 +9,19 @@ using Microsoft.Extensions.Configuration;
 namespace EntKube.Web.Tests;
 
 /// <summary>
-/// The cutover from management-plane telemetry to a cluster's own indexer has two halves that move
-/// separately, and that is what makes it dangerous. Installing the indexer moves READS onto it at once,
-/// because the read path finds it simply by existing. It does not move WRITES: the collector keeps
-/// exporting to the management plane until it is itself re-applied.
+/// Telemetry is held by the management plane again (docs/telemetry-central-again.md), which means the
+/// cutover runs in reverse: a collector pointed at its cluster's own indexer has to be moved back, and the
+/// read path has to keep sending reads to whichever store actually holds the data while that is in
+/// progress.
 ///
-/// In between, the node is empty and the data is somewhere else — and an empty node answers every query
-/// <i>successfully</i>. So every log view, every trace view, every dashboard panel goes blank at once with
-/// nothing anywhere reporting an error, which is indistinguishable from a quiet cluster.
+/// Both halves move separately, and that is what makes it dangerous in either direction. WRITES move when
+/// the collector is re-applied; READS follow the endpoint that re-apply records. Get the order wrong and
+/// reads land on a store that is empty — and an empty store answers every query <i>successfully</i>, so
+/// every log view, trace view and dashboard panel goes blank at once with nothing reporting an error,
+/// which is indistinguishable from a quiet cluster.
 ///
-/// These tests pin both halves: the install moves the collector, and until it has, reads stay where the
-/// data is.
+/// These tests pin both halves: re-applying the collector moves it back and records where, and until it
+/// has, reads stay where the data is.
 /// </summary>
 public class TelemetryCutoverTests
 {
@@ -42,6 +44,8 @@ public class TelemetryCutoverTests
     [Fact]
     public async Task A_collector_shipping_into_the_cluster_hands_the_reads_to_the_node()
     {
+        // The legacy state now, but no less real: until that collector is re-applied it is still writing
+        // into the cluster's node, so that is still where its logs and traces are.
         Fixture f = Fixture.Build(collectorEndpoint: InClusterEndpoint);
 
         (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.TenantId, f.ClusterId)).Should().BeFalse();
@@ -94,39 +98,50 @@ public class TelemetryCutoverTests
     }
 
     [Fact]
-    public async Task Installing_the_indexer_repoints_the_collector_and_records_it()
+    public async Task Re_applying_a_collector_moves_it_back_and_records_where()
     {
-        Fixture f = Fixture.Build(collectorEndpoint: PublicEndpoint);
+        Fixture f = Fixture.Build(collectorEndpoint: InClusterEndpoint);
 
-        Guid? toReapply = await f.Lifecycle.RepointCollectorToInClusterAsync(f.TenantId, f.IndexerId);
+        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.TenantId, f.ClusterId))
+            .Should().BeFalse("the cluster starts out holding its own telemetry");
 
-        toReapply.Should().Be(f.CollectorId, "the collector is what has to be re-applied to move ingest");
+        HelmCommand command = await f.Lifecycle.GetInstallCommandAsync(f.TenantId, f.CollectorId);
 
-        // Written back to the component, not merely rendered into one helm invocation: the read path
-        // decides which store holds the data by reading exactly this value.
-        f.CollectorValues().Should().Contain(InClusterEndpoint);
-        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.TenantId, f.ClusterId)).Should().BeFalse();
+        // Rendered into this invocation, so the running collector actually moves...
+        command.ValuesYaml.Should().Contain(PublicEndpoint);
+        command.ValuesYaml.Should().NotContain(InClusterEndpoint);
+
+        // ...and written back to the component, not merely rendered: the read path decides which store
+        // holds the data by reading exactly this value, so a move it cannot see would send every log and
+        // trace view to whichever store is empty.
+        f.CollectorValues().Should().Contain(PublicEndpoint);
+        (await f.Telemetry.ManagementPlaneStillReceivesAsync(f.TenantId, f.ClusterId)).Should().BeTrue();
     }
 
     [Fact]
-    public async Task Installing_the_indexer_leaves_an_operators_own_endpoint_alone()
+    public async Task Re_applying_a_collector_leaves_an_operators_own_endpoint_alone()
     {
         Fixture f = Fixture.Build(collectorEndpoint: "http://otel-hub.observability:4318/v1/logs");
 
-        (await f.Lifecycle.RepointCollectorToInClusterAsync(f.TenantId, f.IndexerId))
-            .Should().BeNull("re-applying their collector to overwrite their destination would be worse "
-                             + "than the bug this fixes");
+        HelmCommand command = await f.Lifecycle.GetInstallCommandAsync(f.TenantId, f.CollectorId);
 
+        // Overwriting their destination would be worse than the stale address this heals: their telemetry
+        // would silently start arriving somewhere they did not choose.
+        command.ValuesYaml.Should().Contain("otel-hub.observability");
         f.CollectorValues().Should().Contain("otel-hub.observability");
     }
 
     [Fact]
-    public async Task Installing_something_else_does_not_touch_the_collector()
+    public async Task A_stranger_cannot_move_another_tenants_collector()
     {
-        Fixture f = Fixture.Build(collectorEndpoint: PublicEndpoint);
+        Fixture f = Fixture.Build(collectorEndpoint: InClusterEndpoint);
 
-        (await f.Lifecycle.RepointCollectorToInClusterAsync(f.TenantId, f.QuerierId)).Should().BeNull();
-        f.CollectorValues().Should().Contain(PublicEndpoint);
+        // The move is a WRITE to the component, so the tenant guard on the way in is what stops a
+        // stranger redirecting someone else's telemetry. Refused, and nothing is recorded.
+        await FluentActions.Awaiting(() => f.Lifecycle.GetInstallCommandAsync(Guid.NewGuid(), f.CollectorId))
+            .Should().ThrowAsync<InvalidOperationException>();
+
+        f.CollectorValues().Should().Contain(InClusterEndpoint);
     }
 
     /// <summary>A cluster with an installed collector, an installed indexer, and a querier beside them.</summary>
