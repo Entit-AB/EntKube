@@ -342,6 +342,17 @@ public abstract class SegmentManagerBase : IDisposable
     /// <summary>How long the current active index has been accumulating — the age-based roll trigger.</summary>
     public TimeSpan ActiveAge => DateTime.UtcNow - _activeSince;
 
+    /// <summary>
+    /// Whether this manager's sealed archives sit on the same volume as its active index.
+    ///
+    /// <para>Asked per MANAGER rather than per process, because the management plane resolves a blob
+    /// store per tenant: one tenant can have object storage assigned while the next falls back to local
+    /// disk, so there is no single answer for the host. It decides whether deleting a sealed segment
+    /// would actually free space here — with a bucket it frees nothing local, so dropping it would be
+    /// pure loss.</para>
+    /// </summary>
+    public bool ArchivesAreLocal => _blobs is LocalSegmentBlobStore;
+
     /// <summary>Earliest event timestamp in the (unsealed) active index, or null when empty.</summary>
     public DateTime? ActiveMinTs => _active.MinTs;
 

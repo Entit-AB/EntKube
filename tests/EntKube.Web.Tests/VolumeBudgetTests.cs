@@ -24,7 +24,7 @@ public class VolumeBudgetTests
     [Fact]
     public void A_comfortable_volume_is_left_alone()
     {
-        VolumeBudget.Decide(At(50), highWaterPercent: 85, canDropOldest: true, warmTierIsExhausted: false)
+        VolumeBudget.Decide(At(50), highWaterPercent: 85, canDropOldest: true, warmTierIsExhausted: false, canSealActive: false)
             .Should().Be(VolumeAction.None);
     }
 
@@ -33,14 +33,14 @@ public class VolumeBudgetTests
     {
         // Evicting a warm copy costs a download on a later query and loses nothing, so it is always the
         // first thing tried and never needs anyone's permission.
-        VolumeBudget.Decide(At(90), highWaterPercent: 85, canDropOldest: true, warmTierIsExhausted: false)
+        VolumeBudget.Decide(At(90), highWaterPercent: 85, canDropOldest: true, warmTierIsExhausted: false, canSealActive: false)
             .Should().Be(VolumeAction.TrimWarmTier);
     }
 
     [Fact]
     public void Only_once_nothing_is_left_to_evict_is_data_dropped()
     {
-        VolumeBudget.Decide(At(90), highWaterPercent: 85, canDropOldest: true, warmTierIsExhausted: true)
+        VolumeBudget.Decide(At(90), highWaterPercent: 85, canDropOldest: true, warmTierIsExhausted: true, canSealActive: false)
             .Should().Be(VolumeAction.DropOldest);
     }
 
@@ -49,7 +49,7 @@ public class VolumeBudgetTests
     {
         // Either the operator forbade it, or the archives are in object storage — where deleting them
         // frees nothing on this disk, so it would be loss with no benefit whatsoever.
-        VolumeBudget.Decide(At(99), highWaterPercent: 85, canDropOldest: false, warmTierIsExhausted: true)
+        VolumeBudget.Decide(At(99), highWaterPercent: 85, canDropOldest: false, warmTierIsExhausted: true, canSealActive: false)
             .Should().Be(VolumeAction.None);
     }
 
@@ -58,7 +58,62 @@ public class VolumeBudgetTests
     {
         // A failed measurement reports zero bytes. Reading that as 100% used would delete data because a
         // stat call failed, which is a far worse mistake than doing nothing for one cycle.
-        VolumeBudget.Decide(new VolumeState(0, 0), 85, canDropOldest: true, warmTierIsExhausted: true)
+        VolumeBudget.Decide(new VolumeState(0, 0), 85, canDropOldest: true, warmTierIsExhausted: true, canSealActive: false)
+            .Should().Be(VolumeAction.None);
+    }
+
+    // ── Sealing under pressure ──
+
+    [Fact]
+    public void Unsealed_data_is_moved_to_object_storage_before_anything_is_deleted()
+    {
+        // The watermark's whole purpose: "offload the oldest records to the assigned S3 storage". An
+        // active index is uncompressed Lucene on this disk; sealing it puts the bytes in the bucket and
+        // leaves an evictable copy behind. Dropping ahead of that would delete telemetry while a remedy
+        // that loses nothing was still available.
+        VolumeBudget.Decide(At(90), highWaterPercent: 85, canDropOldest: true,
+                warmTierIsExhausted: true, canSealActive: true)
+            .Should().Be(VolumeAction.SealActive);
+    }
+
+    [Fact]
+    public void Evicting_still_comes_before_sealing()
+    {
+        // Eviction is free and instant; sealing compresses and uploads. Order by cost, so a volume that
+        // a trim alone would rescue never pays for a zstd pass.
+        VolumeBudget.Decide(At(90), highWaterPercent: 85, canDropOldest: true,
+                warmTierIsExhausted: false, canSealActive: true)
+            .Should().Be(VolumeAction.TrimWarmTier);
+    }
+
+    [Fact]
+    public void With_nothing_left_to_seal_the_last_resort_is_reached()
+    {
+        // The failure this guards against is a guard that never stops choosing the free remedy: if
+        // "seal" were returned on an idle store, the disk would stay full while the log said it was
+        // working. Sealing is only offered while there is something to seal.
+        VolumeBudget.Decide(At(90), highWaterPercent: 85, canDropOldest: true,
+                warmTierIsExhausted: true, canSealActive: false)
+            .Should().Be(VolumeAction.DropOldest);
+    }
+
+    [Fact]
+    public void Sealing_is_offered_even_when_dropping_is_forbidden()
+    {
+        // These are independent permissions. Dropping is off whenever the archives are in a bucket —
+        // which is exactly the case where sealing into that bucket is the most useful thing to do.
+        VolumeBudget.Decide(At(95), highWaterPercent: 85, canDropOldest: false,
+                warmTierIsExhausted: true, canSealActive: true)
+            .Should().Be(VolumeAction.SealActive);
+    }
+
+    [Fact]
+    public void A_comfortable_volume_seals_nothing_early()
+    {
+        // Sealing under the mark would pre-empt the roll thresholds, turning the size/age policy into
+        // "whenever the guard happens to look" and filling object storage with small segments.
+        VolumeBudget.Decide(At(50), highWaterPercent: 70, canDropOldest: true,
+                warmTierIsExhausted: true, canSealActive: true)
             .Should().Be(VolumeAction.None);
     }
 
@@ -93,11 +148,11 @@ public class VolumeBudgetTests
     {
         // A mistyped 0 read literally would put an indexer into a permanent reclaim loop on an empty
         // disk. Clamped to a floor instead, so a volume with plenty of room is still left alone.
-        VolumeBudget.Decide(At(20), highWaterPercent: 0, canDropOldest: true, warmTierIsExhausted: false)
+        VolumeBudget.Decide(At(20), highWaterPercent: 0, canDropOldest: true, warmTierIsExhausted: false, canSealActive: false)
             .Should().Be(VolumeAction.None);
 
         // The floor is not "never", either — past it the guard still does the free thing.
-        VolumeBudget.Decide(At(60), highWaterPercent: 0, canDropOldest: true, warmTierIsExhausted: false)
+        VolumeBudget.Decide(At(60), highWaterPercent: 0, canDropOldest: true, warmTierIsExhausted: false, canSealActive: false)
             .Should().Be(VolumeAction.TrimWarmTier);
     }
 
@@ -106,7 +161,7 @@ public class VolumeBudgetTests
     {
         // The opposite mistake, and the more dangerous one: it would silently disable the guard entirely
         // and reintroduce exactly the failure it exists to prevent.
-        VolumeBudget.Decide(At(99.5), highWaterPercent: 1000, canDropOldest: true, warmTierIsExhausted: false)
+        VolumeBudget.Decide(At(99.5), highWaterPercent: 1000, canDropOldest: true, warmTierIsExhausted: false, canSealActive: false)
             .Should().Be(VolumeAction.TrimWarmTier);
     }
 }

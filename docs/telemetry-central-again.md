@@ -1,6 +1,6 @@
 # Bringing telemetry back to the management plane
 
-Status: decided; phase 1 in this change. Reverses the relocation described in
+Status: decided; phases 1 and 2 shipped, phase 3 held (see §5). Reverses the relocation described in
 [telemetry-in-cluster.md](telemetry-in-cluster.md), which is kept because its reasoning is what
 this has to answer rather than ignore.
 
@@ -54,7 +54,7 @@ write. Historical logs and traces from before the cutover are gone with the volu
 
 ## 4. Phases
 
-### Phase 1 — cut the collectors back (this change)
+### Phase 1 — cut the collectors back (done)
 
 1. The `otel-collector` catalog entry ships to the management plane's `/ingest/otlp` again. Its
    description and the endpoint's help text currently assert the opposite policy — "there is no
@@ -66,54 +66,61 @@ write. Historical logs and traces from before the cutover are gone with the volu
 Nothing in the query path changes. Nothing in ingest changes. A cluster that still has an indexer
 keeps being read from it until it is uninstalled, because the router decides from the data.
 
-### Phase 2 — the disk watermark
+### Phase 2 — the disk watermark (done)
 
-**Most of this exists already, in the wrong process.** Measured before designing anything:
+**Most of this existed already, in the wrong process.** Measured before designing anything:
 
-| piece | where it is today |
+| piece | where it was |
 |---|---|
 | the pure decision (two watermarks, clamping, unmeasurable = do nothing) | `VolumeBudget` — already in the shared `EntKube.Telemetry` library |
+| the thresholds | `SegmentEngineOptions` — already shared |
 | measuring the filesystem holding the segment directory | `VolumeGuardService.Measure()` — `DriveInfo` on the data path, deliberately not its path root |
 | evicting local copies, losing nothing | `SegmentManagerBase.TrimWarmTierAsync` |
 | dropping the oldest, proportionally across signals | `DropOldestAsync` + `ObjectStorageBudget.Plan` |
-| the host | `VolumeGuardService` in **`EntKube.TelemetryNode`** — the in-cluster node, which is what is being retired |
+| the host | `VolumeGuardService` in **`EntKube.TelemetryNode`** — the in-cluster node this programme retires |
 
-The management plane runs five `SegmentSealService` instances (one per signal registry,
-[Program.cs:444](../src/EntKube.Web/Program.cs#L444)) and **no volume guard at all**. So the work
-is not a new watermark; it is hosting the guard where the data now lives:
+The management plane ran five `SegmentSealService` loops
+([Program.cs](../src/EntKube.Web/Program.cs)) and **no volume guard at all**. So the guard moved
+into `EntKube.Telemetry` beside `VolumeBudget`: "how full is the disk these segments are on?" is
+the same question in a cluster and here.
 
-1. Move `VolumeGuardService` from `EntKube.TelemetryNode` into `EntKube.Telemetry` beside
-   `VolumeBudget`, taking its registries as a list — which it already does.
-2. Register it in the management plane over all five registries.
-3. Defaults 70% high / 60% low, per the ask (the node's are 85/75, sized for a PV dedicated to
-   telemetry; the plane's disk is shared with Postgres and everything else, so it must act sooner).
+#### What is actually new: sealing under pressure
 
-**One behaviour has to be added, and it is the actual ask.** The node's guard relieves pressure by
-evicting *already-sealed* copies, and when the archives are in object storage and the warm tier is
-empty it gives up with a log line telling the operator to "lower the segment roll thresholds so
-the active index is sealed sooner". On the management plane that is the lever to pull, not to
-suggest: **seal under pressure** — `RollAndSealAsync` the active indexes, which moves those bytes
-into the assigned bucket, then evict the local copies. "Offload the oldest records onto the
-appointed S3 storage" is exactly this step, and today it does not exist in either process.
+The old guard could only evict local copies of segments that were **already sealed**. An active
+index holding the very records that should be offloaded was untouchable — and the guard's own log
+told the operator to go and lower the roll thresholds by hand. Past the high-water mark, cheapest
+first:
 
-Order, cheapest first: evict the warm tier → seal the active indexes and evict those → only with
-no object storage configured, drop the oldest (which is loss, and already loud).
+1. **evict warm copies** — free, the archives are already in object storage
+2. **seal the active indexes** — uncompressed Lucene becomes a zstd archive *in the bucket*, and
+   the copy left behind is then evictable like any other sealed segment
+3. **drop the oldest** — only for managers whose archives are on this very volume
 
-Two watermarks, not one, because a single threshold at 70% makes the loop oscillate — it offloads
-one segment, drops to 69.9%, and offloads again on the next tick. `VolumeBudget.BytesToReclaim`
-already aims at the lower target for this reason.
+Sealing before dropping, always: that is the difference between *moving* the oldest records to the
+assigned storage and *deleting* them. `canSealActive` gates on there being something to seal, so an
+idle store still reaches step 3 instead of reporting work it is not doing.
 
-What it measures is the **filesystem holding the segment directory**, not the Postgres data
-directory and not the container root: that is the disk that fills, and it is the one an operator
-can point at object storage to relieve. `Measure()` already uses `DriveInfo` on the data path
-rather than its root, with the reason written down — on Linux the root of `/data/telemetry` is
-`/`, so measuring the root reports the image's free space while the mounted volume fills unwatched.
+#### Per-tenant storage changes who may be dropped from
+
+`ArchivesAreLocal` moved onto the manager. The guard took one `ISegmentBlobStore`, but the plane
+resolves one **per tenant**: one tenant can have object storage assigned while the next falls back
+to local disk, so there is no single answer for the host. Dropping targets only managers whose
+archives share this volume — deleting a segment whose archive lives in a bucket frees nothing here.
+
+#### Thresholds
+
+70% high / 60% low on the plane, against the node's 85/70, overridable with
+`Telemetry:VolumeHighWaterPercent` and `Telemetry:VolumeTargetPercent`. The node measures a
+PersistentVolume dedicated to telemetry; this is the management plane's own disk, shared with
+Postgres and everything else, so telemetry has to start giving space back sooner. Two watermarks
+rather than one because a single threshold oscillates — offload one segment, drop to 69.9%, offload
+again next tick.
 
 ⚠️ **Offloaded segments stay queryable.** They move to the tier the catalogue already models, and
 `TelemetrySegment` keeps `MinTs`/`MaxTs` so a query skips what it does not need. This is a tiering
-rule, not an archive — a query spanning the boundary reads both, and the federation budget rule
-applies: a sealed read and a hot read need different budgets, and a partial answer must fail
-rather than return a successful empty one.
+rule, not an archive — `Sealing_under_pressure_keeps_the_records_readable` asserts a sealed-tier
+read after an offload, because a guard that silently destroyed telemetry while reporting that it
+had offloaded it is the failure worth testing for.
 
 ### Phase 3 — metrics (held, see §5)
 
