@@ -710,6 +710,75 @@ public class ModuleContractTests
         [Module.Secrets] = 0,
     };
 
+    /// <summary>
+    /// ⚠️ <b>A shape the count above cannot see: a STATIC helper that takes the god context as a
+    /// parameter.</b>
+    ///
+    /// <para><see cref="GodContextUsers"/> asks each service's CONSTRUCTORS, and adds the scope
+    /// spelling reflection cannot reach. Neither finds a static class with no constructor at all,
+    /// which borrows the caller's context by parameter — so such a helper extends the all-seeing
+    /// context's reach into a module while the metric reads unchanged. Converting
+    /// <c>DeploymentPodScope</c> to <c>DeliveryDbContext</c> moved no number here, which is how
+    /// the gap was noticed.</para>
+    ///
+    /// <para><b>Both spellings count.</b> The first version of this list looked for a bare
+    /// <c>ApplicationDbContext</c> parameter and reported ZERO once <c>DeploymentPodScope</c> was
+    /// converted — missing <c>JitClusterTokenStore</c>, which takes
+    /// <c>IDbContextFactory&lt;ApplicationDbContext&gt;</c>. Same reach, different spelling.</para>
+    ///
+    /// <para>One left, and it is not an oversight: <c>JitClusterTokenStore</c>'s callers hold the
+    /// all-seeing factory themselves, so converting it means converting
+    /// <c>KubernetesJitProvisioner</c> with it. That is its own change, not a line in this one.</para>
+    /// </summary>
+    private static readonly string[] StaticHelpersOnTheGodContext = ["JitClusterTokenStore"];
+
+    [Fact]
+    public void No_static_helper_starts_borrowing_the_all_seeing_context()
+    {
+        string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, "../../../../../src/EntKube.Web"));
+
+        Directory.Exists(root).Should().BeTrue(
+            "this test reads source; if the tree moved it has to follow rather than quietly stop "
+            + "checking anything");
+
+        Regex helper = new(
+            @"public static[^
+(;]*\s(\w+)\((?:[^)]*?)"
+            + @"(?:IDbContextFactory<ApplicationDbContext>|ApplicationDbContext)\s+\w+",
+            RegexOptions.Compiled);
+
+        List<string> offenders = [];
+
+        foreach (string path in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
+        {
+            if (path.Contains($"{Path.DirectorySeparatorChar}obj{Path.DirectorySeparatorChar}")
+                || path.Contains($"{Path.DirectorySeparatorChar}bin{Path.DirectorySeparatorChar}"))
+            {
+                continue;
+            }
+
+            string src = File.ReadAllText(path);
+
+            foreach (Match cls in Regex.Matches(src, @"public static(?: partial)? class (\w+)"))
+            {
+                string name = cls.Groups[1].Value;
+                if (helper.IsMatch(src[cls.Index..]) && !offenders.Contains(name))
+                {
+                    offenders.Add(name);
+                }
+            }
+        }
+
+        offenders.Should().NotBeEmpty(
+            "if this stops matching, the scan broke rather than the product coming clean — "
+            + $"{StaticHelpersOnTheGodContext.Length} is the known figure");
+
+        offenders.Order().Should().BeEquivalentTo(StaticHelpersOnTheGodContext.Order(),
+            "a static helper that takes ApplicationDbContext hands a module the whole product to "
+            + "read, and does it where the constructor count cannot see. Take the module's own "
+            + "context, as DeploymentPodScope now does");
+    }
+
     [Fact]
     public void No_module_adds_another_service_on_the_all_seeing_context()
     {

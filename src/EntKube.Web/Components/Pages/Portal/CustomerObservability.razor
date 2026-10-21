@@ -1,8 +1,9 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using EntKube.Web.Components.Pages.Tenants
 @using Microsoft.EntityFrameworkCore
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<DeliveryDbContext> DbFactory
 @inject RumSiteService Sites
 
 @* Customer-facing observability: traces (APM), metrics, and RUM for ONE of the customer's apps.
@@ -240,7 +241,7 @@ else
         selectedDeploymentId = null;
         podPattern = null;
 
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        using DeliveryDbContext db = DbFactory.CreateDbContext();
         deployments = await db.AppDeployments
             .Where(d => appIds.Contains(d.AppId))
             .Select(d => new DeploymentRow(d.Id, d.AppId, d.ClusterId, d.Namespace, d.Name))
@@ -279,7 +280,7 @@ else
     private async Task OnDeploymentChanged()
     {
         if (selectedDeploymentId is not Guid depId) { podPattern = null; return; }
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        using DeliveryDbContext db = DbFactory.CreateDbContext();
         podPattern = await DeploymentPodScope.PodRegexAsync(db, depId);
     }
 

@@ -1,5 +1,6 @@
 using System.Text.RegularExpressions;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -23,7 +24,7 @@ public static class DeploymentPodScope
     /// types that don't materialize manifests (e.g. Helm charts).
     /// </summary>
     public static async Task<List<string>> WorkloadNamesAsync(
-        ApplicationDbContext db, Guid deploymentId, CancellationToken ct = default)
+        DeliveryDbContext db, Guid deploymentId, CancellationToken ct = default)
     {
         List<string> fromManifests = await db.DeploymentManifests
             .Where(m => m.DeploymentId == deploymentId && WorkloadKinds.Contains(m.Kind))
@@ -44,7 +45,7 @@ public static class DeploymentPodScope
     /// workload names are on record — in which case the caller should fall back to namespace-only scope.
     /// </summary>
     public static async Task<string?> PodRegexAsync(
-        ApplicationDbContext db, Guid deploymentId, CancellationToken ct = default)
+        DeliveryDbContext db, Guid deploymentId, CancellationToken ct = default)
     {
         List<string> names = await WorkloadNamesAsync(db, deploymentId, ct);
         if (names.Count == 0) return null;
