@@ -1,14 +1,4 @@
-namespace EntKube.Web.Services.Telemetry;
-
-/// <summary>One metric point as it arrived, before anything has been aggregated.</summary>
-/// <param name="Name">Metric name as the exporter emitted it.</param>
-/// <param name="Service">OTel <c>service.name</c>, when the point carried one.</param>
-/// <param name="Namespace">Kubernetes namespace, when the point carried one.</param>
-/// <param name="Pod">Pod name, when the point carried one.</param>
-/// <param name="Timestamp">When the point was observed, UTC.</param>
-/// <param name="Value">The observation.</param>
-public readonly record struct MetricPoint(
-    string Name, string? Service, string? Namespace, string? Pod, DateTime Timestamp, double Value);
+namespace EntKube.Telemetry;
 
 /// <summary>The scope a rollup row belongs to — everything but the numbers.</summary>
 public readonly record struct MetricRollupKey(
@@ -21,7 +11,7 @@ public readonly record struct MetricRollupValue(
 /// <summary>
 /// Folds metric points into fixed-width buckets. Pure, so the resolution rule can be exercised
 /// without a database — and the resolution rule is the whole design decision of the metrics store
-/// (see <see cref="EntKube.Web.Data.MetricRollup"/>).
+/// (see <see cref="MetricRollup"/>).
 ///
 /// <para><b>Aggregating on WRITE is the point.</b> <c>IMetricsQuery</c> only ever asks for N
 /// buckets over a range, so a store of raw points would aggregate on every read instead — which is
