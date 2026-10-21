@@ -25,20 +25,23 @@ namespace EntKube.Web.Tests;
 public class OneAckPerActionRatchetTests
 {
     /// <summary>
-    /// What is left after the Kafka conversion — four actions (create, update, delete, sync a
-    /// binding), measured on this branch.
+    /// <b>Zero.</b> Measured on the merge result, which is the only tree where this number was
+    /// ever meaningful.
     ///
-    /// <para>Each remaining service needs a constructor parameter and every test that builds it
-    /// updated, so they are a change of their own rather than a silent widening of this one.
-    /// Driving this to zero is the work; the ratchet is here so it cannot grow while that
-    /// waits.</para>
+    /// <para>It started at 53 and came down in nine changes: Kafka 4, Redis 2,
+    /// <c>ComponentLifecycleService</c> 2, Storage and registered Postgres 2, then one each for
+    /// the Docker registry, Keycloak, Stalwart and headscale. Every conversion was verified by
+    /// deleting its <c>BeginOperation</c> and requiring a test to go red.</para>
     ///
-    /// <para>⚠️ <b>Re-measure on the merge result, not here.</b> This number has no correct value
-    /// at the moment two conversions merge — each is right against the tree it was measured on.
-    /// See <see cref="AllowedDrift"/>, which exists because that turned <c>main</c> red four
-    /// times.</para>
+    /// <para><b>What this test is now for.</b> While the backlog existed it was a bound on how
+    /// bad things could get. With the backlog gone it refuses the FIRST new action that asks an
+    /// operator twice — which is the job it was always meant to do, and the reason it stays after
+    /// the work it tracked is finished.</para>
+    ///
+    /// <para>⚠️ Still re-measure on the merge result if this ever rises and falls again: a number
+    /// here is a fact about a tree, and a merge produces a tree neither author measured.</para>
     /// </summary>
-    private const int Baseline = 10;
+    private const int Baseline = 0;
 
     /// <summary>
     /// How far below <see cref="Baseline"/> the count may sit before this test asks to be
@@ -52,11 +55,18 @@ public class OneAckPerActionRatchetTests
     /// merges second leaves a constant that no longer matches. The number has no correct value at
     /// the moment of the merge — only after it.</para>
     ///
-    /// <para>So growth is still refused outright, and drift is bounded: ten is small enough that
-    /// a forgotten re-bank cannot quietly become headroom for ten new offenders, and large enough
-    /// to absorb the two or three conversions that are usually in flight together.</para>
+    /// <para>So growth is still refused outright, and drift is bounded: ten was small enough that
+    /// a forgotten re-bank could not quietly become headroom for ten new offenders, and large
+    /// enough to absorb the two or three conversions usually in flight together.</para>
+    ///
+    /// <para><b>Back to zero now that the backlog is.</b> The slack existed because conversions
+    /// landing together each lowered the count, so neither branch's constant survived the merge.
+    /// Nothing is left to convert, so nothing can lower it any further — the count can only rise,
+    /// and <see cref="No_new_operator_action_asks_more_than_once"/> refuses that outright. Keeping
+    /// ten would be slack with no remaining purpose, which is what every other ratchet here
+    /// refuses on principle; the deviation was for the backlog era and ends with it.</para>
     /// </summary>
-    private const int AllowedDrift = 10;
+    private const int AllowedDrift = 0;
 
     private const string Web = "../../../../../src/EntKube.Web";
 
@@ -174,8 +184,9 @@ public class OneAckPerActionRatchetTests
     }
 
     /// <summary>
-    /// The banked number has to be re-measured when it falls — but not so strictly that two
-    /// conversions landing together turn <c>main</c> red. See <see cref="AllowedDrift"/>.
+    /// The banked number has to be re-measured when it falls. With both at zero this cannot fire
+    /// on a falling count — there is nothing left to fall — so what it now guards is a future
+    /// re-opening of the backlog: convert something new, forget to re-bank, and this says so.
     /// </summary>
     [Fact]
     public void The_ratchet_does_not_carry_unbounded_slack()
