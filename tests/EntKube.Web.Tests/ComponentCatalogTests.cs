@@ -273,7 +273,14 @@ public class ComponentCatalogTests : IDisposable
         IReadOnlyList<IGrouping<string, CatalogEntry>> groups = ComponentCatalog.GetByCategory();
 
         groups.Should().NotBeEmpty();
-        groups.SelectMany(g => g).Should().HaveCount(ComponentCatalog.Entries.Count);
+
+        // Every entry that can still be INSTALLED, which is no longer every entry: a retired one is
+        // deliberately withheld here while staying resolvable everywhere else, so that a cluster which
+        // already runs it can still uninstall it. See CatalogEntry.Retired and RetiredCatalogEntryTests.
+        groups.SelectMany(g => g).Should()
+            .HaveCount(ComponentCatalog.Entries.Count(e => !e.Retired));
+
+        groups.SelectMany(g => g).Should().NotContain(e => e.Retired);
     }
 
     // ──────── Registration from catalog ────────

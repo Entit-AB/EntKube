@@ -28,6 +28,18 @@ public class CatalogEntry
     /// <summary>Component type to store on ClusterComponent.</summary>
     public string ComponentType { get; init; } = "HelmChart";
 
+    /// <summary>
+    /// A component that may no longer be installed, but whose entry has to stay resolvable.
+    ///
+    /// <para><see cref="ComponentCatalog.GetByCategory"/> leaves these out, so the Components tab
+    /// does not offer them. Every other accessor keeps answering — <c>GetByKey</c>,
+    /// <c>ResolveForComponent</c>, <c>FindByRelease</c> — because an operator with one already
+    /// installed still needs its chart, its form fields and its release name to upgrade or
+    /// uninstall it. Deleting the entry outright would strand exactly the installs that need to
+    /// go away.</para>
+    /// </summary>
+    public bool Retired { get; init; }
+
     /// <summary>Helm repository URL where the chart lives.</summary>
     public required string HelmRepoUrl { get; init; }
 
@@ -1480,7 +1492,7 @@ public static class ComponentCatalog
         {
             Key = "otel-collector",
             DisplayName = "EntKube Telemetry Collector",
-            Description = "Node-level telemetry collector built on the OpenTelemetry Collector (Apache 2.0). Runs as a DaemonSet, tails container logs on every node, and ships them to the EntKube Telemetry Indexer IN THIS CLUSTER over OTLP/JSON (Bearer-authenticated with a per-cluster ingest token) — no Loki required. The cluster's telemetry never leaves it: the indexer holds it on a volume and seals it into the object-storage bucket you assign at install, and EntKube queries that on demand rather than receiving a copy. Also exposes OTLP receivers (4317/4318) so instrumented apps can send traces to the same place. For a Loki-backed setup instead, use Grafana Alloy.",
+            Description = "Node-level telemetry collector built on the OpenTelemetry Collector (Apache 2.0). Runs as a DaemonSet, tails container logs on every node, and ships them to EntKube over OTLP/JSON (Bearer-authenticated with a per-cluster ingest token) — no Loki required. EntKube indexes them into segments on its own disk and seals those into the object storage you assign, offloading the oldest first as that disk fills, so one place holds every cluster's logs and traces and one query answers across them. Also exposes OTLP receivers (4317/4318) so instrumented apps can send traces to the same place. For a Loki-backed setup instead, use Grafana Alloy.",
             Icon = "bi-arrow-down-up",
             Category = "Monitoring",
             HelmRepoUrl = "https://open-telemetry.github.io/opentelemetry-helm-charts",
@@ -1491,13 +1503,10 @@ public static class ComponentCatalog
             DefaultReleaseName = "otel-collector",
             // DaemonSet rollout (one pod per node) can be slow on busy clusters — give --wait headroom.
             InstallTimeout = "30m0s",
-            // The indexer is a hard dependency, and the direction is deliberate: the collector has
-            // somewhere to ship only if this cluster runs its own telemetry node. It used to be the other
-            // way round — the indexer depended on the collector, so the collector was installed first with
-            // nowhere in-cluster to send, defaulted to the management plane's public ingest URL, and only
-            // moved in-cluster if somebody later re-applied it. That default is gone: a cluster's telemetry
-            // stays in the cluster, so the destination must exist before the thing that fills it.
-            Dependencies = ["entkube-telemetry-indexer"],
+            // No dependency any more: the destination is the management plane, which exists before any
+            // component does. This used to require the in-cluster indexer, so that a collector could not
+            // be installed with nowhere to ship — that was the right guard while the cluster held its own
+            // telemetry, and it is wrong now that EntKube holds it again.
             FormFields =
             [
                 new ComponentFormField
@@ -1537,15 +1546,15 @@ public static class ComponentCatalog
                 {
                     Key = "ingest-endpoint", Label = "Telemetry Ingest URL",
                     YamlPath = "config.exporters.otlphttp/entkube.endpoint", Type = FormFieldType.Text,
-                    DefaultValue = "", Placeholder = "http://entkube-telemetry-indexer.monitoring:8080/ingest/otlp",
-                    HelpText = "Where this collector ships logs and traces (ending in /ingest/otlp — the collector appends /v1/logs and /v1/traces). Filled in automatically from the EntKube Telemetry Indexer installed on this cluster; there is no management-plane fallback, because a cluster's telemetry is not EntKube's to hold. Point it somewhere else only if you run your own OTLP endpoint."
+                    DefaultValue = "", Placeholder = "https://entkube.example.com/ingest/otlp",
+                    HelpText = "Where this collector ships logs and traces (ending in /ingest/otlp — the collector appends /v1/logs and /v1/traces). Filled in automatically from Telemetry:PublicIngestUrl, the address this EntKube is reachable at from your clusters. Point it somewhere else only if you run your own OTLP endpoint."
                 },
                 new ComponentFormField
                 {
                     Key = "ingest-token", Label = "Ingest Token",
                     YamlPath = "config.extensions.bearertokenauth.token", Type = FormFieldType.Password,
                     StoreAsSecret = true, SecretName = "otel-ingest-token",
-                    HelpText = "Per-cluster token, sent as a Bearer token. Required by BOTH destinations — the in-cluster indexer validates the same token, so switching between them changes only the URL. Filled in automatically; stored encrypted in the vault and injected at install."
+                    HelpText = "Per-cluster token, sent as a Bearer token. EntKube validates it and takes the (tenant, cluster) pair from it rather than from the payload, so a collector cannot write into another cluster's telemetry. Filled in automatically; stored encrypted in the vault and injected at install."
                 }
             ],
             // DaemonSet. The contrib image is required for the filelog receiver + k8sattributes
@@ -2134,7 +2143,8 @@ public static class ComponentCatalog
         {
             Key = "entkube-telemetry-indexer",
             DisplayName = "EntKube Telemetry Indexer",
-            Description = "Indexes this cluster's logs and traces INSIDE the cluster instead of shipping them across the WAN to EntKube. Receives OTLP from the EntKube Telemetry Collector, writes a Lucene inverted index on a PersistentVolume (hot), keeps recently sealed segments on the same volume (warm), and seals them to S3-compatible object storage (cold). EntKube then makes one query request per user action instead of carrying every log line of every cluster into one process. Real full-text search on the message body plus term lookups on namespace/pod/container/severity/trace id — not Loki's label-only indexing, and with none of Elasticsearch's shard allocation or mapping management: a segment is an immutable file with a fixed schema. Single replica by design (the engine is single-writer); scale reads with the Query component.",
+            Retired = true,
+            Description = "RETIRED — do not install. Telemetry is held by the management plane again: collectors ship to EntKube's own /ingest/otlp, which indexes into segments on its disk and seals them to the object storage you assign, offloading oldest-first as the disk fills. See docs/telemetry-central-again.md. This entry remains only so an indexer already installed can be upgraded or uninstalled. Previously: indexed this cluster's logs and traces INSIDE the cluster instead of shipping them across the WAN to EntKube. Receives OTLP from the EntKube Telemetry Collector, writes a Lucene inverted index on a PersistentVolume (hot), keeps recently sealed segments on the same volume (warm), and seals them to S3-compatible object storage (cold). EntKube then makes one query request per user action instead of carrying every log line of every cluster into one process. Real full-text search on the message body plus term lookups on namespace/pod/container/severity/trace id — not Loki's label-only indexing, and with none of Elasticsearch's shard allocation or mapping management: a segment is an immutable file with a fixed schema. Single replica by design (the engine is single-writer); scale reads with the Query component.",
             Icon = "bi-hdd-stack",
             Category = "Monitoring",
             HelmRepoUrl = "oci://entit.azurecr.io/helm",
@@ -2143,10 +2153,9 @@ public static class ComponentCatalog
             ImageRegistryHost = "entit.azurecr.io",
             DefaultNamespace = "monitoring",
             DefaultReleaseName = "entkube-telemetry",
-            // No dependency on the collector, and that reversal is the point: the indexer is the
-            // DESTINATION, so it has to exist before the thing that fills it. The old direction forced
-            // the collector to be installed first with nowhere in-cluster to ship, which is precisely
-            // how the management plane became its default address. The collector now depends on this.
+            // Nothing depends on this any more. It was briefly the collector's DESTINATION, and so the
+            // collector depended on it; that dependency is gone with the direction — a dependency on a
+            // retired entry is an install that cannot complete. See RetiredCatalogEntryTests.
             Dependencies = [],
             FormFields =
             [
@@ -2286,7 +2295,8 @@ public static class ComponentCatalog
         {
             Key = "entkube-telemetry-query",
             DisplayName = "EntKube Telemetry Query",
-            Description = "Scales out the telemetry READ path. Searches sealed segments straight from object storage and merges the indexer's not-yet-sealed events, so a heavy query never competes with ingest for the indexer's CPU. Optional: the indexer answers every query on its own, so add this only when query load warrants it or you want more read capacity than one pod. Requires the EntKube Telemetry Indexer on the same cluster — it borrows the segment list and the hot tier from it.",
+            Retired = true,
+            Description = "RETIRED — do not install; it has nothing to read from once the indexer beside it is gone. See docs/telemetry-central-again.md. This entry remains only so a querier already installed can be uninstalled. Previously: scaled out the telemetry READ path. Searches sealed segments straight from object storage and merges the indexer's not-yet-sealed events, so a heavy query never competes with ingest for the indexer's CPU. Optional: the indexer answers every query on its own, so add this only when query load warrants it or you want more read capacity than one pod. Requires the EntKube Telemetry Indexer on the same cluster — it borrows the segment list and the hot tier from it.",
             Icon = "bi-search",
             Category = "Monitoring",
             HelmRepoUrl = "oci://entit.azurecr.io/helm",
@@ -5456,7 +5466,9 @@ public static class ComponentCatalog
     /// </summary>
     public static IReadOnlyList<IGrouping<string, CatalogEntry>> GetByCategory()
     {
-        return Entries.GroupBy(e => e.Category).ToList();
+        // Retired entries stay in Entries so they remain resolvable for the installs that still
+        // exist; they are simply not offered any more. See CatalogEntry.Retired.
+        return Entries.Where(e => !e.Retired).GroupBy(e => e.Category).ToList();
     }
 
     /// <summary>

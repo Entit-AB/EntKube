@@ -1,5 +1,16 @@
 # In-cluster telemetry: indexer and query components
 
+> **SUPERSEDED.** Telemetry is held by the management plane again — see
+> [telemetry-central-again.md](telemetry-central-again.md), which reverses this. The two components
+> described here are retired in the catalog and the collector ships to EntKube.
+>
+> This document is kept, not deleted, for two reasons: the problems it measured in §1 are real and the
+> new shape has to answer them rather than pretend they are gone, and the failure in §5.6 — an empty
+> store answering every query *successfully*, so every telemetry surface blanks with no error anywhere —
+> is the same trap in the reverse direction, which is why `TelemetryRoute` still routes from the data.
+>
+> Names below that no longer exist in the code are flagged where they appear.
+
 Status: all phases complete, with one deliberate change of plan in Phase 5 (see §5.6). The chart and
 image are NOT yet published, which is the only thing standing between this and a working install.
 
@@ -546,7 +557,9 @@ was reachable by following the documented install order exactly.
 Two changes close it:
 
 - **The install completes the cutover.** `ComponentInstallOrchestrator` calls
-  `ComponentLifecycleService.EnsureCollectorShipsInClusterAsync` after a successful indexer install: it
+  `ComponentLifecycleService.EnsureCollectorShipsInClusterAsync` *(removed — the reverse now happens on
+  the collector's own apply, via `TelemetryIngestDefaults.RepointToManagementPlane`)* after a successful
+  indexer install: it
   repoints the collector at the in-cluster indexer and re-applies it, in the same shape as the wg-easy →
   gateway hook beside it. An endpoint the operator chose themselves is left alone and the collector is not
   re-applied at all — silently redirecting their telemetry would be worse than the bug.
