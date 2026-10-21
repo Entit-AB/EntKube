@@ -1,4 +1,4 @@
-using EntKube.Web.Services.Telemetry;
+using EntKube.Telemetry;
 using FluentAssertions;
 
 namespace EntKube.Web.Tests;

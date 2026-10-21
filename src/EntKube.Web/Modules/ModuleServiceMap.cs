@@ -186,6 +186,7 @@ public static partial class ModuleMap
         [typeof(IngestRateLimiter)] = Module.Telemetry,
         [typeof(IngestTokenService)] = Module.Telemetry,
         [typeof(LogQueryService)] = Module.Telemetry,
+        [typeof(EntKube.Web.Services.Telemetry.MetricRollupWriter)] = Module.Telemetry,
         [typeof(LokiService)] = Module.Telemetry,
         [typeof(MimirService)] = Module.Telemetry,
         // NodeLogBackend and NodeTraceService are deliberately absent: they take the tenant they

@@ -905,8 +905,50 @@ public class Program
             return Results.Json(new { });
         }).DisableAntiforgery();
 
-        // NB: there is no /ingest/otlp/v1/metrics endpoint — app metrics go straight to Prometheus (apps
-        // remote-write / are scraped), and EntKube only visualizes them via PromQL (PromMetricsService).
+        // Metrics, folded into MetricRollups on the way in (docs/telemetry-central-again.md §3).
+        //
+        // The same shape as the two above, including the status codes: 400 on an unparseable
+        // payload so the collector DROPS it, 500 on a persistence failure so the collector
+        // RETRIES it. The two must not be swapped — a 500 for bad JSON is retried for ever, and
+        // a 400 for a database blip loses the batch.
+        //
+        // Accepting a batch while Telemetry:AcceptMetricsIngest is off answers 2xx and writes
+        // nothing, rather than refusing: a collector that cannot deliver buffers and retries
+        // until the kubelet OOM-kills it, which is a worse failure than discarded metrics while
+        // the query side is still being built.
+        app.MapPost("/ingest/otlp/v1/metrics", async (
+            HttpContext httpContext, ITelemetryIngest telemetry, IngestTokenService tokens,
+            IngestRateLimiter rateLimiter, MetricRollupWriter metrics,
+            ILoggerFactory loggerFactory, CancellationToken ct) =>
+        {
+            if (IngestClosed(loggerFactory, httpContext) is { } closed) return closed;
+
+            ILogger log = loggerFactory.CreateLogger("OtlpIngest");
+            OtlpIngest.Result r = await OtlpIngest.ReadAsync(httpContext, telemetry, tokens, rateLimiter, log, ct);
+            if (r.Error is not null) return r.Error;
+
+            using System.Text.Json.JsonDocument doc = r.Doc!;
+            List<MetricPoint> points;
+            try
+            {
+                points = OtlpMetricsParser.Parse(doc);
+            }
+            catch (Exception ex)
+            {
+                log.LogWarning(ex, "Failed to parse OTLP metrics payload.");
+                return Results.BadRequest();
+            }
+            try
+            {
+                await metrics.WriteAsync(r.TenantId, r.ClusterId, points, ct);
+            }
+            catch (Exception ex)
+            {
+                log.LogError(ex, "Failed to persist OTLP metrics batch.");
+                return Results.StatusCode(StatusCodes.Status500InternalServerError);
+            }
+            return Results.Json(new { });
+        }).DisableAntiforgery();
 
         // The first-party RUM snippet — embedded as <script src="…/rum/v1/rum.js" data-key="…">. Static,
         // cacheable, no per-site templating (the key comes from data-key, the ingest origin from the src).
