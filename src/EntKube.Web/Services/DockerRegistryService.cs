@@ -19,7 +19,11 @@ namespace EntKube.Web.Services;
 public class DockerRegistryService(
     IDbContextFactory<DataServicesDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
-    VaultEncryptionService encryption)
+    VaultEncryptionService encryption,
+    // Optional, and last, so the existing positional constructions keep compiling. Safe to be
+    // absent: BeginOperation only ever suppresses the second and later questions of one action,
+    // never a refusal — so a null gate means more dialogs, never fewer.
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null)
 {
     // ─── CRUD ──────────────────────────────────────────────────────────────────
 
@@ -334,6 +338,10 @@ public class DockerRegistryService(
         if (cluster is null)
             return KubernetesOperationResult<string>.Failure(
                 "That cluster is not this tenant's, or it has no stored kubeconfig.");
+
+        // One action, one acknowledgment: creating the namespace and writing the pull secret
+        // into it are halves of the same sync.
+        using IDisposable? operation = gate?.BeginOperation("write a registry pull secret into a namespace");
 
         try
         {
