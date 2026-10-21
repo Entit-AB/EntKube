@@ -52,6 +52,9 @@ internal static class TelemetryServices
         services.AddSingleton<IngestTokenService>();
         services.AddScoped<EntKubeTelemetryService>();
         services.AddSingleton<IngestRateLimiter>();
+        // The write half of the central metrics store. Scoped: it opens a TelemetryDbContext per
+        // batch, as the rest of the ingest path does.
+        services.AddScoped<EntKube.Web.Services.Telemetry.MetricRollupWriter>();
         services.AddSingleton<RumSiteService>();
         services.AddScoped<TelemetryAlertRuleService>();
         services.AddScoped<DashboardService>();
