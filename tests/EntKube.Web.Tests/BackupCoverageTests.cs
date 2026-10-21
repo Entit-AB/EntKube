@@ -52,6 +52,10 @@ public class BackupCoverageTests
         ["CostLedgerCoverage"] = "measurements of the old installation's own clusters",
         ["CostLedgerCursor"] = "a position in a sweep the new server has not run",
         ["TelemetrySegment"] = "an index of segments in object storage, rebuilt by the node",
+        // The largest table in the product by row count, and every row is a measurement of a
+        // cluster THIS installation was watching: a restored server re-observes from the moment
+        // it starts, and carrying the old numbers across would describe machines it never saw.
+        ["MetricRollup"] = "measurements of the old installation's own clusters",
 
         // Mirrors of Kubernetes objects. The backup exists in the cluster; the row is a
         // copy of what the operator reports, and is re-read.

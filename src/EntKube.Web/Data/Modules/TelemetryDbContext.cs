@@ -18,6 +18,7 @@ public class TelemetryDbContext(DbContextOptions<TelemetryDbContext> options) : 
     public DbSet<Dashboard> Dashboards => Set<Dashboard>();
     public DbSet<AlertIncident> AlertIncidents => Set<AlertIncident>();
     public DbSet<IncidentNote> IncidentNotes => Set<IncidentNote>();
+    public DbSet<MetricRollup> MetricRollups => Set<MetricRollup>();
     public DbSet<AlertRoutingRule> AlertRoutingRules => Set<AlertRoutingRule>();
     public DbSet<NotificationChannel> NotificationChannels => Set<NotificationChannel>();
     public DbSet<NotificationDelivery> NotificationDeliveries => Set<NotificationDelivery>();

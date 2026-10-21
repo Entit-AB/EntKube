@@ -160,6 +160,7 @@ public static partial class ModuleMap
 
         // ---- Telemetry ----------------------------------------------------------------
         [typeof(TelemetryAlertRule)] = Module.Telemetry,
+        [typeof(MetricRollup)] = Module.Telemetry,
         [typeof(TelemetrySegment)] = Module.Telemetry,
         [typeof(TelemetryStorageSetting)] = Module.Telemetry,
         [typeof(RumSite)] = Module.Telemetry,

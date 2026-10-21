@@ -29,6 +29,7 @@ internal static class TelemetryModel
         builder.Entity<AlertRoutingRule>().ToTable("AlertRoutingRules");
         builder.Entity<Dashboard>().ToTable("Dashboards");
         builder.Entity<IncidentNote>().ToTable("IncidentNotes");
+        builder.Entity<MetricRollup>().ToTable("MetricRollups");
         builder.Entity<NotificationChannel>().ToTable("NotificationChannels");
         builder.Entity<NotificationDelivery>().ToTable("NotificationDeliveries");
         builder.Entity<NotificationProviderConfig>().ToTable("NotificationProviderConfigs");
@@ -59,6 +60,32 @@ internal static class TelemetryModel
             entity.HasIndex(s => new { s.TenantId, s.Signal, s.MaxTs, s.MinTs });
             entity.Property(s => s.Signal).HasMaxLength(20).IsRequired();
             entity.Property(s => s.ObjectKey).HasMaxLength(512).IsRequired();
+        });
+
+        builder.Entity<MetricRollup>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+
+            // The write path's question: "is there already a bucket for this scope?" Ingest upserts
+            // by exactly this tuple, so it is unique — two rows for one scope and bucket would make
+            // every read double-count, silently and in proportion to how often a collector retried.
+            entity.HasIndex(r => new
+            {
+                r.TenantId, r.ClusterId, r.Name, r.Service, r.Namespace, r.Pod,
+                r.BucketStart, r.ResolutionSeconds,
+            }).IsUnique().HasDatabaseName("IX_MetricRollups_Scope");
+
+            // The read path's question: one metric for one cluster over a window, newest last.
+            // Leading TenantId keeps a tenant's scan off everyone else's rows.
+            entity.HasIndex(r => new { r.TenantId, r.ClusterId, r.Name, r.BucketStart });
+
+            // Retention's question, which asks by time alone across every tenant.
+            entity.HasIndex(r => r.BucketStart);
+
+            entity.Property(r => r.Name).HasMaxLength(200).IsRequired();
+            entity.Property(r => r.Service).HasMaxLength(200);
+            entity.Property(r => r.Namespace).HasMaxLength(200);
+            entity.Property(r => r.Pod).HasMaxLength(200);
         });
 
         builder.Entity<TelemetryStorageSetting>(entity =>
