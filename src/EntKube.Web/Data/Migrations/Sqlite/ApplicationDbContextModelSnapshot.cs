@@ -15,7 +15,7 @@ namespace EntKube.Web.Data.Migrations.Sqlite
         protected override void BuildModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
-            modelBuilder.HasAnnotation("ProductVersion", "10.0.8");
+            modelBuilder.HasAnnotation("ProductVersion", "10.0.13");
 
             modelBuilder.Entity("EntKube.Web.Data.AdvisorDigestConfig", b =>
                 {
@@ -5496,6 +5496,69 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("RabbitMQClusterId");
 
                     b.ToTable("MessagingBindings", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.MetricRollup", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("BucketStart")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Count")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<double>("Last")
+                        .HasColumnType("REAL");
+
+                    b.Property<double>("Max")
+                        .HasColumnType("REAL");
+
+                    b.Property<double>("Min")
+                        .HasColumnType("REAL");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Namespace")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Pod")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ResolutionSeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Service")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<double>("Sum")
+                        .HasColumnType("REAL");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BucketStart");
+
+                    b.HasIndex("TenantId", "ClusterId", "Name", "BucketStart");
+
+                    b.HasIndex("TenantId", "ClusterId", "Name", "Service", "Namespace", "Pod", "BucketStart", "ResolutionSeconds")
+                        .IsUnique()
+                        .HasDatabaseName("IX_MetricRollups_Scope");
+
+                    b.ToTable("MetricRollups", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MongoBackup", b =>

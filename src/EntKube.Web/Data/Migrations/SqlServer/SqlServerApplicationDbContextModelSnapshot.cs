@@ -17,7 +17,7 @@ namespace EntKube.Web.Data.Migrations.SqlServer
         {
 #pragma warning disable 612, 618
             modelBuilder
-                .HasAnnotation("ProductVersion", "10.0.8")
+                .HasAnnotation("ProductVersion", "10.0.13")
                 .HasAnnotation("Relational:MaxIdentifierLength", 128);
 
             SqlServerModelBuilderExtensions.UseIdentityColumns(modelBuilder);
@@ -5503,6 +5503,70 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.HasIndex("RabbitMQClusterId");
 
                     b.ToTable("MessagingBindings", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.MetricRollup", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("BucketStart")
+                        .HasColumnType("datetime2");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<long>("Count")
+                        .HasColumnType("bigint");
+
+                    b.Property<double>("Last")
+                        .HasColumnType("float");
+
+                    b.Property<double>("Max")
+                        .HasColumnType("float");
+
+                    b.Property<double>("Min")
+                        .HasColumnType("float");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Namespace")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Pod")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<int>("ResolutionSeconds")
+                        .HasColumnType("int");
+
+                    b.Property<string>("Service")
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<double>("Sum")
+                        .HasColumnType("float");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("BucketStart");
+
+                    b.HasIndex("TenantId", "ClusterId", "Name", "BucketStart");
+
+                    b.HasIndex("TenantId", "ClusterId", "Name", "Service", "Namespace", "Pod", "BucketStart", "ResolutionSeconds")
+                        .IsUnique()
+                        .HasDatabaseName("IX_MetricRollups_Scope")
+                        .HasFilter("[Service] IS NOT NULL AND [Namespace] IS NOT NULL AND [Pod] IS NOT NULL");
+
+                    b.ToTable("MetricRollups", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.MongoBackup", b =>
