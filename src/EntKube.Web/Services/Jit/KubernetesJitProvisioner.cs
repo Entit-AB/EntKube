@@ -1,6 +1,7 @@
 using System.Security.Cryptography;
 using System.Text;
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.ClusterChanges;
 using k8s;
 using k8s.Models;
@@ -13,7 +14,7 @@ namespace EntKube.Web.Services.Jit;
 /// RoleBinding, plus the bound token the proxy uses to act for it.
 /// </summary>
 public class KubernetesJitProvisioner(
-    IDbContextFactory<ApplicationDbContext> dbFactory,
+    IDbContextFactory<IdentityDbContext> dbFactory,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
     IClusterChangeGate gate,
     VaultEncryptionService encryption,
