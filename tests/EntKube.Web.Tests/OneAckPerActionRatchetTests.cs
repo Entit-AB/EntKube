@@ -25,14 +25,20 @@ namespace EntKube.Web.Tests;
 public class OneAckPerActionRatchetTests
 {
     /// <summary>
-    /// What is left after the four conversions in <c>KubernetesOperationsService</c>, which was
-    /// the only one of the thirteen files that already had the gate injected.
+    /// What is left after the Kafka conversion — four actions (create, update, delete, sync a
+    /// binding), measured on this branch.
     ///
-    /// <para>The rest need a constructor parameter each, and every test that builds them updated,
-    /// so they are a change of their own rather than a silent widening of this one. Driving this
-    /// to zero is the work; the ratchet is here so it cannot grow while that waits.</para>
+    /// <para>Each remaining service needs a constructor parameter and every test that builds it
+    /// updated, so they are a change of their own rather than a silent widening of this one.
+    /// Driving this to zero is the work; the ratchet is here so it cannot grow while that
+    /// waits.</para>
+    ///
+    /// <para>⚠️ <b>Re-measure on the merge result, not here.</b> This number has no correct value
+    /// at the moment two conversions merge — each is right against the tree it was measured on.
+    /// See <see cref="AllowedDrift"/>, which exists because that turned <c>main</c> red four
+    /// times.</para>
     /// </summary>
-    private const int Baseline = 21;
+    private const int Baseline = 10;
 
     /// <summary>
     /// How far below <see cref="Baseline"/> the count may sit before this test asks to be
