@@ -55,7 +55,11 @@ public class RedisService(
     EntKube.Web.Services.Clusters.IClusterClientFactory clusters,
     VaultService vaultService,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
-    EntKube.Contracts.Delivery.IDeliveryApi delivery)
+    EntKube.Contracts.Delivery.IDeliveryApi delivery,
+    // Optional, and last, so the existing positional constructions keep compiling. Safe to be
+    // absent: BeginOperation only ever suppresses the second and later questions of one action,
+    // never a refusal — so a null gate means more dialogs, never fewer.
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null)
 {
     private const int RedisPort = 6379;
 
@@ -447,6 +451,10 @@ public class RedisService(
         db.RedisClusters.Add(cluster);
         await db.SaveChangesAsync(ct);
 
+        // One action, one acknowledgment: the namespace, the auth Secret and the CR are one
+        // decision the operator already made by pressing Create.
+        using IDisposable? operation = gate?.BeginOperation("create a Redis cluster");
+
         try
         {
             Clusters.IClusterClient target = await clusters.ForAsync(tenantId, kubernetesClusterId, ct)
@@ -663,6 +671,10 @@ public class RedisService(
             await clusters.ForAsync(tenantId, binding.AppDeployment.ClusterId, ct)
             ?? throw new InvalidOperationException(
                 "The app's cluster has no stored kubeconfig, so the credential secret cannot be synced.");
+
+        // One action, one acknowledgment: creating the namespace and writing the credentials into
+        // it are halves of the same sync.
+        using IDisposable? operation = gate?.BeginOperation("sync Redis credentials into an app namespace");
 
         await appCluster.EnsureNamespaceAsync(binding.AppDeployment.Namespace, ct);
 
