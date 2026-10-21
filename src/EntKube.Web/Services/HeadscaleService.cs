@@ -54,7 +54,11 @@ public class HeadscaleService(
     ComponentLifecycleService lifecycleService,
     IHttpClientFactory httpClientFactory,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
-    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients)
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
+    // Optional, and last, so the existing positional constructions keep compiling. Safe to be
+    // absent: BeginOperation only ever suppresses the second and later questions of one action,
+    // never a refusal — so a null gate means more dialogs, never fewer.
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null)
 {
     private static readonly JsonSerializerOptions JsonOpts = new() { PropertyNameCaseInsensitive = true };
 
@@ -571,6 +575,13 @@ public class HeadscaleService(
         if (!Uri.TryCreate(serverUrl, UriKind.Absolute, out Uri? uri))
             throw new InvalidOperationException($"Invalid server URL: {serverUrl}");
         string hostname = uri.Host;
+
+        // One action, one acknowledgment. Switching to TLS passthrough is six changes to the
+        // cluster — the copied certificate, the patched ConfigMap, the Deployment, the forced
+        // rollout, the Service, and the old HTTPRoute that has to go before the TLSRoute can
+        // take its name — plus the routes re-applied at the end. One press used to raise a
+        // dialog for each, which is how an operator learns to click through them.
+        using IDisposable? operation = gate?.BeginOperation("switch headscale to TLS passthrough");
 
         // 1. Copy the gateway TLS secret (cert-manager namespace → headscale namespace).
         //    The cert in cert-manager namespace was already issued by Let's Encrypt for this
