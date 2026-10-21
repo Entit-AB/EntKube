@@ -34,14 +34,19 @@ public class SweepTenancyRatchetTests
 
     /// <summary>
     /// The management plane. Registrations are read from here only — <c>EntKube.TelemetryNode</c>
-    /// registers three hosted services of its own (<c>ObjectStorageBudgetService</c>,
-    /// <c>SegmentCacheTrimService</c>, <c>VolumeGuardService</c>) and §4.0.1.2 does not reach them:
-    /// the node serves exactly one cluster and authenticates with a token, so there is no tenant to
-    /// act as. Named here so the next reader can see they were considered rather than missed.
+    /// registers two hosted services of its own (<c>ObjectStorageBudgetService</c>,
+    /// <c>SegmentCacheTrimService</c>) and §4.0.1.2 does not reach them: the node serves exactly one
+    /// cluster and authenticates with a token, so there is no tenant to act as. Named here so the
+    /// next reader can see they were considered rather than missed.
+    ///
+    /// <para><c>VolumeGuardService</c> used to be a third. It moved into <c>EntKube.Telemetry</c>
+    /// when telemetry came back to the management plane (docs/telemetry-central-again.md), which
+    /// registers it too — so it is classified below like any other sweep here, and the node's copy
+    /// is no longer the only one.</para>
     ///
     /// <para>Source files are still resolved across all of <c>src</c>, because the management plane
-    /// registers one type that lives elsewhere — <c>SegmentSealService</c>, in
-    /// <c>EntKube.Telemetry</c>.</para>
+    /// registers two types that live elsewhere — <c>SegmentSealService</c> and
+    /// <c>VolumeGuardService</c>, both in <c>EntKube.Telemetry</c>.</para>
     /// </summary>
     private const string ManagementPlane = "../../../../../src/EntKube.Web";
 
@@ -95,6 +100,13 @@ public class SweepTenancyRatchetTests
         ["SegmentSealService"] =
             "iterates the live per-tenant segment managers for one signal and seals or expires that "
             + "tenant's own segments — per-tenant by construction, with no cross-tenant decision to make",
+        ["VolumeGuardService"] =
+            "measures ONE disk that every tenant shares, then acts through the same live per-tenant "
+            + "managers, so the tenant is an input to every write exactly as for SegmentSealService. "
+            + "Its one genuinely cross-tenant act is deliberate and is not a scoping gap to convert: "
+            + "when the volume is full the oldest segments go, whoever wrote them, because the "
+            + "alternative is that ingest fails for all of them at once. A shared disk cannot be "
+            + "apportioned by asking each tenant in turn — there is one disk and one answer about it",
     };
 
     /// <summary>

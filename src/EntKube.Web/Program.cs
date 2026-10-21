@@ -394,6 +394,13 @@ public class Program
     MaxCachedReaders = builder.Configuration.GetValue<int?>("Telemetry:MaxCachedReaders") ?? 64,
     ObjectStorageMaxBytes = builder.Configuration.GetValue<long?>("Telemetry:ObjectStorageMaxBytes") ?? 0,
     ObjectStorageTargetPercent = builder.Configuration.GetValue<int?>("Telemetry:ObjectStorageTargetPercent") ?? 90,
+            // Watermarks on the disk holding the segments. Lower than the node's 85/70 on purpose: that
+            // volume is a PersistentVolume dedicated to telemetry, whereas this one is the management
+            // plane's own disk, shared with Postgres, the vault and everything else — so telemetry has to
+            // start giving space back long before the disk is in trouble. 70 is what was asked for;
+            // reclaiming stops at 60 so the next tick is not immediately over the line again.
+            VolumeHighWaterPercent = builder.Configuration.GetValue<int?>("Telemetry:VolumeHighWaterPercent") ?? 70,
+            VolumeTargetPercent = builder.Configuration.GetValue<int?>("Telemetry:VolumeTargetPercent") ?? 60,
         };
         builder.Services.AddSingleton(segmentOptions);
         // Per-tenant setting for which StorageLink backs a tenant's telemetry (edited in the tenant's
@@ -456,6 +463,22 @@ public class Program
         builder.Services.AddHostedService(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
+
+        // Each seal loop above bounds one CONSUMER of the disk; this bounds the disk itself. Past the
+        // high-water mark it evicts warm copies, then seals the active indexes so those bytes move into
+        // the tenant's object storage, and only on a plane with no bucket configured does it fall back to
+        // dropping the oldest. Telemetry is held here again (docs/telemetry-central-again.md), so this is
+        // the management plane's own disk — and a full one fails ingest for every cluster at once.
+        builder.Services.AddHostedService(sp => new VolumeGuardService(
+            [
+                sp.GetRequiredService<SegmentManagerRegistry<LogSegmentManager>>(),
+                sp.GetRequiredService<SegmentManagerRegistry<VerboseLogSegmentManager>>(),
+                sp.GetRequiredService<SegmentManagerRegistry<SpanSegmentManager>>(),
+                sp.GetRequiredService<SegmentManagerRegistry<RumSegmentManager>>(),
+                sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(),
+            ],
+            segmentOptions,
+            sp.GetRequiredService<ILogger<VolumeGuardService>>()));
         // Configures the in-cluster telemetry components from platform state (bucket, identity, tokens).
         // Real User Monitoring: resolves per-site public keys for the public browser ingest endpoint.
         // The engine resolves cluster→tenant through IClusterTenantResolver; in the management plane that

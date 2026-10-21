@@ -181,7 +181,7 @@ if (node.Role == NodeRole.Indexer)
             sp.GetRequiredService<SegmentManagerRegistry<RumSegmentManager>>(),
             sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(),
         ],
-        sp.GetRequiredService<ISegmentBlobStore>(), engine,
+        engine,
         sp.GetRequiredService<ILogger<VolumeGuardService>>()));
 
     // And this one measures the BUCKET. Retention bounds telemetry in time; nothing bounded what that

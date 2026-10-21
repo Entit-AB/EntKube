@@ -10,8 +10,15 @@ public enum VolumeAction
     TrimWarmTier,
 
     /// <summary>
-    /// Still over after evicting everything evictable, and the archives are on this same volume —
-    /// so the only remaining lever is to drop the oldest sealed data.
+    /// Nothing left to evict, but there is unsealed data sitting in the active indexes. Seal it: the
+    /// bytes become an archive in object storage, and the local copy is then evictable like any other.
+    /// Loses nothing either — it only brings forward work the roll thresholds would do later.
+    /// </summary>
+    SealActive,
+
+    /// <summary>
+    /// Still over after evicting everything evictable and sealing everything sealable, and the archives
+    /// are on this same volume — so the only remaining lever is to drop the oldest sealed data.
     /// </summary>
     DropOldest,
 }
@@ -23,6 +30,18 @@ public readonly record struct VolumeState(long TotalBytes, long FreeBytes)
 {
     public long UsedBytes => Math.Max(0, TotalBytes - FreeBytes);
 
+    /// <summary>
+    /// How full, as a fraction. The <c>TotalBytes &gt; 0</c> test is not defensive noise: without it an
+    /// unmeasurable volume divides zero by zero and yields <b>NaN</b>, and every comparison against NaN
+    /// is false — so <c>UsedPercent &lt; highWater</c> would be false and the guard would start reclaiming
+    /// because a stat call failed. It is also what keeps "NaN%" out of the log lines that print this.
+    ///
+    /// <para>Deliberately duplicated by the <c>TotalBytes &lt;= 0</c> test in <see cref="VolumeBudget.Decide"/>:
+    /// either one alone is sufficient, so deleting EITHER leaves every test green. That green is not
+    /// evidence the clause is dead — removing both together turns
+    /// <c>An_unmeasurable_volume_is_not_treated_as_a_full_one</c> and
+    /// <c>An_unmeasurable_volume_changes_nothing</c> red, which is how the pair was verified.</para>
+    /// </summary>
     public double UsedFraction => TotalBytes > 0 ? (double)UsedBytes / TotalBytes : 0d;
 
     public double UsedPercent => UsedFraction * 100d;
@@ -62,16 +81,32 @@ public static class VolumeBudget
     /// True when a trim has already run and left nothing further to evict, so trimming again would be a
     /// no-op and the guard would spin doing nothing while the disk stayed full.
     /// </param>
+    /// <param name="canSealActive">
+    /// Whether any active index still holds documents. Sealing one turns an uncompressed Lucene index
+    /// into a compressed archive in object storage, so it is the last remedy that costs nothing — but
+    /// only while there is something to seal. Without this the guard would keep choosing it on an idle
+    /// node and never reach the remedy that would actually help.
+    /// </param>
     public static VolumeAction Decide(
-        VolumeState state, int highWaterPercent, bool canDropOldest, bool warmTierIsExhausted)
+        VolumeState state, int highWaterPercent, bool canDropOldest, bool warmTierIsExhausted,
+        bool canSealActive)
     {
         // An unmeasurable volume is not a full one. Reporting a total of zero as 0% used would be just as
         // wrong as reporting it as 100% — the honest answer is to do nothing and leave the logs to say so.
+        //
+        // Stated here as policy AND guarded arithmetically in VolumeState.UsedFraction. The two are
+        // mutually redundant, so a sweep that deletes one clause at a time finds both "unnecessary";
+        // see UsedFraction for how the pair was actually verified.
         if (state.TotalBytes <= 0) return VolumeAction.None;
 
         if (state.UsedPercent < Clamp(highWaterPercent)) return VolumeAction.None;
 
         if (!warmTierIsExhausted) return VolumeAction.TrimWarmTier;
+
+        // Sealing before dropping, always: it is the difference between moving the oldest records into
+        // the bucket and deleting them. Only once there is nothing left to move does loss become the
+        // remaining option.
+        if (canSealActive) return VolumeAction.SealActive;
 
         return canDropOldest ? VolumeAction.DropOldest : VolumeAction.None;
     }
