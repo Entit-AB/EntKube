@@ -1,4 +1,5 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.Jit;
@@ -17,13 +18,13 @@ public static class JitClusterTokenStore
 {
     /// <summary>Encrypts and stores the bound token for a grant, replacing anything already there.</summary>
     public static async Task StoreAsync(
-        IDbContextFactory<ApplicationDbContext> dbFactory,
+        IDbContextFactory<IdentityDbContext> dbFactory,
         VaultEncryptionService encryption,
         Guid grantId,
         string token,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         JitGrant grant = await db.JitGrants.FirstOrDefaultAsync(g => g.Id == grantId, ct)
             ?? throw new InvalidOperationException("Grant not found.");
@@ -61,9 +62,9 @@ public static class JitClusterTokenStore
     /// history of the access without carrying the means to repeat it.
     /// </summary>
     public static async Task ForgetAsync(
-        IDbContextFactory<ApplicationDbContext> dbFactory, Guid grantId, CancellationToken ct = default)
+        IDbContextFactory<IdentityDbContext> dbFactory, Guid grantId, CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        using IdentityDbContext db = dbFactory.CreateDbContext();
 
         JitGrant? grant = await db.JitGrants.FirstOrDefaultAsync(g => g.Id == grantId, ct);
         if (grant is null) return;

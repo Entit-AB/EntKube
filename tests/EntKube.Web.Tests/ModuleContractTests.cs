@@ -726,11 +726,19 @@ public class ModuleContractTests
     /// converted — missing <c>JitClusterTokenStore</c>, which takes
     /// <c>IDbContextFactory&lt;ApplicationDbContext&gt;</c>. Same reach, different spelling.</para>
     ///
-    /// <para>One left, and it is not an oversight: <c>JitClusterTokenStore</c>'s callers hold the
-    /// all-seeing factory themselves, so converting it means converting
-    /// <c>KubernetesJitProvisioner</c> with it. That is its own change, not a line in this one.</para>
+    /// <para><b>Now zero.</b> <c>JitClusterTokenStore</c> was the last one, and its conversion was
+    /// the change this comment used to defer: the provisioner held the all-seeing factory for the
+    /// single purpose of handing it to the store, so both moved to <c>IdentityDbContext</c>
+    /// together and nothing else had to follow.</para>
+    ///
+    /// <para>⚠️ <b>Emptying it broke this test's own health check.</b> The first version proved the
+    /// scan still worked by requiring the offender list to be NON-EMPTY — which is only ever true
+    /// while an offender exists, so the last conversion would have failed the test that was
+    /// guarding it. "Did the scan run" and "did it find anything" are two questions, and only the
+    /// first can be answered by the scan's own output: it now counts the static classes it
+    /// examined, and a zero THERE is the broken scan.</para>
     /// </summary>
-    private static readonly string[] StaticHelpersOnTheGodContext = ["JitClusterTokenStore"];
+    private static readonly string[] StaticHelpersOnTheGodContext = [];
 
     [Fact]
     public void No_static_helper_starts_borrowing_the_all_seeing_context()
@@ -742,12 +750,12 @@ public class ModuleContractTests
             + "checking anything");
 
         Regex helper = new(
-            @"public static[^
-(;]*\s(\w+)\((?:[^)]*?)"
+            @"public static[^\n(;]*\s(\w+)\((?:[^)]*?)"
             + @"(?:IDbContextFactory<ApplicationDbContext>|ApplicationDbContext)\s+\w+",
             RegexOptions.Compiled);
 
         List<string> offenders = [];
+        int staticClassesExamined = 0;
 
         foreach (string path in Directory.EnumerateFiles(root, "*.cs", SearchOption.AllDirectories))
         {
@@ -761,6 +769,7 @@ public class ModuleContractTests
 
             foreach (Match cls in Regex.Matches(src, @"public static(?: partial)? class (\w+)"))
             {
+                staticClassesExamined++;
                 string name = cls.Groups[1].Value;
                 if (helper.IsMatch(src[cls.Index..]) && !offenders.Contains(name))
                 {
@@ -769,9 +778,12 @@ public class ModuleContractTests
             }
         }
 
-        offenders.Should().NotBeEmpty(
-            "if this stops matching, the scan broke rather than the product coming clean — "
-            + $"{StaticHelpersOnTheGodContext.Length} is the known figure");
+        // The health check, separated from the finding: this says the scan READ something, which
+        // is the only part its own output can vouch for. An empty offender list is now the goal,
+        // so it can no longer double as evidence that the scan works.
+        staticClassesExamined.Should().BeGreaterThan(20,
+            "if this stops finding static classes the scan broke, and an empty offender list below "
+            + "would mean nothing");
 
         offenders.Order().Should().BeEquivalentTo(StaticHelpersOnTheGodContext.Order(),
             "a static helper that takes ApplicationDbContext hands a module the whole product to "
