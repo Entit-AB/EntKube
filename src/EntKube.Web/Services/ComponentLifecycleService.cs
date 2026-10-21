@@ -75,7 +75,11 @@ public class ComponentLifecycleService(
     EntKubeTelemetryService entKubeTelemetry,
     IConfiguration configuration,
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
-    ILogger<ComponentLifecycleService> logger)
+    ILogger<ComponentLifecycleService> logger,
+    // Optional, and last, so the existing positional constructions keep compiling. Safe to be
+    // absent: BeginOperation only ever suppresses the second and later questions of one action,
+    // never a refusal — so a null gate means more dialogs, never fewer.
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null)
 {
     /// <summary>
     /// OCI registries this process has already logged helm in to. The login persists in helm's config for
@@ -1433,6 +1437,11 @@ public class ComponentLifecycleService(
 
         List<string> results = [];
 
+        // One action, one acknowledgment. This one scales with the data rather than being a fixed
+        // two or three: each group is a namespace to ensure AND a Secret to write, so a component
+        // with four target Secrets asked eight times for a single press of Sync.
+        using IDisposable? operation = gate?.BeginOperation("sync a component's secrets to its cluster");
+
         foreach (IGrouping<(string SecretName, string Namespace), VaultSecret> group in groups)
         {
             string k8sSecretName = group.Key.SecretName;
@@ -1920,6 +1929,12 @@ public class ComponentLifecycleService(
                 },
             },
         });
+
+        // One action, one acknowledgment: labelling each route namespace, removing the routes
+        // that were renamed out from under their old names, and applying the Gateway with every
+        // listener on it are one reconcile — and the count grows with the number of hostnames,
+        // so this was the worst of them to press.
+        using IDisposable? operation = gate?.BeginOperation("apply the external routes and the Gateway");
 
         foreach (string routeNs in routeNamespaces)
         {

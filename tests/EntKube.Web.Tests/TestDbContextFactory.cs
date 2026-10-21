@@ -91,8 +91,14 @@ public static class TestServices
     /// <c>cluster.Kubeconfig</c> to resolve the way production resolves it — through the vault
     /// materialisation interceptor rather than from a column that no longer exists.
     /// </summary>
+    /// <param name="gate">
+    /// Supplied only by the tests that count acknowledgments. Null everywhere else, which is the
+    /// production-safe direction: without a gate <c>BeginOperation</c> is a no-op, so an action
+    /// asks more times, never fewer.
+    /// </param>
     public static ComponentLifecycleService BuildLifecycle(
-        InterceptingTestDb testDb, IKubernetesClientFactory k8sFactory, string? publicIngestUrl = null)
+        InterceptingTestDb testDb, IKubernetesClientFactory k8sFactory, string? publicIngestUrl = null,
+        EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null)
     {
         IConfiguration config = TestConfiguration(publicIngestUrl);
         IngestTokenService tokens = new(config);
@@ -114,7 +120,8 @@ public static class TestServices
                 new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), config),
             config,
             new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8sFactory),
-            Microsoft.Extensions.Logging.Abstractions.NullLogger<ComponentLifecycleService>.Instance);
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<ComponentLifecycleService>.Instance,
+            gate);
     }
 
     /// <summary>
