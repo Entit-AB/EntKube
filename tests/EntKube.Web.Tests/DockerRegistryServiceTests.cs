@@ -277,4 +277,102 @@ public class DockerRegistryServiceTests : IDisposable
             .Should().ContainSingle().Which.Username.Should().Be("renamed");
         (await sut.DeleteAsync(tenant.Id, cred.Id)).Should().BeTrue();
     }
+
+    // ════════════════════════════════════════════════════════════════
+    //  One action, one acknowledgment
+    // ════════════════════════════════════════════════════════════════
+
+    private sealed class CountingSink : EntKube.Web.Services.ClusterChanges.IClusterChangeAckSink
+    {
+        public int Calls { get; private set; }
+
+        public Task<EntKube.Web.Services.ClusterChanges.ClusterChangeDecision> RequestAsync(
+            EntKube.Web.Services.ClusterChanges.PlannedClusterChange change,
+            EntKube.Web.Services.ClusterChanges.ClusterChangeDiff diff,
+            CancellationToken ct)
+        {
+            Calls++;
+            return Task.FromResult(
+                EntKube.Web.Services.ClusterChanges.ClusterChangeDecision.Acknowledged);
+        }
+    }
+
+    /// <summary>
+    /// Writing a pull secret ensures the namespace and then replaces the Secret: two gated
+    /// changes, one press.
+    ///
+    /// <para>The mock has to acknowledge, because the gate lives inside the real
+    /// <see cref="KubernetesClientFactory"/> and this one is mocked — without that the action
+    /// reaches the gate zero times and "one dialog" is satisfied by an action that asked
+    /// nobody.</para>
+    /// </summary>
+    [Fact]
+    public async Task SyncToKubernetesAsync_AsksTheOperatorExactlyOnce()
+    {
+        (Tenant tenant, App app, Data.Environment prod, _) = await SeedAsync();
+
+        KubernetesCluster cluster = new()
+        {
+            Id = Guid.NewGuid(), TenantId = tenant.Id, EnvironmentId = prod.Id,
+            Name = "prod-cluster", ApiServerUrl = "https://k8s",
+        };
+        db.KubernetesClusters.Add(cluster);
+        await db.SaveChangesAsync();
+        await testDb.SeedKubeconfigAsync(vault, tenant.Id, cluster.Id, TestKubeconfig.Valid);
+
+        DockerRegistryCredential cred = await CreateAsync(tenant.Id, app.Id, "prod-cred", prod.Id);
+        await sut.ConfigureSyncAsync(tenant.Id, cred.Id, cluster.Id, "registry-creds", "app");
+
+        EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate =
+            (EntKube.Web.Services.ClusterChanges.ClusterChangeGate)TestServices.NewGate();
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        int gatedChanges = 0;
+
+        k8s.Setup(f => f.EnsureNamespaceAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string ns, string kubeconfig, CancellationToken ct) =>
+            {
+                gatedChanges++;
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                    Manifest = $"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {ns}\n",
+                    Kubeconfig = kubeconfig,
+                }, ct);
+            });
+
+        k8s.Setup(f => f.ReplaceSecretAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .Returns(async (string name, string ns, string manifest, string kubeconfig,
+                            string? summary, CancellationToken ct) =>
+            {
+                gatedChanges++;
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                    Manifest = manifest,
+                    Kubeconfig = kubeconfig,
+                    Summary = summary,
+                }, ct);
+                return "secret replaced";
+            });
+
+        DockerRegistryService gated = new(
+            testDb.Factory,
+            new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
+            testDb.Encryption,
+            gate);
+
+        (await gated.SyncToKubernetesAsync(tenant.Id, cred.Id)).IsSuccess.Should().BeTrue();
+
+        gatedChanges.Should().BeGreaterThan(1, "the namespace and the Secret are both gated changes");
+        sink.Calls.Should().Be(1, "one action, one dialog");
+
+        // The window closes with the action: syncing again is a new decision.
+        (await gated.SyncToKubernetesAsync(tenant.Id, cred.Id)).IsSuccess.Should().BeTrue();
+        sink.Calls.Should().Be(2, "a second press asks again");
+    }
 }
