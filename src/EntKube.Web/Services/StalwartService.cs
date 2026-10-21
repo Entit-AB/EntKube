@@ -31,7 +31,11 @@ public class StalwartService(
     ComponentLifecycleService lifecycleService,
     RedisService redisService,
     EntKube.Contracts.Catalog.ICatalogApi catalog,
-    ILogger<StalwartService> logger) : IComponentFormValueProvider
+    ILogger<StalwartService> logger,
+    // Optional, and last, so the existing positional constructions keep compiling. Safe to be
+    // absent: BeginOperation only ever suppresses the second and later questions of one action,
+    // never a refusal — so a null gate means more dialogs, never fewer.
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null) : IComponentFormValueProvider
 {
     // Explicit implementation: the class already exposes CatalogKey as a const, and the interface
     // wants it as a property.
@@ -2080,6 +2084,16 @@ public class StalwartService(
             // old name, the CLI sent the new one, the fallback never matched, and the login fell
             // through to LDAP with the wrong password: a 401 that took a day to read. Mirror first,
             // then prove the two halves agree, before anything restarts.
+            // One action, one acknowledgment, and this is the longest action in the product: the
+            // credential mirror writes a Secret per namespace, the StatefulSet is re-applied, the
+            // config plan runs as a Job, and the routes are applied at the end. Pressing Apply
+            // once used to raise a dialog for each.
+            //
+            // Opened here, before the first gated change, which is inside the credential sync.
+            // Everything after it — including the applies further down — is a consequence of the
+            // same press, and the operation spans them because it is scoped to this method.
+            using IDisposable? operation = gate?.BeginOperation("apply the Stalwart mail configuration");
+
             output.Add("--- Syncing credentials to the cluster ---");
             HelmExecutionResult sync = await lifecycleService.SyncComponentSecretsAsync(tenantId, clusterComponentId, ct);
             if (!string.IsNullOrWhiteSpace(sync.Output))
