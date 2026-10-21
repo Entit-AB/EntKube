@@ -37,7 +37,11 @@ public class MinioBucketInfo
 /// External providers are registered manually — the service stores metadata
 /// in StorageLink entities and credentials in the VaultSecret table.
 /// </summary>
-public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, OpenStackKeystoneClient keystone, ClusterEgressRelay egressRelay, ClusterEgressTunnel egressTunnel, AgentRegistry agentRegistry, IKubernetesClientFactory k8sFactory, EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients, EntKube.Contracts.Catalog.ICatalogApi catalog, StorageLinkClientFactory storageClientFactory, IConfiguration? configuration = null)
+public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, VaultService vaultService, OpenStackS3Service openStackS3, OpenStackKeystoneClient keystone, ClusterEgressRelay egressRelay, ClusterEgressTunnel egressTunnel, AgentRegistry agentRegistry, IKubernetesClientFactory k8sFactory, EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients, EntKube.Contracts.Catalog.ICatalogApi catalog, StorageLinkClientFactory storageClientFactory, IConfiguration? configuration = null,
+    // Optional, and last, so the existing positional constructions keep compiling. Safe to be
+    // absent: BeginOperation only ever suppresses the second and later questions of one action,
+    // never a refusal — so a null gate means more dialogs, never fewer.
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null)
 {
     // CubeFS service coordinates for in-cluster access, overridable per deployment via config
     // (the CubeFS Helm chart's service names/ports can differ). Defaults match the chart's
@@ -1887,6 +1891,10 @@ public class StorageService(IDbContextFactory<ApplicationDbContext> dbFactory, V
             await clusterClients.ForAsync(tenantId, deployment.ClusterId, ct)
             ?? throw new InvalidOperationException(
                 "The deployment's cluster has no kubeconfig, so storage credentials cannot be synced.");
+
+        // One action, one acknowledgment: creating the namespace and writing the credentials into
+        // it are halves of the same sync.
+        using IDisposable? operation = gate?.BeginOperation("sync storage credentials into an app namespace");
 
         await clusterAccess.EnsureNamespaceAsync(ns, ct);
 
