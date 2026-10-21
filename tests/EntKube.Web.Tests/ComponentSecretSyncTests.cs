@@ -265,4 +265,215 @@ public class ComponentSecretSyncTests : IDisposable
         replaced.Should().BeEmpty("no Secret may be written to a cluster this tenant does not own");
     }
 
+
+    // ════════════════════════════════════════════════════════════════
+    //  One action, one acknowledgment
+    // ════════════════════════════════════════════════════════════════
+
+    private sealed class CountingSink : EntKube.Web.Services.ClusterChanges.IClusterChangeAckSink
+    {
+        public int Calls { get; private set; }
+
+        public Task<EntKube.Web.Services.ClusterChanges.ClusterChangeDecision> RequestAsync(
+            EntKube.Web.Services.ClusterChanges.PlannedClusterChange change,
+            EntKube.Web.Services.ClusterChanges.ClusterChangeDiff diff,
+            CancellationToken ct)
+        {
+            Calls++;
+            return Task.FromResult(
+                EntKube.Web.Services.ClusterChanges.ClusterChangeDecision.Acknowledged);
+        }
+    }
+
+    /// <summary>
+    /// Syncing a component's secrets is the acknowledgment case that scales with the DATA rather
+    /// than with the code: every target Secret is a namespace to ensure and a Secret to write, so
+    /// a component with four of them asked eight times for one press of Sync. A fixed "two or
+    /// three" is bad; a number the operator cannot predict is worse.
+    ///
+    /// <para>The mock has to acknowledge, because the gate lives inside the real
+    /// <see cref="KubernetesClientFactory"/> and this one is mocked — without that the action
+    /// reaches the gate zero times and the count below is trivially satisfied.</para>
+    /// </summary>
+    [Fact]
+    public async Task Syncing_several_secrets_asks_the_operator_exactly_once()
+    {
+        await SeedAsync();
+
+        // Two distinct target Secrets in two namespaces: four gated changes, one press.
+        await GivenAComponentSecretAsync("WG_HOST", "vpn.example.com", "wg-easy-env", "wg-easy");
+        await GivenAComponentSecretAsync("API_KEY", "s3cret", "wg-easy-api", "wg-easy-other");
+
+        EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate =
+            (EntKube.Web.Services.ClusterChanges.ClusterChangeGate)TestServices.NewGate();
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        int gatedChanges = 0;
+
+        k8s.Setup(x => x.EnsureNamespaceAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(async (string ns, string kubeconfig, CancellationToken ct) =>
+            {
+                gatedChanges++;
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                    Manifest = $"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {ns}\n",
+                    Kubeconfig = kubeconfig,
+                }, ct);
+            });
+
+        k8s.Setup(x => x.ReplaceSecretAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(async (string name, string ns, string manifest, string kubeconfig,
+                            string? summary, CancellationToken ct) =>
+            {
+                gatedChanges++;
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                    Manifest = manifest,
+                    Kubeconfig = kubeconfig,
+                    Summary = summary,
+                }, ct);
+                return "secret configured";
+            });
+
+        ComponentLifecycleService gated = TestServices.BuildLifecycle(testDb, k8s.Object, gate: gate);
+
+        HelmExecutionResult result = await gated.SyncComponentSecretsAsync(tenantId, componentId);
+
+        result.Success.Should().BeTrue();
+        gatedChanges.Should().BeGreaterThan(2,
+            "two target Secrets means two namespaces ensured and two Secrets written — the point "
+            + "of this case is that the number grows with the data");
+        sink.Calls.Should().Be(1, "one press of Sync, one dialog");
+    }
+
+    /// <summary>
+    /// And the window closes with the action: pressing Sync again asks again. Without this, a fix
+    /// that suppressed the question for the rest of the circuit would pass the test above while
+    /// quietly retiring the gate for everything the operator did next.
+    /// </summary>
+    [Fact]
+    public async Task Pressing_sync_a_second_time_asks_again()
+    {
+        await SeedAsync();
+        await GivenAComponentSecretAsync("WG_HOST", "vpn.example.com");
+
+        EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate =
+            (EntKube.Web.Services.ClusterChanges.ClusterChangeGate)TestServices.NewGate();
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        k8s.Setup(x => x.EnsureNamespaceAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(async (string ns, string kubeconfig, CancellationToken ct) =>
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                    Manifest = $"apiVersion: v1\nkind: Namespace\nmetadata:\n  name: {ns}\n",
+                    Kubeconfig = kubeconfig,
+                }, ct));
+
+        k8s.Setup(x => x.ReplaceSecretAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string?>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(async (string name, string ns, string manifest, string kubeconfig,
+                            string? summary, CancellationToken ct) =>
+            {
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                    Manifest = manifest,
+                    Kubeconfig = kubeconfig,
+                    Summary = summary,
+                }, ct);
+                return "secret configured";
+            });
+
+        ComponentLifecycleService gated = TestServices.BuildLifecycle(testDb, k8s.Object, gate: gate);
+
+        await gated.SyncComponentSecretsAsync(tenantId, componentId);
+        sink.Calls.Should().Be(1);
+
+        await gated.SyncComponentSecretsAsync(tenantId, componentId);
+        sink.Calls.Should().Be(2, "a second press is a second decision");
+    }
+
+    /// <summary>
+    /// Applying the external routes is the other acknowledgment case in this service whose count
+    /// grows with the data: every route namespace is a label patch, every route renamed out from
+    /// under its old name is a delete, and the Gateway with all the listeners on it is one more
+    /// apply. One press of "apply routes", as many dialogs as the cluster had hostnames.
+    /// </summary>
+    [Fact]
+    public async Task Applying_the_external_routes_asks_the_operator_exactly_once()
+    {
+        await SeedAsync();
+
+        await using (ApplicationDbContext write = testDb.CreateContext())
+        {
+            write.Set<ExternalRoute>().Add(new ExternalRoute
+            {
+                Id = Guid.NewGuid(), ComponentId = componentId,
+                Hostname = "vpn.example.com", ServiceName = "wg-easy", ServicePort = 51821,
+                TlsMode = TlsMode.ClusterIssuer, ClusterIssuerName = "letsencrypt",
+            });
+            await write.SaveChangesAsync();
+        }
+
+        EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate =
+            (EntKube.Web.Services.ClusterChanges.ClusterChangeGate)TestServices.NewGate();
+        CountingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        int gatedChanges = 0;
+
+        // Reading the backend's ports is a READ and must never be gated; it is mocked only so the
+        // Service lookup has something to parse.
+        k8s.Setup(x => x.GetJsonAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("{}");
+
+        k8s.Setup(x => x.PatchStrategicAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(async (string kind, string name, string ns, string patch, string kubeconfig,
+                            CancellationToken ct) =>
+            {
+                gatedChanges++;
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Patch,
+                    Kind = kind, Name = name, Namespace = ns, Patch = patch,
+                    Kubeconfig = kubeconfig,
+                }, ct);
+                return string.Empty;
+            });
+
+        k8s.Setup(x => x.ApplyManifestAsync(It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<CancellationToken>()))
+            .Returns(async (string manifest, string kubeconfig, CancellationToken ct) =>
+            {
+                gatedChanges++;
+                await gate.AcknowledgeAsync(new EntKube.Web.Services.ClusterChanges.PlannedClusterChange
+                {
+                    Verb = EntKube.Web.Services.ClusterChanges.ChangeVerb.Apply,
+                    Manifest = manifest,
+                    Kubeconfig = kubeconfig,
+                }, ct);
+                return string.Empty;
+            });
+
+        ComponentLifecycleService gated = TestServices.BuildLifecycle(testDb, k8s.Object, gate: gate);
+
+        await gated.ApplyExternalRoutesAsync(tenantId, componentId);
+
+        gatedChanges.Should().BeGreaterThan(1,
+            "labelling the route namespace and applying the Gateway are both gated changes");
+        sink.Calls.Should().Be(1, "one press of apply, one dialog");
+    }
 }
