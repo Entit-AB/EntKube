@@ -188,7 +188,11 @@ public class KeycloakService(
     IHttpClientFactory httpClientFactory,
     CnpgService cnpgService,
     ICatalogApi catalog,
-    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients)
+    EntKube.Web.Services.Clusters.IClusterClientFactory clusterClients,
+    // Optional, and last, so the existing positional constructions keep compiling. Safe to be
+    // absent: BeginOperation only ever suppresses the second and later questions of one action,
+    // never a refusal — so a null gate means more dialogs, never fewer.
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null)
 {
     private readonly record struct TokenCacheKey(Guid ComponentId);
     private readonly Dictionary<TokenCacheKey, (string Token, DateTime Expiry)> _tokenCache = [];
@@ -1832,6 +1836,10 @@ public class KeycloakService(
                 "The deployment's cluster has no stored kubeconfig, so the client secret cannot be "
                 + "written into its namespace.");
         string ns = binding.AppDeployment.Namespace;
+
+        // One action, one acknowledgment: creating the namespace and writing the client
+        // credentials into it are halves of the same sync.
+        using IDisposable? operation = gate?.BeginOperation("sync OIDC client credentials into an app namespace");
 
         await cluster.EnsureNamespaceAsync(ns, ct);
 
