@@ -84,19 +84,32 @@ public class ErrorBudgetService(IDeliveryApi delivery, ISupportApi support)
             })
             .ToList();
 
-        int maxWindow = resolved.Select(r => r.Target?.MeasurementWindowDays ?? 30).DefaultIfEmpty(30).Max();
         DateTime now = DateTime.UtcNow;
-        DateTime from = now.AddDays(-maxWindow);
 
-        List<Guid> deploymentIds = [.. deployments.Select(d => d.Id)];
+        // ONE CALL PER DISTINCT SLA WINDOW, aggregated in the database, instead of one call for
+        // every sample in the widest window sliced per-deployment here. This service never wanted
+        // the samples: it computes healthy/total twice per deployment and throws them away. At
+        // five-minute sampling a 30-day window is ~8,600 rows per deployment, and the measurement
+        // window can be 90.
+        //
+        // The windows are a handful of values in practice — SLA targets are written as 7, 30 or
+        // 90 days — and each call returns one row per deployment, so the call count buys back
+        // several orders of magnitude of rows. Deployments sharing a window share a call.
+        Dictionary<int, Dictionary<Guid, DeploymentHealthRatio>> byWindow = [];
 
-        // One call for all samples in the widest window; sliced per-deployment in memory.
-        IReadOnlyList<DeploymentHealthSample> allSamples =
-            await delivery.GetHealthSamplesAsync(tenantId, deploymentIds, from, null, ct);
+        foreach (IGrouping<int, Guid> group in resolved
+            .GroupBy(r => r.Target?.MeasurementWindowDays ?? 30, r => r.Deployment.Id))
+        {
+            byWindow[group.Key] = (await delivery.GetHealthRatiosAsync(
+                    tenantId, [.. group], now.AddDays(-group.Key), null, ct))
+                .ToDictionary(r => r.DeploymentId);
+        }
 
-        Dictionary<Guid, List<DeploymentHealthSample>> byDeployment = allSamples
-            .GroupBy(s => s.DeploymentId)
-            .ToDictionary(g => g.Key, g => g.ToList());
+        // The burn window is the same for every deployment, so it is one call regardless.
+        Dictionary<Guid, DeploymentHealthRatio> recent = (await delivery.GetHealthRatiosAsync(
+                tenantId, [.. deployments.Select(d => d.Id)],
+                now.AddDays(-RecentBurnWindowDays), null, ct))
+            .ToDictionary(r => r.DeploymentId);
 
         var result = new List<ErrorBudgetStatus>(resolved.Count);
         foreach ((DeploymentSummary d, AppSummary? app, SlaTargetSummary? target) in resolved)
@@ -105,12 +118,8 @@ public class ErrorBudgetService(IDeliveryApi delivery, ISupportApi support)
             int windowDays = target?.MeasurementWindowDays ?? 30;
             double allowedErr = Math.Max(0, 100.0 - targetPercent);
 
-            byDeployment.TryGetValue(d.Id, out List<DeploymentHealthSample>? samples);
-            DateTime windowFrom = now.AddDays(-windowDays);
-            List<DeploymentHealthSample> windowSamples =
-                samples?.Where(s => s.SnapshotAt >= windowFrom).ToList() ?? [];
-
-            double? achieved = Availability(windowSamples);
+            double? achieved = Availability(
+                byWindow[windowDays].GetValueOrDefault(d.Id));
             double? consumed = null, burn = null, hoursToExhaust = null;
 
             if (achieved is double ach)
@@ -118,8 +127,7 @@ public class ErrorBudgetService(IDeliveryApi delivery, ISupportApi support)
                 double actualErr = 100.0 - ach;
                 consumed = allowedErr > 0 ? actualErr / allowedErr : (actualErr > 0 ? 2.0 : 0.0);
 
-                DateTime recentFrom = now.AddDays(-RecentBurnWindowDays);
-                double? recentAch = Availability(windowSamples.Where(s => s.SnapshotAt >= recentFrom).ToList());
+                double? recentAch = Availability(recent.GetValueOrDefault(d.Id));
                 if (recentAch is double rach)
                 {
                     double recentErr = 100.0 - rach;
@@ -154,12 +162,18 @@ public class ErrorBudgetService(IDeliveryApi delivery, ISupportApi support)
         return result;
     }
 
-    private static double? Availability(List<DeploymentHealthSample> samples)
-    {
-        if (samples.Count == 0) return null;
-        int healthy = samples.Count(s => s.Health == HealthStatus.Healthy);
-        return Math.Round((double)healthy / samples.Count * 100.0, 2);
-    }
+    /// <summary>
+    /// The achieved percentage, or null when nothing was observed.
+    ///
+    /// <para>Null rather than 0 is the point: "no samples in the window" and "no sample was
+    /// healthy" are different answers, and only one of them is a service-level failure. A
+    /// deployment with no samples is absent from the contract's result, which is why this takes a
+    /// nullable.</para>
+    /// </summary>
+    private static double? Availability(DeploymentHealthRatio? ratio)
+        => ratio is null || ratio.TotalSamples == 0
+            ? null
+            : Math.Round((double)ratio.HealthySamples / ratio.TotalSamples * 100.0, 2);
 
     /// <summary>
     /// Most-specific-wins: app-level &gt; customer-level &gt; tenant-level default.

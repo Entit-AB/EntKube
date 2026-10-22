@@ -207,6 +207,28 @@ public sealed record DeploymentHealthSample(
     DateTime SnapshotAt);
 
 /// <summary>
+/// How many of one deployment's samples were healthy, over whatever interval was asked for.
+/// </summary>
+/// <param name="DeploymentId">Which deployment it describes.</param>
+/// <param name="HealthySamples">Samples whose health was <c>Healthy</c>.</param>
+/// <param name="TotalSamples">Samples in the interval, always &gt; 0 — a deployment with none is absent.</param>
+/// <remarks>
+/// <b>Counts, not a percentage, and that is the whole point of the shape.</b> Every caller that
+/// aggregates across deployments has to sum the counts and divide once; averaging per-deployment
+/// percentages weights a deployment with three samples the same as one with eight thousand. Two
+/// call sites were already doing it correctly by counting raw samples, and returning a percentage
+/// here would have made the correct thing impossible to express.
+///
+/// <para>A deployment with no samples in the interval is <b>omitted</b> rather than returned as
+/// 0/0: "nothing was observed" and "nothing was healthy" are different answers, and every caller
+/// distinguishes them — they report no availability figure at all rather than 0%.</para>
+/// </remarks>
+public sealed record DeploymentHealthRatio(
+    Guid DeploymentId,
+    int HealthySamples,
+    int TotalSamples);
+
+/// <summary>
 /// What Delivery offers the rest of EntKube.
 ///
 /// <para>Read-only: 22 services across other modules read <c>AppDeployment</c> and none of
@@ -252,15 +274,49 @@ public interface IDeliveryApi
     /// it dropped, and the customer status dashboard carves 7 days out of 30. A pre-computed
     /// percentage cannot answer any of them.</para>
     ///
-    /// <para>⚠️ Two <em>other</em> callers want only a ratio, and this method is deliberately not
-    /// for them: at five-minute sampling that is ~8,600 rows per deployment per month to compute
-    /// two integers. They keep their own counting shape until a count-returning method earns its
-    /// place — putting them behind this one would lock the waste in behind a contract.</para>
+    /// <para>⚠️ <b>The paragraph above was too strong, and <see cref="GetHealthRatiosAsync"/> is
+    /// the correction.</b> It said a pre-computed percentage "cannot answer any of them", which is
+    /// true only of a SINGLE call: carving a deployment's own SLA window, a one-day burn window, or
+    /// 7 days out of 30 is a time slice, and a time slice is expressible as another call with
+    /// another <paramref name="from"/>. Counting five sites rather than three found that four of
+    /// them want nothing but the ratio — so the count-returning method has earned the place this
+    /// note reserved for it, and those four now take it.</para>
+    ///
+    /// <para><b>One caller genuinely needs the rows, and it is the only one left:</b> the monthly
+    /// report drops individual samples that fall inside a maintenance window and reports how many
+    /// it dropped. That exclusion is per sample on an arbitrary predicate, not a time slice, so no
+    /// count can stand in for it. This method exists for that caller.</para>
     ///
     /// <para><paramref name="to"/> is exclusive and optional: the monthly report needs a closed
-    /// calendar month, the other two want "up to now".</para>
+    /// calendar month.</para>
     /// </summary>
     Task<IReadOnlyList<DeploymentHealthSample>> GetHealthSamplesAsync(
+        Guid tenantId, IReadOnlyCollection<Guid> deploymentIds, DateTime from,
+        DateTime? to = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// How many of each deployment's samples were healthy over an interval — the aggregate done in
+    /// the database, for the callers that only ever wanted the ratio.
+    ///
+    /// <para><b>Why this exists.</b> Five call sites outside Delivery compute the identical
+    /// <c>healthy / total × 100</c>, and four of them need nothing else. At five-minute sampling
+    /// (<c>UptimeTrackingService</c>, 90-day retention) that is ~8,600 rows per deployment per
+    /// month shipped out of the database to produce one number — and two of those four were paying
+    /// it <em>through this very contract</em>, which is the worst version: the waste was already
+    /// locked in behind the boundary that was supposed to prevent it.</para>
+    ///
+    /// <para>A caller wanting several intervals calls this once per interval. That is deliberate
+    /// and it is still the cheap direction: the error-budget service needs each deployment's own
+    /// SLA window plus a one-day burn window, which is a handful of calls returning one row per
+    /// deployment, against one call returning up to <c>window × 288</c> rows per deployment.</para>
+    ///
+    /// <para>Deployments with no samples in the interval are omitted — see
+    /// <see cref="DeploymentHealthRatio"/> for why that is not 0/0.</para>
+    ///
+    /// <para><paramref name="to"/> is exclusive and optional, matching
+    /// <see cref="GetHealthSamplesAsync"/>.</para>
+    /// </summary>
+    Task<IReadOnlyList<DeploymentHealthRatio>> GetHealthRatiosAsync(
         Guid tenantId, IReadOnlyCollection<Guid> deploymentIds, DateTime from,
         DateTime? to = null, CancellationToken ct = default);
 

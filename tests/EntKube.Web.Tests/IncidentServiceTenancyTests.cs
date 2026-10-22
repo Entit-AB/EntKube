@@ -41,7 +41,11 @@ public class IncidentServiceTenancyTests : IDisposable
         db = new ApplicationDbContext(
             new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(connection).Options);
         db.Database.EnsureCreated();
-        sut = new IncidentService(new TestDbContextFactory(connection));
+        TestDbContextFactory factory = new(connection);
+        // GetUptimeAsync reads Delivery's health snapshots, and now asks Delivery's contract for
+        // the aggregate rather than walking s.Deployment.App.Customer.TenantId itself. The real
+        // implementation is used, not a stub, because the predicate under test now lives in it.
+        sut = new IncidentService(factory, new EntKube.Web.Modules.Api.DeliveryApi(factory));
 
         ourCluster = Seed(ourTenant, "ours");
         theirCluster = Seed(theirTenant, "theirs");
@@ -163,6 +167,55 @@ public class IncidentServiceTenancyTests : IDisposable
 
         (await sut.GetIncidentsForDeploymentsAsync(theirTenant, deployments))
             .Should().BeEmpty("a caller-supplied deployment list is not an entitlement");
+    }
+
+    /// <summary>
+    /// <c>GetUptimeAsync</c> refuses another tenant's deployment.
+    ///
+    /// <para><b>This test did not exist, and the predicate it covers has just moved.</b> The method
+    /// used to apply the scope itself by walking <c>s.Deployment.App.Customer.TenantId</c> — three
+    /// navigations out of Telemetry and across two other modules — and now asks
+    /// <c>IDeliveryApi.GetHealthRatiosAsync</c>, which applies the same scope on Delivery's own
+    /// side. Nothing proved the predicate was there before the move, so nothing would have noticed
+    /// if the move had dropped it.</para>
+    ///
+    /// <para>The samples are seeded so the owner gets a real figure: an empty answer proves a
+    /// refusal only when there is something to refuse.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_cannot_read_another_tenants_uptime()
+    {
+        Guid customerId = Guid.NewGuid(), appId = Guid.NewGuid(), deploymentId = Guid.NewGuid();
+        Guid envId = db.KubernetesClusters.Single(c => c.Id == ourCluster).EnvironmentId;
+
+        db.Customers.Add(new Customer { Id = customerId, TenantId = ourTenant, Name = "ours" });
+        db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "ours-app" });
+        db.AppDeployments.Add(new AppDeployment
+        {
+            Id = deploymentId, AppId = appId, ClusterId = ourCluster, EnvironmentId = envId,
+            Name = "ours-deploy", Namespace = "ours",
+        });
+
+        // Three healthy, one degraded — a mixed fixture, so a miscount shows as the wrong
+        // percentage rather than as a missing one.
+        foreach (HealthStatus status in new[]
+        {
+            HealthStatus.Healthy, HealthStatus.Healthy, HealthStatus.Healthy, HealthStatus.Degraded,
+        })
+        {
+            db.DeploymentHealthSnapshots.Add(new DeploymentHealthSnapshot
+            {
+                Id = Guid.NewGuid(), DeploymentId = deploymentId, HealthStatus = status,
+                SnapshotAt = DateTime.UtcNow.AddMinutes(-5),
+            });
+        }
+        await db.SaveChangesAsync();
+
+        (await sut.GetUptimeAsync(ourTenant, deploymentId, 30)).Percent
+            .Should().Be(75, "three of four samples were healthy");
+
+        (await sut.GetUptimeAsync(theirTenant, deploymentId, 30)).Percent
+            .Should().BeNull("the deployment exists and has samples, so this is a refusal");
     }
 
     public void Dispose()

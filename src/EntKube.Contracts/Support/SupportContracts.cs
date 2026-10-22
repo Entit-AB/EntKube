@@ -60,10 +60,17 @@ public interface ISupportApi
     /// <summary>
     /// Every availability objective a tenant has set, unresolved.
     ///
-    /// <para>Returns rows rather than an answer because a caller computing error budgets needs
-    /// them all at once: it has to know the widest measurement window across the tenant before
-    /// it can decide how much health history to load, and then resolve per deployment. One call
-    /// per deployment would be the same question asked N times.</para>
+    /// <para>Returns rows rather than an answer because a caller computing error budgets has to
+    /// resolve most-specific-wins per deployment, and one call per deployment would be the same
+    /// question asked N times.</para>
+    ///
+    /// <para>⚠️ <b>The original reason given here no longer holds, and is recorded because a stale
+    /// rationale is worse than none.</b> It said the caller "has to know the widest measurement
+    /// window across the tenant before it can decide how much health history to load" — true while
+    /// <c>ErrorBudgetService</c> loaded every sample in one wide fetch and sliced in memory. It now
+    /// asks <c>IDeliveryApi.GetHealthRatiosAsync</c> once per <em>distinct</em> window, so there is
+    /// no widest window to discover; it groups by the window each target names. The method is
+    /// unchanged, but only the first sentence above is still its reason.</para>
     /// </summary>
     Task<IReadOnlyList<SlaTargetSummary>> GetSlaTargetsAsync(
         Guid tenantId, CancellationToken ct = default);

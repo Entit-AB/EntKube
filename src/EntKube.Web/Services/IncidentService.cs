@@ -1,10 +1,11 @@
+using EntKube.Contracts.Delivery;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Data;
 
 namespace EntKube.Web.Services;
 
-public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
+public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory, IDeliveryApi delivery)
 {
     /// <summary>
     /// Returns incidents that are relevant to a specific set of deployments,
@@ -269,20 +270,25 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory)
         int windowDays,
         CancellationToken ct = default)
     {
-        using ApplicationDbContext db = dbFactory.CreateDbContext();
+        // Delivery's table, asked for through Delivery's contract — and asked for as the AGGREGATE,
+        // because the ratio is the only thing this method has ever returned. It used to load every
+        // sample in the window (five-minute sampling, so ~8,600 a month per deployment) and count
+        // them here.
+        //
+        // It also used to reach the tenant by walking s.Deployment.App.Customer.TenantId: three
+        // navigations out of Telemetry, across two other modules, to check a predicate. The
+        // contract applies the same predicate on Delivery's own side of the boundary.
         DateTime from = DateTime.UtcNow.AddDays(-windowDays);
 
-        List<DeploymentHealthSnapshot> snapshots = await db.DeploymentHealthSnapshots
-            .Where(s => s.DeploymentId == deploymentId && s.SnapshotAt >= from
-                     && s.Deployment.App.Customer.TenantId == tenantId)
-            .OrderBy(s => s.SnapshotAt)
-            .ToListAsync(ct);
+        IReadOnlyList<DeploymentHealthRatio> ratios =
+            await delivery.GetHealthRatiosAsync(tenantId, [deploymentId], from, null, ct);
 
-        if (snapshots.Count == 0)
+        // Absent means no samples were observed, which is not the same as none being healthy —
+        // the caller shows no figure rather than 0%.
+        if (ratios.FirstOrDefault() is not DeploymentHealthRatio r)
             return new UptimeResult(windowDays, null);
 
-        int healthy = snapshots.Count(s => s.HealthStatus == HealthStatus.Healthy);
-        double percent = (double)healthy / snapshots.Count * 100.0;
+        double percent = (double)r.HealthySamples / r.TotalSamples * 100.0;
         return new UptimeResult(windowDays, Math.Round(percent, 2));
     }
 
