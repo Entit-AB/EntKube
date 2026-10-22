@@ -734,19 +734,24 @@ public static class PublicApiEndpoints
         {
             ApiTokenPrincipal principal = ctx.GetApiPrincipal()!;
 
-            ClusterCostRate? saved = await rates.SaveAsync(
+            // ⚠️ PatchAsync, not SaveAsync. SaveAsync writes every field of the entity it is
+            // handed, so building one here from an optional body meant each `?? default` was an
+            // overwrite rather than a fallback: an omitted loadBalancerMonthlyCost zeroed a
+            // configured price, which is the opposite of what CostRateInput's own comment
+            // promised. And ChargeIdleCapacity, absent from that initializer entirely, took the
+            // entity's `= true` on every single write.
+            ClusterCostRate? saved = await rates.PatchAsync(
                 principal.TenantId, clusterId,
-                new ClusterCostRate
-                {
-                    CpuCoreHourCost = input.CpuCoreHourCost,
-                    MemoryGiBHourCost = input.MemoryGiBHourCost,
-                    StorageGiBMonthCost = input.StorageGiBMonthCost,
-                    ClusterMonthlyOverhead = input.ClusterMonthlyOverhead,
-                    Currency = input.Currency ?? "USD",
-                    ChargeOnRequests = input.ChargeOnRequests ?? true,
-                    LoadBalancerMonthlyCost = input.LoadBalancerMonthlyCost ?? 0m,
-                    PublicIpMonthlyCost = input.PublicIpMonthlyCost ?? 0m,
-                },
+                new CostRatePatch(
+                    input.CpuCoreHourCost,
+                    input.MemoryGiBHourCost,
+                    input.StorageGiBMonthCost,
+                    input.ClusterMonthlyOverhead,
+                    input.Currency,
+                    input.ChargeOnRequests,
+                    input.ChargeIdleCapacity,
+                    input.LoadBalancerMonthlyCost,
+                    input.PublicIpMonthlyCost),
                 updatedBy: $"api-token:{principal.TokenName}", ct);
 
             // SaveAsync returns null when the cluster is not this tenant's, so a crafted
@@ -819,6 +824,7 @@ public static class PublicApiEndpoints
         clusterMonthlyOverhead = rate.ClusterMonthlyOverhead,
         currency = rate.Currency,
         chargeOnRequests = rate.ChargeOnRequests,
+        chargeIdleCapacity = rate.ChargeIdleCapacity,
         updatedAt = rate.UpdatedAt,
         updatedBy = rate.UpdatedBy,
     };
@@ -839,5 +845,12 @@ public static class PublicApiEndpoints
         // Per-month network charges. Nullable so an existing client that does not send
         // them leaves the stored values alone rather than silently zeroing a rate.
         decimal? LoadBalancerMonthlyCost = null,
-        decimal? PublicIpMonthlyCost = null);
+        decimal? PublicIpMonthlyCost = null,
+        // ⚠️ Added late, and its absence was a defect in three directions at once: the field
+        // was not in this type, so no client could set it; not in ToCostRateDto, so no client
+        // could read it back to detect drift; and not in the object the handler built, so every
+        // PUT reset it to the entity's initializer — true — silently re-enabling idle-capacity
+        // charging for a tenant who had turned it off in the settings page. Appended last so no
+        // positional caller of this record is re-mapped.
+        bool? ChargeIdleCapacity = null);
 }
