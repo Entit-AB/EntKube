@@ -1092,8 +1092,9 @@ background services. It stops being defensible when a remote agent is a caller.
   and the change carries who approved it and when;
 - automation declares its intent up front: `RequiresApproval` / `PreApproved(policy)` /
   `Ungated(reason)`, and the ungated path is auditable rather than accidental;
-- `RemediationService`'s existing deliberate exemption becomes an explicit
-  `Ungated("remediation")` instead of an emergent property of having no circuit.
+- ~~`RemediationService`'s existing deliberate exemption becomes an explicit
+  `Ungated("remediation")` instead of an emergent property of having no circuit.~~
+  **Done 2026-10-22 — and the primitive named here was the wrong one. See §5.4.3.**
 
 This is a prerequisite, not a phase-4 nicety. Everything else in this document can
 slip; this cannot.
@@ -1289,6 +1290,121 @@ behalf.
 2. **Does `rabbitmqctl import_definitions` belong to this family or to the one above it?** It is
    not SQL and not a manifest; it replaces a broker's entire topology from stdin. Today it is
    invisible on both counts.
+
+### 5.4.3 The typed SDK, and remediation's exemption made real (2026-10-22)
+
+§5.4's fourth bullet — make `RemediationService`'s exemption explicit — had been open since the
+gate was written. Closing it turned up two things worth recording: the bullet named the wrong
+primitive, and the metric that was supposed to notice this class of gap could not see it.
+
+#### The exemption was invisible, not ungated
+
+`RemediationService` deleted pods and restarted Deployments, StatefulSets and DaemonSets through
+the typed Kubernetes SDK and **never called the gate at all**. Its comment said so and argued the
+case, which is right as far as it goes: the operator picks the action from the alerts page and
+confirms it in a panel naming the resource, so the gate's own dialog is a second prompt for one
+decision.
+
+What was wrong is the mechanism. A flow that does not call the gate produces no `ClusterChange`
+record of any outcome — not `AppliedUnattended`, not `AppliedAsConsequence`, nothing. That is the
+exact distinction §5.4.1 was written to kill: *invisible* rather than *ungated*. The `AuditService`
+row it already wrote is a different trail, and says a human asked for a remediation rather than
+that a cluster was changed.
+
+The five mutations now go through `IClusterClient` inside a `DeclareConsequence` scope. Each is
+recorded as `AppliedAsConsequence`; the operator is still asked once.
+
+#### `DeclareUnattended` would have been the wrong primitive
+
+`Ungated(reason)` as sketched above became `DeclareUnattended(reason)`, and reaching for it here
+would have made things worse rather than better. `ClusterChangeGate.AcknowledgeAsync` tests
+`_sink is null` **first**: an unattended declaration only takes effect when there is nobody to ask.
+Remediation's one caller is `TenantAlertsTab`, a Blazor circuit, and `ClusterChangeAckDialog` is
+mounted in `MainLayout` — so there is always a sink, the declaration would have been inert, and the
+operator would have acknowledged every remediation twice.
+
+`DeclareConsequence` is the primitive that suppresses the *question* while still recording the
+*outcome*, and it is what `ReleaseVolumeGuard` already uses for the same shape of problem: work the
+operator approved once, carried out as several changes. The general lesson is that "exempt" is not
+one thing — **whether a declaration takes effect depends on whether anyone is there**, and a
+sketch written before the gate existed could not have known which half it needed.
+
+#### The CLI metric is structurally blind to the SDK
+
+`ClusterChangeGateCoverageTests` counts `"kubectl"` and `"helm"` as the *program argument of a
+process call*. It is down to one invocation (`ClusterEgressTunnel`'s port-forward, a channel rather
+than a change) and that number is quoted as a fact in §5.4. But a mutation issued as
+`client.AppsV1.PatchNamespacedDeploymentAsync(…)` spawns no process and names no program, so it was
+never in scope for that metric — by construction, not by oversight. The CLI number reaching one
+said nothing about the SDK.
+
+`TypedSdkMutationTests` measures the second dimension: **19 typed-SDK mutations in three files.**
+Fourteen acknowledge (`KubernetesOperationsService` ×11, `NodeManagementService` ×3); the other five
+were these. Four things about how it is built are deliberate:
+
+- **Containment is per method, not per file.** The CLI metric asks only whether a file
+  acknowledges *anywhere*, and says itself that this undercounts. Here the enclosing method is
+  resolved for each site, so removing one of `KubernetesOperationsService`'s five acknowledgments
+  fails the test while the other four keep theirs — verified by doing it, and the CLI metric stayed
+  green throughout.
+- **The receiver identifies an SDK call, never the method name.** Matched by shape
+  (`<Name>V<n>`) rather than a list of group names, so a seventh API group is caught without
+  editing the test. A first pass keyed on `(Create|Delete|…)(Namespaced|Node|Cluster)\w*Async`
+  returned 39 sites, twenty of them EntKube's own `CreateClusterAsync` and `DeleteNodeAsync`:
+  **"Cluster" and "Node" are this product's words too.**
+- **The health check cannot be "we found something",** because the finding is expected to be
+  empty. It asserts the receiver pattern still matches SDK calls at all (64 today, nearly all
+  reads), and a site whose enclosing method cannot be resolved fails loudly instead of being
+  skipped. This earned itself immediately: a stale test binary from an earlier verification step
+  made the corpus read as empty, and the health check refused to let four absence assertions pass
+  against source it had not read.
+- **The blind spots are named and asserted empty.** `GenericClient`, the `WithHttpMessagesAsync`
+  overload, `DeleteCollection*`, and `CustomObjects` mutations — the last of these has no `V<n>` in
+  the receiver, so a CRD write there would be genuinely invisible. All four are unoccupied; CNPG
+  clusters, Istio policies and cert-manager Certificates are written with `ApplyManifestAsync`,
+  which acknowledges.
+
+#### What is deliberately not measured, and what is still open
+
+`IClusterClient.CreateSdkClient()`/`GetPooledSdkClient()` hand out a live `k8s.Kubernetes` at **36
+call sites in 12 files**, and the accessor's own doc-comment admits the credential stays reachable.
+Those sites are overwhelmingly legitimate reads — EntKube has to read clusters — so counting them
+would be a census rather than a ratchet: a number that cannot reach zero and whose members are all
+defensible teaches nothing. What is worth guarding is that none of them *mutates* without an
+acknowledgment, which is the number above. Any of the 36 is one line from becoming a site it
+catches.
+
+**Still outside the gate, measured 2026-10-22 and not yet addressed.** Every component's own admin
+API is a third dimension, which neither ratchet counts because none of it is `kubectl`, `helm` or
+the typed SDK:
+
+| Family | Mutating sites | Worst case |
+|---|---|---|
+| Keycloak admin REST | 33 in 1 file | `DELETE /admin/realms/{realm}`; `reset-password`; client-secret regeneration |
+| Object storage via the API-server proxy | 10 in 2 files | CubeFS user mint (credentials); bucket policy/CORS; paginated folder delete over Velero backups and telemetry segments |
+| Harbor API | 11 in 1 file | project and registry deletion — breaks the pulls live deployments depend on |
+| Headscale API | 8 in 1 file | `PUT /api/v1/policy` replaces the ACL for the mesh EntKube reaches clusters over |
+| Alertmanager | 1 | silence creation — low blast radius, time-bounded, carries `createdBy` |
+
+Three judgements about that table rather than a plan to gate all of it:
+
+1. **Not all of it should be gated.** Adding a user to a Keycloak group, or deleting one object
+   through a file browser, is routine administration; a dialog there produces the click-through
+   habit the gate's own doc-comments warn about. The destructive and credential-minting subsets are
+   the ones that need a record.
+2. **`PlannedClusterChange` cannot preview any of it.** It requires a kubeconfig and computes a
+   `kubectl diff`. A Keycloak or Harbor change would get the honest-summary fall-through that
+   `ChangeVerb.Drain` already takes — which is fine, but it means "gate it" is a new shape of
+   record, not a new call site.
+3. **Keycloak can be registered as *external*.** `KeycloakComponentConfig` rows with a null
+   `ClusterComponentId` are not in any cluster, so for those the gate would be acknowledging a
+   change to something the invariant does not cover.
+
+**Second-order writes are a fourth dimension and no approach here reaches them.** EntKube applies a
+Job or CronJob — acknowledged at apply — whose container then PUTs Elasticsearch ILM policies, dumps
+a database, or exports a broker topology. The acknowledgment previews the manifest, never what the
+manifest goes on to do. That is where the Elasticsearch and RabbitMQ backup mutations actually
+live.
 
 ---
 
