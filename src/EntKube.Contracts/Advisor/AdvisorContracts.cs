@@ -17,6 +17,49 @@ public enum FindingStatus
 }
 
 /// <summary>How often a tenant receives the advisor digest.</summary>
+/// <summary>Broad problem domain a finding belongs to.</summary>
+/// <remarks>
+/// ⚠️ Mirrors <c>AdvisorCategory</c> member for member, and the names are <b>published</b>: the
+/// public API's <c>/advisor/findings</c> route emits <c>category</c> as <c>ToString()</c> on this
+/// value. Renaming a member here renames a field in a response the CLI and MCP server read, so
+/// <c>AdvisorContractEnumTests</c> pins the names rather than only the ordinals — the same reason
+/// <c>PublishedProvisioningStatus</c> exists for Fleet, where the entity and contract disagreed on
+/// a name and projecting the contract value would have changed the API by accident.
+/// </remarks>
+public enum FindingCategory
+{
+    Security,
+    Reliability,
+    DataProtection,
+    Capacity,
+    Maintenance,
+    SupplyChain,
+}
+
+/// <summary>How bad a finding is. Mirrors <c>AdvisorSeverity</c>; names are published.</summary>
+public enum FindingSeverity
+{
+    Critical = 0,
+    Warning = 1,
+    Info = 2,
+}
+
+/// <summary>When a finding needs acting on. Mirrors <c>AdvisorHorizon</c>; names are published.</summary>
+public enum FindingHorizon
+{
+    /// <summary>The deadline has already passed.</summary>
+    Overdue = 0,
+
+    /// <summary>Impact within ~48h.</summary>
+    Today = 1,
+
+    /// <summary>Impact within ~a week.</summary>
+    ThisWeek = 2,
+
+    /// <summary>On the radar, with no near-term deadline.</summary>
+    Later = 3,
+}
+
 public enum DigestFrequency
 {
     Off,
@@ -77,9 +120,54 @@ public sealed record DigestSettings(
 /// <para>Computing the findings is not here. That is Advisor's own work, and exposing it
 /// would mean exposing every other module's data through the back door.</para>
 /// </summary>
+/// <summary>
+/// One synthesized finding, as the rest of the product reads it.
+///
+/// <para><b>Thirteen fields, because thirteen are read.</b> <c>OperationsFinding</c> carries
+/// twenty-six — timing phrases, a priority score, escalation and "new" flags, a confidence,
+/// deep-link hints, the lead incident id. Those exist for the operator tab that renders them and
+/// for the sort order inside a horizon; nothing outside the module asks for any of them. The
+/// public API projects exactly the set below, which is where this shape came from.</para>
+///
+/// <para>Findings are computed on read and never stored, so there is no id to fetch one by —
+/// <see cref="Id"/> is a stable synthetic key like <c>cert:{secretId}</c>, which is also what the
+/// state methods take.</para>
+/// </summary>
+public sealed record FindingSummary(
+    string Id,
+    FindingCategory Category,
+    FindingSeverity Severity,
+    FindingHorizon Horizon,
+    string Title,
+    string? Detail,
+    string ScopeLabel,
+    DateTime? DueAt,
+    string? Remediation,
+    string Source,
+    FindingStatus State,
+    Guid? ClusterId,
+    string? CustomerName);
+
 public interface IAdvisorApi
 {
     /// <summary>Every recorded decision for a tenant, keyed by finding key.</summary>
+    /// <summary>
+    /// Every finding the advisor currently reports for a tenant, most urgent first.
+    ///
+    /// <para><b>Added because the one caller outside the module could not use this contract at
+    /// all.</b> The public API's <c>GET /advisor/findings</c> injected
+    /// <c>OperationsAdvisorService</c> directly — a module's own service, reached across the
+    /// boundary — because the only read here returned raw state rows keyed by finding id, which is
+    /// the module's internal join and not a question anyone outside it asks. The findings are the
+    /// answer; the states are how Advisor computes it.</para>
+    ///
+    /// <para>No paging and no filter: the report is computed on read in one pass over a tenant's
+    /// signals, so there is nothing cheaper to ask for. A caller wanting one horizon filters the
+    /// result, as the operator tab already does.</para>
+    /// </summary>
+    Task<IReadOnlyList<FindingSummary>> GetFindingsAsync(
+        Guid tenantId, CancellationToken ct = default);
+
     Task<IReadOnlyDictionary<string, FindingState>> GetFindingStatesAsync(
         Guid tenantId, CancellationToken ct = default);
 

@@ -1,5 +1,14 @@
 using EntKube.Contracts.Advisor;
 using ContractDigestFrequency = EntKube.Contracts.Advisor.DigestFrequency;
+// ⚠️ Aliased because EntKube.Web.Services declares its OWN FindingSeverity — the connectivity
+// analyser's, whose members are Error/Warning/Info against this one's Critical/Warning/Info. Two
+// unrelated notions of "finding" that happen to share a name, with different members: picking the
+// wrong one compiles in any file importing both and mislabels a severity. The compiler caught it
+// here; the alias is so it cannot come back silently.
+using ContractFindingCategory = EntKube.Contracts.Advisor.FindingCategory;
+using ContractFindingSeverity = EntKube.Contracts.Advisor.FindingSeverity;
+using ContractFindingHorizon = EntKube.Contracts.Advisor.FindingHorizon;
+using ContractFindingStatus = EntKube.Contracts.Advisor.FindingStatus;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
 
@@ -18,8 +27,32 @@ namespace EntKube.Web.Modules.Api;
 /// </summary>
 public sealed class AdvisorApi(
     AdvisorStateService state,
-    AdvisorDigestConfigService digest) : IAdvisorApi
+    AdvisorDigestConfigService digest,
+    OperationsAdvisorService advisor) : IAdvisorApi
 {
+    public async Task<IReadOnlyList<FindingSummary>> GetFindingsAsync(
+        Guid tenantId, CancellationToken ct = default)
+    {
+        AdvisorReport report = await advisor.GetReportAsync(tenantId, ct);
+
+        // The report already arrives most-urgent-first and already has each finding's state
+        // merged onto it, so this is a projection and nothing more.
+        return [.. report.Findings.Select(f => new FindingSummary(
+            f.Id,
+            (ContractFindingCategory)(int)f.Category,
+            (ContractFindingSeverity)(int)f.Severity,
+            (ContractFindingHorizon)(int)f.Horizon,
+            f.Title,
+            f.Detail,
+            f.ScopeLabel,
+            f.DueAt,
+            f.Remediation,
+            f.Source,
+            (ContractFindingStatus)(int)f.State,
+            f.ClusterId,
+            f.CustomerName))];
+    }
+
     public async Task<IReadOnlyDictionary<string, FindingState>> GetFindingStatesAsync(
         Guid tenantId, CancellationToken ct = default)
     {

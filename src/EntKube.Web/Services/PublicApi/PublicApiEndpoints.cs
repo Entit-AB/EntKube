@@ -259,13 +259,23 @@ public static class PublicApiEndpoints
 
         // ── Operations ──
 
+        // Asked of Advisor, through Advisor's contract. Both of these routes used to inject the
+        // module's own services — OperationsAdvisorService here and AdvisorStateService below —
+        // which is the boundary this file crosses correctly for Fleet, Catalog, Delivery and
+        // Telemetry and crossed for nobody in Advisor. IAdvisorApi had eight methods and no
+        // callers at all; these two are its first.
+        //
+        // The JSON is unchanged. category/severity/horizon/state are still ToString() on enums
+        // that now come from the contract, and AdvisorContractEnumTests pins their NAMES against
+        // the entity enums for exactly that reason.
         api.MapGet("/advisor/findings", async (
-            HttpContext ctx, OperationsAdvisorService advisor, CancellationToken ct) =>
+            HttpContext ctx, EntKube.Contracts.Advisor.IAdvisorApi advisor, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
-            AdvisorReport report = await advisor.GetReportAsync(tenantId, ct);
+            IReadOnlyList<EntKube.Contracts.Advisor.FindingSummary> findings =
+                await advisor.GetFindingsAsync(tenantId, ct);
 
-            return Results.Ok(report.Findings.Select(f => new
+            return Results.Ok(findings.Select(f => new
             {
                 id = f.Id,
                 category = f.Category.ToString(),
@@ -753,11 +763,15 @@ public static class PublicApiEndpoints
             return deleted ? Results.NoContent() : Results.NotFound();
         }).RequireApiScope(ApiScopes.ConfigWrite);
 
+        // IAdvisorApi.AcknowledgeAsync has always existed; this route reached past it to the
+        // service that backs it, which is how a contract ends up with no consumers while the
+        // product does the thing it describes.
         api.MapPost("/advisor/findings/{findingId}/acknowledge", async (
-            string findingId, HttpContext ctx, AdvisorStateService state, CancellationToken ct) =>
+            string findingId, HttpContext ctx,
+            EntKube.Contracts.Advisor.IAdvisorApi advisor, CancellationToken ct) =>
         {
             ApiTokenPrincipal principal = ctx.GetApiPrincipal()!;
-            await state.AcknowledgeAsync(
+            await advisor.AcknowledgeAsync(
                 principal.TenantId, findingId, $"api-token:{principal.TokenName}", ct);
             return Results.Ok(new { ok = true });
         }).RequireApiScope(ApiScopes.OpsWrite);
