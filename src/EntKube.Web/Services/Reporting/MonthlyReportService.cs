@@ -85,7 +85,6 @@ public readonly record struct ShortNoticeWindow(
 /// <param name="Timebank">The hour bank as it stood (§11.1 — including what expired).</param>
 /// <param name="Hours">Committed hours at the §20 granularity.</param>
 /// <param name="PenaltyDeviations">Response breaches on P1 or P2 that carry §14.6's penalty.</param>
-/// <param name="PenaltyAmount">What those come to, at 10% of the month's window fee each.</param>
 /// <param name="WindowFee">The window fee the penalty is a fraction of.</param>
 /// <param name="PenaltiesAlreadyThisYear">
 /// Penalty deviations earlier in the same calendar year, against §14.6's cap of three.
@@ -112,7 +111,6 @@ public readonly record struct MonthlyReport(
     TimebankStatement Timebank,
     CommittedHoursStatement Hours,
     int PenaltyDeviations,
-    decimal PenaltyAmount,
     decimal WindowFee,
     int PenaltiesAlreadyThisYear,
     bool ActionPlanRequired,
@@ -130,6 +128,35 @@ public readonly record struct MonthlyReport(
     /// </summary>
     public int PenaltiesRemainingThisYear =>
         Math.Max(0, TicketSla.MaxPenaltiesPerYear - PenaltiesAlreadyThisYear - PenaltyDeviations);
+
+    /// <summary>
+    /// How many of this month's deviations §14.6 actually pays for: the month's count, limited by
+    /// what is left of the calendar year's allowance of
+    /// <see cref="TicketSla.MaxPenaltiesPerYear"/>.
+    ///
+    /// <para>Distinct from <see cref="PenaltyDeviations"/>, which stays the month's real total —
+    /// a fact about the month, and the customer is entitled to see it whether it is paid for or
+    /// not.</para>
+    /// </summary>
+    public int PayablePenalties =>
+        Math.Clamp(TicketSla.MaxPenaltiesPerYear - PenaltiesAlreadyThisYear, 0, PenaltyDeviations);
+
+    /// <summary>
+    /// What the month's deviations come to, at §14.6's fraction of the window fee each.
+    ///
+    /// <para>⚠️ <b>Computed here, and it used to be passed in.</b> The caller multiplied the
+    /// window fee by the month's <em>full</em> deviation count and never consulted the year's
+    /// allowance, so a month with more deviations than the cap had left was priced for all of
+    /// them: two already used and three this month billed 30% of the window fee where §14.6 pays
+    /// 10%. The report printed that amount in the same sentence as the words "up to
+    /// @TicketSla.MaxPenaltiesPerYear a calendar year".</para>
+    ///
+    /// <para>Deriving it from <see cref="PayablePenalties"/> makes that impossible rather than
+    /// merely corrected — there is no longer a value for any call site to pass, and the amount
+    /// cannot disagree with the counts printed beside it.</para>
+    /// </summary>
+    public decimal PenaltyAmount =>
+        WindowFee * TicketSla.PenaltyFractionOfWindowFee * PayablePenalties;
 }
 
 /// <summary>
@@ -207,7 +234,7 @@ public class MonthlyReportService(
         if (customer is null)
         {
             return new MonthlyReport(
-                "", from, [], [], 0, default, default, 0, 0m, 0m, 0, false, [], []);
+                "", from, [], [], 0, default, default, 0, 0m, 0, false, [], []);
         }
 
         List<TicketSlaStatus> inMonth = await tickets.GetForPeriodAsync(tenantId, customerId, from, to, to, ct);
@@ -244,10 +271,10 @@ public class MonthlyReportService(
         int penaltyDeviations = inMonth.Count(t => t.IsPenaltyDeviation);
 
         // §14.6 prices the penalty at 10% of the month's window fee, which comes from the
-        // portfolio's widest window and the price list in force then.
+        // portfolio's widest window and the price list in force then. The pricing itself lives on
+        // MonthlyReport, because it depends on the year's remaining allowance as well as this
+        // month's count — see PenaltyAmount.
         BaseFeeBreakdown fees = await contracts.CalculateBaseFeeAsync(tenantId, customerId, from, ct);
-
-        decimal penalty = fees.WindowFee * TicketSla.PenaltyFractionOfWindowFee * penaltyDeviations;
 
         // The clusters this customer actually runs on. A tenant hosts several customers,
         // and this report goes to one of them — so the windows below are narrowed to the
@@ -285,7 +312,6 @@ public class MonthlyReportService(
             await time.GetTimebankAsync(tenantId, customerId, from, ct),
             await time.GetCommittedHoursAsync(tenantId, customerId, from, to, ct),
             penaltyDeviations,
-            penalty,
             fees.WindowFee,
             await PenaltiesEarlierThisYearAsync(tenantId, customerId, from, ct),
             await ActionPlanRequiredAsync(tenantId, customerId, from, ct),
