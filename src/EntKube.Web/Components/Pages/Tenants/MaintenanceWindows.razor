@@ -1,10 +1,11 @@
 @using System.ComponentModel.DataAnnotations
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Support
 @using Microsoft.EntityFrameworkCore
 @inject IncidentService IncidentService
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<TelemetryDbContext> DbFactory
 @inject AuthenticationStateProvider AuthStateProvider
 @inject ToastService Toasts
 
@@ -310,7 +311,7 @@ else
         DateTime now = DateTime.UtcNow;
         activeWindows = windows.Where(w => w.StartsAt <= now && w.EndsAt >= now).ToList();
 
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        using TelemetryDbContext db = DbFactory.CreateDbContext();
         clusters = await db.KubernetesClusters
             .Where(c => c.TenantId == TenantId)
             .OrderBy(c => c.Name)

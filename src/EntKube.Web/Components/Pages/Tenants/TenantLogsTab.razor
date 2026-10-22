@@ -1,8 +1,9 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Telemetry
 @using Microsoft.EntityFrameworkCore
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<TelemetryDbContext> DbFactory
 @inject IngestTokenService IngestTokens
 @inject ITelemetryIngest Telemetry
 @inject Microsoft.Extensions.Configuration.IConfiguration Config
@@ -100,7 +101,7 @@ else
 
     protected override async Task OnInitializedAsync()
     {
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        using TelemetryDbContext db = DbFactory.CreateDbContext();
         List<KubernetesCluster> clusters = await db.KubernetesClusters
             .Include(c => c.Components)
             .Where(c => c.TenantId == TenantId)

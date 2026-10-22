@@ -119,7 +119,7 @@ public class CustomerPortalRenderTests : BunitContext, IDisposable
         ContractService contracts = new(factory);
         tickets = new TicketService(factory, contracts, SilentTicketNotifier.For(factory));
 
-        Services.AddSingleton<IDbContextFactory<ApplicationDbContext>>(factory);
+        Services.AddEveryContext(factory);
         Services.AddSingleton(contracts);
         Services.AddSingleton(tickets);
         Services.AddSingleton(new TimeService(factory, contracts));

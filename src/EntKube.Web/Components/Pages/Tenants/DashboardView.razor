@@ -1,8 +1,9 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject DashboardService Dashboards
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<TelemetryDbContext> DbFactory
 
 <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
     <div class="d-flex align-items-center gap-2">
@@ -145,7 +146,7 @@ else
         if (_to == default) SnapshotRange();
         if (clusters.Count == 0)
         {
-            using ApplicationDbContext db = DbFactory.CreateDbContext();
+            using TelemetryDbContext db = DbFactory.CreateDbContext();
             clusters = await db.KubernetesClusters.Where(c => c.TenantId == TenantId)
                 .OrderBy(c => c.Name).Select(c => new ClusterOption(c.Id.ToString(), c.Name)).ToListAsync();
             if (clusters.Count > 0 && string.IsNullOrEmpty(selectedClusterId)) selectedClusterId = clusters[0].Id;

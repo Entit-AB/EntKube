@@ -1,9 +1,10 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Contracts
 @using Microsoft.EntityFrameworkCore
 @inject ContractService Contracts
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<SupportDbContext> DbFactory
 @inject ToastService Toasts
 
 @* ═══════════════════════════════════════════════════════════════════
@@ -328,7 +329,7 @@
 
             levels = contract is null ? [] : await Contracts.ListServiceLevelsAsync(TenantId, contract.Id);
 
-            using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+            using SupportDbContext db = await DbFactory.CreateDbContextAsync();
             siblingApps = await db.Apps.AsNoTracking()
                 .Where(a => a.CustomerId == App.CustomerId && a.Id != App.Id)
                 .OrderBy(a => a.Name)

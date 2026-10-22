@@ -1,9 +1,10 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject PrometheusService PrometheusService
 @inject RabbitMQService RabbitMQService
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<DataServicesDbContext> DbFactory
 
 @* ═══════════════════════════════════════════════════════════════════════════
    RabbitMQMonitoringPanel — per-broker performance and health.
@@ -372,7 +373,7 @@ else
             // database or vault failure throws here. Escaping this method would reach the Blazor
             // dispatcher and tear down the circuit, and would leave isLoading stuck true.
             List<RabbitMQCluster> clusters;
-            using (ApplicationDbContext db = DbFactory.CreateDbContext())
+            using (DataServicesDbContext db = DbFactory.CreateDbContext())
             {
                 // Always this tenant's brokers now. The null branch existed for the cluster-wide
                 // view, which listed every tenant's broker on a shared cluster; that view supplies
@@ -509,7 +510,7 @@ else
         try
         {
             string ns;
-            using (ApplicationDbContext db = DbFactory.CreateDbContext())
+            using (DataServicesDbContext db = DbFactory.CreateDbContext())
             {
                 ns = await db.RabbitMQClusters.Where(c => c.Id == b.Id)
                         .Select(c => c.Namespace).FirstAsync();

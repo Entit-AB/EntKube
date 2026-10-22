@@ -3,11 +3,12 @@
 @using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.EntityFrameworkCore
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services.Sso
 @rendermode InteractiveServer
 @attribute [Authorize(Roles = "Admin")]
 
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<IdentityDbContext> DbFactory
 @inject OidcOptions Oidc
 @inject AuthenticationStateProvider AuthState
 
@@ -189,7 +190,7 @@
 
     private async Task ReloadAsync()
     {
-        await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+        await using IdentityDbContext db = await DbFactory.CreateDbContextAsync();
 
         tenants = await db.Tenants.AsNoTracking().OrderBy(t => t.Name).ToListAsync();
         roles = await db.TenantRoles.AsNoTracking().OrderBy(r => r.Name).ToListAsync();
@@ -207,7 +208,7 @@
         message = null;
         try
         {
-            await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+            await using IdentityDbContext db = await DbFactory.CreateDbContextAsync();
 
             // The role must belong to the chosen tenant, or the membership would carry a role
             // from somewhere else entirely.
@@ -254,7 +255,7 @@
 
     private async Task RemoveAsync(Guid id)
     {
-        await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+        await using IdentityDbContext db = await DbFactory.CreateDbContextAsync();
 
         ExternalGroupMapping? mapping = await db.ExternalGroupMappings.FirstOrDefaultAsync(m => m.Id == id);
         if (mapping is not null)

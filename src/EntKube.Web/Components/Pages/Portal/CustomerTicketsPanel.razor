@@ -1,9 +1,10 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Tickets
 @using Microsoft.EntityFrameworkCore
 @inject TicketService Tickets
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<SupportDbContext> DbFactory
 @inject ToastService Toasts
 @inject CurrentActor ActorService
 
@@ -286,7 +287,7 @@
 
         try
         {
-            using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+            using SupportDbContext db = await DbFactory.CreateDbContextAsync();
 
             tickets = await db.Tickets
                 .Include(t => t.Pauses)

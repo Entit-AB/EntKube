@@ -1,8 +1,9 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject RumSiteService Sites
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<TelemetryDbContext> DbFactory
 @inject NavigationManager Nav
 @inject IConfiguration Config
 @inject IJSRuntime JS
@@ -138,7 +139,7 @@ else if (sites.Count > 0)
 
     protected override async Task OnInitializedAsync()
     {
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        using TelemetryDbContext db = DbFactory.CreateDbContext();
         clusters = await db.KubernetesClusters.Where(c => c.TenantId == TenantId)
             .OrderBy(c => c.Name).Select(c => new ClusterOption(c.Id, c.Name)).ToListAsync();
         // Apps of this tenant, labelled "Customer / App" so operators can tell same-named apps apart.
