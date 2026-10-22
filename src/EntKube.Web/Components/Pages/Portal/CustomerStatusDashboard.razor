@@ -1,7 +1,8 @@
 @using EntKube.Web.Data
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<EntKube.Web.Data.Modules.TelemetryDbContext> DbFactory
+@inject EntKube.Contracts.Delivery.IDeliveryApi Delivery
 @inject IncidentService IncidentService
 
 @* Health / uptime / SLA dashboard for a single customer. Self-loading so it can be
@@ -158,25 +159,40 @@ else
         isLoading = true;
         StateHasChanged();
 
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        // ⚠️ This page was on ApplicationDbContext for one reason: it needed Delivery's
+        // deployments and health snapshots AND Telemetry's incidents, and no module context has
+        // all three. Delivery's two are asked through IDeliveryApi now, so the only tables read
+        // directly are Telemetry's own — which is what the context below is.
+        // docs/decomposition.md §4.0.2.
+        HashSet<Guid> appIds = Customer.Apps.Select(a => a.Id).ToHashSet();
 
-        List<Guid> appIds = Customer.Apps.Select(a => a.Id).ToList();
-
-        List<AppDeployment> deployments = await db.AppDeployments
-            .Where(d => appIds.Contains(d.AppId))
-            .ToListAsync();
+        List<EntKube.Contracts.Delivery.DeploymentSummary> deployments =
+            [.. (await Delivery.GetDeploymentsForTenantAsync(Customer.TenantId))
+                .Where(d => appIds.Contains(d.AppId))];
 
         List<Guid> deploymentIds = deployments.Select(d => d.Id).ToList();
 
-        DateTime from30 = DateTime.UtcNow.AddDays(-30);
-        DateTime from7 = DateTime.UtcNow.AddDays(-7);
+        DateTime now = DateTime.UtcNow;
+        DateTime from30 = now.AddDays(-30);
+        DateTime from7 = now.AddDays(-7);
 
-        var snapshots = await db.DeploymentHealthSnapshots
-            .Where(s => deploymentIds.Contains(s.DeploymentId) && s.SnapshotAt >= from30)
-            .Select(s => new { s.DeploymentId, s.HealthStatus, s.SnapshotAt })
-            .ToListAsync();
+        // One call per window, each counted in SQL. This used to pull every snapshot of the last
+        // 30 days — one row per deployment per five minutes — and count them in memory, which is
+        // what GetHealthRatiosAsync was added for.
+        Dictionary<Guid, EntKube.Contracts.Delivery.DeploymentHealthRatio> ratio30 =
+            (await Delivery.GetHealthRatiosAsync(Customer.TenantId, deploymentIds, from30, now))
+                .ToDictionary(r => r.DeploymentId);
+
+        Dictionary<Guid, EntKube.Contracts.Delivery.DeploymentHealthRatio> ratio7 =
+            (await Delivery.GetHealthRatiosAsync(Customer.TenantId, deploymentIds, from7, now))
+                .ToDictionary(r => r.DeploymentId);
 
         List<Guid> clusterIds = deployments.Select(d => d.ClusterId).Distinct().ToList();
+
+        // Opened here rather than at the top: the only tables read through it are Telemetry's own,
+        // and holding a context open across the contract calls above keeps a second DbContext on
+        // the same connection for no reason.
+        using EntKube.Web.Data.Modules.TelemetryDbContext db = DbFactory.CreateDbContext();
         List<(Guid ClusterId, string LabelsJson)> activeIncidentLabels = await db.AlertIncidents
             .Where(i => clusterIds.Contains(i.ClusterId)
                      && (i.Status == IncidentStatus.Active || i.Status == IncidentStatus.Acknowledged))
@@ -186,10 +202,19 @@ else
         rows = [];
         foreach (EntKube.Web.Data.App app in Customer.Apps.OrderBy(a => a.Name))
         {
-            List<AppDeployment> appDeployments = deployments.Where(d => d.AppId == app.Id).ToList();
+            List<EntKube.Contracts.Delivery.DeploymentSummary> appDeployments =
+                deployments.Where(d => d.AppId == app.Id).ToList();
             if (appDeployments.Count == 0) continue;
 
-            HealthStatus worstHealth = appDeployments
+            // ⚠️ There are two HealthStatus enums — Data's and the Delivery contract's — and the
+            // cast between them is safe only because ModuleApiTests pins Enum.GetNames of both to
+            // be equal IN ORDER, which fixes the names and the ordinals together. Without that a
+            // same-named enum with a reordered member would silently relabel every app's health.
+            //
+            // In memory, never inside an EF Expression: a cast on a string-stored enum emits
+            // CAST(... AS integer), which is 22P02 on Postgres and a silent 0 on SQLite.
+            // DeliveryApi carries the same note at its own mapping.
+            HealthStatus worstHealth = (HealthStatus)(int)appDeployments
                 .Select(d => d.HealthStatus)
                 .OrderByDescending(h => (int)h)
                 .FirstOrDefault();
@@ -198,29 +223,39 @@ else
                 .Where(d => d.LastSyncedAt.HasValue)
                 .Max(d => d.LastSyncedAt);
 
-            double? uptime7d = null, uptime30d = null;
-            foreach (AppDeployment dep in appDeployments)
+            // ⚠️ A true mean across the app's deployments. This was a running pairwise mean —
+            // `u = u.HasValue ? (u + pct) / 2 : pct` — which for three deployments gives
+            // a/4 + b/4 + c/2: the last one counted double and the first a quarter. Correct for
+            // one or two deployments and wrong for every app with more, on a figure a customer
+            // reads as their own uptime. The order of Customer.Apps' deployments decided the
+            // answer, which is why nobody could have noticed it from the number alone.
+            List<double> pct7 = [], pct30 = [];
+
+            foreach (EntKube.Contracts.Delivery.DeploymentSummary dep in appDeployments)
             {
-                var depSnaps = snapshots.Where(s => s.DeploymentId == dep.Id).ToList();
-                if (depSnaps.Count == 0) continue;
-
-                var snaps7 = depSnaps.Where(s => s.SnapshotAt >= from7).ToList();
-                var snaps30 = depSnaps;
-
-                if (snaps7.Count > 0)
+                if (ratio7.TryGetValue(dep.Id, out EntKube.Contracts.Delivery.DeploymentHealthRatio? r7)
+                    && r7.TotalSamples > 0)
                 {
-                    double pct = (double)snaps7.Count(s => s.HealthStatus == HealthStatus.Healthy) / snaps7.Count * 100;
-                    uptime7d = uptime7d.HasValue ? (uptime7d + pct) / 2 : pct;
+                    pct7.Add((double)r7.HealthySamples / r7.TotalSamples * 100);
                 }
-                if (snaps30.Count > 0)
+
+                if (ratio30.TryGetValue(dep.Id, out EntKube.Contracts.Delivery.DeploymentHealthRatio? r30)
+                    && r30.TotalSamples > 0)
                 {
-                    double pct = (double)snaps30.Count(s => s.HealthStatus == HealthStatus.Healthy) / snaps30.Count * 100;
-                    uptime30d = uptime30d.HasValue ? (uptime30d + pct) / 2 : pct;
+                    pct30.Add((double)r30.HealthySamples / r30.TotalSamples * 100);
                 }
             }
 
+            double? uptime7d = pct7.Count > 0 ? pct7.Average() : null;
+            double? uptime30d = pct30.Count > 0 ? pct30.Average() : null;
+
             HashSet<Guid> appClusterIds = appDeployments.Select(d => d.ClusterId).ToHashSet();
-            HashSet<string> appNamespaces = appDeployments.Select(d => d.Namespace).ToHashSet();
+            // Namespace is nullable on the contract's summary where the entity's was not, so the
+            // empties are dropped rather than matched against an incident label that cannot be "".
+            HashSet<string> appNamespaces = [.. appDeployments
+                .Select(d => d.Namespace)
+                .Where(n => !string.IsNullOrEmpty(n))
+                .Select(n => n!)];
             int activeAlerts = activeIncidentLabels
                 .Where(x => appClusterIds.Contains(x.ClusterId))
                 .Count(x =>
