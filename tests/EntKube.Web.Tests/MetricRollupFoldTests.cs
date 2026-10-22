@@ -46,6 +46,32 @@ public class MetricRollupFoldTests
         MetricRollupFold.BucketFor(local, 30).Should().Be(T0);
     }
 
+    /// <summary>
+    /// The sibling of the test above, and the one that was missing.
+    ///
+    /// <para>An Unspecified timestamp carries NO offset, so there is nothing to convert — but
+    /// <c>ToUniversalTime()</c> treats it as local and applies the host's offset anyway. That made
+    /// the same row bucket differently depending on which machine the process ran on, which is
+    /// precisely what flooring against the epoch exists to rule out. It is not hypothetical: rows
+    /// come back Unspecified from any provider that does not store a kind — SQLite keeps timestamps
+    /// as TEXT — so a read was looking for buckets two hours in the past and finding none.</para>
+    ///
+    /// <para>It stayed invisible because the shift only shows through
+    /// <see cref="EntKube.Telemetry.MetricSeriesBuilder.ToStep"/>, which skips the bucketing
+    /// entirely when the caller's step equals the stored resolution. Only a COARSER step reaches
+    /// it.</para>
+    /// </summary>
+    [Fact]
+    public void An_unspecified_timestamp_is_taken_as_utc_rather_than_shifted_by_the_hosts_offset()
+    {
+        DateTime unspecified = DateTime.SpecifyKind(T0.AddSeconds(7), DateTimeKind.Unspecified);
+
+        MetricRollupFold.BucketFor(unspecified, 30).Should().Be(T0);
+
+        // Not just equal in ticks: the result is usable as UTC by whatever compares it next.
+        MetricRollupFold.BucketFor(unspecified, 30).Kind.Should().Be(DateTimeKind.Utc);
+    }
+
     [Fact]
     public void A_nonsense_resolution_is_clamped_rather_than_trusted()
     {
