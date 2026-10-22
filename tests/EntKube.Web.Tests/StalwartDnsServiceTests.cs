@@ -317,14 +317,17 @@ public class StalwartDnsServiceTests
     /// PROXY greeting to send, which a pod-to-pod connection to this server would need. The token
     /// is read from stdin rather than passed as an argument, where anything able to read the
     /// process table in that container could see it.
+    ///
+    /// <para><b>The path is on stdin too now</b>, so this command is a constant and no value of
+    /// the path can alter it. See <see cref="A_hostile_path_cannot_alter_the_command"/>.</para>
     /// </summary>
     [Fact]
     public void The_request_is_made_over_loopback_with_the_token_on_stdin()
     {
-        string command = StalwartDnsService.Query("/api/schema");
+        string command = StalwartDnsService.Query();
 
-        command.Should().StartWith("read -r TOK;");
-        command.Should().Contain("http://127.0.0.1:8080/api/schema");
+        command.Should().StartWith("read -r TOK; read -r REQ_PATH;");
+        command.Should().Contain("\"http://127.0.0.1:8080$REQ_PATH\"");
         command.Should().Contain("Authorization: Bearer $TOK");
 
         // The server reads the client address from this header and warns once per request that
@@ -339,6 +342,38 @@ public class StalwartDnsServiceTests
         // Never the Service name: EntKube runs outside the cluster, so that resolves nowhere
         // here, and the API server's proxy would strip the Authorization header anyway.
         command.Should().NotContain("stalwart.stalwart.svc");
+    }
+
+    /// <summary>
+    /// No path can change the command, because the command no longer contains one.
+    ///
+    /// <para>⚠️ <b>Why this is not paranoia about a literal.</b> One of the two callers builds its
+    /// path from a stored DKIM object name — <c>/api/object/{name}</c> — and the path used to be
+    /// interpolated into a double-quoted shell word inside <c>sh -c</c>, where <c>sh</c> evaluates
+    /// <c>$(…)</c> and backticks and a <c>"</c> ends the quoting. It was safe only because that
+    /// caller wraps the name in <c>Uri.EscapeDataString</c>, which percent-encodes every one of
+    /// those characters. That made an escape whose stated purpose is URL hygiene <em>also</em> the
+    /// only thing preventing command execution in the mail pod — a load-bearing property nothing
+    /// recorded, which the next person to adjust the encoding would have had no way to know.</para>
+    ///
+    /// <para>This asserts the command is <b>exactly</b> the constant. A weaker test looking for
+    /// the absence of <c>$(id)</c> would also pass for an implementation that merely escaped the
+    /// path into the command.</para>
+    /// </summary>
+    [Fact]
+    public void A_hostile_path_cannot_alter_the_command()
+    {
+        string constant = StalwartDnsService.Query();
+
+        // Nothing in it can begin a command substitution, so no value of the path can either.
+        constant.Should().NotContain("$(");
+        constant.Should().NotContain("`");
+
+        // The escaping the live caller applies is still correct URL behaviour, and is no longer
+        // what stands between a stored name and a shell.
+        Uri.EscapeDataString("a\";$(id);b").Should().NotContain("$(",
+            "kept as a statement of what that escape does, now that nothing depends on it for "
+            + "shell safety");
     }
 
     /// <summary>The status the server gave, split from the body it sent.</summary>
