@@ -34,7 +34,6 @@ public class RazorGodContextRatchetTests
     [
         // No single module context exposes every table these two touch, so they are the genuine
         // contract work — the only two of the original 31.
-        "CustomerStatusDashboard.razor",   // AlertIncidents (Telemetry) + AppDeployments, DeploymentHealthSnapshots (Delivery)
         "SlaTargetManager.razor",          // SlaTargets (Support) + Delivery's deployments + Customers
 
         // Hub-only pages whose SUBJECT does not derive. These touch nothing but Tenant, Customer,
