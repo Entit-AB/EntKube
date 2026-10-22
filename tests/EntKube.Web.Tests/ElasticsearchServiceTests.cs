@@ -1477,15 +1477,86 @@ public class ElasticsearchServiceTests : IDisposable
     // ──────── Live reads: disk, indices and lifecycle state ────────
 
     [Fact]
-    public void TheQueryRunsOnLoopbackAndTakesThePasswordFromStdin()
+    public void TheQueryRunsOnLoopbackAndTakesThePasswordAndPathFromStdin()
     {
-        string command = ElasticsearchService.BuildQueryCommand("/_cluster/health");
+        string command = ElasticsearchService.BuildQueryCommand();
 
-        // The password is read from stdin, so it is never in an argument list a "ps" would show.
-        command.Should().StartWith("read -r ES_PW;");
-        command.Should().Contain("https://localhost:9200/_cluster/health");
+        // Both are read from stdin, so neither is in an argument list a "ps" would show and
+        // neither is interpolated into a shell word.
+        command.Should().StartWith("read -r ES_PW; read -r ES_PATH;");
+        command.Should().Contain("\"https://localhost:9200$ES_PATH\"");
         command.Should().Contain("--cacert");
         command.Should().NotContain("ELASTIC_PASSWORD=");
+
+        // The property that makes the path safe: it is a parameter expansion inside double
+        // quotes, which sh does not re-scan. Nothing in this command can start a command
+        // substitution, so no value of the path can either.
+        command.Should().NotContain("$(", "a command substitution here would be evaluated by sh");
+        command.Should().NotContain("`", "backticks are command substitution too");
+    }
+
+    /// <summary>
+    /// A path that tries to break out of the shell is sent as <b>data</b> and reaches curl intact.
+    ///
+    /// <para>⚠️ <c>QueryAsync</c> is public, and the path used to be interpolated into a
+    /// double-quoted shell word inside <c>sh -c</c> — where <c>$(…)</c> is evaluated and a
+    /// <c>"</c> ends the quoting. Nothing exploited it, because all six callers passed literals;
+    /// this test is what makes that a property of the code rather than of today's callers.</para>
+    ///
+    /// <para>It asserts the command is <em>exactly</em> the constant one. Asserting merely that it
+    /// does not contain <c>$(id)</c> would also pass for an implementation that escaped the path
+    /// into the command, which is the weaker fix this deliberately is not.</para>
+    /// </summary>
+    [Fact]
+    public async Task AHostilePathIsSentAsDataAndNeverReachesTheShell()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+        const string hostile = "/_cluster/health\";$(id);echo \"";
+
+        k8s.Setup(x => x.GetJsonAsync("pods", "search", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("""{"items":[{"metadata":{"name":"search-es-hot-0"},"status":{"containerStatuses":[{"ready":true}]}}]}""");
+        k8s.Setup(x => x.GetSecretValueAsync("search-es-elastic-user", "elastic", "search",
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync("pw");
+        k8s.Setup(x => x.RunCommandOnPodWithStdinAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<ChangeIntent>(),
+                It.IsAny<CancellationToken>(), It.IsAny<string>()))
+            .ReturnsAsync("{}");
+
+        await sut.QueryAsync(c, hostile);
+
+        k8s.Verify(x => x.RunCommandOnPodWithStdinAsync(
+                It.IsAny<string>(), It.IsAny<string>(),
+                It.Is<IReadOnlyList<string>>(cmd => cmd[2] == ElasticsearchService.BuildQueryCommand()),
+                It.Is<string>(stdin => stdin == "pw\n" + hostile + "\n"),
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(),
+                It.IsAny<CancellationToken>(), It.IsAny<string>()),
+            Times.Once,
+            "the command must be the constant script and the path must arrive verbatim on stdin, "
+            + "after the password, as its own line");
+    }
+
+    /// <summary>
+    /// The one thing moving the path to stdin does not make safe: the pod reads two lines, so a
+    /// line break in the path would put part of it on the password's line and leave the rest to be
+    /// read as something else. Refused before the cluster is even looked up.
+    /// </summary>
+    [Fact]
+    public async Task APathWithALineBreakIsRefusedBeforeAnythingIsAsked()
+    {
+        ElasticsearchCluster c = await SeedPlainClusterAsync();
+
+        Func<Task> act = () => sut.QueryAsync(c, "/_cluster/health\nrm -rf /");
+
+        (await act.Should().ThrowAsync<ArgumentException>())
+            .And.Message.Should().Contain("line break");
+
+        k8s.Verify(x => x.GetJsonAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Never,
+            "the guard is at the top of the method, so a bad path costs no cluster call at all");
     }
 
     [Fact]
@@ -1606,14 +1677,18 @@ public class ElasticsearchServiceTests : IDisposable
             .ReturnsAsync("pw");
 
         k8s.Setup(x => x.RunCommandOnPodWithStdinAsync(
-                It.IsAny<string>(), It.IsAny<string>(),
-                It.Is<IReadOnlyList<string>>(cmd => cmd[2].Contains("_cluster/health")),
-                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>(), It.IsAny<string>()))
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+                // Keyed on stdin, not on the command: the path moved there, so the command is
+                // identical for every query and can no longer tell two of them apart.
+                It.Is<string>(stdin => stdin.Contains("_cluster/health")),
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>(), It.IsAny<string>()))
             .ReturnsAsync("""{"status":"yellow","unassigned_shards":2}""");
         k8s.Setup(x => x.RunCommandOnPodWithStdinAsync(
-                It.IsAny<string>(), It.IsAny<string>(),
-                It.Is<IReadOnlyList<string>>(cmd => cmd[2].Contains("_cat/allocation")),
-                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>(), It.IsAny<string>()))
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
+                // Keyed on stdin, not on the command: the path moved there, so the command is
+                // identical for every query and can no longer tell two of them apart.
+                It.Is<string>(stdin => stdin.Contains("_cat/allocation")),
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>(), It.IsAny<string>()))
             .ReturnsAsync("""[{"shards":"9","disk.used":"88","disk.total":"100","node":"search-es-hot-0"}]""");
 
         await sut.RefreshInsightAsync(tenantId, c.Id);

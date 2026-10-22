@@ -368,8 +368,12 @@ public class StalwartDnsService(
     {
         try
         {
+            // The path goes on stdin, after the token, for the reason given on Query: one of the
+            // two callers builds it from a stored object name, and a value interpolated into a
+            // double-quoted shell word is a value sh may evaluate.
             return await cluster.RunCommandOnPodWithStdinAsync(
-                pod, ns, ["sh", "-c", Query(path)], token + "\n", ChangeIntent.Read, ct, "stalwart");
+                pod, ns, ["sh", "-c", Query()], token + "\n" + path + "\n",
+                ChangeIntent.Read, ct, "stalwart");
         }
         catch (Exception ex)
         {
@@ -381,9 +385,25 @@ public class StalwartDnsService(
     /// <summary>
     /// The shell run inside the pod. Loopback, so there is no proxy to strip the header and no
     /// PROXY greeting to send; plain HTTP, because the request never leaves the container.
+    ///
+    /// <para>⚠️ <b>The path arrives on stdin, not interpolated here.</b> It used to land inside a
+    /// double-quoted shell word, where <c>sh</c> evaluates <c>$(…)</c> and backticks and a
+    /// <c>"</c> ends the quoting — and unlike the Elasticsearch equivalent, one of the two callers
+    /// does pass a <em>dynamic</em> value: <c>/api/object/{name}</c>, built from a stored DKIM
+    /// object name.</para>
+    ///
+    /// <para>That caller wraps it in <c>Uri.EscapeDataString</c>, which percent-encodes every
+    /// shell metacharacter there is (<c>$</c> to <c>%24</c>, <c>"</c> to <c>%22</c>, backtick to
+    /// <c>%60</c>), so nothing was exploitable. But that made the escape <b>load-bearing for shell
+    /// safety</b> while reading like ordinary URL hygiene — remove it to fix some encoding
+    /// complaint and the injection is back, with nothing to say so. A parameter expansion in
+    /// double quotes is not re-scanned by <c>sh</c>, so <c>"…$REQ_PATH"</c> is safe for any value
+    /// and the escaping goes back to meaning only what it says.</para>
+    ///
+    /// <para>The port is still interpolated, and stays so: it is a compile-time constant.</para>
     /// </summary>
-    public static string Query(string path) =>
-        "read -r TOK; "
+    public static string Query() =>
+        "read -r TOK; read -r REQ_PATH; "
         + $"curl -sS --max-time 20 -H \"Authorization: Bearer $TOK\" "
         // The server is configured to read the client's address from this header, and warns on
         // every request arriving without one. Saying plainly that this came from loopback keeps
@@ -395,7 +415,7 @@ public class StalwartDnsService(
         // request that never arrived. The server's log is no fallback — a rejected token and an
         // accepted one leave identical traces there, which is what made this take as long as it did.
         + $"-w \"\\n{StatusMarker}%{{http_code}}\" "
-        + $"\"http://127.0.0.1:{StalwartPlanBuilder.HttpPort}{path}\"";
+        + $"\"http://127.0.0.1:{StalwartPlanBuilder.HttpPort}$REQ_PATH\"";
 
     /// <summary>What <see cref="Query"/> writes before the status, so the two can be told apart.</summary>
     public const string StatusMarker = "<<<entkube-http-status:";

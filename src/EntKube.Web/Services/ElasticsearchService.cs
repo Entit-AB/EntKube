@@ -2278,6 +2278,13 @@ public class ElasticsearchService(
     public async Task<string> QueryAsync(
         ElasticsearchCluster cluster, string path, CancellationToken ct = default)
     {
+        if (path.Contains('\n') || path.Contains('\r'))
+            throw new ArgumentException(
+                "An Elasticsearch path cannot contain a line break. The pod reads the password and "
+                + "the path as one line each, so a break would put part of the path on the "
+                + "password's line and leave the rest to be read as something else.",
+                nameof(path));
+
         Clusters.IClusterClient client =
             await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct);
 
@@ -2294,25 +2301,52 @@ public class ElasticsearchService(
             ?? throw new InvalidOperationException(
                 $"The '{cluster.ElasticUserSecretName}' Secret is not readable, so there is no way to authenticate.");
 
+        // The pod reads one line for the password and one for the path, so a line break in the
+        // path would shift it onto the password's line and feed the remainder to the next read.
+        // This is the only thing moving the path to stdin does NOT make safe, so it is refused
+        // here rather than left to every caller.
         return await client.RunCommandOnPodWithStdinAsync(
-            pod, cluster.Namespace, ["sh", "-c", BuildQueryCommand(path)], password + "\n",
+            pod, cluster.Namespace, ["sh", "-c", BuildQueryCommand()],
+            password + "\n" + path + "\n",
             ChangeIntent.Read, ct, "elasticsearch");
     }
 
     /// <summary>
-    /// The shell run inside the node. The password arrives on stdin; the CA is whichever of ECK's
-    /// two mount points exists in this version, and if neither does the request still goes over
-    /// loopback inside the very container that serves it — there is no position to intercept it
-    /// from, which is the only reason skipping verification is defensible anywhere in this service.
+    /// The shell run inside the node. The password <b>and the path</b> arrive on stdin; the CA is
+    /// whichever of ECK's two mount points exists in this version, and if neither does the request
+    /// still goes over loopback inside the very container that serves it — there is no position to
+    /// intercept it from, which is the only reason skipping verification is defensible anywhere in
+    /// this service.
+    ///
+    /// <para>⚠️ <b>The path used to be interpolated into this string, and that was an injection
+    /// surface.</b> It landed inside a double-quoted shell word, where <c>sh</c> evaluates
+    /// <c>$(…)</c> and backticks and a <c>"</c> ends the quoting — so a path could run arbitrary
+    /// commands in the Elasticsearch container. Nothing exploited it: all six callers passed
+    /// compile-time literals. But <see cref="QueryAsync"/> is <c>public</c>, so the seam did not
+    /// constrain what a future caller could pass, and "every caller happens to pass a literal" is a
+    /// property of today's callers rather than of this code.</para>
+    ///
+    /// <para><b>Why stdin rather than escaping.</b> A parameter expansion in double quotes is not
+    /// re-scanned by <c>sh</c>: <c>"…$ES_PATH"</c> cannot produce a command substitution, a word
+    /// split or a quote break whatever the value is. That removes the injection instead of
+    /// filtering for it, which is the difference between a guarantee and a denylist that has to
+    /// anticipate every metacharacter. The residue is line-based framing — two <c>read</c>s, so a
+    /// value containing a line break would desync them — and <see cref="QueryAsync"/> refuses
+    /// that explicitly rather than hoping no caller sends one.</para>
+    ///
+    /// <para>It takes no parameter now, which is the point: there is nothing left to interpolate.
+    /// ⚠️ A caller distinguishing one query from another must look at the <b>stdin</b> argument,
+    /// not at this command — it is identical for every path. Two test matchers keyed on the old
+    /// interpolated path and had to move.</para>
     /// </summary>
-    public static string BuildQueryCommand(string path) =>
-        "read -r ES_PW; " +
+    public static string BuildQueryCommand() =>
+        "read -r ES_PW; read -r ES_PATH; " +
         "CA=''; " +
         "for f in /usr/share/elasticsearch/config/http-certs/ca.crt /mnt/elastic-internal/http-certs/ca.crt; do " +
         "  if [ -f \"$f\" ]; then CA=\"--cacert $f\"; break; fi; " +
         "done; " +
         "if [ -z \"$CA\" ]; then CA='--insecure'; fi; " +
-        $"curl -sS $CA -u \"elastic:$ES_PW\" \"https://localhost:9200{path}\"";
+        "curl -sS $CA -u \"elastic:$ES_PW\" \"https://localhost:9200$ES_PATH\"";
 
     /// <summary>
     /// Reads health, per-node disk, and the indices with their lifecycle phase. One place, because
