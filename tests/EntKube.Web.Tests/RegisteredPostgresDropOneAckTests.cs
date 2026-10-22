@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
 using EntKube.Web.Services.Clusters;
@@ -44,7 +45,7 @@ public class RegisteredPostgresDropOneAckTests : IDisposable
         // The SQL never reaches a real pod. The service catches this and carries on with the
         // cleanup, which is the half under test.
         k8s.Setup(x => x.ExecuteSqlOnPodAsync(
-                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<ChangeIntent>(),
                 It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("no pod here"));
     }

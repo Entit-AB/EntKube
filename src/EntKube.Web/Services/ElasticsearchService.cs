@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using System.Globalization;
 using System.Text;
 using System.Text.Json;
@@ -2294,7 +2295,8 @@ public class ElasticsearchService(
                 $"The '{cluster.ElasticUserSecretName}' Secret is not readable, so there is no way to authenticate.");
 
         return await client.RunCommandOnPodWithStdinAsync(
-            pod, cluster.Namespace, ["sh", "-c", BuildQueryCommand(path)], password + "\n", ct, "elasticsearch");
+            pod, cluster.Namespace, ["sh", "-c", BuildQueryCommand(path)], password + "\n",
+            ChangeIntent.Read, ct, "elasticsearch");
     }
 
     /// <summary>

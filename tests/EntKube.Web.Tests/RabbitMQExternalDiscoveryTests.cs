@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using System.Text.Json;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
@@ -455,7 +456,7 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         k8s.Setup(f => f.RunCommandOnPodAsync(
                 "mq-rabbitmq-0", "messaging",
                 It.Is<IReadOnlyList<string>>(c => c.Contains("list_vhosts")),
-                It.IsAny<string>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
                 It.IsAny<CancellationToken>(), It.IsAny<int>(), It.IsAny<bool>()))
             .ReturnsAsync("""[{"name":"/"},{"name":"orders"}]""");
 
@@ -483,7 +484,7 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         // rabbitmqctl commonly prints a status line ahead of the payload.
         k8s.Setup(f => f.RunCommandOnPodAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
-                It.IsAny<string>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
                 It.IsAny<CancellationToken>(), It.IsAny<int>(), It.IsAny<bool>()))
             .ReturnsAsync("Listing vhosts ...\n[{\"name\":\"/\"}]\n");
 
@@ -507,7 +508,7 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         k8s.Setup(f => f.RunCommandOnPodAsync(
                 It.IsAny<string>(), It.IsAny<string>(),
                 It.Is<IReadOnlyList<string>>(c => c.Contains("list_vhosts")),
-                It.IsAny<string>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
                 It.IsAny<CancellationToken>(), It.IsAny<int>(), It.IsAny<bool>()))
             .ReturnsAsync("""[{"name":"/"}]""");
 
@@ -515,10 +516,10 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         k8s.Setup(f => f.RunCommandOnPodAsync(
                 It.IsAny<string>(), It.IsAny<string>(),
                 It.Is<IReadOnlyList<string>>(c => c.Contains("delete_vhost")),
-                It.IsAny<string>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
                 It.IsAny<CancellationToken>(), It.IsAny<int>(), It.IsAny<bool>()))
             .Callback((string _, string _, IReadOnlyList<string> cmd, string _,
-                       IReadOnlyDictionary<string, string>? _, CancellationToken _, int _, bool _) =>
+                       ChangeIntent _, IReadOnlyDictionary<string, string>? _, CancellationToken _, int _, bool _) =>
                 deleteCommand = [.. cmd])
             .ReturnsAsync("");
 
@@ -543,9 +544,9 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         k8s.Setup(f => f.RunCommandOnPodWithStdinAsync(
                 "mq-rabbitmq-0", "messaging",
                 It.Is<IReadOnlyList<string>>(c => c.Contains("import_definitions")),
-                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>(), It.IsAny<string?>()))
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>(), It.IsAny<string?>()))
             // The trailing parameter selects a container; Moq needs the callback to carry it too.
-            .Callback((string _, string _, IReadOnlyList<string> _, string s, string _, CancellationToken _, string? _) =>
+            .Callback((string _, string _, IReadOnlyList<string> _, string s, string _, ChangeIntent _, CancellationToken _, string? _) =>
                 stdin = s)
             .ReturnsAsync("");
 
@@ -596,10 +597,10 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         List<string>? command = null;
         k8s.Setup(f => f.RunCommandOnPodAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
-                It.IsAny<string>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
                 It.IsAny<CancellationToken>(), It.IsAny<int>(), It.IsAny<bool>()))
             .Callback((string _, string _, IReadOnlyList<string> cmd, string _,
-                       IReadOnlyDictionary<string, string>? _, CancellationToken _, int _, bool _) =>
+                       ChangeIntent _, IReadOnlyDictionary<string, string>? _, CancellationToken _, int _, bool _) =>
                 command = [.. cmd])
             .ReturnsAsync("");
 
@@ -663,7 +664,7 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         k8s.Setup(f => f.RunCommandOnPodAsync(
                 "managed-server-0", "messaging",
                 It.Is<IReadOnlyList<string>>(c => c.Contains("list_vhosts")),
-                It.IsAny<string>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
                 It.IsAny<CancellationToken>(), It.IsAny<int>(), It.IsAny<bool>()))
             .ReturnsAsync("""[{"name":"/"},{"name":"orders"}]""");
 
@@ -697,7 +698,7 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
 
         k8s.Verify(f => f.RunCommandOnPodAsync(
             It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
-            It.IsAny<string>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
+            It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
             It.IsAny<CancellationToken>(), It.IsAny<int>(), It.IsAny<bool>()), Times.Never);
     }
 
@@ -709,10 +710,10 @@ public class RabbitMQExternalDiscoveryTests : IDisposable
         List<string>? command = null;
         k8s.Setup(f => f.RunCommandOnPodAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<IReadOnlyList<string>>(),
-                It.IsAny<string>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<IReadOnlyDictionary<string, string>>(),
                 It.IsAny<CancellationToken>(), It.IsAny<int>(), It.IsAny<bool>()))
             .Callback((string _, string _, IReadOnlyList<string> cmd, string _,
-                       IReadOnlyDictionary<string, string>? _, CancellationToken _, int _, bool _) =>
+                       ChangeIntent _, IReadOnlyDictionary<string, string>? _, CancellationToken _, int _, bool _) =>
                 command = [.. cmd])
             .ReturnsAsync("");
 

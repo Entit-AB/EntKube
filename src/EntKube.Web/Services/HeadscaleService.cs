@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using System.Net.Http.Headers;
 using System.Text;
 using System.Text.Json;
@@ -127,7 +128,7 @@ public class HeadscaleService(
         string podName = await GetHeadscalePodNameAsync(tenantId, clusterId, cluster, ct);
         string output = await cluster.RunCommandOnPodAsync(
             podName, "headscale",
-            ["headscale", "apikeys", "create"],
+            ["headscale", "apikeys", "create"], ChangeIntent.Change,
             ct: ct);
 
         // headscale writes structured log lines to stderr; the API key is the last

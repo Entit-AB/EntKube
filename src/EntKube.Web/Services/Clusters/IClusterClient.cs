@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 namespace EntKube.Web.Services.Clusters;
 
 /// <summary>
@@ -203,32 +204,32 @@ public interface IClusterClient
 
     Task<string?> GetSecretValueAsync(string secretName, string key, string ns, CancellationToken ct = default);
 
-    Task ExecuteSqlAsync(string clusterName, string ns, string sql, CancellationToken ct = default);
+    Task ExecuteSqlAsync(string clusterName, string ns, string sql, ChangeIntent intent, CancellationToken ct = default);
 
-    Task ExecuteSqlOnPodAsync(string podName, string ns, string sql,
+    Task ExecuteSqlOnPodAsync(string podName, string ns, string sql, ChangeIntent intent,
         string username = "postgres", string? password = null, CancellationToken ct = default);
 
-    Task<string> ExecuteSqlOnPodWithOutputAsync(string podName, string ns, string sql,
+    Task<string> ExecuteSqlOnPodWithOutputAsync(string podName, string ns, string sql, ChangeIntent intent,
         string username = "postgres", string? password = null, CancellationToken ct = default);
 
     Task ExecuteSqlInCnpgDatabaseAsync(string clusterName, string ns, string database,
-        string sql, CancellationToken ct = default);
+        string sql, ChangeIntent intent, CancellationToken ct = default);
 
     Task<string> ExecuteSqlInCnpgDatabaseWithOutputAsync(string clusterName, string ns, string database,
-        string sql, CancellationToken ct = default);
+        string sql, ChangeIntent intent, CancellationToken ct = default);
 
-    Task ExecuteMongoAsync(string clusterName, string ns, string script,
+    Task ExecuteMongoAsync(string clusterName, string ns, string script, ChangeIntent intent,
         string? username = null, string? password = null, CancellationToken ct = default);
 
-    Task<string> ExecuteMongoWithOutputAsync(string clusterName, string ns, string script,
+    Task<string> ExecuteMongoWithOutputAsync(string clusterName, string ns, string script, ChangeIntent intent,
         string? username = null, string? password = null, CancellationToken ct = default);
 
-    Task<string> RunCommandOnPodAsync(string podName, string ns, IReadOnlyList<string> command,
+    Task<string> RunCommandOnPodAsync(string podName, string ns, IReadOnlyList<string> command, ChangeIntent intent,
         IReadOnlyDictionary<string, string>? envVars = null, CancellationToken ct = default,
         int timeoutSeconds = 0, bool verbose = false);
 
     Task<string> RunCommandOnPodWithStdinAsync(string podName, string ns, IReadOnlyList<string> command,
-        string stdin, CancellationToken ct = default, string? container = null);
+        string stdin, ChangeIntent intent, CancellationToken ct = default, string? container = null);
 
     /// <summary>
     /// An authenticated client for the typed Kubernetes SDK, bound to this cluster. The caller

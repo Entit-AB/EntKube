@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using System.Text.Json;
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
@@ -368,7 +369,7 @@ public class StalwartDnsService(
         try
         {
             return await cluster.RunCommandOnPodWithStdinAsync(
-                pod, ns, ["sh", "-c", Query(path)], token + "\n", ct, "stalwart");
+                pod, ns, ["sh", "-c", Query(path)], token + "\n", ChangeIntent.Read, ct, "stalwart");
         }
         catch (Exception ex)
         {

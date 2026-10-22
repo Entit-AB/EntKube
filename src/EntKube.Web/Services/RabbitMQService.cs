@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
@@ -1150,7 +1151,7 @@ public class RabbitMQService(
             // rabbitmqctl export_definitions - writes the JSON definitions to stdout.
             string json = await client.RunCommandOnPodAsync(
                 primaryPod, cluster.Namespace,
-                ["rabbitmqctl", "export_definitions", "-"], ct: ct);
+                ["rabbitmqctl", "export_definitions", "-"], ChangeIntent.Read, ct: ct);
 
             byte[] data = Encoding.UTF8.GetBytes(json);
             await UploadToS3Async(tenantId, storageLink, backup.ObjectKey, data, ct);
@@ -1212,7 +1213,7 @@ public class RabbitMQService(
         await client.RunCommandOnPodWithStdinAsync(
             primaryPod, cluster.Namespace,
             ["rabbitmqctl", "import_definitions", "-"],
-            json, ct);
+            json, ChangeIntent.Change, ct);
     }
 
     public async Task DeleteBackupAsync(Guid tenantId, Guid backupId, CancellationToken ct = default)
@@ -1307,12 +1308,12 @@ public class RabbitMQService(
     /// leave the caller — and the panel that awaited it — hanging with no way out but a reload.
     /// </summary>
     private async Task<string> RunCtlAsync(
-        RabbitMQCluster cluster, IReadOnlyList<string> args, CancellationToken ct,
-        int timeoutSeconds = 60)
+        RabbitMQCluster cluster, IReadOnlyList<string> args, ChangeIntent intent,
+        CancellationToken ct, int timeoutSeconds = 60)
     {
         List<string> command = ["rabbitmqctl", .. args];
         return await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).RunCommandOnPodAsync(
-            cluster.PrimaryPodName, cluster.Namespace, command,
+            cluster.PrimaryPodName, cluster.Namespace, command, intent,
              ct: ct, timeoutSeconds: timeoutSeconds);
     }
 
@@ -1324,7 +1325,9 @@ public class RabbitMQService(
     private async Task<List<JsonElement>> RunCtlListAsync(
         RabbitMQCluster cluster, IReadOnlyList<string> args, CancellationToken ct)
     {
-        string raw = await RunCtlAsync(cluster, [.. args, "--formatter", "json"], ct);
+        // A listing by construction: this appends --formatter json and parses an array out of
+        // the result. Nothing reaches rabbitmqctl through here that is not a list_* verb.
+        string raw = await RunCtlAsync(cluster, [.. args, "--formatter", "json"], ChangeIntent.Read, ct);
 
         int start = raw.IndexOf('[');
         int end = raw.LastIndexOf(']');
@@ -1353,7 +1356,7 @@ public class RabbitMQService(
         await (await ClusterFor(cluster.TenantId, cluster.KubernetesClusterId, ct)).RunCommandOnPodWithStdinAsync(
             cluster.PrimaryPodName, cluster.Namespace,
             ["rabbitmqctl", "import_definitions", "-"],
-            definitionsJson, ct);
+            definitionsJson, ChangeIntent.Change, ct);
     }
 
     private async Task<List<string>> ListExternalVhostsAsync(RabbitMQCluster cluster, CancellationToken ct)
@@ -1439,7 +1442,7 @@ public class RabbitMQService(
 
         if (!await UseTopologyCrdsAsync(cluster, ct))
         {
-            await RunCtlAsync(cluster, ["add_vhost", vhostName], ct);
+            await RunCtlAsync(cluster, ["add_vhost", vhostName], ChangeIntent.Change, ct);
             return;
         }
 
@@ -1469,7 +1472,7 @@ public class RabbitMQService(
         if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             (_, string vhost) = ParseExternalHandle(k8sName);
-            await RunCtlAsync(cluster, ["delete_vhost", vhost], ct);
+            await RunCtlAsync(cluster, ["delete_vhost", vhost], ChangeIntent.Change, ct);
             return;
         }
 
@@ -1649,7 +1652,7 @@ public class RabbitMQService(
         if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             (string vhost, string queue) = ParseExternalHandle(k8sName);
-            await RunCtlAsync(cluster, ["delete_queue", "--vhost", vhost, queue], ct);
+            await RunCtlAsync(cluster, ["delete_queue", "--vhost", vhost, queue], ChangeIntent.Change, ct);
             return;
         }
 
@@ -1951,10 +1954,10 @@ public class RabbitMQService(
             {
                 case "vhost":
                     // delete_vhost takes its contents with it.
-                    await RunCtlAsync(cluster, ["delete_vhost", vhost], ct);
+                    await RunCtlAsync(cluster, ["delete_vhost", vhost], ChangeIntent.Change, ct);
                     return;
                 case "queue":
-                    await RunCtlAsync(cluster, ["delete_queue", "--vhost", vhost, name], ct);
+                    await RunCtlAsync(cluster, ["delete_queue", "--vhost", vhost, name], ChangeIntent.Change, ct);
                     return;
                 case "exchange":
                     throw NoCliVerb("delete an exchange");
@@ -2048,11 +2051,11 @@ public class RabbitMQService(
             // The password is passed as an argv entry, not through a shell, so it is never
             // word-split or expanded — but it is briefly visible in the pod's process list.
             // rabbitmqctl offers no non-interactive way to avoid that.
-            await RunCtlAsync(cluster, ["add_user", username, password], ct);
+            await RunCtlAsync(cluster, ["add_user", username, password], ChangeIntent.Change, ct);
 
             string[] tagList = [.. tags];
             if (tagList.Length > 0)
-                await RunCtlAsync(cluster, ["set_user_tags", username, .. tagList], ct);
+                await RunCtlAsync(cluster, ["set_user_tags", username, .. tagList], ChangeIntent.Change, ct);
 
             return;
         }
@@ -2107,7 +2110,7 @@ public class RabbitMQService(
         if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             (_, string username) = ParseExternalHandle(k8sName);
-            await RunCtlAsync(cluster, ["delete_user", username], ct);
+            await RunCtlAsync(cluster, ["delete_user", username], ChangeIntent.Change, ct);
             return;
         }
 
@@ -2194,7 +2197,8 @@ public class RabbitMQService(
         if (!await UseTopologyCrdsAsync(cluster, ct))
         {
             await RunCtlAsync(cluster,
-                ["set_permissions", "--vhost", vhost, username, configure, write, read], ct);
+                ["set_permissions", "--vhost", vhost, username, configure, write, read],
+                ChangeIntent.Change, ct);
             return;
         }
 

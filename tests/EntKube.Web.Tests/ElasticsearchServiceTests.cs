@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
 using FluentAssertions;
@@ -1607,12 +1608,12 @@ public class ElasticsearchServiceTests : IDisposable
         k8s.Setup(x => x.RunCommandOnPodWithStdinAsync(
                 It.IsAny<string>(), It.IsAny<string>(),
                 It.Is<IReadOnlyList<string>>(cmd => cmd[2].Contains("_cluster/health")),
-                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>(), It.IsAny<string>()))
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>(), It.IsAny<string>()))
             .ReturnsAsync("""{"status":"yellow","unassigned_shards":2}""");
         k8s.Setup(x => x.RunCommandOnPodWithStdinAsync(
                 It.IsAny<string>(), It.IsAny<string>(),
                 It.Is<IReadOnlyList<string>>(cmd => cmd[2].Contains("_cat/allocation")),
-                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>(), It.IsAny<string>()))
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>(), It.IsAny<string>()))
             .ReturnsAsync("""[{"shards":"9","disk.used":"88","disk.total":"100","node":"search-es-hot-0"}]""");
 
         await sut.RefreshInsightAsync(tenantId, c.Id);

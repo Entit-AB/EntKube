@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.RegularExpressions;
@@ -141,6 +142,7 @@ public class RegisteredPostgresService(
 
         string output = await (await ClusterFor(tenantId, cluster.Id, ct)).ExecuteSqlOnPodWithOutputAsync(
             instance.AdminPodName, instance.Namespace, sql,
+            ChangeIntent.Read,
             instance.AdminUsername, adminPassword, ct);
 
         return ParsePsqlColumnOutput(output);
@@ -234,6 +236,7 @@ public class RegisteredPostgresService(
 
         await (await ClusterFor(tenantId, cluster.Id, ct)).ExecuteSqlOnPodAsync(
             instance.AdminPodName, instance.Namespace, sql,
+            ChangeIntent.Change,
             instance.AdminUsername, adminPassword, ct);
 
         database.Status = RegisteredPostgresDatabaseStatus.Ready;
@@ -317,6 +320,7 @@ public class RegisteredPostgresService(
 
             await (await ClusterFor(tenantId, cluster.Id, ct)).ExecuteSqlOnPodAsync(
                 instance.AdminPodName, instance.Namespace, sql,
+                ChangeIntent.Change,
                 instance.AdminUsername, adminPassword, ct);
         }
         catch (InvalidOperationException)
@@ -534,6 +538,7 @@ public class RegisteredPostgresService(
         await (await ClusterFor(tenantId, cluster.Id, ct)).ExecuteSqlOnPodAsync(
             instance.AdminPodName, instance.Namespace,
             $"ALTER ROLE \"{database.Owner}\" PASSWORD '{newPassword}';",
+             ChangeIntent.Change,
              instance.AdminUsername, adminPassword, ct);
 
         string k8sSecretName = $"{instance.ServiceName}-{database.Name}-credentials";
@@ -594,6 +599,7 @@ public class RegisteredPostgresService(
         string dumpSql = await (await ClusterFor(tenantId, cluster.Id, ct)).RunCommandOnPodAsync(
             instance.AdminPodName, instance.Namespace,
             ["pg_dump", "--format=plain", "-U", instance.AdminUsername, "-h", "127.0.0.1", "-d", database.Name],
+            ChangeIntent.Read,
             new Dictionary<string, string> { ["PGPASSWORD"] = adminPassword },
             ct);
 
@@ -728,6 +734,7 @@ public class RegisteredPostgresService(
                 "-w", "--lock-wait-timeout=30000",
                 "-U", instance.AdminUsername, "-h", "127.0.0.1", "-d", database.Name
             ],
+            ChangeIntent.Read,
             new Dictionary<string, string>
             {
                 ["PGPASSWORD"] = adminPassword,
@@ -765,7 +772,7 @@ public class RegisteredPostgresService(
             $"""
             CREATE ROLE "{owner}" WITH LOGIN PASSWORD '{password}';
             CREATE DATABASE "{newDatabaseName}" OWNER "{owner}";
-            """, ct);
+            """, ChangeIntent.Change, ct);
         logger.LogInformation("Migrate→CNPG: role+database created, restoring dump ({Bytes} bytes)", dumpSql.Length);
 
         // Restore the dump connected directly to the new database.
@@ -774,7 +781,7 @@ public class RegisteredPostgresService(
         // (psql continues reading in the wrong database and exits with code 0).
         await client.ExecuteSqlInCnpgDatabaseAsync(
             cnpgCluster.Name, cnpgCluster.Namespace,
-            newDatabaseName, dumpSql, ct);
+            newDatabaseName, dumpSql, ChangeIntent.Change, ct);
         logger.LogInformation("Migrate→CNPG: dump restored into '{NewName}', registering database", newDatabaseName);
 
         // Register the database in EntKube so it appears in the UI and credentials
@@ -829,7 +836,7 @@ public class RegisteredPostgresService(
         try
         {
             await client.ExecuteSqlOnPodAsync(
-                podName, ns, "SELECT 1;", username, password, ct);
+                podName, ns, "SELECT 1;", ChangeIntent.Read, username, password, ct);
         }
         catch (Exception ex)
         {

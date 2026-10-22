@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
@@ -128,41 +129,41 @@ public sealed class ClusterClient(
     public Task<string?> GetSecretValueAsync(string secretName, string key, string ns, CancellationToken ct = default)
         => inner.GetSecretValueAsync(secretName, key, ns, kubeconfig, ct);
 
-    public Task ExecuteSqlAsync(string clusterName_, string ns, string sql, CancellationToken ct = default)
-        => inner.ExecuteSqlAsync(clusterName_, ns, sql, kubeconfig, ct);
+    public Task ExecuteSqlAsync(string clusterName_, string ns, string sql, ChangeIntent intent, CancellationToken ct = default)
+        => inner.ExecuteSqlAsync(clusterName_, ns, sql, kubeconfig, intent, ct);
 
-    public Task ExecuteSqlOnPodAsync(string podName, string ns, string sql,
+    public Task ExecuteSqlOnPodAsync(string podName, string ns, string sql, ChangeIntent intent,
         string username = "postgres", string? password = null, CancellationToken ct = default)
-        => inner.ExecuteSqlOnPodAsync(podName, ns, sql, kubeconfig, username, password, ct);
+        => inner.ExecuteSqlOnPodAsync(podName, ns, sql, kubeconfig, intent, username, password, ct);
 
-    public Task<string> ExecuteSqlOnPodWithOutputAsync(string podName, string ns, string sql,
+    public Task<string> ExecuteSqlOnPodWithOutputAsync(string podName, string ns, string sql, ChangeIntent intent,
         string username = "postgres", string? password = null, CancellationToken ct = default)
-        => inner.ExecuteSqlOnPodWithOutputAsync(podName, ns, sql, kubeconfig, username, password, ct);
+        => inner.ExecuteSqlOnPodWithOutputAsync(podName, ns, sql, kubeconfig, intent, username, password, ct);
 
     public Task ExecuteSqlInCnpgDatabaseAsync(string clusterName_, string ns, string database,
-        string sql, CancellationToken ct = default)
-        => inner.ExecuteSqlInCnpgDatabaseAsync(clusterName_, ns, database, sql, kubeconfig, ct);
+        string sql, ChangeIntent intent, CancellationToken ct = default)
+        => inner.ExecuteSqlInCnpgDatabaseAsync(clusterName_, ns, database, sql, kubeconfig, intent, ct);
 
     public Task<string> ExecuteSqlInCnpgDatabaseWithOutputAsync(string clusterName_, string ns, string database,
-        string sql, CancellationToken ct = default)
-        => inner.ExecuteSqlInCnpgDatabaseWithOutputAsync(clusterName_, ns, database, sql, kubeconfig, ct);
+        string sql, ChangeIntent intent, CancellationToken ct = default)
+        => inner.ExecuteSqlInCnpgDatabaseWithOutputAsync(clusterName_, ns, database, sql, kubeconfig, intent, ct);
 
-    public Task ExecuteMongoAsync(string clusterName_, string ns, string script,
+    public Task ExecuteMongoAsync(string clusterName_, string ns, string script, ChangeIntent intent,
         string? username = null, string? password = null, CancellationToken ct = default)
-        => inner.ExecuteMongoAsync(clusterName_, ns, script, kubeconfig, username, password, ct);
+        => inner.ExecuteMongoAsync(clusterName_, ns, script, kubeconfig, intent, username, password, ct);
 
-    public Task<string> ExecuteMongoWithOutputAsync(string clusterName_, string ns, string script,
+    public Task<string> ExecuteMongoWithOutputAsync(string clusterName_, string ns, string script, ChangeIntent intent,
         string? username = null, string? password = null, CancellationToken ct = default)
-        => inner.ExecuteMongoWithOutputAsync(clusterName_, ns, script, kubeconfig, username, password, ct);
+        => inner.ExecuteMongoWithOutputAsync(clusterName_, ns, script, kubeconfig, intent, username, password, ct);
 
-    public Task<string> RunCommandOnPodAsync(string podName, string ns, IReadOnlyList<string> command,
+    public Task<string> RunCommandOnPodAsync(string podName, string ns, IReadOnlyList<string> command, ChangeIntent intent,
         IReadOnlyDictionary<string, string>? envVars = null, CancellationToken ct = default,
         int timeoutSeconds = 0, bool verbose = false)
-        => inner.RunCommandOnPodAsync(podName, ns, command, kubeconfig, envVars, ct, timeoutSeconds, verbose);
+        => inner.RunCommandOnPodAsync(podName, ns, command, kubeconfig, intent, envVars, ct, timeoutSeconds, verbose);
 
     public Task<string> RunCommandOnPodWithStdinAsync(string podName, string ns, IReadOnlyList<string> command,
-        string stdin, CancellationToken ct = default, string? container = null)
-        => inner.RunCommandOnPodWithStdinAsync(podName, ns, command, stdin, kubeconfig, ct, container);
+        string stdin, ChangeIntent intent, CancellationToken ct = default, string? container = null)
+        => inner.RunCommandOnPodWithStdinAsync(podName, ns, command, stdin, kubeconfig, intent, ct, container);
 
     /// <summary>
     /// The same four lines that were copied into ten services, in one place. The kubeconfig is

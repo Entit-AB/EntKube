@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using System.Security.Cryptography;
 using System.Text;
 using EntKube.Web.Data;
@@ -1036,7 +1037,7 @@ public class MongoService(
             """;
 
         string createOutput = await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ExecuteMongoWithOutputAsync(
-            mongo.Name, mongo.Namespace, script,
+            mongo.Name, mongo.Namespace, script, ChangeIntent.Change,
             username: "admin", password: adminPassword, ct);
 
         if (!createOutput.Contains("ENTK_SUCCESS"))
@@ -1098,7 +1099,7 @@ public class MongoService(
             """;
 
         await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct)).ExecuteMongoAsync(
-            mongo.Name, mongo.Namespace, script,
+            mongo.Name, mongo.Namespace, script, ChangeIntent.Change,
             username: "admin", password: adminPassword, ct);
 
         // Remove vault secrets.
@@ -1406,7 +1407,7 @@ public class MongoService(
 
         string rotateOutput = await (await ClusterFor(mongo.TenantId, mongo.KubernetesClusterId, ct))
             .ExecuteMongoWithOutputAsync(
-                mongo.Name, mongo.Namespace, script,
+                mongo.Name, mongo.Namespace, script, ChangeIntent.Change,
                 username: "admin", password: adminPassword, ct: ct);
 
         if (!rotateOutput.Contains("ENTK_SUCCESS"))
@@ -1612,7 +1613,7 @@ public class MongoService(
         timeout.CancelAfter(TimeSpan.FromSeconds(12));
 
         output = await client.ExecuteMongoWithOutputAsync(
-            cluster.Name, cluster.Namespace, script,
+            cluster.Name, cluster.Namespace, script, ChangeIntent.Read,
             username: string.IsNullOrEmpty(adminPw) ? null : "admin",
             password: adminPw,
             ct: timeout.Token);

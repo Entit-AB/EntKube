@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 namespace EntKube.Web.Services;
 
 /// <summary>
@@ -318,18 +319,18 @@ public interface IKubernetesClientFactory
     /// Executes a SQL statement against the CNPG primary pod.
     /// Uses kubectl exec to connect to the primary and run psql.
     /// </summary>
-    Task ExecuteSqlAsync(string clusterName, string ns, string sql, string kubeconfig, CancellationToken ct = default);
+    Task ExecuteSqlAsync(string clusterName, string ns, string sql, string kubeconfig, ChangeIntent intent, CancellationToken ct = default);
 
     /// <summary>
     /// Executes a MongoDB script against the primary pod via kubectl exec + mongosh.
     /// The primary pod is the first StatefulSet member: {clusterName}-0.
     /// When username and password are provided, mongosh connects with SCRAM credentials.
     /// </summary>
-    Task ExecuteMongoAsync(string clusterName, string ns, string script, string kubeconfig,
+    Task ExecuteMongoAsync(string clusterName, string ns, string script, string kubeconfig, ChangeIntent intent,
         string? username = null, string? password = null, CancellationToken ct = default);
 
     /// <summary>Same as ExecuteMongoAsync but returns stdout from mongosh.</summary>
-    Task<string> ExecuteMongoWithOutputAsync(string clusterName, string ns, string script, string kubeconfig,
+    Task<string> ExecuteMongoWithOutputAsync(string clusterName, string ns, string script, string kubeconfig, ChangeIntent intent,
         string? username = null, string? password = null, CancellationToken ct = default);
 
     /// <summary>
@@ -344,14 +345,14 @@ public interface IKubernetesClientFactory
     /// The admin password is passed via the PGPASSWORD environment variable so it
     /// never appears in the process argument list.
     /// </summary>
-    Task ExecuteSqlOnPodAsync(string podName, string ns, string sql, string kubeconfig,
+    Task ExecuteSqlOnPodAsync(string podName, string ns, string sql, string kubeconfig, ChangeIntent intent,
         string username = "postgres", string? password = null, CancellationToken ct = default);
 
     /// <summary>
     /// Same as ExecuteSqlOnPodAsync but returns the psql stdout output.
     /// Used for queries that need to read results (e.g. listing databases).
     /// </summary>
-    Task<string> ExecuteSqlOnPodWithOutputAsync(string podName, string ns, string sql, string kubeconfig,
+    Task<string> ExecuteSqlOnPodWithOutputAsync(string podName, string ns, string sql, string kubeconfig, ChangeIntent intent,
         string username = "postgres", string? password = null, CancellationToken ct = default);
 
     /// <summary>
@@ -361,7 +362,7 @@ public interface IKubernetesClientFactory
     /// special characters in values are never misinterpreted.
     /// </summary>
     Task<string> RunCommandOnPodAsync(string podName, string ns, IReadOnlyList<string> command,
-        string kubeconfig, IReadOnlyDictionary<string, string>? envVars = null,
+        string kubeconfig, ChangeIntent intent, IReadOnlyDictionary<string, string>? envVars = null,
         CancellationToken ct = default, int timeoutSeconds = 0, bool verbose = false);
 
     /// <summary>
@@ -371,10 +372,10 @@ public interface IKubernetesClientFactory
     /// context from the start — avoiding \c reconnection which can silently fail.
     /// </summary>
     Task ExecuteSqlInCnpgDatabaseAsync(string clusterName, string ns, string database,
-        string sql, string kubeconfig, CancellationToken ct = default);
+        string sql, string kubeconfig, ChangeIntent intent, CancellationToken ct = default);
 
     Task<string> ExecuteSqlInCnpgDatabaseWithOutputAsync(string clusterName, string ns, string database,
-        string sql, string kubeconfig, CancellationToken ct = default);
+        string sql, string kubeconfig, ChangeIntent intent, CancellationToken ct = default);
 
     /// <summary>
     /// Runs a command on a pod with content piped via stdin, returning stdout.
@@ -385,7 +386,7 @@ public interface IKubernetesClientFactory
     /// "Defaulted container" notice on stderr that then leads every error message.
     /// </param>
     Task<string> RunCommandOnPodWithStdinAsync(string podName, string ns, IReadOnlyList<string> command,
-        string stdin, string kubeconfig, CancellationToken ct = default, string? container = null);
+        string stdin, string kubeconfig, ChangeIntent intent, CancellationToken ct = default, string? container = null);
 }
 
 /// <summary>

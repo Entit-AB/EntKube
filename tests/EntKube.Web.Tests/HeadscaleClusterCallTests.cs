@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
 using FluentAssertions;
@@ -252,11 +253,11 @@ public class HeadscaleClusterCallTests : IDisposable
         PodIsNamed("headscale-7c9f8-abcde");
 
         k8s.Setup(x => x.RunCommandOnPodAsync(It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<IReadOnlyList<string>>(), It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(), It.IsAny<string>(), It.IsAny<ChangeIntent>(),
                 It.IsAny<IReadOnlyDictionary<string, string>?>(), It.IsAny<CancellationToken>(),
                 It.IsAny<int>(), It.IsAny<bool>()))
             .Callback((string pod, string ns, IReadOnlyList<string> cmd, string _,
-                       IReadOnlyDictionary<string, string>? _, CancellationToken _, int _, bool _) =>
+                       ChangeIntent _, IReadOnlyDictionary<string, string>? _, CancellationToken _, int _, bool _) =>
                 commands.Add((pod, ns, string.Join(' ', cmd))))
             .ReturnsAsync("abcdef0123456789");
 
@@ -278,7 +279,7 @@ public class HeadscaleClusterCallTests : IDisposable
 
         // Real output: structured logs and a timestamped line on the same stream as the key.
         k8s.Setup(x => x.RunCommandOnPodAsync(It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<IReadOnlyList<string>>(), It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(), It.IsAny<string>(), It.IsAny<ChangeIntent>(),
                 It.IsAny<IReadOnlyDictionary<string, string>?>(), It.IsAny<CancellationToken>(),
                 It.IsAny<int>(), It.IsAny<bool>()))
             .ReturnsAsync("""
@@ -298,7 +299,7 @@ public class HeadscaleClusterCallTests : IDisposable
         PodIsNamed("headscale-1");
 
         k8s.Setup(x => x.RunCommandOnPodAsync(It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<IReadOnlyList<string>>(), It.IsAny<string>(),
+                It.IsAny<IReadOnlyList<string>>(), It.IsAny<string>(), It.IsAny<ChangeIntent>(),
                 It.IsAny<IReadOnlyDictionary<string, string>?>(), It.IsAny<CancellationToken>(),
                 It.IsAny<int>(), It.IsAny<bool>()))
             .ReturnsAsync("{\"level\":\"error\",\"msg\":\"database is locked\"}");
