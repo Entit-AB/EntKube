@@ -1,7 +1,5 @@
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
-using k8s;
-using k8s.Models;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services;
@@ -35,6 +33,7 @@ public record AlertRemediation(
 /// </summary>
 public class RemediationService(
     EntKube.Web.Services.Clusters.IClusterClientFactory clusterAccess,
+    EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
     AuditService auditService,
     ILogger<RemediationService> logger)
 {
@@ -117,39 +116,76 @@ public class RemediationService(
 
         try
         {
-            // ⚠️ Deliberately NOT routed through the change gate: see docs/decomposition.md §5.4.1,
-            // where remediation is the one flow that must act without asking. Moving the
-            // credential into the seam does not change that — the SDK calls below are the same
-            // ones, made with a client the service no longer has to construct.
-            using Kubernetes client = cluster.CreateSdkClient();
+            // Remediation goes through the seam like every other cluster write, and says what it
+            // is rather than saying nothing. The operator picked this action from the alerts page
+            // and confirmed it in a panel that names the resource and describes the effect, so the
+            // gate's own dialog would be a second prompt for one decision — the ceremony §5.4's
+            // doc-comments warn about. DeclareConsequence suppresses the question and records each
+            // change as AppliedAsConsequence.
+            //
+            // ⚠️ What this replaced was an exemption that worked by NOT CALLING the gate at all, so
+            // there was no record of any outcome: invisible rather than ungated, which is the
+            // distinction docs/decomposition.md §5.4.1 exists to kill. The AuditService row below
+            // is a different trail — it says a human asked for a remediation, not that a cluster
+            // was changed, and IClusterChangeRecorder had nothing either way.
+            //
+            // §5.4's fourth bullet proposed an Ungated("remediation") marker, and DeclareUnattended
+            // is the primitive that grew into that slot. It would have been the wrong one here:
+            // it only takes effect when there is no sink (ClusterChangeGate.AcknowledgeAsync tests
+            // _sink first), and this flow's one caller is TenantAlertsTab — a Blazor circuit, which
+            // always has a sink because ClusterChangeAckDialog is mounted in MainLayout. Declaring
+            // unattended would have left the operator acknowledging every remediation twice.
+            //
+            // Both halves of that are already tested, so this is a checkable claim rather than a
+            // reading of mine: ClusterChangeGateTests.A_declared_scope_with_a_sink_still_asks
+            // (unattended + sink => the sink is asked once) and
+            // A_consequence_declaration_does_not_ask_again (consequence + sink => asked zero
+            // times).
+            //
+            // ⚠️ The accepted cost: a consequence does NOT rescue a scope with nobody to ask —
+            // A_consequence_declaration_does_not_rescue_a_scope_with_nobody_to_ask — so a
+            // remediation invoked outside a circuit is refused with an explanatory message rather
+            // than applied. That is the declare-or-refuse contract working as intended, and it is
+            // reachable only by giving this service a second, non-interactive caller. Such a
+            // caller would be a background remediation loop, which is a different question with a
+            // different answer, and it should declare DeclareUnattended for itself rather than
+            // this method pre-emptively declaring both.
+            using IDisposable consequence = gate.DeclareConsequence(
+                $"the {remediation.Action} remediation the operator confirmed on the alerts page");
 
             switch (remediation.Action)
             {
+                // The seam's delete passes --ignore-not-found, so a pod that has already gone is a
+                // success. The SDK call this replaced threw 404 and reported "Remediation failed"
+                // for an alert that resolved itself between the page loading and the click.
                 case RemediationActionKind.DeletePod:
-                    await client.CoreV1.DeleteNamespacedPodAsync(
-                        remediation.ResourceName, remediation.Namespace, cancellationToken: ct);
+                    await cluster.DeleteManifestAsync(
+                        "pod", remediation.ResourceName, remediation.Namespace, ct);
                     break;
 
                 case RemediationActionKind.RestartDeployment:
-                    await client.AppsV1.PatchNamespacedDeploymentAsync(
-                        MakeRestartPatch(), remediation.ResourceName, remediation.Namespace, cancellationToken: ct);
+                    await cluster.PatchJsonAsync(
+                        "deployment", remediation.ResourceName, remediation.Namespace,
+                        RestartPatch(), ct);
                     break;
 
                 case RemediationActionKind.RestartStatefulSet:
-                    await client.AppsV1.PatchNamespacedStatefulSetAsync(
-                        MakeRestartPatch(), remediation.ResourceName, remediation.Namespace, cancellationToken: ct);
+                    await cluster.PatchJsonAsync(
+                        "statefulset", remediation.ResourceName, remediation.Namespace,
+                        RestartPatch(), ct);
                     break;
 
                 case RemediationActionKind.RestartDaemonSet:
-                    await client.AppsV1.PatchNamespacedDaemonSetAsync(
-                        MakeRestartPatch(), remediation.ResourceName, remediation.Namespace, cancellationToken: ct);
+                    await cluster.PatchJsonAsync(
+                        "daemonset", remediation.ResourceName, remediation.Namespace,
+                        RestartPatch(), ct);
                     break;
 
+                // kubectl delete's default cascade is background, which is what the
+                // PropagationPolicy = "Background" on the SDK call said explicitly.
                 case RemediationActionKind.DeleteJob:
-                    await client.BatchV1.DeleteNamespacedJobAsync(
-                        remediation.ResourceName, remediation.Namespace,
-                        body: new V1DeleteOptions { PropagationPolicy = "Background" },
-                        cancellationToken: ct);
+                    await cluster.DeleteManifestAsync(
+                        "job", remediation.ResourceName, remediation.Namespace, ct);
                     break;
             }
 
@@ -179,9 +215,16 @@ public class RemediationService(
         }
     }
 
-    private static V1Patch MakeRestartPatch() => new(
-        "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":" +
-        $"{{\"kubectl.kubernetes.io/restartedAt\":\"{DateTime.UtcNow:O}\"}}" +
-        "}}}}",
-        V1Patch.PatchType.MergePatch);
+    /// <summary>
+    /// The rolling-restart annotation, as the patch JSON the seam takes.
+    ///
+    /// <para><c>PatchJsonAsync</c> is <c>kubectl patch --type=merge</c>, which is the same patch
+    /// type the <c>V1Patch</c> this replaced declared — so the request the API server sees is
+    /// unchanged. <c>PatchStrategicAsync</c> would also work for an annotation and is <em>not</em>
+    /// used, because it sends a different request for no reason.</para>
+    /// </summary>
+    private static string RestartPatch() =>
+        "{\"spec\":{\"template\":{\"metadata\":{\"annotations\":"
+        + $"{{\"kubectl.kubernetes.io/restartedAt\":\"{DateTime.UtcNow:O}\"}}"
+        + "}}}}";
 }

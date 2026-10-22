@@ -36,11 +36,11 @@ public class RemediationTenancyTests : IDisposable
         theirCluster = Seed(db, theirTenant, "theirs");
         db.SaveChanges();
 
-        // Points at a port nothing listens on, so the SDK call the owner's case reaches fails
-        // immediately with a connection error instead of waiting out a DNS/TLS timeout. The test
-        // below needs that call ATTEMPTED to prove the guard let it through.
-        testDb.SeedKubeconfigAsync(vault, ourTenant, ourCluster,
-            TestKubeconfig.Valid.Replace("https://k8s.example.com", "https://127.0.0.1:1"))
+        // This used to point at a closed port, so the owner's case failed on the connection and
+        // the two refusals could be told apart by their message. The remediation goes through the
+        // seam now, which is mocked here, so the call the guard protects is asserted directly and
+        // there is nothing left for an unreachable address to prove.
+        testDb.SeedKubeconfigAsync(vault, ourTenant, ourCluster, TestKubeconfig.Valid)
             .GetAwaiter().GetResult();
         testDb.SeedKubeconfigAsync(vault, theirTenant, theirCluster, TestKubeconfig.Valid).GetAwaiter().GetResult();
     }
@@ -65,8 +65,10 @@ public class RemediationTenancyTests : IDisposable
         GC.SuppressFinalize(this);
     }
 
-    private RemediationService Build()
+    private RemediationService Build(
+        EntKube.Web.Services.ClusterChanges.IClusterChangeGate? gate = null)
         => new(new EntKube.Web.Services.Clusters.ClusterClientFactory(testDb.Factory, k8s.Object),
+            gate ?? TestServices.NewGate(),
             new AuditService(testDb.Factory, new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory)),
             NullLogger<RemediationService>.Instance);
 
@@ -92,11 +94,13 @@ public class RemediationTenancyTests : IDisposable
     /// The owner gets <em>past</em> the guard — otherwise the test above would pass against a
     /// method that refuses everyone.
     ///
-    /// <para>Proving that needs the next step to be attempted, and the next step is a live API
-    /// call, so this cluster's kubeconfig points at a closed port: the call fails on the
-    /// connection rather than on the authorization, and the two are told apart by the message.
-    /// ⚠️ A cancelled token does <em>not</em> work here — it aborts inside the seam's own cluster
-    /// lookup, before the guard is reached, so the method throws instead of answering.</para>
+    /// <para>This used to prove it indirectly: the owner's kubeconfig pointed at a closed port, so
+    /// the failure was a connection error rather than an authorization one and the messages told
+    /// them apart. Since the remediation goes through <c>IClusterClient</c> — mocked here — the
+    /// step the guard protects can be asserted for what it is: the seam was asked to delete
+    /// <em>that</em> pod in <em>that</em> namespace. A weaker version of this test would assert
+    /// only that the call succeeded, which a method that deleted the wrong pod would also
+    /// pass.</para>
     /// </summary>
     [Fact]
     public async Task The_owner_passes_the_tenant_check()
@@ -104,10 +108,75 @@ public class RemediationTenancyTests : IDisposable
         KubernetesOperationResult result =
             await Build().ExecuteAsync(ourTenant, ourCluster, DeletePod(), "alice");
 
-        result.IsSuccess.Should().BeFalse();
-        result.Error.Should().NotContain("not this tenant's",
-            "the cluster is this tenant's, so the failure must come from the unreachable API "
-            + "server rather than from the authorization check");
+        result.IsSuccess.Should().BeTrue(result.Error);
+
+        k8s.Verify(f => f.DeleteManifestAsync(
+                "pod", "billing-api-7d9f", "billing",
+                It.IsAny<string>(), It.IsAny<CancellationToken>()),
+            Times.Once,
+            "the owner's remediation must reach the seam, and reach it for the named resource");
+    }
+
+    /// <summary>
+    /// The remediation declares itself a consequence of the operator's own click, and declares it
+    /// <em>before</em> the change reaches the cluster.
+    ///
+    /// <para>⚠️ <b>This is the substance of the change that added it.</b> Remediation used to be
+    /// exempt from the gate by not calling it at all, so <c>IClusterChangeRecorder</c> held no
+    /// outcome for a pod deletion — invisible rather than ungated, which is the distinction
+    /// docs/decomposition.md §5.4.1 exists to kill. The <c>AuditService</c> row it already wrote is
+    /// a different trail: it records that a human asked for a remediation, not that a cluster was
+    /// changed.</para>
+    ///
+    /// <para>The ordering is asserted rather than assumed, because a declaration raised
+    /// <em>after</em> the write would produce the same record and prevent nothing — and the gate
+    /// reads its scope at the moment <c>AcknowledgeAsync</c> is called, so "somewhere in the
+    /// method" is not good enough.</para>
+    ///
+    /// <para><c>DeclareUnattended</c> must not be what it reaches for, which is why that is
+    /// asserted too: §5.4's fourth bullet proposed an <c>Ungated("remediation")</c> marker and
+    /// unattended is the primitive that grew into that slot, but it only takes effect in a scope
+    /// with <b>no sink</b>. This flow's one caller is a Blazor circuit, and
+    /// <c>ClusterChangeAckDialog</c> is mounted in <c>MainLayout</c>, so there is always a sink and
+    /// the operator would have been asked to acknowledge every remediation twice.</para>
+    /// </summary>
+    [Fact]
+    public async Task The_remediation_declares_a_consequence_before_it_changes_anything()
+    {
+        Mock<EntKube.Web.Services.ClusterChanges.IClusterChangeGate> gate = new();
+        bool declared = false, declaredBeforeTheChange = false;
+
+        gate.Setup(g => g.DeclareConsequence(It.IsAny<string>()))
+            .Returns(() => { declared = true; return new Nothing(); });
+
+        k8s.Setup(f => f.DeleteManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Callback(() => declaredBeforeTheChange = declared)
+            .Returns(Task.CompletedTask);
+
+        KubernetesOperationResult result =
+            await Build(gate.Object).ExecuteAsync(ourTenant, ourCluster, DeletePod(), "alice");
+
+        result.IsSuccess.Should().BeTrue(result.Error);
+
+        gate.Verify(g => g.DeclareConsequence(It.Is<string>(r =>
+                r.Contains("DeletePod", StringComparison.Ordinal)
+                && r.Contains("alerts page", StringComparison.Ordinal))),
+            Times.Once,
+            "the recorded reason has to say which remediation and on whose authority, or the "
+            + "AppliedAsConsequence row says only that something was approved by someone");
+
+        declaredBeforeTheChange.Should().BeTrue(
+            "a consequence declared after the write records the same row and prevents nothing");
+
+        gate.Verify(g => g.DeclareUnattended(It.IsAny<string>()), Times.Never,
+            "unattended only takes effect without a sink, and the alerts page always has one");
+    }
+
+    private sealed class Nothing : IDisposable
+    {
+        public void Dispose() { }
     }
 
     /// <summary>

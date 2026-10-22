@@ -16,6 +16,26 @@ namespace EntKube.Web.Tests;
 /// make two or more gated cluster changes without opening an operation. Each is a button that
 /// asks more than once. The count may only go down.</para>
 ///
+/// <para><b><c>DeclareConsequence</c> satisfies this as well as <c>BeginOperation</c>, and the
+/// difference between the two is worth being exact about.</b> <c>BeginOperation</c> asks once and
+/// records the rest as consequences; <c>DeclareConsequence</c> asks <em>nothing</em> and records
+/// all of them. Under either one the operator cannot be asked twice, which is the property this
+/// file is named after — so a method wrapped in either is not an offender here.</para>
+///
+/// <para>What follows from that is that this test does <b>not</b> police the opposite mistake: an
+/// action that asks zero times where it should have asked once. That is a real failure mode and a
+/// different question, answered by whether the caller already confirmed in the UI.
+/// <c>RemediationService.ExecuteAsync</c> and <c>ReleaseVolumeGuard.ScaleDownAsync</c> both
+/// declare a consequence for exactly that reason — the operator confirmed the action in a panel
+/// naming the resource — and <c>ClusterChangeGate</c> is what keeps the declaration from being a
+/// free pass: it refuses a consequence in a scope with no sink, so declaring one cannot conjure an
+/// approver who was never there.</para>
+///
+/// <para>⚠️ <c>RemediationService.ExecuteAsync</c> is what prompted the clause, and shows the
+/// standing limitation of measuring a missing wrapper by scanning source: its five gated calls sit
+/// in a <c>switch</c> that runs exactly one of them per invocation, so the 5 this scan counts was
+/// never a count of dialogs. A source scan cannot see control flow.</para>
+///
 /// <para><b>Why a source scan.</b> The property is about a <em>missing wrapper</em>, which has no
 /// behaviour to observe until someone clicks the button — and the gate is reached through the real
 /// <c>KubernetesClientFactory</c>, so a test with a mocked seam sees nothing at all. The
@@ -129,11 +149,23 @@ public class OneAckPerActionRatchetTests
 
     private static List<string> FindActionsThatAskTwice()
     {
+        return [.. OperatorActions()
+            .Where(a => GatedCall.Matches(a.Body).Count >= 2
+                     && !a.Body.Contains("BeginOperation(")
+                     && !a.Body.Contains("DeclareConsequence("))
+            .Select(a => $"{a.File}:{a.Name}")];
+    }
+
+    /// <summary>
+    /// The set both questions in this file are asked of: public service methods a Razor component
+    /// calls by name. One enumerator rather than two scans, so the two cannot drift apart over
+    /// which methods they consider an operator action.
+    /// </summary>
+    private static IEnumerable<(string File, string Name, string Body)> OperatorActions()
+    {
         string razor = string.Join("\n", Directory
             .EnumerateFiles(ComponentsRoot, "*.razor", SearchOption.AllDirectories)
             .Select(File.ReadAllText));
-
-        List<string> found = [];
 
         foreach (string path in Directory.EnumerateFiles(
                      ServicesRoot, "*.cs", SearchOption.AllDirectories))
@@ -163,12 +195,65 @@ public class OneAckPerActionRatchetTests
                 if (!razor.Contains($".{name}(", StringComparison.Ordinal))
                     continue;
 
-                if (GatedCall.Matches(body).Count >= 2 && !body.Contains("BeginOperation("))
-                    found.Add($"{Path.GetFileName(path)}:{name}");
+                // The gate is not an operator action: DeclareConsequence's own declaration
+                // mentions itself, and asking it to justify itself is not coherent.
+                if (Path.GetFileNameWithoutExtension(path) == "ClusterChangeGate")
+                    continue;
+
+                yield return (Path.GetFileName(path), name, body);
             }
         }
+    }
 
-        return found;
+    /// <summary>
+    /// Operator actions that ask <b>zero</b> times, which is the mistake the count above does not
+    /// police and which accepting <c>DeclareConsequence</c> there would otherwise have let in
+    /// unnoticed.
+    ///
+    /// <para>Named with a reason each, not counted: there are two, which is few enough for a human
+    /// to check, and a third appearing inside a total would say nothing about whether it was
+    /// justified. The justification always has the same shape — <b>the UI already confirmed this
+    /// specific act</b> — and it is the one thing a source scan cannot verify, so it is written
+    /// down instead.</para>
+    /// </summary>
+    private static readonly Dictionary<string, string> AsksNothingBecauseTheUiAlreadyDid =
+        new(StringComparer.Ordinal)
+        {
+            ["RemediationService.cs:ExecuteAsync"] =
+                "TenantAlertsTab shows a confirm panel naming the resource and describing the "
+                + "effect before this is reachable, and the switch runs exactly one change per call",
+
+            ["ReleaseVolumeGuard.cs:RestoreAsync"] =
+                "the upgrade dialog the operator acknowledged already named every workload taken "
+                + "down and put back. ⚠️ This entry is also the scan's name-only matching being "
+                + "coarse: the `.RestoreAsync(` it found in Razor is a backup page's own method, "
+                + "not this one. Left in rather than special-cased, because the imprecision is the "
+                + "existing heuristic's and hiding it here would be the wrong place to fix it",
+        };
+
+    /// <summary>
+    /// ⚠️ A new entrant here is an operator action that changes a cluster <em>several times</em>
+    /// with no dialog at all. That can be right — both current entries are — but it is never right
+    /// by default, and it is strictly less visible than asking too often, which is what the rest
+    /// of this file measures.
+    /// </summary>
+    [Fact]
+    public void An_operator_action_that_asks_nothing_at_all_is_named_and_justified()
+    {
+        List<string> found = [.. OperatorActions()
+            .Where(a => a.Body.Contains("DeclareConsequence("))
+            .Select(a => $"{a.File}:{a.Name}")];
+
+        // Health check that survives the list being correct: the enumerator still finds operator
+        // actions at all. Without it, a broken AnyMember regex would empty both lists and pass.
+        OperatorActions().Should().HaveCountGreaterThan(50,
+            "if this stops finding operator actions, the member scan has broken and both "
+            + "assertions in this file are vacuous");
+
+        found.Should().BeEquivalentTo(AsksNothingBecauseTheUiAlreadyDid.Keys,
+            "an operator action that suppresses every acknowledgment has to say why here — the "
+            + "reason is that the UI already confirmed the act, and nothing in the source can "
+            + "check that for you");
     }
 
     [Fact]
