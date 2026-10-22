@@ -68,6 +68,34 @@ public static class TestServices
             => Task.FromResult<EntKube.Web.Services.Clusters.IClusterClient?>(null);
     }
 
+    /// <summary>
+    /// Registers <paramref name="factory"/> under EVERY context interface, as production's
+    /// <c>AddModuleContexts</c> does — not just <c>ApplicationDbContext</c>.
+    ///
+    /// <para><b>Why this exists.</b> A render harness that registers only the god context compiles
+    /// and then fails at RESOLUTION the moment the component under test takes its own module's
+    /// context. Six harnesses did, and converting one Razor page off the god context turned four
+    /// portal render tests red for a reason that had nothing to do with the page. A test harness
+    /// that offers fewer registrations than production makes a correct change look broken, which
+    /// is the wrong way round for a test to be wrong.</para>
+    /// </summary>
+    public static IServiceCollection AddEveryContext(
+        this IServiceCollection services, TestDbContextFactory factory)
+        => services
+            .AddSingleton<IDbContextFactory<ApplicationDbContext>>(factory)
+            .AddSingleton<IDbContextFactory<IdentityDbContext>>(factory)
+            .AddSingleton<IDbContextFactory<FleetDbContext>>(factory)
+            .AddSingleton<IDbContextFactory<CatalogDbContext>>(factory)
+            .AddSingleton<IDbContextFactory<DataServicesDbContext>>(factory)
+            .AddSingleton<IDbContextFactory<MailDbContext>>(factory)
+            .AddSingleton<IDbContextFactory<DeliveryDbContext>>(factory)
+            .AddSingleton<IDbContextFactory<ConnectivityDbContext>>(factory)
+            .AddSingleton<IDbContextFactory<SecretsDbContext>>(factory)
+            .AddSingleton<IDbContextFactory<TelemetryDbContext>>(factory)
+            .AddSingleton<IDbContextFactory<CostDbContext>>(factory)
+            .AddSingleton<IDbContextFactory<SupportDbContext>>(factory)
+            .AddSingleton<IDbContextFactory<AdvisorDbContext>>(factory);
+
     public const string TestRootKeyBase64 = "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=";
 
     /// <summary>

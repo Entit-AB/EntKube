@@ -1,4 +1,5 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Cost
 @using Microsoft.AspNetCore.Components.Authorization
@@ -7,7 +8,7 @@
 @inject CostRateService RateService
 @inject CostScanCache ScanCache
 @inject CostLedgerService Ledger
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<CostDbContext> DbFactory
 @inject AuthenticationStateProvider AuthState
 
 @* ═══════════════════════════════════════════════════════════════════
@@ -927,7 +928,7 @@
 
     private async Task LoadRatesAsync()
     {
-        await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+        await using CostDbContext db = await DbFactory.CreateDbContextAsync();
         clusters = await db.KubernetesClusters
             .AsNoTracking()
             .Where(c => c.TenantId == TenantId)

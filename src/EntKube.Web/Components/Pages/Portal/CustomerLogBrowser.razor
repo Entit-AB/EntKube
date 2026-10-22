@@ -1,10 +1,11 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using Microsoft.AspNetCore.Components.Web
 @using Microsoft.AspNetCore.Components.Web.Virtualization
 @using Microsoft.EntityFrameworkCore
 @inject LogQueryService Logs
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<DeliveryDbContext> DbFactory
 @inject IJSRuntime JS
 @implements IAsyncDisposable
 
@@ -360,7 +361,7 @@ else
 
         List<Guid> appIds = Customer.Apps.Select(a => a.Id).ToList();
 
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        using DeliveryDbContext db = DbFactory.CreateDbContext();
         deployments = await db.AppDeployments
             .Where(d => appIds.Contains(d.AppId))
             .Select(d => new DeploymentRow(d.Id, d.AppId, d.EnvironmentId, d.ClusterId, d.Namespace, d.Name))
@@ -545,7 +546,7 @@ else
     // for deployment types that don't materialize manifests (e.g. Helm charts).
     private async Task<List<string>> GetDeploymentPodPrefixesAsync(Guid deploymentId)
     {
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        using DeliveryDbContext db = DbFactory.CreateDbContext();
 
         List<string> fromManifests = await db.DeploymentManifests
             .Where(m => m.DeploymentId == deploymentId && WorkloadKinds.Contains(m.Kind))

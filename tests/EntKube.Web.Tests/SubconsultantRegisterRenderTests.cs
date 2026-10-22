@@ -40,7 +40,7 @@ public class SubconsultantRegisterRenderTests : BunitContext, IDisposable
 
         TestDbContextFactory factory = new(connection);
 
-        Services.AddSingleton<IDbContextFactory<ApplicationDbContext>>(factory);
+        Services.AddEveryContext(factory);
         Services.AddSingleton(new OnCallService(factory));
         Services.AddSingleton(new ToastService());
     }

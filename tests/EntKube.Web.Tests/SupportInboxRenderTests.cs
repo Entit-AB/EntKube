@@ -63,7 +63,7 @@ public class SupportInboxRenderTests : BunitContext, IDisposable
             new TimeService(factory, contracts), TestTicketReference.Instance,
             new SupportDutyService(factory));
 
-        Services.AddSingleton<IDbContextFactory<ApplicationDbContext>>(factory);
+        Services.AddEveryContext(factory);
         Services.AddSingleton(contracts);
         Services.AddSingleton(tickets);
         Services.AddSingleton(mail);

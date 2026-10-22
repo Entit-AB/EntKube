@@ -1,9 +1,10 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Rollouts
 @using Microsoft.AspNetCore.Components.Authorization
 @using Microsoft.EntityFrameworkCore
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<DeliveryDbContext> DbFactory
 @inject AuthenticationStateProvider AuthState
 
 @* ═══════════════════════════════════════════════════════════════════
@@ -188,7 +189,7 @@
         loading = true;
         try
         {
-            await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+            await using DeliveryDbContext db = await DbFactory.CreateDbContextAsync();
 
             rollouts = await db.DeploymentRollouts
                 .AsNoTracking()
@@ -253,7 +254,7 @@
         saveMessage = null;
         try
         {
-            await using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+            await using DeliveryDbContext db = await DbFactory.CreateDbContextAsync();
 
             // Scoped through the tenant so a crafted deployment id cannot write a policy
             // onto another tenant's workload.

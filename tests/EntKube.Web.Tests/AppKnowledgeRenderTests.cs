@@ -48,7 +48,7 @@ public class AppKnowledgeRenderTests : BunitContext, IDisposable
 
         TestDbContextFactory factory = new(connection);
 
-        Services.AddSingleton<IDbContextFactory<ApplicationDbContext>>(factory);
+        Services.AddEveryContext(factory);
         Services.AddSingleton(new KnowledgeService(factory, new ContractService(factory)));
         Services.AddSingleton(new ToastService());
         Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils"));

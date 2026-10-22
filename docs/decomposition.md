@@ -467,6 +467,45 @@ What is left is **160 sites in 32 files**, and the balance has shifted: the bigg
 is `KubernetesOperationsService` with 46, which also holds eleven of the nineteen tautological seam
 calls (§4.0.1.1). It is the same question, now concentrated.
 
+### 4.0.2 The shape no service-level count could see: the pages themselves (measured 2026-10-22)
+
+The god-context metric in §4.0 counts **services** — by constructor, by scope, and since #327 by
+static helpers taking the context as a parameter. A **Razor component** is none of those: it is not
+in `ModuleServiceMap`, has no constructor reflection can read, and is compiled from a `.razor` file.
+
+**31 components injected `IDbContextFactory<ApplicationDbContext>` and queried the database from the
+page**, while every existing count read unchanged. That is more sites than the 35 services the
+programme has been tracking, and none of it was visible.
+
+Classified by what the tables themselves can decide, rather than by preference:
+
+| bucket | n | basis |
+|---|---|---|
+| dead injection | 2 | injected and never used — deleting the line is the whole fix |
+| exactly one viable module context | 10 | derived: only one context exposes every table the page touches |
+| hub-only, subject derives from its services | 7 | touches only Tenant/Customer/App/KubernetesCluster, but all its injected services belong to one module per `ModuleServiceMap` |
+| hub-only, subject does not derive | 10 | its services split across modules, or it injects none |
+| no viable context | 2 | genuine contract work: `CustomerStatusDashboard`, `SlaTargetManager` |
+
+**19 converted, 12 left**, banked by `RazorGodContextRatchetTests`.
+
+**Why a hub-only page is still worth converting.** Fourteen of the 31 only looked up a cluster or a
+customer — tables every module context already exposes read-only as hubs, so the conversion changes
+no query. The cost was never what the page reads today; it is what the type system permits tomorrow.
+On `ApplicationDbContext` the next edit can join anything and nothing fails. On the module's own
+context it does not compile. `ModuleDbContext` builds the *same full model*, so the swap is
+compile-time checked and runtime-identical — the compiler found every mistyped local, and there was
+nothing left for a test to catch.
+
+⚠️ **Two measurement traps, both hit here.**
+- The first scan matched the type name anywhere in the file and reported **33**, two of which were a
+  *comment* about `IDbContextFactory` in a page that injects nothing. A grep for a subject matches
+  prose about that subject.
+- The second resolved "which context" by asking which one *covers* the page's tables, and answered
+  `AdvisorDbContext` for every cluster-lookup page — because the hubs are declared `IQueryable`, not
+  `DbSet`, every context exposes them, and `Advisor` sorts first. Coverage is necessary and not
+  sufficient; ownership is what picks, and where ownership is a hub the tables cannot pick at all.
+
 ### 4.1 Modules (logical — inside the monolith first)
 
 Twelve bounded contexts, drawn where the code already clusters:

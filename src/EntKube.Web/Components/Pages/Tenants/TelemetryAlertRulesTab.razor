@@ -1,9 +1,10 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject TelemetryAlertRuleService Rules
 @inject RumSiteService RumSites
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<TelemetryDbContext> DbFactory
 
 <div class="d-flex justify-content-between align-items-center mb-3">
     <div>
@@ -167,7 +168,7 @@ else if (rules.Count > 0)
 
     protected override async Task OnInitializedAsync()
     {
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        using TelemetryDbContext db = DbFactory.CreateDbContext();
         clusters = await db.KubernetesClusters.Where(c => c.TenantId == TenantId)
             .OrderBy(c => c.Name).Select(c => new ClusterOption(c.Id, c.Name)).ToListAsync();
         rumSites = await RumSites.ListAsync(TenantId);

@@ -419,7 +419,7 @@ public class TicketBridgeRenderTests : BunitContext, IDisposable
         TestDbContextFactory factory = new(connection);
         admin = new TicketBridgeAdmin(factory);
 
-        Services.AddSingleton<IDbContextFactory<ApplicationDbContext>>(factory);
+        Services.AddEveryContext(factory);
         Services.AddSingleton(admin);
         Services.AddSingleton(new ToastService());
     }

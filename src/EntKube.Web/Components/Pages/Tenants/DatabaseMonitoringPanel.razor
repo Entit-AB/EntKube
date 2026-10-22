@@ -1,9 +1,10 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject PrometheusService PrometheusService
 @inject CnpgService CnpgService
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<DataServicesDbContext> DbFactory
 
 @if (isLoading)
 {
@@ -181,7 +182,7 @@ else
         isLoading = true;
         StateHasChanged();
 
-        using (ApplicationDbContext db = DbFactory.CreateDbContext())
+        using (DataServicesDbContext db = DbFactory.CreateDbContext())
         {
             cnpgClusters = await db.CnpgClusters
                 .Where(c => c.KubernetesClusterId == ClusterId)

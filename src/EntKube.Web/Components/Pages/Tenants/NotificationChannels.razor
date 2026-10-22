@@ -1,8 +1,9 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @using System.ComponentModel.DataAnnotations
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<TelemetryDbContext> DbFactory
 @inject NotificationService NotificationService
 @inject NotificationProviderConfigService ProviderConfigService
 @inject ToastService Toasts
@@ -337,7 +338,7 @@ else
 
     private async Task LoadChannels()
     {
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        using TelemetryDbContext db = DbFactory.CreateDbContext();
         channels = await db.NotificationChannels
             .Where(c => c.TenantId == TenantId && c.CustomerId == null)
             .OrderBy(c => c.Name)
@@ -388,7 +389,7 @@ else
 
         try
         {
-            using ApplicationDbContext db = DbFactory.CreateDbContext();
+            using TelemetryDbContext db = DbFactory.CreateDbContext();
             db.NotificationChannels.Add(new NotificationChannel
             {
                 TenantId = TenantId,
@@ -441,7 +442,7 @@ else
 
     private async Task ToggleEnabled(NotificationChannel channel)
     {
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        using TelemetryDbContext db = DbFactory.CreateDbContext();
         NotificationChannel? ch = await db.NotificationChannels.FindAsync(channel.Id);
         if (ch is null) return;
         ch.IsEnabled = !ch.IsEnabled;
@@ -453,7 +454,7 @@ else
     {
         try
         {
-            using ApplicationDbContext db = DbFactory.CreateDbContext();
+            using TelemetryDbContext db = DbFactory.CreateDbContext();
             NotificationChannel? ch = await db.NotificationChannels.FindAsync(channel.Id);
             if (ch is not null) db.NotificationChannels.Remove(ch);
             await db.SaveChangesAsync();

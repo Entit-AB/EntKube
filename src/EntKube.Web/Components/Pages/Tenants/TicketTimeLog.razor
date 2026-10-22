@@ -1,9 +1,10 @@
 @using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Time
 @using Microsoft.EntityFrameworkCore
 @inject TimeService Time
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<SupportDbContext> DbFactory
 @inject ToastService Toasts
 @inject CurrentActor ActorService
 
@@ -149,7 +150,7 @@ else
 
     private async Task LoadAsync()
     {
-        using ApplicationDbContext db = await DbFactory.CreateDbContextAsync();
+        using SupportDbContext db = await DbFactory.CreateDbContextAsync();
 
         entries = await db.TimeEntries.AsNoTracking()
             .Where(e => e.TicketId == Ticket.Id)
