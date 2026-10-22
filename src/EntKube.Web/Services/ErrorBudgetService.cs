@@ -36,7 +36,12 @@ public sealed record ErrorBudgetStatus
     public double? HoursToExhaustion { get; init; }
 
     public bool HasData => AchievedPercent.HasValue;
-    public bool IsBreached => BudgetConsumedFraction >= 1.0;
+    /// <summary>
+    /// ⚠️ <b>Strictly greater than 1.0</b>, which is what the contract three lines above says:
+    /// "1.0 = exhausted, &gt;1 = breached". This was <c>&gt;= 1.0</c>, so a budget exactly spent
+    /// — availability exactly equal to the objective, which <em>meets</em> it — reported a breach.
+    /// </summary>
+    public bool IsBreached => BudgetConsumedFraction > 1.0;
 }
 
 /// <summary>
@@ -118,7 +123,9 @@ public class ErrorBudgetService(IDeliveryApi delivery, ISupportApi support)
             int windowDays = target?.MeasurementWindowDays ?? 30;
             double allowedErr = Math.Max(0, 100.0 - targetPercent);
 
-            double? achieved = Availability(
+            // Raw, not rounded: see RawAvailability. Rounding here is what turned a met
+            // objective into a reported breach.
+            double? achieved = RawAvailability(
                 byWindow[windowDays].GetValueOrDefault(d.Id));
             double? consumed = null, burn = null, hoursToExhaust = null;
 
@@ -127,7 +134,7 @@ public class ErrorBudgetService(IDeliveryApi delivery, ISupportApi support)
                 double actualErr = 100.0 - ach;
                 consumed = allowedErr > 0 ? actualErr / allowedErr : (actualErr > 0 ? 2.0 : 0.0);
 
-                double? recentAch = Availability(recent.GetValueOrDefault(d.Id));
+                double? recentAch = RawAvailability(recent.GetValueOrDefault(d.Id));
                 if (recentAch is double rach)
                 {
                     double recentErr = 100.0 - rach;
@@ -152,7 +159,8 @@ public class ErrorBudgetService(IDeliveryApi delivery, ISupportApi support)
                 ClusterId = d.ClusterId,
                 TargetPercent = targetPercent,
                 WindowDays = windowDays,
-                AchievedPercent = achieved,
+                // Rounded here and nowhere earlier: this one is read, not divided.
+                AchievedPercent = achieved is double shown ? Math.Round(shown, 2) : null,
                 BudgetConsumedFraction = consumed,
                 BurnRateRecent = burn,
                 HoursToExhaustion = hoursToExhaust,
@@ -171,9 +179,32 @@ public class ErrorBudgetService(IDeliveryApi delivery, ISupportApi support)
     /// nullable.</para>
     /// </summary>
     private static double? Availability(DeploymentHealthRatio? ratio)
+        => RawAvailability(ratio) is double raw ? Math.Round(raw, 2) : null;
+
+    /// <summary>
+    /// The same figure <b>unrounded</b>, for arithmetic.
+    ///
+    /// <para>⚠️ <b>Rounding before the budget division produced false breaches.</b> The error
+    /// budget is <c>(100 - achieved) / (100 - target)</c>, and both terms are small differences of
+    /// numbers near 100. Rounding <c>achieved</c> to two places first snaps any availability
+    /// within 0.005 of a two-decimal target onto the target exactly — after which numerator and
+    /// denominator are the <em>same expression</em>, bit for bit, and the quotient is exactly
+    /// 1.0.</para>
+    ///
+    /// <para>2014 healthy samples of 2016 is 99.9008%, which <b>meets</b> a 99.9% objective with
+    /// 99.2% of the budget spent. Rounded first it became 99.9, consumed came out 1.0, and
+    /// <c>OperationsAdvisor</c> raised a Critical, Overdue "SLO breached" finding whose own text
+    /// read "Availability 99.9% is below the 99.9% objective" — served over
+    /// <c>GET /api/v1/advisor/findings</c>. Five-minute sampling over seven days is 2016 samples,
+    /// so two bad ones reach it.</para>
+    ///
+    /// <para>Null rather than 0 for the reason <see cref="Availability"/> gives: no samples and no
+    /// healthy sample are different answers.</para>
+    /// </summary>
+    private static double? RawAvailability(DeploymentHealthRatio? ratio)
         => ratio is null || ratio.TotalSamples == 0
             ? null
-            : Math.Round((double)ratio.HealthySamples / ratio.TotalSamples * 100.0, 2);
+            : (double)ratio.HealthySamples / ratio.TotalSamples * 100.0;
 
     /// <summary>
     /// Most-specific-wins: app-level &gt; customer-level &gt; tenant-level default.
