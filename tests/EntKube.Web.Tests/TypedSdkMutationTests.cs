@@ -123,10 +123,17 @@ public class TypedSdkMutationTests
     /// <summary>
     /// Every spelling of "this scope was declared to the gate". <c>BeginOperation</c> counts: it
     /// suppresses the second and later questions of one operation, and the first still asked.
+    ///
+    /// <para>⚠️ <c>\b</c> on both ends, and it is load-bearing. Verifying this ratchet meant
+    /// removing a real acknowledgment to watch it fail, and the first attempt renamed
+    /// <c>AcknowledgeAsync</c> to <c>AcknowledgeAsyncSTOLEN</c> — which still <em>contains</em> the
+    /// symbol, so the unanchored pattern matched and the test passed, reporting a gated method
+    /// that no longer called the gate. The removal check is what found it; the anchors are what
+    /// stop an identifier that merely embeds one of these names from reading as a declaration.</para>
     /// </summary>
     private static readonly Regex GateCall = new(
-        @"AcknowledgeAsync|RequireAckAsync|RequireNodeAckAsync"
-        + @"|DeclareUnattended|DeclareConsequence|BeginOperation",
+        @"\b(?:AcknowledgeAsync|RequireAckAsync|RequireNodeAckAsync"
+        + @"|DeclareUnattended|DeclareConsequence|BeginOperation)\b",
         RegexOptions.Compiled);
 
     /// <summary>
