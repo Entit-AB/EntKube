@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
 using FluentAssertions;
@@ -680,7 +681,7 @@ public class CnpgServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ExecuteSqlAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
 
         // Act
@@ -723,7 +724,7 @@ public class CnpgServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ExecuteSqlAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
 
         // Act
@@ -777,7 +778,7 @@ public class CnpgServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ExecuteSqlAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
 
         CnpgDatabase database = await sut.CreateDatabaseAsync(
@@ -929,7 +930,7 @@ public class CnpgServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ExecuteSqlAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
 
         CnpgDatabase database = await sut.CreateDatabaseAsync(tenant.Id, cnpg.Id, "webapp");
@@ -976,7 +977,7 @@ public class CnpgServiceTests : IDisposable
 
         k8sFactory.Setup(f => f.ExecuteSqlAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>()))
             .Returns(Task.CompletedTask);
 
         List<(string Name, string Namespace, IReadOnlyDictionary<string, string?> Keys)> merged = [];

@@ -1250,6 +1250,36 @@ Task ExecuteSqlOnPodAsync(
 - Cost: 9 signatures, 30 call sites, and the redaction. Mechanical, but it changes a
   security-relevant contract, which is why it is written down here rather than done.
 
+#### Done, except the gating (2026-10-22)
+
+**The declaration landed; the gate does not act on it yet**, and that split is deliberate. The
+parameter forces every site to state its intent and makes the statement auditable; wiring the gate
+and redacting SQL that carries a password are the next change. Keeping them apart means this
+change's entire review surface is one question — *are these declarations correct?* — and that a
+wrong declaration cannot yet cause an unasked change, because nothing reads them.
+
+**39 declarations, not 30: 13 `Read` and 26 `Change`.** The count is higher than the measurement
+above because the intent *propagates to whoever knows*. `RabbitMQService.RunCtlAsync` is a private
+helper that runs arbitrary `rabbitmqctl` args — one factory call site serving ten callers, nine of
+which are writes (`add_vhost`, `delete_queue`, `add_user`, `set_permissions`…). It cannot declare
+for them, so it takes a `ChangeIntent` and threads it, and its ten callers declare instead. That is
+the same reasoning as the public verbs, one level in: the caller knows what the command does.
+
+`RunCtlListAsync` is the exception that proves it — it appends `--formatter json` and parses an
+array out of the result, so it is a listing *by construction* and declares `Read` on its callers'
+behalf.
+
+**Both open questions below are now answered in code, one of them only provisionally:**
+
+1. **The probe declares `Read`** (`TestConnectionCoreAsync`, `SELECT 1;`). That does not settle
+   whether `Read` is *trusted* — it makes the claim enumerable. `ExecChangeIntentTests` lists all
+   thirteen with what each one actually runs, which is short enough to audit by hand. If the answer
+   turns out to be "a probe must still be recorded", the change is to the gate, not to the
+   declarations.
+2. **`rabbitmqctl import_definitions` belongs to this family**, and declares `Change` at both call
+   sites. It replaces a broker's entire topology from stdin; `export_definitions` is its `Read`
+   counterpart. Neither was visible to any gate before.
+
 #### Two questions this cannot settle on its own
 
 1. **Should a probe be exempt?** `TestConnectionCoreAsync` runs `SELECT 1;` to decide whether

@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using System.Text.Json;
 using EntKube.Web.Data;
 using Microsoft.EntityFrameworkCore;
@@ -1685,7 +1686,7 @@ public class StalwartService(
         try
         {
             output = await cluster.RunCommandOnPodWithStdinAsync(
-                pod, ns, command, bindPassword ?? "", ct, container);
+                pod, ns, command, bindPassword ?? "", ChangeIntent.Read, ct, container);
         }
         catch (Exception ex)
         {

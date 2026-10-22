@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using EntKube.Web.Data;
 using EntKube.Web.Services;
 using FluentAssertions;
@@ -421,7 +422,7 @@ public class MongoServiceTests : IDisposable
         // ENTK_SUCCESS sentinel before marking the database Ready.
         k8sFactory.Setup(f => f.ExecuteMongoWithOutputAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
-                It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+                It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
             .ReturnsAsync("ENTK_SUCCESS");
 
         MongoCluster mongoCluster = await sut.CreateClusterAsync(
@@ -439,7 +440,7 @@ public class MongoServiceTests : IDisposable
 
         k8sFactory.Verify(f => f.ExecuteMongoWithOutputAsync(
             "db-test", "databases", It.Is<string>(s => s.Contains("myapp")),
-            It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()), Times.Once);
+            It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<string?>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
     // ──────── BackupAsync ────────

@@ -1,3 +1,4 @@
+using EntKube.Web.Services.ClusterChanges;
 using System.Security.Cryptography;
 using System.Text;
 using EntKube.Web.Data;
@@ -389,7 +390,7 @@ public class CnpgService(
             """;
 
         string output = await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlInCnpgDatabaseWithOutputAsync(
-            cnpg.Name, cnpg.Namespace, "postgres", sql, ct);
+            cnpg.Name, cnpg.Namespace, "postgres", sql, ChangeIntent.Read, ct);
 
         List<(string Name, string Owner)> result = [];
 
@@ -1081,7 +1082,7 @@ public class CnpgService(
             """;
 
         await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlAsync(
-            cnpg.Name, cnpg.Namespace, sql, ct);
+            cnpg.Name, cnpg.Namespace, sql, ChangeIntent.Change, ct);
 
         // Mark as ready.
 
@@ -1135,7 +1136,7 @@ public class CnpgService(
                 """;
 
             await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlAsync(
-                cnpg.Name, cnpg.Namespace, sql, ct);
+                cnpg.Name, cnpg.Namespace, sql, ChangeIntent.Change, ct);
         }
         catch (InvalidOperationException)
         {
@@ -1332,7 +1333,7 @@ public class CnpgService(
         await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlAsync(
             cnpg.Name, cnpg.Namespace,
             $"ALTER ROLE \"{database.Owner}\" PASSWORD '{newPassword}';",
-             ct);
+             ChangeIntent.Change, ct);
 
         string k8sSecretName = $"{cnpg.Name}-{database.Name}-credentials";
 
@@ -1413,7 +1414,7 @@ public class CnpgService(
 
         string result = await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlInCnpgDatabaseWithOutputAsync(
             cnpg.Name, cnpg.Namespace, database.Name, sql,
-             ct);
+             ChangeIntent.Read, ct);
 
         return result.Trim() == "ok";
     }
@@ -1457,7 +1458,7 @@ public class CnpgService(
         try
         {
             output = await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlInCnpgDatabaseWithOutputAsync(
-                cnpg.Name, cnpg.Namespace, database.Name, sql, ct);
+                cnpg.Name, cnpg.Namespace, database.Name, sql, ChangeIntent.Read, ct);
         }
         catch (Exception)
         {
@@ -1535,7 +1536,7 @@ public class CnpgService(
 
         await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlInCnpgDatabaseAsync(
             cnpg.Name, cnpg.Namespace, database.Name, sql,
-             ct);
+             ChangeIntent.Change, ct);
     }
 
     public async Task ReleaseLiquibaseLockAsync(
@@ -1560,7 +1561,7 @@ public class CnpgService(
 
         await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlInCnpgDatabaseAsync(
             cnpg.Name, cnpg.Namespace, database.Name, sql,
-             ct);
+             ChangeIntent.Change, ct);
     }
 
     public async Task FixKeycloakRealmFrontendUrlAsync(
@@ -1594,7 +1595,7 @@ public class CnpgService(
 
         await (await ClusterFor(tenantId, cnpg.KubernetesClusterId, ct)).ExecuteSqlInCnpgDatabaseAsync(
             cnpg.Name, cnpg.Namespace, database.Name, sql,
-             ct);
+             ChangeIntent.Change, ct);
     }
 
     // ──────── DatabaseBinding management ────────

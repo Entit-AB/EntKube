@@ -1297,7 +1297,7 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// The primary pod is identified by the CNPG naming convention: {cluster}-1.
     /// </summary>
     public async Task ExecuteSqlAsync(
-        string clusterName, string ns, string sql, string kubeconfig, CancellationToken ct = default)
+        string clusterName, string ns, string sql, string kubeconfig, ChangeIntent intent, CancellationToken ct = default)
     {
         string kubeconfigPath = Path.GetTempFileName();
 
@@ -1321,12 +1321,12 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     }
 
     public Task ExecuteMongoAsync(
-        string clusterName, string ns, string script, string kubeconfig,
+        string clusterName, string ns, string script, string kubeconfig, ChangeIntent intent,
         string? username = null, string? password = null, CancellationToken ct = default) =>
-        ExecuteMongoWithOutputAsync(clusterName, ns, script, kubeconfig, username, password, ct);
+        ExecuteMongoWithOutputAsync(clusterName, ns, script, kubeconfig, intent, username, password, ct);
 
     public async Task<string> ExecuteMongoWithOutputAsync(
-        string clusterName, string ns, string script, string kubeconfig,
+        string clusterName, string ns, string script, string kubeconfig, ChangeIntent intent,
         string? username = null, string? password = null, CancellationToken ct = default)
     {
         string kubeconfigPath = Path.GetTempFileName();
@@ -1376,17 +1376,17 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     }
 
     public Task ExecuteSqlOnPodAsync(
-        string podName, string ns, string sql, string kubeconfig,
+        string podName, string ns, string sql, string kubeconfig, ChangeIntent intent,
         string username = "postgres", string? password = null, CancellationToken ct = default) =>
         ExecuteSqlOnPodCoreAsync(podName, ns, sql, kubeconfig, username, password, ct);
 
     public async Task<string> ExecuteSqlOnPodWithOutputAsync(
-        string podName, string ns, string sql, string kubeconfig,
+        string podName, string ns, string sql, string kubeconfig, ChangeIntent intent,
         string username = "postgres", string? password = null, CancellationToken ct = default) =>
         await ExecuteSqlOnPodCoreAsync(podName, ns, sql, kubeconfig, username, password, ct);
 
     public async Task<string> RunCommandOnPodAsync(
-        string podName, string ns, IReadOnlyList<string> command, string kubeconfig,
+        string podName, string ns, IReadOnlyList<string> command, string kubeconfig, ChangeIntent intent,
         IReadOnlyDictionary<string, string>? envVars = null, CancellationToken ct = default,
         int timeoutSeconds = 0, bool verbose = false)
     {
@@ -1474,13 +1474,13 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     }
 
     public async Task ExecuteSqlInCnpgDatabaseAsync(
-        string clusterName, string ns, string database, string sql, string kubeconfig, CancellationToken ct = default)
+        string clusterName, string ns, string database, string sql, string kubeconfig, ChangeIntent intent, CancellationToken ct = default)
     {
-        await ExecuteSqlInCnpgDatabaseWithOutputAsync(clusterName, ns, database, sql, kubeconfig, ct);
+        await ExecuteSqlInCnpgDatabaseWithOutputAsync(clusterName, ns, database, sql, kubeconfig, intent, ct);
     }
 
     public async Task<string> ExecuteSqlInCnpgDatabaseWithOutputAsync(
-        string clusterName, string ns, string database, string sql, string kubeconfig, CancellationToken ct = default)
+        string clusterName, string ns, string database, string sql, string kubeconfig, ChangeIntent intent, CancellationToken ct = default)
     {
         string kubeconfigPath = Path.GetTempFileName();
 
@@ -1501,7 +1501,7 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     }
 
     public async Task<string> RunCommandOnPodWithStdinAsync(
-        string podName, string ns, IReadOnlyList<string> command, string stdin, string kubeconfig,
+        string podName, string ns, IReadOnlyList<string> command, string stdin, string kubeconfig, ChangeIntent intent,
         CancellationToken ct = default, string? container = null)
     {
         string kubeconfigPath = Path.GetTempFileName();
