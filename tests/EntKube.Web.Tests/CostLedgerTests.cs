@@ -569,6 +569,82 @@ public class CostLedgerTests : IDisposable
     private static CostReport EmptyReport() => new() { GeneratedAt = Noon, Namespaces = [] };
 
     /// <summary>Writes a ledger row directly, for tests about reading rather than accruing.</summary>
+    // ---- Per-day average over a window wider than the ledger -------------------------------
+
+    /// <summary>
+    /// ⚠️ <b>The "Per day" figure divided by the whole range, not by what was measured.</b>
+    /// <c>DailyAverage</c> was <c>TotalCost / (Daily.Count * Completeness)</c>, and that
+    /// correction cannot work: <c>ExpectedHours</c> is summed by <c>ExpectedCoverage</c> over the
+    /// days that HAVE a coverage row, so a day the ledger never ran on is absent from both sides
+    /// of the ratio and <c>Completeness</c> comes out 1.0. The scale factor was 1 exactly when it
+    /// was needed.
+    ///
+    /// <para>Ten days of ledger at 100/day, asked for over 30 days: the old formula reported
+    /// 1000/30 = 33.33 as the daily rate, a third of the truth — on the Cost tab's "Per day" tile
+    /// and in <c>dailyAverage</c> from <c>GET /api/v1/cost/history</c>, which that endpoint
+    /// documents as the figure a billing system reads. Every window wider than the installation
+    /// is old hit this.</para>
+    ///
+    /// <para>The report also claimed to be <c>IsComplete</c> while two thirds of it was never
+    /// watched, and the existing hours warning could not say so for the same reason it could not
+    /// scale the average — so both are asserted here.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_window_wider_than_the_ledger_averages_over_the_days_it_measured()
+    {
+        for (int d = 10; d >= 1; d--)
+        {
+            await SeedDayAsync(Noon.AddDays(-d), cost: 100m);
+        }
+
+        CostHistoryReport report = await history.GetHistoryAsync(
+            tenantId, Noon.AddDays(-29), Noon, CostGroupBy.App, Noon);
+
+        report.Daily.Should().HaveCount(30);
+        report.TotalCost.Should().Be(1000m);
+
+        report.UnmeasuredDays.Should().Be(20,
+            "twenty of the thirty days have no coverage row at all — the ledger was not running");
+
+        report.DailyAverage.Should().Be(100m,
+            "ten measured days at 100 each is 100 a day; dividing by the full thirty gives 33.33, "
+            + "which is what this reported before");
+
+        report.IsComplete.Should().BeFalse(
+            "Completeness is 1.0 here because it only sees recorded days, so the day count has to "
+            + "be checked too or a two-thirds-unwatched window calls itself complete");
+
+        report.Warnings.Should().Contain(w => w.Contains("20 of 30 days"),
+            "the hours warning cannot see a day with no coverage row, so this needs its own");
+    }
+
+    /// <summary>
+    /// The case that was <b>never</b> broken, pinned so the fix did not trade one error for
+    /// another.
+    ///
+    /// <para>When every day in the window has a coverage row, the old
+    /// <c>Daily.Count * Completeness</c> and the new sum-of-per-day-completeness agree — two days
+    /// at 0.75 average completeness is 1.5 either way. That agreement is exactly why the defect
+    /// only showed up for windows reaching past the ledger's first day, and it is worth a test of
+    /// its own: a "fix" that got the missing-day case right and this one wrong would look correct
+    /// from the bug report alone.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_partly_measured_day_still_counts_as_the_fraction_that_was_measured()
+    {
+        await SeedDayAsync(Noon.AddDays(-2), cost: 100m, coveredHours: 24m);
+        await SeedDayAsync(Noon.AddDays(-1), cost: 50m, coveredHours: 12m, gapHours: 12m);
+
+        CostHistoryReport report = await history.GetHistoryAsync(
+            tenantId, Noon.AddDays(-2), Noon.AddDays(-1), CostGroupBy.App, Noon);
+
+        report.Daily.Should().HaveCount(2);
+        report.UnmeasuredDays.Should().Be(0, "both days have a coverage row");
+
+        report.DailyAverage.Should().Be(100m,
+            "one full day at 100 and a half-measured day at 50 is 1.5 measured days for 150");
+    }
+
     private async Task SeedDayAsync(
         DateTime day,
         decimal cost,
