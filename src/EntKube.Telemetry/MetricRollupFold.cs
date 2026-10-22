@@ -29,14 +29,29 @@ public static class MetricRollupFold
     /// later and a backfill all upsert the same row instead of three adjacent ones. A bucket
     /// boundary that depended on the batch would make the store's shape a function of delivery
     /// timing.</para>
+    ///
+    /// <para><b>An UNSPECIFIED timestamp is taken to be UTC, not local.</b> Only
+    /// <see cref="DateTimeKind.Local"/> carries an offset worth applying;
+    /// <c>ToUniversalTime()</c> would apply the server's offset to an Unspecified one as well, and
+    /// then the SAME ROW would bucket differently depending on which machine or timezone the
+    /// process happened to run in — the one thing epoch-floored bucketing exists to rule out. The
+    /// store's own rows arrive Unspecified from providers that do not carry a kind (SQLite reads
+    /// back TEXT), so this is not a hypothetical: it shifted a read by the host's offset until a
+    /// coarse-step query went looking for buckets two hours in the past.</para>
+    ///
+    /// <para>⚠️ <c>RollupMetricsQuery</c> also stamps UTC on rows it reads, and by removal either
+    /// change alone repairs that read — so this one is NOT the only thing standing between the
+    /// store and a timezone shift. It is kept because it covers the write path too, where a
+    /// wrongly-bucketed row is permanent rather than merely mis-drawn, and because an Unspecified
+    /// timestamp has no offset to apply whoever hands it over.</para>
     /// </summary>
     public static DateTime BucketFor(DateTime timestamp, int resolutionSeconds)
     {
         int width = Clamp(resolutionSeconds);
 
-        DateTime utc = timestamp.Kind == DateTimeKind.Utc
-            ? timestamp
-            : timestamp.ToUniversalTime();
+        DateTime utc = timestamp.Kind == DateTimeKind.Local
+            ? timestamp.ToUniversalTime()
+            : timestamp;
 
         long ticks = width * TimeSpan.TicksPerSecond;
         return new DateTime(utc.Ticks - (utc.Ticks % ticks), DateTimeKind.Utc);

@@ -122,9 +122,68 @@ rule, not an archive — `Sealing_under_pressure_keeps_the_records_readable` ass
 read after an offload, because a guard that silently destroyed telemetry while reporting that it
 had offloaded it is the failure worth testing for.
 
-### Phase 3 — metrics (held, see §5)
+### Phase 3 — metrics: rollups, not raw samples
 
-## 5. ⚠️ The metrics decision, recorded with its risk
+§5 below recorded the decision as **raw samples in Postgres**, held, with two narrower designs to
+fall back on if the risk landed. Phase 3 took the first of them — **rollups only** — *before* any
+schema was written rather than after measuring a failure, because the measurement that would have
+justified raw samples is the one that broke the previous store. There is nothing to learn from
+reproducing it.
+
+#### What is stored
+
+One `MetricRollups` row per (tenant, cluster, name, service, namespace, pod, bucket, resolution),
+carrying `Count`/`Sum`/`Min`/`Max`/`Last`. `Telemetry:MetricsResolutionSeconds` (default 30) is the
+dial, and the unique index over that tuple is also the upsert key — a collector that retries on a
+5xx, or two collectors reporting the same scope, merge into the row instead of doubling every
+reading of that bucket. Cardinality is bounded by series × resolution rather than by scrape volume,
+which is the whole difference from the store `82ec230` deleted.
+
+#### Four slices, kept separate on purpose
+
+1. The store and the resolution dial (#329).
+2. The OTLP endpoint, the parser and the write path (#331 — #330 carried this and was merged into an
+   already-merged branch, so it never reached main, and was re-cut against main).
+3. The series semantics (#332): the two PromQL rules reproduced against known arithmetic.
+4. The query: `RollupMetricsQuery`, an `IMetricsQuery` over the store.
+
+⚠️ **None of it is routed.** `PromMetricsService` is still the only implementation anything
+resolves, `Telemetry:AcceptMetricsIngest` defaults to false, and `RollupMetricsQuery` is not even
+registered. Routing is its own change deliberately: it is the moment a dashboard's numbers change
+source, and a mistake there does not fail — it draws a different graph, with no error anywhere.
+
+#### What the query has to decide that Prometheus decided for it
+
+- **The tenant predicate is the only boundary there is.** `PromMetricsService` reaches a cluster's
+  own Prometheus, so it is bounded by the cluster it found; this store holds every tenant's rows in
+  one table. Each of the five methods is therefore tested against a *populated* neighbouring
+  tenant, not an empty database — a missing predicate returns a plausible answer rather than an
+  error.
+- **The pod scope arrives as a POSIX regex** (`^(workload-a|workload-b)-`, built for PromQL) and is
+  applied as a prefix match, which is what that pattern means for every case the product generates.
+  No provider can translate it to SQL, and evaluating it in memory would mean loading every row the
+  cluster has first. A pattern the parser cannot read scopes **nothing** rather than everything:
+  too many pods in a chart is visible and can be narrowed, too few is indistinguishable from the
+  workload having no metrics.
+- **A counter's window is read one bucket wider than it is plotted**, because the first bucket has
+  no rate without a predecessor — otherwise every counter chart opens with a blank first interval,
+  at every range, which reads as missing data. A gauge's window is *not* widened, and that is the
+  only thing keeping a point from being drawn before the operator's own left edge: `topk` orders the
+  broken-down series by their peak before any after-the-fact filter could run, so not reading the
+  bucket is strictly better than discarding it later.
+
+#### A timezone shift the coarse path was hiding
+
+`MetricRollupFold.BucketFor` converted any non-UTC timestamp with `ToUniversalTime()`, which treats
+an **Unspecified** one as local and applies the host's offset. Rows come back Unspecified from any
+provider that does not store a kind — SQLite keeps timestamps as TEXT — so a read went looking for
+buckets two hours in the past and found none. It was invisible until this phase because
+`MetricSeriesBuilder.ToStep` skips the bucketing entirely when the caller's step equals the stored
+resolution: only a **coarser** step reaches it. Only `DateTimeKind.Local` is converted now, and the
+query stamps UTC on rows as they leave the store.
+
+
+## 5. ⚠️ The metrics decision as it was recorded, and the risk it was held for
 
 Metrics are not stored centrally today: `PromMetricsService` reads each cluster's own Prometheus
 over PromQL. "Send metrics to EntKube again" was decided as **raw samples in Postgres**, with
@@ -156,4 +215,5 @@ If the risk lands, two narrower designs keep the decision's intent:
    its own S3 tiering, and PromQL keeps working. Metrics stop being per-cluster without a sample
    table.
 
-Phase 3 should pick between (1) and the decision as stated before any schema is written.
+**Phase 3 picked (1).** Recorded here rather than rewritten, because the reasoning above is what
+the choice was made against and a note that only states its conclusion cannot be checked later.
