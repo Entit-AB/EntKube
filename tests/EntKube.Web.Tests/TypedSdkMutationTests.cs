@@ -28,11 +28,11 @@ namespace EntKube.Web.Tests;
 ///
 /// <para><b>The standing capability this does not measure.</b>
 /// <c>IClusterClient.CreateSdkClient()</c>/<c>GetPooledSdkClient()</c> hand out a live
-/// <c>k8s.Kubernetes</c> at 36 call sites in 12 files, and the accessor's own doc-comment admits
+/// <c>k8s.Kubernetes</c> at 34 call sites in 9 files, and the accessor's own doc-comment admits
 /// the credential stays reachable. Those sites are overwhelmingly legitimate reads — EntKube has to
 /// read clusters — so counting them would be a census, not a ratchet: a number that cannot reach
 /// zero and whose members are all defensible teaches nothing. What is worth guarding is that none
-/// of them <em>mutates</em> outside an acknowledgment, and that is the number below. Any of the 36
+/// of them <em>mutates</em> outside an acknowledgment, and that is the number below. Any of the 34
 /// is one line from becoming a site this file catches, which is the point of catching it here
 /// rather than in review.</para>
 ///

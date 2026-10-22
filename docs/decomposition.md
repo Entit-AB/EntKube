@@ -1366,12 +1366,12 @@ were these. Four things about how it is built are deliberate:
 
 #### What is deliberately not measured, and what is still open
 
-`IClusterClient.CreateSdkClient()`/`GetPooledSdkClient()` hand out a live `k8s.Kubernetes` at **36
-call sites in 12 files**, and the accessor's own doc-comment admits the credential stays reachable.
+`IClusterClient.CreateSdkClient()`/`GetPooledSdkClient()` hand out a live `k8s.Kubernetes` at **34
+call sites in 9 files**, and the accessor's own doc-comment admits the credential stays reachable.
 Those sites are overwhelmingly legitimate reads — EntKube has to read clusters — so counting them
 would be a census rather than a ratchet: a number that cannot reach zero and whose members are all
 defensible teaches nothing. What is worth guarding is that none of them *mutates* without an
-acknowledgment, which is the number above. Any of the 36 is one line from becoming a site it
+acknowledgment, which is the number above. Any of the 34 is one line from becoming a site it
 catches.
 
 **Still outside the gate, measured 2026-10-22 and not yet addressed.** Every component's own admin
@@ -1381,7 +1381,7 @@ the typed SDK:
 | Family | Mutating sites | Worst case |
 |---|---|---|
 | Keycloak admin REST | 33 in 1 file | `DELETE /admin/realms/{realm}`; `reset-password`; client-secret regeneration |
-| Object storage via the API-server proxy | 10 in 2 files | CubeFS user mint (credentials); bucket policy/CORS; paginated folder delete over Velero backups and telemetry segments |
+| Object storage via the API-server proxy | 9 in 2 files | CubeFS user mint (credentials); bucket policy/CORS; paginated folder delete over Velero backups and telemetry segments |
 | Harbor API | 11 in 1 file | project and registry deletion — breaks the pulls live deployments depend on |
 | Headscale API | 8 in 1 file | `PUT /api/v1/policy` replaces the ACL for the mesh EntKube reaches clusters over |
 | Alertmanager | 1 | silence creation — low blast radius, time-bounded, carries `createdBy` |
