@@ -128,18 +128,56 @@ public sealed record CostHistoryReport
     public double Completeness =>
         ExpectedHours > 0m ? Math.Min(1d, (double)(CoveredHours / ExpectedHours)) : 1d;
 
-    public bool IsComplete => Completeness >= 0.99d;
+    /// <summary>
+    /// Days in this window with <b>no coverage record at all</b> — the ledger was not running,
+    /// rather than running and missing hours.
+    ///
+    /// <para>⚠️ These are invisible to <see cref="Completeness"/> by construction, because
+    /// <see cref="ExpectedHours"/> is summed over recorded days only. Exposed so the denominator
+    /// <see cref="DailyAverage"/> uses is checkable rather than implied, and so a caller can tell
+    /// a quiet window from an unwatched one.</para>
+    /// </summary>
+    public int UnmeasuredDays => Daily.Count(d => d.ExpectedHours <= 0m);
+
+    /// <summary>
+    /// True when the window was measured essentially end to end.
+    ///
+    /// <para>⚠️ <c>Completeness >= 0.99</c> alone was not enough, and said the opposite of the
+    /// truth in the case that matters: for a window reaching back before the ledger's first day
+    /// it is 1.0, so a report two thirds of which was never watched claimed to be complete. The
+    /// day count has to be checked as well as the hours.</para>
+    /// </summary>
+    public bool IsComplete => Completeness >= 0.99d && UnmeasuredDays == 0;
 
     public IReadOnlyList<string> Warnings { get; init; } = [];
 
-    /// <summary>Average cost per day over the days actually covered — the basis for a projection.</summary>
+    /// <summary>
+    /// Average cost per day over the days actually covered — the basis for a projection.
+    ///
+    /// <para>⚠️ <b>This used to divide by the whole range, scaled by
+    /// <see cref="Completeness"/>, and that correction could not work.</b> It was
+    /// <c>Daily.Count * Completeness</c>, and <see cref="ExpectedHours"/> is summed only over days
+    /// that HAVE a coverage record — <c>ExpectedCoverage</c> iterates the coverage rows, so a day
+    /// the ledger never ran on contributes to neither side of the ratio. Completeness therefore
+    /// answers "of the days we recorded, how fully did we record them", not "how much of the
+    /// window did we record", and for a window reaching back before the ledger existed it is
+    /// 1.0. The scale factor was 1 exactly when it was needed most.</para>
+    ///
+    /// <para>So a 30-day view of a ten-day-old ledger divided ten days of cost by thirty and
+    /// reported a third of the true daily rate — on the Cost tab's "Per day" tile and in the
+    /// <c>dailyAverage</c> field of <c>GET /api/v1/cost/history</c>, which that endpoint documents
+    /// as the figure a billing system reads.</para>
+    ///
+    /// <para>Now it divides by the days actually measured, counting a partly measured day as the
+    /// fraction of it that was. A day with no coverage record contributes <b>0</b>: it is not a
+    /// cheap day, it is an absent one — which is this file's own rule, that an hour never
+    /// measured must be reported as unmeasured rather than as free.</para>
+    /// </summary>
     public decimal DailyAverage
     {
         get
         {
-            decimal days = CoveredHours > 0m && ExpectedHours > 0m
-                ? (decimal)Daily.Count * (decimal)Completeness
-                : Daily.Count;
+            decimal days = Daily.Sum(d => d.ExpectedHours > 0m ? (decimal)d.Completeness : 0m);
 
             return days > 0m ? TotalCost / days : 0m;
         }
@@ -329,6 +367,20 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
             warnings.Add(
                 $"{missing:F0} of {expectedHours:F0} cluster-hours in this period were never measured, "
                 + "so the cost below is lower than what was actually incurred.");
+        }
+
+        // ⚠️ A separate warning, because the one above CANNOT see these days. Both of its terms
+        // are summed over days that have a coverage record, so a day the ledger never ran on is
+        // absent from each and the comparison stays satisfied. Without this the report says
+        // nothing at all about a window that reaches back before the ledger's first day — which
+        // is every window wider than the installation is old.
+        int unmeasuredDays = daily.Count(d => d.ExpectedHours <= 0m);
+        if (unmeasuredDays > 0)
+        {
+            warnings.Add(
+                $"{unmeasuredDays} of {daily.Count} days in this period have no coverage record at "
+                + "all — the ledger was not yet running for them. Totals cover the remaining "
+                + $"{daily.Count - unmeasuredDays} days.");
         }
 
         return new CostHistoryReport
