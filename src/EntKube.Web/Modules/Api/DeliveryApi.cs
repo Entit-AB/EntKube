@@ -165,6 +165,53 @@ public sealed class DeliveryApi(IDbContextFactory<DeliveryDbContext> dbFactory) 
             r.DeploymentId, (ContractHealthStatus)(int)r.HealthStatus, r.SnapshotAt))];
     }
 
+    public async Task<IReadOnlyList<DeploymentHealthRatio>> GetHealthRatiosAsync(
+        Guid tenantId, IReadOnlyCollection<Guid> deploymentIds, DateTime from,
+        DateTime? to = null, CancellationToken ct = default)
+    {
+        if (deploymentIds.Count == 0) return [];
+
+        await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        // Same predicate and same index as GetHealthSamplesAsync — (DeploymentId, SnapshotAt) —
+        // so this is the identical scan with the aggregate left in the database.
+        IQueryable<Data.DeploymentHealthSnapshot> q = db.DeploymentHealthSnapshots
+            .AsNoTracking()
+            .Where(s => deploymentIds.Contains(s.DeploymentId)
+                && s.Deployment.App.Customer.TenantId == tenantId
+                && s.SnapshotAt >= from);
+
+        if (to is DateTime upper)
+        {
+            q = q.Where(s => s.SnapshotAt < upper);
+        }
+
+        // The conditional count translates to COUNT(CASE WHEN "HealthStatus" = 'Healthy' THEN 1
+        // END), so the whole aggregate stays in the database — which is the entire point of this
+        // method over GetHealthSamplesAsync.
+        //
+        // ⚠️ A note against the obvious worry, because it was checked rather than assumed: the
+        // string-stored-enum trap recorded on Delivery_carries_the_enums_rather_than_casting_them
+        // does NOT apply to this comparison. That bug is a PROJECTION converting to a different
+        // enum type — `(ContractHealthStatus)(int)r.HealthStatus` inside a Select, which EF emits
+        // as CAST("HealthStatus" AS integer): 22P02 on PostgreSQL, a silent 0 on SQLite. Here the
+        // comparison is against a constant of the SAME enum, and EF folds `(int)x == (int)const`
+        // back to `= 'Healthy'`: both spellings were compiled and ToQueryString returned byte-
+        // identical SQL. Writing the value comparison is still the right habit, but it is a habit
+        // and not a fix, and claiming otherwise would leave a false reason for the next reader.
+        var rows = await q
+            .GroupBy(s => s.DeploymentId)
+            .Select(g => new
+            {
+                DeploymentId = g.Key,
+                Total = g.Count(),
+                Healthy = g.Count(s => s.HealthStatus == Data.HealthStatus.Healthy),
+            })
+            .ToListAsync(ct);
+
+        return [.. rows.Select(r => new DeploymentHealthRatio(r.DeploymentId, r.Healthy, r.Total))];
+    }
+
     private static IQueryable<Data.App> ScopedApps(DeliveryDbContext db, Guid tenantId)
         => db.Apps.AsNoTracking().Where(a => a.Customer.TenantId == tenantId);
 
