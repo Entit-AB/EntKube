@@ -27,7 +27,15 @@ else
             <tbody>
                 @foreach (SlaRow row in rows)
                 {
-                    bool met = !row.Uptime30d.HasValue || !row.SlaTarget.HasValue || row.Uptime30d.Value >= row.SlaTarget.Value;
+                    @* ⚠️ Judged over the window the target NAMES, not over 30 days. A target carries
+                       MeasurementWindowDays alongside TargetPercent and the two are one statement:
+                       "99.9% over 7 days" is a different commitment from "99.9% over 30". This
+                       compared the 30-day figure whatever the target said, so a 7-day or 90-day
+                       SLA was reported against the wrong measurement — on the page the customer
+                       reads. SlaTargetManager and ErrorBudgetService both honour the stored
+                       window; this was the one place that did not. *@
+                    bool met = !row.UptimeInWindow.HasValue || !row.SlaTarget.HasValue
+                               || row.UptimeInWindow.Value >= row.SlaTarget.Value;
                     <tr>
                         <td class="fw-semibold small">@row.DeploymentName</td>
                         <td class="text-muted small">@row.AppName</td>
@@ -46,10 +54,12 @@ else
                             else { <span class="text-muted">—</span> }
                         </td>
                         <td class="text-end text-muted small">
-                            @(row.SlaTarget.HasValue ? $"{row.SlaTarget.Value:F1}%" : "—")
+                            @(row.SlaTarget.HasValue
+                                ? $"{row.SlaTarget.Value:F1}% / {row.WindowDays}d"
+                                : "—")
                         </td>
                         <td class="text-end">
-                            @if (!row.Uptime30d.HasValue)
+                            @if (!row.UptimeInWindow.HasValue)
                             {
                                 <span class="text-muted small">No data</span>
                             }
@@ -91,16 +101,33 @@ else
         List<SlaRow> result = [];
         foreach (AppDeployment dep in Deployments)
         {
+            SlaTarget? sla = await IncidentService.GetSlaTargetAsync(TenantId, CustomerId, dep.AppId);
+
             UptimeResult u7 = await IncidentService.GetUptimeAsync(TenantId, dep.Id, 7);
             UptimeResult u30 = await IncidentService.GetUptimeAsync(TenantId, dep.Id, 30);
-            SlaTarget? sla = await IncidentService.GetSlaTargetAsync(TenantId, CustomerId, dep.AppId);
+
+            // The target's own window decides the verdict. 30 when there is no target, which is
+            // SlaTarget.MeasurementWindowDays' own default and what ErrorBudgetService falls back
+            // to as well. The 7- and 30-day columns stay as context either way; a third query is
+            // only needed when the window is neither, which of the three the manager offers
+            // (7 / 30 / 90) means only 90.
+            int window = sla?.MeasurementWindowDays ?? 30;
+
+            double? inWindow = window switch
+            {
+                7 => u7.Percent,
+                30 => u30.Percent,
+                _ => (await IncidentService.GetUptimeAsync(TenantId, dep.Id, window)).Percent,
+            };
 
             result.Add(new SlaRow(
                 dep.Name,
                 dep.App?.Name ?? dep.AppId.ToString(),
                 u7.Percent,
                 u30.Percent,
-                sla?.TargetPercent));
+                sla?.TargetPercent,
+                window,
+                inWindow));
         }
         rows = result.OrderBy(r => r.AppName).ThenBy(r => r.DeploymentName).ToList();
         isLoading = false;
@@ -119,5 +146,7 @@ else
         string AppName,
         double? Uptime7d,
         double? Uptime30d,
-        double? SlaTarget);
+        double? SlaTarget,
+        int WindowDays,
+        double? UptimeInWindow);
 }
