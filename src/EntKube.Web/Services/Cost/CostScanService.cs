@@ -170,6 +170,26 @@ public class CostScanService(
 }
 
 /// <summary>Reads and writes the per-cluster price sheets.</summary>
+/// <summary>
+/// A price sheet as the public API's PUT describes one: four required prices, and the rest
+/// optional so that <b>omitting a field keeps what is stored</b> rather than overwriting it.
+///
+/// <para>⚠️ Every optional member must be nullable, and that is the whole point of the type. A
+/// <c>bool</c> cannot express "not supplied" — <c>false</c> and absent are the same value — which
+/// is why <c>ChargeIdleCapacity</c> was silently reset to the entity default on every API write
+/// while being neither readable nor writable through the API at all.</para>
+/// </summary>
+public sealed record CostRatePatch(
+    decimal CpuCoreHourCost,
+    decimal MemoryGiBHourCost,
+    decimal StorageGiBMonthCost,
+    decimal ClusterMonthlyOverhead,
+    string? Currency = null,
+    bool? ChargeOnRequests = null,
+    bool? ChargeIdleCapacity = null,
+    decimal? LoadBalancerMonthlyCost = null,
+    decimal? PublicIpMonthlyCost = null);
+
 public class CostRateService(IDbContextFactory<CostDbContext> dbFactory)
 {
     public async Task<List<ClusterCostRate>> ListAsync(Guid tenantId, CancellationToken ct = default)
@@ -215,6 +235,76 @@ public class CostRateService(IDbContextFactory<CostDbContext> dbFactory)
         rate.Currency = string.IsNullOrWhiteSpace(values.Currency) ? "USD" : values.Currency.Trim().ToUpperInvariant();
         rate.ChargeOnRequests = values.ChargeOnRequests;
         rate.ChargeIdleCapacity = values.ChargeIdleCapacity;
+        rate.UpdatedAt = DateTime.UtcNow;
+        rate.UpdatedBy = updatedBy;
+
+        await db.SaveChangesAsync(ct);
+        return rate;
+    }
+
+    /// <summary>
+    /// Creates or updates a price sheet from a <b>partial</b> set of values: a null optional field
+    /// keeps whatever is stored, and on a row that does not exist yet keeps the entity's own
+    /// documented default.
+    ///
+    /// <para><b>Why this exists beside <see cref="SaveAsync"/>.</b> That one takes a whole
+    /// <c>ClusterCostRate</c> and writes every field, which is right for the settings page: the
+    /// form shows all nine, so the operator is replacing a sheet they can see. The public API's PUT
+    /// is not that — its body type carries four required prices and the rest optional, for clients
+    /// written before a field existed — and expressing "leave it alone" through a full entity is
+    /// impossible, because an unset property is indistinguishable from one deliberately set to its
+    /// default. That is exactly how <c>ChargeIdleCapacity</c> came to be reset by every API write.
+    /// </para>
+    ///
+    /// <para>⚠️ <b>The merge happens here, in the context that loads the row</b>, not in the
+    /// caller. A caller that read the sheet and then wrote it back would leave a window between
+    /// the two in which two concurrent PUTs, each omitting a different field, each write back the
+    /// other's stale value.</para>
+    ///
+    /// <para>New rows need no special case: <c>Currency</c>, <c>ChargeOnRequests</c> and
+    /// <c>ChargeIdleCapacity</c> carry initializers on the entity, so "keep what is there" already
+    /// means "take the documented default" for a sheet that does not exist yet.</para>
+    /// </summary>
+    public async Task<ClusterCostRate?> PatchAsync(
+        Guid tenantId, Guid clusterId, CostRatePatch patch, string? updatedBy,
+        CancellationToken ct = default)
+    {
+        await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        // Same refusal as SaveAsync, for the same reason: a crafted cluster id must not let one
+        // tenant price another tenant's cluster.
+        bool owned = await db.KubernetesClusters.AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct);
+        if (!owned)
+        {
+            return null;
+        }
+
+        ClusterCostRate? rate = await db.ClusterCostRates.FirstOrDefaultAsync(r => r.ClusterId == clusterId, ct);
+        if (rate is null)
+        {
+            rate = new ClusterCostRate { Id = Guid.NewGuid(), ClusterId = clusterId };
+            db.ClusterCostRates.Add(rate);
+        }
+
+        // Required, so always written. Clamped for the reason SaveAsync gives: a negative price
+        // produces credits that corrupt the proportional overhead split.
+        rate.CpuCoreHourCost = Math.Max(0m, patch.CpuCoreHourCost);
+        rate.MemoryGiBHourCost = Math.Max(0m, patch.MemoryGiBHourCost);
+        rate.StorageGiBMonthCost = Math.Max(0m, patch.StorageGiBMonthCost);
+        rate.ClusterMonthlyOverhead = Math.Max(0m, patch.ClusterMonthlyOverhead);
+
+        // Optional: absent means keep. Never "absent means zero", which is what the PUT handler
+        // did and what the input type's own comment said it did not.
+        if (patch.LoadBalancerMonthlyCost is decimal lb) rate.LoadBalancerMonthlyCost = Math.Max(0m, lb);
+        if (patch.PublicIpMonthlyCost is decimal ip) rate.PublicIpMonthlyCost = Math.Max(0m, ip);
+        if (patch.ChargeOnRequests is bool onRequests) rate.ChargeOnRequests = onRequests;
+        if (patch.ChargeIdleCapacity is bool idle) rate.ChargeIdleCapacity = idle;
+
+        if (!string.IsNullOrWhiteSpace(patch.Currency))
+        {
+            rate.Currency = patch.Currency.Trim().ToUpperInvariant();
+        }
+
         rate.UpdatedAt = DateTime.UtcNow;
         rate.UpdatedBy = updatedBy;
 
