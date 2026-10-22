@@ -135,6 +135,21 @@ public class RemediationService(
             // _sink first), and this flow's one caller is TenantAlertsTab — a Blazor circuit, which
             // always has a sink because ClusterChangeAckDialog is mounted in MainLayout. Declaring
             // unattended would have left the operator acknowledging every remediation twice.
+            //
+            // Both halves of that are already tested, so this is a checkable claim rather than a
+            // reading of mine: ClusterChangeGateTests.A_declared_scope_with_a_sink_still_asks
+            // (unattended + sink => the sink is asked once) and
+            // A_consequence_declaration_does_not_ask_again (consequence + sink => asked zero
+            // times).
+            //
+            // ⚠️ The accepted cost: a consequence does NOT rescue a scope with nobody to ask —
+            // A_consequence_declaration_does_not_rescue_a_scope_with_nobody_to_ask — so a
+            // remediation invoked outside a circuit is refused with an explanatory message rather
+            // than applied. That is the declare-or-refuse contract working as intended, and it is
+            // reachable only by giving this service a second, non-interactive caller. Such a
+            // caller would be a background remediation loop, which is a different question with a
+            // different answer, and it should declare DeclareUnattended for itself rather than
+            // this method pre-emptively declaring both.
             using IDisposable consequence = gate.DeclareConsequence(
                 $"the {remediation.Action} remediation the operator confirmed on the alerts page");
 
