@@ -95,6 +95,104 @@ public class PublicApiContractAdoptionTests
     }
 
     /// <summary>
+    /// Module-owned SERVICES still injected straight into a public API route: <b>9</b>, from 11.
+    ///
+    /// <para><b>A second axis, because the first one's zero was true and incomplete.</b>
+    /// <see cref="BaselineDirectReads"/> counts <c>db.Xxx</c> — tables. A route that injects a
+    /// module's <em>service</em> instead reads the same database through one more layer and the
+    /// table count does not move. That is exactly how Advisor hid: <c>GET /advisor/findings</c>
+    /// took <c>OperationsAdvisorService</c> and the acknowledge route took
+    /// <c>AdvisorStateService</c>, so this file reported zero while <c>IAdvisorApi</c> had eight
+    /// methods and not one caller anywhere in the product.</para>
+    ///
+    /// <para><b>What the nine are, and why each is still here.</b> None is an adoption that was
+    /// skipped; all four need contract surface that does not exist, which is a different change
+    /// from using surface that does:</para>
+    /// <list type="bullet">
+    ///   <item><c>CostRateService</c> ×4 and <c>CostLedgerService</c> ×2 — <b>Cost has no contract
+    ///     at all.</b> Six of the nine are one module, and four of those six are writes (a price
+    ///     sheet upsert and a delete), so this is not a read contract's shape either. It is the
+    ///     largest single gap this measure shows.</item>
+    ///   <item><c>KubernetesOperationsService</c> ×2 — Fleet has <c>IFleetApi</c>, which describes
+    ///     clusters. These routes <em>act</em> on one. A contract that performs cluster operations
+    ///     is the agent boundary (docs/decomposition.md §5), not a read method.</item>
+    ///   <item><c>ComponentUpgradeService</c> ×1 — Catalog has <c>ICatalogApi</c>, whose 44
+    ///     consumers make it the most adopted contract in the product, and it still has no upgrade
+    ///     method. Upgrading installs a chart; see <c>project-component-upgrade-action</c> for why
+    ///     that is not a read.</item>
+    /// </list>
+    ///
+    /// <para>⚠️ The same hazard as the other ratchets: this counts a type NAME in a parameter
+    /// position, so it cannot see a route that resolves a service from the provider by hand, and it
+    /// would count a comment naming one. Comments are stripped; the provider shape is not currently
+    /// present and would need its own measure if it appeared.</para>
+    /// </summary>
+    private const int BaselineModuleServices = 9;
+
+    [Fact]
+    public void The_public_api_does_not_reach_past_a_contract_into_a_modules_services()
+    {
+        (int count, IReadOnlyList<string> where) = MeasureModuleServices();
+
+        count.Should().BeLessThanOrEqualTo(BaselineModuleServices,
+            "injecting a module's own service into a product-surface route is the same boundary "
+            + "break as reading its tables, one layer further in — and the table count cannot see "
+            + $"it. Ask the module's contract. Found: {string.Join(", ", where)}");
+    }
+
+    [Fact]
+    public void The_module_service_baseline_does_not_carry_slack()
+    {
+        (int count, IReadOnlyList<string> where) = MeasureModuleServices();
+
+        count.Should().Be(BaselineModuleServices,
+            $"now {count} ({string.Join(", ", where)}) — bank it by lowering the baseline");
+    }
+
+    /// <summary>
+    /// Every parameter of a public API route handler whose type <c>ModuleServiceMap</c> places in a
+    /// module. Comments stripped, occurrences counted rather than lines, as above.
+    /// </summary>
+    private static (int Count, IReadOnlyList<string> Where) MeasureModuleServices()
+    {
+        string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, Web));
+        string endpoints = Path.Combine(root, "Services", "PublicApi", "PublicApiEndpoints.cs");
+
+        File.Exists(endpoints).Should().BeTrue();
+
+        string map = File.ReadAllText(Path.Combine(root, "Modules", "ModuleServiceMap.cs"));
+
+        IReadOnlySet<string> owned = Regex
+            .Matches(map, @"\[typeof\(([\w.]+)\)\]\s*=\s*Module\.(\w+)")
+            .Select(m => m.Groups[1].Value.Split('.')[^1])
+            .ToHashSet(StringComparer.Ordinal);
+
+        owned.Should().NotBeEmpty(
+            "ModuleServiceMap is how this test knows which services belong to a module; if it "
+            + "stops parsing, an empty set would make every route look clean");
+
+        List<string> found = [];
+
+        foreach (string line in File.ReadAllLines(endpoints))
+        {
+            string trimmed = line.TrimStart();
+
+            if (trimmed.StartsWith("//", StringComparison.Ordinal)
+                || trimmed.StartsWith('*')) continue;
+
+            foreach (Match m in Regex.Matches(line, @"\b([A-Z]\w*(?:Service|Resolver|Store))\s+[a-z]\w*\s*[,)]"))
+            {
+                if (owned.Contains(m.Groups[1].Value))
+                {
+                    found.Add(m.Groups[1].Value);
+                }
+            }
+        }
+
+        return (found.Count, found);
+    }
+
+    /// <summary>
     /// Every <c>db.Xxx</c> in the public API whose entity <c>ModuleMap</c> places in a module.
     ///
     /// <para>Occurrences rather than matching lines, and comments stripped, for the same reasons the
