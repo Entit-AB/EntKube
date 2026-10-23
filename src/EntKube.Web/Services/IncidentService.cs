@@ -300,7 +300,31 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory, 
                 && (i.Status == IncidentStatus.Active || i.Status == IncidentStatus.Acknowledged), ct);
     }
 
-    public async Task<Dictionary<Guid, int>> GetActiveCountsPerClusterAsync(
+    /// <summary>
+    /// What is firing on each of these clusters, split by severity.
+    ///
+    /// <para>⭐ <b>This counted <c>Status == Active &amp;&amp; Severity == "critical"</c>, and both
+    /// halves of that were wrong for what the caller renders.</b></para>
+    ///
+    /// <para><b>Acknowledged is not resolved.</b> <see cref="AlertStats.Open"/>, in this same
+    /// file, already states the rule: <c>Active + Acknowledged</c>. The two sibling methods ten
+    /// lines above and below this one both filter <c>Active || Acknowledged</c>. This one did
+    /// not, so an on-call engineer acknowledging the only critical alert dropped the count to
+    /// zero — and <c>TenantMonitoringOverview</c> renders zero as a green <b>"Healthy"</b>. The
+    /// act of a person taking ownership of an incident made the dashboard report that there was
+    /// nothing wrong.</para>
+    ///
+    /// <para><b>Warnings existed and were never shown.</b> Restricting to <c>critical</c> under a
+    /// card captioned "Active Alerts" meant a cluster with six firing warnings read as healthy.
+    /// The severity is kept here rather than discarded, because flattening a warning into the
+    /// red count would be the opposite error — the distinction is real and the caller needs it to
+    /// colour the badge.</para>
+    ///
+    /// <para>⚠️ <see cref="GetActiveAlertCountForTenantAsync"/> is the correct tenant-wide
+    /// version of this and has no callers. The overview computes its headline by summing these
+    /// counts instead, which is why that headline was wrong in exactly the same two ways.</para>
+    /// </summary>
+    public async Task<Dictionary<Guid, FiringCounts>> GetActiveCountsPerClusterAsync(
         IEnumerable<Guid> clusterIds, CancellationToken ct = default)
     {
         List<Guid> ids = clusterIds.ToList();
@@ -309,13 +333,23 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory, 
         using ApplicationDbContext db = dbFactory.CreateDbContext();
         var rows = await db.AlertIncidents
             .Where(i => ids.Contains(i.ClusterId)
-                     && i.Status == IncidentStatus.Active
-                     && i.Severity == "critical")
+                     && (i.Status == IncidentStatus.Active
+                         || i.Status == IncidentStatus.Acknowledged))
             .GroupBy(i => i.ClusterId)
-            .Select(g => new { ClusterId = g.Key, Count = g.Count() })
+            .Select(g => new
+            {
+                ClusterId = g.Key,
+
+                // Compared in the database, so the severity vocabulary stays in one place. The
+                // stored values seen in this codebase are "critical", "warning", "none" and "";
+                // anything that is not critical counts as Other rather than being dropped, so a
+                // severity nobody anticipated still reaches somebody's screen.
+                Critical = g.Count(i => i.Severity == "critical"),
+                Other = g.Count(i => i.Severity != "critical"),
+            })
             .ToListAsync(ct);
 
-        return rows.ToDictionary(r => r.ClusterId, r => r.Count);
+        return rows.ToDictionary(r => r.ClusterId, r => new FiringCounts(r.Critical, r.Other));
     }
 
     public async Task<List<AlertIncident>> GetActiveIncidentsForTenantAsync(
@@ -566,6 +600,30 @@ public class IncidentService(IDbContextFactory<ApplicationDbContext> dbFactory, 
 public record UptimeResult(int WindowDays, double? Percent)
 {
     public string Display => Percent.HasValue ? $"{Percent:F2}%" : "No data";
+}
+
+/// <summary>
+/// What is firing on one cluster, kept split by severity.
+///
+/// <para>⚠️ <b><see cref="Total"/> is what "is anything wrong" asks, and it is not
+/// <see cref="Critical"/>.</b> The caller renders a green "Healthy" badge on zero, so reading
+/// only the critical count there is what made a cluster with six firing warnings — and a
+/// cluster whose critical alert had just been acknowledged by the person dealing with it —
+/// claim to be healthy.</para>
+///
+/// <para>Both numbers count <c>Active</c> and <c>Acknowledged</c> incidents, after
+/// <see cref="AlertStats.Open"/>: acknowledging an alert records that somebody has taken it on,
+/// not that it stopped firing.</para>
+/// </summary>
+/// <param name="Critical">Firing incidents whose severity is <c>critical</c>.</param>
+/// <param name="Other">
+/// Firing incidents of every other severity — <c>warning</c> and anything unrecognised, which
+/// is counted here rather than dropped so an unanticipated severity still reaches a screen.
+/// </param>
+public readonly record struct FiringCounts(int Critical, int Other)
+{
+    /// <summary>Everything firing, which is what a "healthy or not" question means.</summary>
+    public int Total => Critical + Other;
 }
 
 public record AlertStats(
