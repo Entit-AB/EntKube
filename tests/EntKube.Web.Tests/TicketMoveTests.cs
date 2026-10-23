@@ -360,6 +360,195 @@ public class TicketMoveTests : IDisposable
     }
 
     /// <summary>
+    /// ⭐ The reply does not merely find the moved ticket — it is written to it.
+    ///
+    /// <para>The test above stops at the suggestion, and that is the gap this one closes.
+    /// Accepting an <c>AppendToTicket</c> went through <c>TicketService.AddEventAsync</c> with the
+    /// arriving mailbox's tenant, while the ticket now belonged to another one. That method takes
+    /// a tenant and <b>returns silently</b> when the ticket is not that tenant's, so nothing was
+    /// written — and <c>AcceptAsync</c> marked the suggestion Accepted and the message Handled
+    /// regardless, because nothing after the switch inspects whether the branch did anything.</para>
+    ///
+    /// <para>So the customer's reply left the triage queue and landed nowhere. ⚠️ Worse than
+    /// losing it: the inbox then states "Added to its ticket as it arrived… it went onto that
+    /// history rather than waiting here", so the one place an operator would look to notice the
+    /// loss actively asserts the write happened.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_reply_to_a_moved_ticket_is_written_to_its_history_not_just_matched()
+    {
+        Ticket ticket = await Reported();
+
+        await tickets.MoveAsync(ours, ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
+
+        db.CustomerEmailDomains.Add(new CustomerEmailDomain
+        {
+            Id = Guid.NewGuid(),
+            TenantId = ours,
+            CustomerId = ourCustomer,
+            Domain = "kund.example",
+        });
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? reply = await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = ours,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = Reporter,
+            Subject = $"Re: [#{ticket.Number}] Remisser kommer inte fram",
+            Body = "Fortfarande inget.",
+            SentAt = Tue(12),
+        });
+
+        MailSuggestion append = reply!.Suggestions
+            .Single(s => s.Kind == MailSuggestionKind.AppendToTicket && s.TicketId == ticket.Id);
+
+        await mail.AcceptAsync(ours, append.Id, "nils", Tue(13));
+
+        // The assertion the suggestion-only test could not make: the words the customer sent are
+        // on the ticket. Asserting on the BODY rather than on a count, because a count would also
+        // be satisfied by the Moved event already sitting there.
+        List<string> history = await db.TicketEvents
+            .Where(e => e.TicketId == ticket.Id)
+            .Select(e => e.Detail)
+            .ToListAsync();
+
+        history.Should().Contain(d => d.Contains("Fortfarande inget."),
+            "a reply that the product matched to this ticket, told the customer to expect on this "
+            + "ticket, and then marked handled, has to actually be on this ticket");
+    }
+
+    /// <summary>
+    /// ⚠️ The boundary the fix above had to be careful not to open.
+    ///
+    /// <para>Making the write succeed with the ticket's own tenant is what stops a moved
+    /// ticket's reply being lost — but a suggestion can point at a ticket merely because the
+    /// mail THREADS to it, and that header is forgeable by anyone who knows the number
+    /// (<c>SupportMessageId</c> says so). Before the fix a forged thread naming another
+    /// tenant's ticket was harmless only by accident, because the write refused. Making it
+    /// succeed without asking what justified the crossing would have converted a silent bug
+    /// into a way to put words on another tenant's ticket — customer-visible, on a history
+    /// §14.6 makes evidence, with an operator clicking accept and nothing on screen saying a
+    /// boundary was crossed.</para>
+    ///
+    /// <para>So a crossing needs something an outsider cannot produce: a token we minted, or
+    /// the message coming from the address the ticket records as its reporter. This sender is
+    /// a recorded contact of the customer — so the suggestion forms, which is the point — but
+    /// is <b>not</b> that reporter, and the subject carries no token.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_forged_thread_from_someone_who_is_not_the_reporter_does_not_cross_tenants()
+    {
+        Ticket ticket = await Reported();
+
+        await tickets.MoveAsync(ours, ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
+
+        // Both domains are recognised for our customer, so neither sender is a stranger to the
+        // product — the only difference that matters is which one the ticket names as reporter.
+        foreach (string domain in new[] { "kund.example", "annan.example" })
+        {
+            db.CustomerEmailDomains.Add(new CustomerEmailDomain
+            {
+                Id = Guid.NewGuid(),
+                TenantId = ours,
+                CustomerId = ourCustomer,
+                Domain = domain,
+            });
+        }
+
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? forged = await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = ours,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = "bo@annan.example",
+            Subject = "Komplettering",
+            Body = "Lagg till det har.",
+            SentAt = Tue(12),
+
+            // Anyone who knows the number can mint this; nothing about it is checked.
+            InReplyTo = SupportMessageId.For(ticket.Number),
+        });
+
+        // ⚠️ Asserted, not tolerated. Measured by reverting the rule under test: the suggestion
+        // DOES form here, and without the rule the text crosses. Had this been written as "skip
+        // if no suggestion", the test would go on passing if placement ever stopped happening —
+        // green for the wrong reason, and the boundary never exercised.
+        MailSuggestion append = forged!.Suggestions
+            .Should().ContainSingle(s => s.Kind == MailSuggestionKind.AppendToTicket,
+                "the thread places the message on the ticket — that is the precondition for "
+                + "there being a boundary to refuse to cross")
+            .Subject;
+
+        await mail.AcceptAsync(ours, append.Id, "nils", Tue(13));
+
+        db.ChangeTracker.Clear();
+
+        (await db.TicketEvents.Where(e => e.TicketId == ticket.Id).Select(e => e.Detail)
+            .ToListAsync())
+            .Should().NotContain(d => d.Contains("Lagg till det har."),
+                "a threaded header is forgeable, so on its own it must not carry text across a "
+                + "tenant boundary onto a §14.6 history");
+
+        (await db.InboundMailMessages.AsNoTracking().FirstAsync(m => m.Id == forged.Id))
+            .State.Should().NotBe(MailTriageState.Handled,
+                "nothing was written, so it stays where somebody can look at both sides");
+    }
+
+    /// <summary>
+    /// ⚠️ The companion invariant, which is the one that generalises: if a branch could not do
+    /// what it claims, the message stays in the queue.
+    ///
+    /// <para>Fixing the tenant makes the case above work, but it does not stop the next cause —
+    /// a ticket closed or deleted between triage and acceptance — from being swallowed the same
+    /// way. "Handled" is a claim about what happened, so it is now only made when something did.
+    /// This is asserted separately from the write itself so that a regression in either is
+    /// attributable: the two have different causes and different fixes.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_suggestion_that_wrote_nothing_leaves_the_message_in_the_queue()
+    {
+        Ticket ticket = await Reported();
+
+        db.CustomerEmailDomains.Add(new CustomerEmailDomain
+        {
+            Id = Guid.NewGuid(),
+            TenantId = ours,
+            CustomerId = ourCustomer,
+            Domain = "kund.example",
+        });
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? reply = await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = ours,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = Reporter,
+            Subject = $"Re: [#{ticket.Number}] Remisser kommer inte fram",
+            Body = "Har ni hunnit titta?",
+            SentAt = Tue(12),
+        });
+
+        MailSuggestion append = reply!.Suggestions
+            .Single(s => s.Kind == MailSuggestionKind.AppendToTicket && s.TicketId == ticket.Id);
+
+        // The ticket goes away between the analyst's suggestion and the operator accepting it,
+        // which is the general shape of "the branch could not do what it said".
+        db.Tickets.Remove(await db.Tickets.FirstAsync(t => t.Id == ticket.Id));
+        await db.SaveChangesAsync();
+
+        await mail.AcceptAsync(ours, append.Id, "nils", Tue(13));
+
+        InboundMailMessage after = await db.InboundMailMessages
+            .AsNoTracking().FirstAsync(m => m.Id == reply.Id);
+
+        after.State.Should().NotBe(MailTriageState.Handled,
+            "nothing was written, so saying it was handled hides a lost customer message behind "
+            + "a state that reads as success");
+    }
+
+    /// <summary>
     /// The same, threaded rather than quoted, and with the subject gone entirely. The
     /// Message-Id we minted is the strongest evidence there is that this message belongs to
     /// this ticket — it was sent to the people the ticket concerns and carries a random half

@@ -153,11 +153,18 @@ public static class ArrivalPolicy
     /// handed in by hand — is not made to say zero.
     /// </param>
     /// <param name="referenceIsProven">
-    /// Whether what placed this message on an existing ticket was something only somebody we
-    /// wrote to could be holding: a thread on one of our own Message-Ids, or a subject
-    /// reference whose check token validates. Read by the append branch and nothing else.
-    /// Defaulted to false, which is the safe answer — a caller that does not know cannot
-    /// cause anything to be appended.
+    /// Whether a subject reference's check token validates — an HMAC under a key only we hold.
+    ///
+    /// <para>⚠️ <b>This used to also admit "a thread on one of our own Message-Ids", and that
+    /// was wrong.</b> The random half of those identifiers is never checked against anything
+    /// stored, so anyone who knows a ticket number can mint a matching
+    /// <c>In-Reply-To</c>; <c>SupportMessageId.TicketNumberIn</c> states that outright and
+    /// warns against building on the opposite. Since this parameter is what licenses writing to
+    /// a customer and appending to a §14.6 history without a person reading the message, a
+    /// forgeable signal must not reach it.</para>
+    ///
+    /// <para>Read by the append and reply branches. Defaulted to false, which is the safe
+    /// answer — a caller that does not know cannot cause anything to be sent or appended.</para>
     /// </param>
     public static ArrivalDecision Decide(
         InboundMailMessage message,

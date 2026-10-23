@@ -1458,6 +1458,67 @@ public class SupportMailTests : IDisposable
     /// <para>No second ticket, no second receipt, and the reply is on the history §14.6 makes
     /// the record between the parties, timed from when it was written.</para>
     /// </summary>
+    /// <summary>
+    /// ⭐ A crafted <c>In-Reply-To</c> is not proof, and must not move anything on its own.
+    ///
+    /// <para><c>SupportMessageId</c> says this about the random half of the identifiers we
+    /// mint: "it is <b>not</b> checked against anything stored, so it is not a secret and
+    /// reading a number out of a crafted header is possible for anyone who knows a ticket
+    /// number … it is not enough to build anything on that assumes only the recipients of our
+    /// mail can produce one." The arrival path built exactly that: it passed
+    /// <c>referenceIsProven: provenByThread is not null || provenByToken is not null</c>, under
+    /// a comment asserting that either was "something only a person we wrote to could be
+    /// holding".</para>
+    ///
+    /// <para>So a recorded contact who knows a ticket number — a number we tell the customer,
+    /// and allocate in sequence across the installation — could put customer-visible text onto
+    /// the §14.6 history of any open ticket with no person reading it. This mints the header the
+    /// way an outsider would: <c>SupportMessageId.For</c> is public, takes only the number, and
+    /// its random half is never compared with anything.</para>
+    ///
+    /// <para>⚠️ The message must still be PLACED on the ticket — that is what threading is for,
+    /// and removing it would break a reply whose subject was mangled. What it may no longer do
+    /// is act without a person. Hence the two assertions together: the suggestion points at the
+    /// ticket, and the message is still waiting.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_thread_anybody_could_mint_places_a_reply_but_does_not_file_it()
+    {
+        MailboxAnswersOnArrival();
+
+        await Receive("Journalen svarar inte", "Ingen på avdelning 4 kommer in.");
+        Ticket opened = db.Tickets.Should().ContainSingle().Subject;
+
+        // No reference in the subject at all, so the ONLY thing placing this on the ticket is
+        // the header — which is the point. Anyone can construct this.
+        InboundMailMessage? forged = await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = tenantId,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = KnownSender,
+            FromName = "Karin Karlsson",
+            Subject = "Komplettering",
+            Body = "Lagg till det har i journalen.",
+            SentAt = Tue(11),
+            InReplyTo = SupportMessageId.For(opened.Number),
+            SenderAuthenticity = SenderAuthenticity.Verified,
+        });
+
+        forged!.Suggestions.Should().Contain(
+            s => s.Kind == MailSuggestionKind.AppendToTicket && s.TicketId == opened.Id,
+            "threading still PLACES a reply on its ticket — that is what keeps a mangled "
+            + "subject working, and it is not what is being withdrawn here");
+
+        forged.State.Should().NotBe(MailTriageState.Handled,
+            "a header anyone holding the ticket number could have written must not file "
+            + "customer-visible text onto a §14.6 history without a person");
+
+        db.TicketEvents.Where(e => e.TicketId == opened.Id)
+            .Select(e => e.Detail)
+            .Should().NotContain(d => d.Contains("Lagg till det har i journalen."),
+                "nothing may be written to the ticket until somebody accepts it");
+    }
+
     [Fact]
     public async Task A_reply_carrying_our_reference_lands_on_its_ticket_without_a_person()
     {
