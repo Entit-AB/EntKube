@@ -74,7 +74,8 @@ else
                     <tbody>
                         @foreach (AlertRule rule in group.OrderBy(r => r.Name))
                         {
-                            <tr>
+                            <tr style="cursor:pointer" @onclick="() => ToggleExpanded(rule)"
+                                title="Show the rule's query">
                                 <td style="width:90px">
                                     @StateIndicator(rule.State)
                                 </td>
@@ -100,13 +101,16 @@ else
                                 <td style="width:36px" class="text-end">
                                     @if (!string.IsNullOrEmpty(rule.RunbookUrl))
                                     {
-                                        <a href="@rule.RunbookUrl" target="_blank" class="btn btn-sm btn-link p-0" title="Runbook">
+                                        @* stopPropagation: the row toggles the query, so without this
+                                           opening the runbook also expands the row behind it. *@
+                                        <a href="@rule.RunbookUrl" target="_blank" class="btn btn-sm btn-link p-0" title="Runbook"
+                                           @onclick:stopPropagation="true">
                                             <span class="bi bi-book"></span>
                                         </a>
                                     }
                                 </td>
                             </tr>
-                            @if (expandedRule == rule.Name + rule.GroupName)
+                            @if (expandedRule == RuleKey(rule))
                             {
                                 <tr>
                                     <td colspan="5" class="bg-light py-2 px-3">
@@ -170,6 +174,33 @@ else
         ApplyFilter();
     }
 
+    /// <summary>
+    /// ⭐ Clicking a row shows that rule's PromQL. Nothing used to assign
+    /// <see cref="expandedRule"/> at all.
+    ///
+    /// <para>The expand row was already written — <c>@if (expandedRule == …)</c> around
+    /// <c>rule.Query</c> — but no row carried a click handler and no code path ever set the
+    /// field, so the compiler said so plainly: <c>warning CS0649: Field
+    /// 'AlertRulesPanel.expandedRule' is never assigned to, and will always have its default
+    /// value null</c>. The condition was therefore constantly false and the query was dead
+    /// markup: an operator looking at a rule they do not recognise had no way to see what it
+    /// actually asks, because the click they would try did nothing.</para>
+    ///
+    /// <para>⚠️ The key is <c>group/name</c>, not the old condition's <c>Name + GroupName</c>.
+    /// Bare concatenation of two free-form strings can collide — group "node" + rule "down" and
+    /// group "no" + rule "dedown" both yield "nodedown" — and expanding one rule would then
+    /// expand another. A separator that cannot appear in a Prometheus rule group name makes the
+    /// key unambiguous.</para>
+    /// </summary>
+    private static string RuleKey(AlertRule rule) => $"{rule.GroupName}/{rule.Name}";
+
+    /// <summary>Opens this rule's query, or closes it if it is the one already open.</summary>
+    private void ToggleExpanded(AlertRule rule)
+    {
+        string key = RuleKey(rule);
+        expandedRule = expandedRule == key ? null : key;
+    }
+
     private void ApplyFilter()
     {
         filtered = rules.Where(r =>
@@ -180,16 +211,69 @@ else
         ).ToList();
     }
 
-    private static string FormatDuration(double seconds) =>
-        seconds >= 3600 ? $"{(int)(seconds / 3600)}h"
-        : seconds >= 60 ? $"{(int)(seconds / 60)}m"
-        : $"{(int)seconds}s";
+    /// <summary>
+    /// The rule's <c>for:</c> window, with the remainder kept.
+    ///
+    /// <para>This used to collapse to the largest unit alone —
+    /// <c>seconds >= 3600 ? $"{(int)(seconds / 3600)}h" : …</c> — which truncates rather than
+    /// rounds and never shows what was dropped. A rule written <c>for: 90m</c> rendered as
+    /// <b>"1h"</b> and <c>for: 2m30s</c> as <b>"2m"</b>, losing up to 59 minutes with no sign
+    /// that anything was lost. The column is tooltipped "Fires after this duration", so the
+    /// number is presented as the rule's actual pre-fire window, and this panel is the only
+    /// place in EntKube that window is shown at all: the expanded row carries only the query,
+    /// and the rules API is read-only, so there is no second surface to check it against.</para>
+    ///
+    /// <para>⚠️ Coarse single-unit truncation <em>is</em> right elsewhere in the repo — every
+    /// "age" formatter (ClusterNodes, WorkloadsTab, ResourceTreePanel) does it, kubectl-style,
+    /// because an age is approximate by nature. A <em>configured</em> duration is not: it is a
+    /// number somebody chose, and the house treatment for one of those is
+    /// <c>IdentityTab.FormatSeconds</c>, which carries the remainder and collapses to a single
+    /// unit only when the remainder is zero. That is what this now does.</para>
+    /// </summary>
+    private static string FormatDuration(double seconds)
+    {
+        int total = (int)Math.Round(seconds);
+        if (total < 60) return $"{total}s";
 
+        int minutes = total / 60;
+        if (minutes < 60) return total % 60 == 0 ? $"{minutes}m" : $"{minutes}m {total % 60}s";
+
+        return minutes % 60 == 0 ? $"{minutes / 60}h" : $"{minutes / 60}h {minutes % 60}m";
+    }
+
+    /// <summary>
+    /// ⭐ Only the state Prometheus actually calls quiet is painted as quiet.
+    ///
+    /// <para>The final arm used to be a bare <c>_ =></c> onto the green "OK" badge, so every
+    /// state string that was not <c>firing</c> or <c>pending</c> — including an empty one —
+    /// came out as a green check reading "OK". <c>ParseAlertRules</c> defaults
+    /// <see cref="AlertRule.State"/> to <c>""</c> when the rules API omits the field, and the
+    /// catch-all turned that absence of information into a positive reassurance. "I do not know
+    /// what this rule is doing" and "this rule is fine" are not the same answer, and the green
+    /// one is the one nobody investigates.</para>
+    ///
+    /// <para>⚠️ <b>This does not cover a rule whose evaluation is failing.</b> Prometheus
+    /// reports two orthogonal things per alerting rule: <c>state</c> (inactive|pending|firing)
+    /// and <c>health</c> (ok|err|unknown) with <c>lastError</c>. A rule with bad PromQL — after
+    /// a metric rename, say — has <c>health: "err"</c> and <c>state: "inactive"</c>, because a
+    /// rule that cannot be evaluated can never fire. So it still renders here as a legitimate
+    /// "Inactive" and still lands in the green "inactive" badge above, while the alert it was
+    /// written for can no longer fire at all. Fixing that needs the parser, not this method:
+    /// <c>ParseAlertRules</c> (PrometheusService.cs) reads name/query/state/duration/labels/
+    /// annotations and never reads <c>health</c> or <c>lastError</c>, and
+    /// <see cref="AlertRule"/> has no field to put them in, so the information is discarded at
+    /// the parse boundary and is not recoverable from this component. The sibling panel on the
+    /// same page already shows what it should look like: <c>ParseScrapeTargets</c> reads both,
+    /// and <c>ScrapeTargetsPanel</c> paints a red DOWN badge, a <c>table-danger</c> row and a
+    /// panel-level "N targets down" banner.</para>
+    /// </summary>
     private static RenderFragment StateIndicator(string state) => state switch
     {
         "firing"   => @<span class="badge bg-danger"><span class="bi bi-fire me-1"></span>Firing</span>,
         "pending"  => @<span class="badge bg-warning text-dark"><span class="bi bi-hourglass me-1"></span>Pending</span>,
-        _          => @<span class="badge bg-success-subtle text-success border"><span class="bi bi-check me-1"></span>OK</span>
+        "inactive" => @<span class="badge bg-success-subtle text-success border"><span class="bi bi-check me-1"></span>OK</span>,
+        ""         => @<span class="badge bg-secondary-subtle text-secondary border" title="Prometheus reported no state for this rule"><span class="bi bi-question-circle me-1"></span>Unknown</span>,
+        _          => @<span class="badge bg-secondary-subtle text-secondary border" title="Unrecognised rule state: @state"><span class="bi bi-question-circle me-1"></span>@state</span>
     };
 
     private static RenderFragment SeverityBadge(string sev) => sev switch
