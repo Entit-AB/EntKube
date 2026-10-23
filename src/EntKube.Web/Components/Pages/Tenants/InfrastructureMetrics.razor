@@ -107,12 +107,12 @@ else
             new("node-disk", "Disk utilization (/)", "%", false,
                 Query: ClusterHealthQueries.NodeDiskPercent, Color: "#d63384", Max: 100),
             new("node-cpu-by", "CPU by node", "cores", true, SeriesLabel: "instance",
-                Query: "sum by (instance) (rate(node_cpu_seconds_total{mode!=\"idle\"}[5m]))"),
+                Query: $"sum by (instance) (rate(node_cpu_seconds_total{{mode!=\"idle\"}}[{PromRateWindow.Token}]))"),
         ]),
         new("Workloads", "bi-boxes",
         [
             new("ns-cpu", "CPU by namespace", "cores", true, SeriesLabel: "namespace",
-                Query: "sum by (namespace) (rate(container_cpu_usage_seconds_total{container!=\"\",namespace!=\"\"}[5m]))"),
+                Query: $"sum by (namespace) (rate(container_cpu_usage_seconds_total{{container!=\"\",namespace!=\"\"}}[{PromRateWindow.Token}]))"),
             new("ns-mem", "Memory by namespace", "MiB", true, SeriesLabel: "namespace",
                 Query: "sum by (namespace) (container_memory_working_set_bytes{container!=\"\",namespace!=\"\"}) / 1048576"),
             new("pods-running", "Running pods", null, false,
@@ -125,9 +125,9 @@ else
         new("Network", "bi-diagram-2",
         [
             new("net-rx", "Receive by namespace", "KiB/s", true, SeriesLabel: "namespace",
-                Query: "sum by (namespace) (rate(container_network_receive_bytes_total{namespace!=\"\"}[5m])) / 1024"),
+                Query: $"sum by (namespace) (rate(container_network_receive_bytes_total{{namespace!=\"\"}}[{PromRateWindow.Token}])) / 1024"),
             new("net-tx", "Transmit by namespace", "KiB/s", true, SeriesLabel: "namespace",
-                Query: "sum by (namespace) (rate(container_network_transmit_bytes_total{namespace!=\"\"}[5m])) / 1024"),
+                Query: $"sum by (namespace) (rate(container_network_transmit_bytes_total{{namespace!=\"\"}}[{PromRateWindow.Token}])) / 1024"),
         ]),
     ];
 

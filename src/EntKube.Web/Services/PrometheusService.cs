@@ -506,7 +506,11 @@ public class PrometheusService(
     private async Task<ClusterHealthSummary> QueryClusterHealthAsync(
         HttpClient http, string baseUrl, Guid clusterId, CancellationToken ct)
     {
-        Task<double> Scalar(string promQl) => ScalarAsync(http, $"{baseUrl}/api/v1/query?query={Q(promQl)}", ct);
+        // An instant query has no step, so the token resolves to PromRateWindow.FloorSeconds —
+        // 300s, exactly the 5m these queries asked for before. The substitution happens here only
+        // so that one constant can serve both the instant and the range caller.
+        Task<double> Scalar(string promQl) => ScalarAsync(
+            http, $"{baseUrl}/api/v1/query?query={Q(PromRateWindow.Resolve(promQl, 0))}", ct);
 
         // Which sources exist is a property of how the cluster is scraped, so it is asked
         // once and remembered — in steady state this leaves a single round of queries.
@@ -613,7 +617,13 @@ public class PrometheusService(
         long end   = DateTimeOffset.UtcNow.ToUnixTimeSeconds();
         long start = end - (long)duration.TotalSeconds;
         int  step  = Math.Max(15, (int)(duration.TotalSeconds / 100));
-        string encodedQuery = Q(query);
+
+        // ⚠️ The rate window is sized from the step here, not written into the query text. At 12h
+        // the step is 432s and at 24h it is 864s, both past the 5m these queries used to hard-code,
+        // so two thirds of the 24h timeline was never looked at and a ten-minute burst between
+        // sample points plotted as zero. Opt-in by token: an operator's own PromQL carries no
+        // token and is passed through exactly as typed. See PromRateWindow.
+        string encodedQuery = Q(PromRateWindow.Resolve(query, step));
 
         // Keyed on the query and window, not on `end` — that moves every second, which would make every
         // call a distinct key and cache nothing. Within the cache's few seconds, a chart whose window
@@ -906,13 +916,14 @@ public class PrometheusService(
 
                 if (hasNex > 0 && hasKsm > 0)
                 {
-                    cpuQ = Q(ClusterHealthQueries.NodeCpuPercent);
+                    // Sized from this query's own step, for the reason on PromRateWindow.
+                    cpuQ = Q(PromRateWindow.Resolve(ClusterHealthQueries.NodeCpuPercent, step));
                     memQ = Q(ClusterHealthQueries.NodeMemoryPercent);
                     podQ = Q(ClusterHealthQueries.RunningPods);
                 }
                 else
                 {
-                    cpuQ = Q(ClusterHealthQueries.KubeletCpuPercent);
+                    cpuQ = Q(PromRateWindow.Resolve(ClusterHealthQueries.KubeletCpuPercent, step));
                     memQ = Q(ClusterHealthQueries.KubeletMemoryPercent);
                     podQ = Q(ClusterHealthQueries.KubeletRunningPods);
                 }
