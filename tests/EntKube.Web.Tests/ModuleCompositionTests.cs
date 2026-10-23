@@ -48,6 +48,21 @@ public class ModuleCompositionTests
     /// The registrations a module's composition class actually performs, by running it
     /// against a bare collection. Reading the file would prove nothing about what runs.
     /// </summary>
+    /// <summary>
+    /// Sees through <c>SingletonWorkHost&lt;T&gt;</c> to the service it gates.
+    ///
+    /// <para>A hosted service now declares where it runs
+    /// (<c>AddSingletonWork</c>/<c>AddPerInstanceWork</c>, docs/decomposition.md §9.5), which puts
+    /// a wrapper between the module and its service. ⚠️ Unwrapped rather than exempted: the
+    /// mapping from module to concrete service is exactly what this file checks, so treating
+    /// <c>IHostedService</c> as unowned would have retired the check for all 24 of them. The
+    /// wrapper's type argument is the service, so nothing is lost.</para>
+    /// </summary>
+    private static Type Unwrap(Type t) =>
+        t.IsGenericType && t.GetGenericTypeDefinition() == typeof(EntKube.Web.Modules.SingletonWorkHost<>)
+            ? t.GetGenericArguments()[0]
+            : t;
+
     private static List<ServiceDescriptor> RegistrationsOf(Module module, Type composition)
     {
         ServiceCollection services = [];
@@ -68,7 +83,7 @@ public class ModuleCompositionTests
         {
             foreach (ServiceDescriptor d in RegistrationsOf(module, composition))
             {
-                Type implementation = d.ImplementationType ?? d.ServiceType;
+                Type implementation = Unwrap(d.ImplementationType ?? d.ServiceType);
                 Module? owner = ModuleMap.ServiceOwner(implementation);
 
                 if (owner is null)

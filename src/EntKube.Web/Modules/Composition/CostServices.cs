@@ -41,8 +41,8 @@ internal static class CostServices
         services.AddScoped<EntKube.Web.Services.Cost.CostLedgerWriter>();
         services.AddScoped<EntKube.Web.Services.Cost.CostLedgerService>();
         services.AddSingleton<EntKube.Web.Services.Cost.CostScanCache>();
-        services.AddHostedService<EntKube.Web.Services.Cost.CostScanService>();
-        services.AddHostedService<ResourceUsageCollectorService>();
+        services.AddSingletonWork<EntKube.Web.Services.Cost.CostScanService>();
+        services.AddSingletonWork<ResourceUsageCollectorService>();
 
         return services;
     }

@@ -38,7 +38,7 @@ internal static class AdvisorServices
         services.AddScoped<AdvisorStateService>();
         services.AddScoped<AdvisorDigestConfigService>();
         services.AddScoped<OperationsAdvisorService>();
-        services.AddHostedService<AdvisorScanService>();
+        services.AddSingletonWork<AdvisorScanService>();
 
         // The module's contract. See EntKube.Contracts for why callers get this rather
         // than the services behind it.

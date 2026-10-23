@@ -59,7 +59,7 @@ internal static class TelemetryServices
         services.AddScoped<TelemetryAlertRuleService>();
         services.AddScoped<DashboardService>();
         services.AddScoped<IncidentDispatcher>();
-        services.AddHostedService<TelemetryAlertEvaluator>();
+        services.AddSingletonWork<TelemetryAlertEvaluator>();
         services.AddScoped<LogQueryService>();
         services.AddScoped<IncidentService>();
         services.AddScoped<NotificationService>();
@@ -73,9 +73,9 @@ internal static class TelemetryServices
         services.AddScoped<ErrorBudgetService>();
         services.AddScoped<EntKube.Web.Services.Tickets.AlertTicketBridge>();
         services.AddScoped<CustomerNotificationService>();
-        services.AddHostedService<AlertSyncService>();
-        services.AddHostedService<AlertEscalationService>();
-        services.AddHostedService<UptimeTrackingService>();
+        services.AddSingletonWork<AlertSyncService>();
+        services.AddSingletonWork<AlertEscalationService>();
+        services.AddSingletonWork<UptimeTrackingService>();
 
         // The module's contract — what everyone else is allowed to know about it.
         services.AddScoped<EntKube.Contracts.Telemetry.ITelemetryApi,

@@ -41,7 +41,7 @@ internal static class IdentityServices
         services.AddScoped<UserManagementService>();
         services.AddScoped<TenantRoleService>();
         services.AddScoped<CustomerAccessService>();
-        services.AddHostedService<EntKube.Web.Services.Jit.JitGrantReaperService>();
+        services.AddSingletonWork<EntKube.Web.Services.Jit.JitGrantReaperService>();
         services.AddScoped<EntKube.Web.Services.Jit.JitAccessService>();
         services.AddScoped<EntKube.Web.Services.Jit.JitProxyService>();
         services.AddSingleton<EntKube.Web.Services.Jit.JitUpstreamClientPool>();
@@ -49,7 +49,7 @@ internal static class IdentityServices
         services.AddScoped<EntKube.Web.Services.Scim.ScimUserService>();
         services.AddScoped<KeycloakService>();
         services.AddScoped<AuditService>();
-        services.AddHostedService<KeycloakBackupSchedulerService>();
+        services.AddSingletonWork<KeycloakBackupSchedulerService>();
 
         return services;
     }

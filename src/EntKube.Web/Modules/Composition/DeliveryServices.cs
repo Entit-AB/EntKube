@@ -41,7 +41,7 @@ internal static class DeliveryServices
         services.AddScoped<KyvernoPolicyService>();
         services.AddScoped<KedaScalerService>();
         services.AddScoped<EntKube.Web.Services.Rollouts.RolloutService>();
-        services.AddHostedService<EntKube.Web.Services.Rollouts.RolloutWatcherService>();
+        services.AddSingletonWork<EntKube.Web.Services.Rollouts.RolloutWatcherService>();
         services.AddScoped<AppGovernanceService>();
         services.AddScoped<PortalServiceScopeService>();
         services.AddScoped<GitOperationsService>();
@@ -50,7 +50,7 @@ internal static class DeliveryServices
         services.AddScoped<AppOfAppsService>();
         services.AddSingleton<GitSyncService>();
         services.AddScoped<GitWebhookService>();
-        services.AddHostedService<DeploymentSyncService>();
+        services.AddSingletonWork<DeploymentSyncService>();
 
         // The module's contract — what everyone else is allowed to know about it.
         services.AddScoped<EntKube.Contracts.Delivery.IDeliveryApi, EntKube.Web.Modules.Api.DeliveryApi>();
