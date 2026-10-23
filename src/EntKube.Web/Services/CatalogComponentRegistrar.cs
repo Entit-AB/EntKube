@@ -259,7 +259,19 @@ public class CatalogComponentRegistrar(
             : string.IsNullOrEmpty(hostname) ? "" : $"https://{hostname}{httpPath}";
         string adminUsername = fieldValues.TryGetValue("admin-username", out string? n) && !string.IsNullOrWhiteSpace(n) ? n : "admin";
 
-        await keycloakService.ConfigureAsync(tenantId, componentId, cnpgDatabaseId, adminUsername, adminPassword, adminUrl);
+        // Same reasoning as ClusterDetail's copy of this, and this is the call site the compiler
+        // found that a search for it did not: these fieldValues carry a cnpg-database field and no
+        // registered-Postgres one, so saving them expresses no opinion about a registered
+        // database and must not clear one. Choosing a CNPG database does decide it, the two being
+        // mutually exclusive.
+        KeycloakComponentConfig? existingKeycloak =
+            await keycloakService.GetConfigForComponentAsync(tenantId, componentId);
+
+        await keycloakService.ConfigureAsync(
+            tenantId, componentId, cnpgDatabaseId, adminUsername, adminPassword, adminUrl,
+            registeredPostgresDatabaseId: cnpgDatabaseId is null
+                ? existingKeycloak?.RegisteredPostgresDatabaseId
+                : null);
 
         if (!string.IsNullOrEmpty(hostname))
         {

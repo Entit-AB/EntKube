@@ -3611,7 +3611,21 @@ else if (section == "components")
 
         string adminUsername = fieldValues.TryGetValue("admin-username", out string? n) && !string.IsNullOrWhiteSpace(n) ? n : "admin";
 
-        await KeycloakService.ConfigureAsync(TenantId, componentId, cnpgDatabaseId, adminUsername, adminPassword, adminUrl);
+        // ⚠️ This form has a cnpg-database field and no registered-Postgres one, so saving it
+        // expresses no opinion about a registered database — and must not decide that question.
+        // It used to omit the argument, which took the parameter's `= null` default and cleared
+        // whatever the identity tab had set, leaving a Keycloak with neither database id.
+        //
+        // Picking a CNPG database DOES decide it, because the two are mutually exclusive, so that
+        // case clears the registered link on purpose. Leaving the field empty preserves it.
+        KeycloakComponentConfig? existingKeycloak =
+            await KeycloakService.GetConfigForComponentAsync(TenantId, componentId);
+
+        await KeycloakService.ConfigureAsync(
+            TenantId, componentId, cnpgDatabaseId, adminUsername, adminPassword, adminUrl,
+            registeredPostgresDatabaseId: cnpgDatabaseId is null
+                ? existingKeycloak?.RegisteredPostgresDatabaseId
+                : null);
 
         // Create the HTTPRoute + Certificate if a hostname was provided.
         if (!string.IsNullOrEmpty(hostname))
