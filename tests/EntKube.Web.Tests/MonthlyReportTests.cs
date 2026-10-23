@@ -258,6 +258,68 @@ public class MonthlyReportTests : IDisposable
         report.PenaltiesAlreadyThisYear.Should().Be(2);
         report.PenaltyDeviations.Should().Be(1);
         report.PenaltiesRemainingThisYear.Should().Be(0);
+
+        // ⚠️ The boundary, and the money belongs here: two used and one this month is the third
+        // of three, so it IS paid for — which is why this scenario reads the same whether the cap
+        // is applied or ignored. That is exactly why the amount went unchecked for so long, and
+        // why the two tests below sit past the boundary rather than on it.
+        report.PayablePenalties.Should().Be(1);
+        report.PenaltyAmount.Should().Be(600m);
+    }
+
+    /// <summary>
+    /// ⭐ <b>More deviations in the month than the year's allowance has left.</b>
+    ///
+    /// <para>§14.6 pays for three a calendar year — <c>TicketSla.MaxPenaltiesPerYear</c>, whose own
+    /// doc comment says "the number of response-time breaches §14.6 pays a penalty for in a
+    /// calendar year". Two have gone, so of this month's three only one is payable: 600 kr, not
+    /// 1 800.</para>
+    ///
+    /// <para>The amount used to be the window fee times the month's <em>full</em> count, with the
+    /// allowance never consulted — and the report printed that figure in the same sentence as the
+    /// words "up to three a calendar year". The count stays 3, because that is a fact about the
+    /// month and §28 makes the report binding on what it states.</para>
+    /// </summary>
+    [Fact]
+    public async Task Only_the_deviations_still_inside_the_years_allowance_are_paid_for()
+    {
+        await RaiseWithLateResponse(TicketPriority.P1, Swedish(2026, 7, 21, 9));
+        await RaiseWithLateResponse(TicketPriority.P1, Swedish(2026, 8, 18, 9));
+
+        await RaiseWithLateResponse(TicketPriority.P1, Tue(9));
+        await RaiseWithLateResponse(TicketPriority.P2, Tue(10));
+        await RaiseWithLateResponse(TicketPriority.P1, Tue(11));
+
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
+
+        report.PenaltiesAlreadyThisYear.Should().Be(2);
+        report.PenaltyDeviations.Should().Be(3, "all three happened and all three are reported");
+
+        report.PayablePenalties.Should().Be(1, "one of the three a year was still unspent");
+        report.PenaltyAmount.Should().Be(600m,
+            "1 800 kr is what pricing all three comes to, and §14.6 does not owe it");
+    }
+
+    /// <summary>
+    /// The allowance already spent before the month began: nothing further is owed, and the
+    /// deviations are still reported.
+    /// </summary>
+    [Fact]
+    public async Task A_year_already_at_the_cap_owes_nothing_further()
+    {
+        await RaiseWithLateResponse(TicketPriority.P1, Swedish(2026, 6, 16, 9));
+        await RaiseWithLateResponse(TicketPriority.P1, Swedish(2026, 7, 21, 9));
+        await RaiseWithLateResponse(TicketPriority.P1, Swedish(2026, 8, 18, 9));
+
+        await RaiseWithLateResponse(TicketPriority.P1, Tue(9));
+
+        MonthlyReport report = await reports.BuildAsync(tenantId, customerId, September);
+
+        report.PenaltiesAlreadyThisYear.Should().Be(3);
+        report.PenaltyDeviations.Should().Be(1, "it still happened and is still reported");
+
+        report.PayablePenalties.Should().Be(0);
+        report.PenaltyAmount.Should().Be(0m, "three a year is the whole allowance");
     }
 
     [Fact]

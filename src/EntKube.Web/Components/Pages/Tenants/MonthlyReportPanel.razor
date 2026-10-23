@@ -225,6 +225,19 @@
             §14.6 sets this at @((int)(TicketSla.PenaltyFractionOfWindowFee * 100))% of the month's
             window fee (@report.WindowFee.ToString("N0") kr) per deviation, up to
             @TicketSla.MaxPenaltiesPerYear a calendar year.
+            @if (report.PayablePenalties < report.PenaltyDeviations)
+            {
+                @* Without this the two numbers above read as an arithmetic mistake: the count is
+                   the month's real total and the amount is only what the year's allowance still
+                   covers. Saying which of the deviations are priced is the difference between a
+                   capped figure and a wrong one. *@
+                <span>
+                    @report.PayablePenalties of
+                    @(report.PenaltyDeviations == 1 ? "it" : "them")
+                    @(report.PayablePenalties == 1 ? "is" : "are") priced here — the
+                    @TicketSla.MaxPenaltiesPerYear a year were reached.
+                </span>
+            }
             @if (Customer)
             {
                 <span>
