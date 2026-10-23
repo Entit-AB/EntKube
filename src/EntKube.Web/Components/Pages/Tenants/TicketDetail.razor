@@ -74,8 +74,16 @@
                     <div class="small text-muted">
                         @if (status.UpdateOverdue(now))
                         {
+                            @* ⚠️ With the day on it, not a bare time. LastUpdateAt is the last
+                               thing the customer was actually told, and §14.4's deadline walks
+                               over closed hours and pauses — so the gap this line exists to
+                               describe can be days wide. It used to print "since 16:40", which
+                               on a Monday morning reads as this afternoon when it was Friday,
+                               and the operator deprioritises the most overdue obligation on
+                               the ticket. The non-overdue line below it, and the same sentence
+                               in the queue (TicketQueue.razor), have always carried the day. *@
                             <span>overdue — the customer has heard nothing since
-                                @status.LastUpdateAt.ToLocalTime().ToString("HH:mm")</span>
+                                @status.LastUpdateAt.ToLocalTime().ToString("MMM d HH:mm")</span>
                         }
                         else
                         {
@@ -340,8 +348,10 @@
             }
 
             @* Moving is the one action that can take a ticket out of the tenant the person
-               is looking at. The pickers only offer tenants they can already reach, so the
-               control cannot express a move they would not be allowed to make. *@
+               is looking at. The pickers only offer tenants they can already reach — and
+               because what a select posts is a browser-supplied string rather than one of the
+               options we rendered, every posted id is checked against that same server-side
+               list again before it is used. See CanMoveInto. *@
             @if (showMove)
             {
                 <div class="border rounded p-3 mb-2">
@@ -472,8 +482,9 @@
 
     // ---- Moving it somewhere else ----
     //
-    // The tenants this person can already reach, loaded once. Only they are offered, so
-    // the control cannot express a move its operator would not be allowed to make.
+    // The tenants this person can already reach, read once on the server. They are the only
+    // ones offered, and — since the rendered options are not a boundary, see CanMoveInto —
+    // the only ones accepted.
     private List<Tenant> moveTargets = [];
     private List<Customer> moveCustomers = [];
     private List<Data.App> moveApps = [];
@@ -551,32 +562,71 @@
         showMove = true;
     }
 
+    /// <summary>
+    /// Whether a ticket may be moved into <paramref name="tenantId"/>: it has to be one
+    /// <see cref="moveTargets"/> already holds.
+    ///
+    /// <para>⭐ The list is the authority, not the markup. <c>moveTargets</c> is read on the
+    /// server from this person's memberships (<see cref="ReachableTenantsAsync"/>) and the
+    /// browser cannot reach it; the rendered options are a convenience built from it.</para>
+    ///
+    /// <para>⚠️ A select's change payload is a string the browser puts on the circuit.
+    /// Blazor Server validates the handler an event is addressed to, never the value that
+    /// arrives with it, so nothing confines it to the options we rendered. This page used to
+    /// claim in a comment that "the pickers only offer tenants they can already reach, so the
+    /// control cannot express a move they would not be allowed to make" and then hand the
+    /// posted id straight to <see cref="LoadMoveCustomersAsync"/> — which answers with
+    /// another tenant's customer names — and the chosen customer straight to
+    /// <see cref="TicketService.MoveAsync"/>, whose destination is deliberately unscoped (its
+    /// own doc says so, and two service tests pin it that way). The service is right to stay
+    /// unscoped: moving a ticket across tenants is the whole point of the action. That leaves
+    /// this page as the only place the destination can be authorised, which is why it is
+    /// authorised here.</para>
+    ///
+    /// <para>The caller this guards against is not somebody conjuring GUIDs out of nothing:
+    /// it is somebody who knew the ids before their membership was taken away, and whose
+    /// picker no longer offers them.</para>
+    /// </summary>
+    private bool CanMoveInto(Guid tenantId) => moveTargets.Any(t => t.Id == tenantId);
+
     private async Task OnMoveTenantChanged(ChangeEventArgs e)
     {
-        moveTenantId = e.Value?.ToString() ?? "";
         moveCustomerId = "";
         moveAppId = "";
         moveApps = [];
+        moveCustomers = [];
 
-        if (Guid.TryParse(moveTenantId, out Guid tenantId))
+        if (!Guid.TryParse(e.Value?.ToString(), out Guid tenantId) || !CanMoveInto(tenantId))
         {
-            await LoadMoveCustomersAsync(tenantId);
+            // Refused rather than queried. The Customer picker is built FROM this value, so a
+            // tenant we never offered would be answered with its customers' names.
+            moveTenantId = "";
+            Toasts.Error("That is not a tenant you can move a ticket into.");
+            return;
         }
+
+        moveTenantId = tenantId.ToString();
+        await LoadMoveCustomersAsync(tenantId);
     }
 
     private async Task OnMoveCustomerChanged(ChangeEventArgs e)
     {
-        moveCustomerId = e.Value?.ToString() ?? "";
         moveAppId = "";
 
-        if (Guid.TryParse(moveCustomerId, out Guid customerId))
+        // The same reasoning as the tenant above, one level down: moveApps is loaded FROM this
+        // id, and moveCustomers is the server-side list the options were rendered from. No
+        // toast, because the empty value is the "choose" placeholder and picking it is not a
+        // mistake.
+        if (!Guid.TryParse(e.Value?.ToString(), out Guid customerId)
+            || moveCustomers.All(c => c.Id != customerId))
         {
-            await LoadMoveAppsAsync(customerId);
-        }
-        else
-        {
+            moveCustomerId = "";
             moveApps = [];
+            return;
         }
+
+        moveCustomerId = customerId.ToString();
+        await LoadMoveAppsAsync(customerId);
     }
 
     private async Task LoadMoveCustomersAsync(Guid tenantId)
@@ -601,7 +651,13 @@
 
     private async Task MoveAsync()
     {
-        if (!Guid.TryParse(moveCustomerId, out Guid customerId))
+        // Not one of the customers we offered means no destination — whether nothing was
+        // chosen, or the posted value never came from the control (see CanMoveInto). Checking
+        // the customer is what carries the tenant check through to the move itself:
+        // moveCustomers is only ever loaded for a tenant CanMoveInto allowed, and the
+        // application is checked in the service, which refuses one belonging to anybody else.
+        if (!Guid.TryParse(moveCustomerId, out Guid customerId)
+            || moveCustomers.All(c => c.Id != customerId))
         {
             Toasts.Error("Choose the customer it belongs to.");
             return;
@@ -625,6 +681,29 @@
                 : "Moved.");
 
             showMove = false;
+
+            // ⭐ A move can take the ticket out of the tenant this view is scoped to, and
+            // when it does there is nothing here left to re-read. TenantId is a parameter,
+            // bound by TicketQueue to the tenant the explorer has open and never updated by a
+            // move; LoadAsync reads through it and Tickets.GetAsync filters on it. So
+            // re-reading in place — which is what this used to do — handed back null, and the
+            // entire body below (including "Back to the queue", which sits inside the same
+            // @if) rendered as nothing immediately after a success toast: the move had
+            // happened, and the screen said the ticket was gone with no way out of the blank
+            // state but a page reload.
+            //
+            // Leaving is also what the other detail views do when an action takes the entity
+            // out of the page's scope: AppDetail's unregister and the cluster delete finish
+            // with OnDeleted, and TenantExplorer clears the selection rather than keeping a
+            // detail view that can no longer resolve its row. OnBack first, so the panel is
+            // never rendered against a tenant that cannot resolve the ticket.
+            if (result.Ticket.TenantId != TenantId)
+            {
+                await OnBack.InvokeAsync();
+                await OnChanged.InvokeAsync();
+                return;
+            }
+
             await LoadAsync();
             await OnChanged.InvokeAsync();
         }
