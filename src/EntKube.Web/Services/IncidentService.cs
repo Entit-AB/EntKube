@@ -580,6 +580,23 @@ public record AlertStats(
     double? MttaMinutes,
     List<DailyAlertCount> Daily)
 {
+    /// <summary>
+    /// Incidents open right now: <see cref="Active"/> plus <see cref="Acknowledged"/>, which is
+    /// exactly the set <see cref="Critical"/> and <see cref="Warning"/> are counted from —
+    /// <c>GetStatsForTenantAsync</c> builds those four from one query whose only predicate is
+    /// <c>Status == Active || Status == Acknowledged</c>.
+    ///
+    /// <para>⚠️ <b>This is not <see cref="Total"/>, and the difference is a trap.</b> Total counts
+    /// incidents that STARTED inside the window; the severity counts deliberately ignore the
+    /// window so a long-running alert still shows, which its own comment explains. Both are right
+    /// as counts. Dividing one by the other is not a share of anything, and it produced severity
+    /// bars wider than 100% and a negative "Other" — three open criticals that began before the
+    /// window, against one incident inside it, gave 300%.</para>
+    ///
+    /// <para>So anything expressing a severity count as a proportion divides by this.</para>
+    /// </summary>
+    public int Open => Active + Acknowledged;
+
     public string FormatMttr() => MttrMinutes.HasValue
         ? MttrMinutes.Value >= 60
             ? $"{MttrMinutes.Value / 60:F1}h"

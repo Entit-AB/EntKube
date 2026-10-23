@@ -204,12 +204,23 @@ else
             <div class="card">
                 <div class="card-header py-2 small fw-semibold">
                     <span class="bi bi-pie-chart me-1"></span>Severity breakdown
+                    <span class="text-muted fw-normal">· open now</span>
                 </div>
                 <div class="card-body py-2">
-                    @if (stats.Total > 0)
+                    @* ⚠️ Open, never Total. The severity counts come from a query with no date
+                       predicate, so a long-running alert still shows; Total counts only incidents
+                       that STARTED in the window. Both are right as counts and their ratio is a
+                       share of nothing: three open criticals from before the window against one
+                       incident inside it gave critPct = 300, a bar at width:300%, otherPct = -200
+                       — so no "Other" bar at all, its `> 0` guard being false — and an "Other"
+                       badge reading -2. Dividing by Open makes the three shares sum to 100 by
+                       construction and the bars agree with the badges beneath them, which is what
+                       the badges were already counting. The header says "open now" because that is
+                       now what the card is a breakdown of. *@
+                    @if (stats.Open > 0)
                     {
-                        int critPct = (int)(stats.Critical * 100.0 / stats.Total);
-                        int warnPct = (int)(stats.Warning * 100.0 / stats.Total);
+                        int critPct = (int)(stats.Critical * 100.0 / stats.Open);
+                        int warnPct = (int)(stats.Warning * 100.0 / stats.Open);
                         int otherPct = 100 - critPct - warnPct;
                         <div class="d-flex rounded overflow-hidden mb-2" style="height:24px">
                             @if (critPct > 0)
@@ -229,7 +240,7 @@ else
                             @if (otherPct > 0)
                             {
                                 <div class="bg-info d-flex align-items-center justify-content-center text-white"
-                                     style="width:@(otherPct)%;font-size:.7rem" title="Other: @(stats.Total - stats.Critical - stats.Warning)">
+                                     style="width:@(otherPct)%;font-size:.7rem" title="Other: @(stats.Open - stats.Critical - stats.Warning)">
                                     @if (otherPct > 10) { <span>@(otherPct)%</span> }
                                 </div>
                             }
@@ -237,12 +248,12 @@ else
                         <div class="d-flex gap-3 small">
                             <span><span class="badge bg-danger me-1">@stats.Critical</span>Critical</span>
                             <span><span class="badge bg-warning text-dark me-1">@stats.Warning</span>Warning</span>
-                            <span><span class="badge bg-info me-1">@(stats.Total - stats.Critical - stats.Warning)</span>Other</span>
+                            <span><span class="badge bg-info me-1">@(stats.Open - stats.Critical - stats.Warning)</span>Other</span>
                         </div>
                     }
                     else
                     {
-                        <p class="text-muted small mb-0">No incidents in window.</p>
+                        <p class="text-muted small mb-0">No open incidents.</p>
                     }
                 </div>
             </div>
