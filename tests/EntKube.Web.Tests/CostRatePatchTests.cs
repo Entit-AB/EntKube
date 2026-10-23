@@ -277,13 +277,28 @@ public class CostRatePatchTests : IDisposable
         // Health check: the route is still here under the name this file talks about.
         source.Should().Contain("MapPut(\"/cost-rates/{clusterId:guid}\"");
 
-        source.Should().Contain("rates.PatchAsync(",
+        // ⚠️ The route reaches the merge through ICostApi now, not CostRateService directly — the
+        // price sheets moved behind Cost's contract. The property is unchanged and so is this
+        // test's point; what moved is which layer to read it at, so the pin follows the code
+        // rather than being deleted. A pin that stops matching is a question about the code, not
+        // licence to drop the assertion.
+        source.Should().Contain("cost.PatchRateAsync(",
             "an optional request body cannot be expressed as a whole entity: an unset property is "
             + "indistinguishable from one deliberately set to its default");
 
         Regex.Matches(source, @"rates\.SaveAsync\(").Should().BeEmpty(
             "SaveAsync writes every field, so routing an optional body through it turns each "
             + "omitted field into an overwrite");
+
+        // And the merge is still a merge one layer down, where the contract implements it.
+        string costApi = File.ReadAllText(Path.GetFullPath(Path.Combine(
+            AppContext.BaseDirectory, "../../../../../src/EntKube.Web/Modules/Api/CostApi.cs")));
+
+        costApi.Should().Contain("rates.PatchAsync(",
+            "ICostApi.PatchRateAsync has to reach the method that keeps what the caller omitted");
+
+        Regex.Matches(costApi, @"rates\.SaveAsync\(").Should().BeEmpty(
+            "and must not take the whole-row replace that the settings page correctly uses");
     }
 
     [Fact]

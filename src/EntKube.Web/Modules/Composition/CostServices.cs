@@ -37,6 +37,7 @@ internal static class CostServices
     {
         services.AddScoped<EntKube.Web.Services.Cost.CostReportService>();
         services.AddScoped<EntKube.Web.Services.Cost.CostRateService>();
+        services.AddScoped<EntKube.Contracts.Cost.ICostApi, EntKube.Web.Modules.Api.CostApi>();
         services.AddScoped<EntKube.Web.Services.Cost.CostLedgerWriter>();
         services.AddScoped<EntKube.Web.Services.Cost.CostLedgerService>();
         services.AddSingleton<EntKube.Web.Services.Cost.CostScanCache>();

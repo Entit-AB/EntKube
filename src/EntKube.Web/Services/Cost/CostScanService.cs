@@ -202,6 +202,24 @@ public class CostRateService(IDbContextFactory<CostDbContext> dbFactory)
     }
 
     /// <summary>
+    /// One cluster's price sheet, or null when it has none.
+    ///
+    /// <para>⚠️ Tenant-scoped through the cluster, like <see cref="ListAsync"/>: a cluster id on
+    /// its own is not authorisation. The predicate is applied in the database rather than by
+    /// filtering <see cref="ListAsync"/>'s result, which is what the public API route did — it
+    /// fetched every rate the tenant had in order to return one.</para>
+    /// </summary>
+    public async Task<ClusterCostRate?> GetAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        return await db.ClusterCostRates
+            .AsNoTracking()
+            .FirstOrDefaultAsync(r => r.ClusterId == clusterId && r.Cluster.TenantId == tenantId, ct);
+    }
+
+    /// <summary>
     /// Creates or updates a cluster's price sheet. Scoped by tenant as well as cluster so a
     /// tenant cannot price another tenant's cluster.
     /// </summary>
