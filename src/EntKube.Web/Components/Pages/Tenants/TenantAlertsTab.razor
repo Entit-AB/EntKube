@@ -6,7 +6,20 @@
 @inject RemediationService RemediationService
 @inject IncidentService IncidentService
 @inject ToastService Toasts
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@* ⚠️ Telemetry's context, and the reason is worth stating because the tables cannot settle it.
+   This page reads exactly one table — KubernetesClusters — and that is a HUB, exposed as a
+   read-only IQueryable on every module context, so every context would serve it equally and the
+   query says nothing about which module owns the page.
+
+   What settles it is what the page IS. Two of its three module services are Telemetry's
+   (PrometheusService, IncidentService) and one is Fleet's (RemediationService); alerts are
+   Telemetry's subject and remediation is the action this page offers on one. So: Telemetry, with
+   the Fleet service injected as a service — which is all it ever was. The ratchet is about the
+   all-seeing CONTEXT, not about calling another module's service.
+
+   It needs only the read: there is no SaveChanges anywhere in this component.
+   docs/decomposition.md §4.0.2. *@
+@inject IDbContextFactory<EntKube.Web.Data.Modules.TelemetryDbContext> DbFactory
 @inject AuthenticationStateProvider AuthStateProvider
 @implements IAsyncDisposable
 
@@ -451,7 +464,7 @@ else
         StateHasChanged();
 
         List<KubernetesCluster> clusters;
-        using (ApplicationDbContext db = DbFactory.CreateDbContext())
+        using (EntKube.Web.Data.Modules.TelemetryDbContext db = DbFactory.CreateDbContext())
         {
             clusters = await db.KubernetesClusters
                 .Include(c => c.Components)

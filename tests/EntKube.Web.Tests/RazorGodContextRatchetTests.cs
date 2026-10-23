@@ -41,7 +41,6 @@ public class RazorGodContextRatchetTests
         // Choosing for them is an architecture decision about which module owns the page, so it is
         // stated in a change of its own rather than guessed here.
         "SupportInbox.razor",              // SupportMailService (Support) + UserAccessService (Identity)
-        "TenantAlertsTab.razor",           // Incident, Prometheus (Telemetry) + Remediation (Fleet)
         "TenantMonitoringOverview.razor",  // Telemetry ×2 + OnCall (Support) + OperationsAdvisor (Advisor)
         "TicketDetail.razor",              // Support ×2 + UserAccessService (Identity)
         "UpgradesTab.razor",               // ComponentUpgrade (Catalog) + NodeManagement (Fleet)
