@@ -5,7 +5,8 @@
    shared time + value axis, with a value (y) scale, a start/end time (x) axis,
    faint gridlines, and a legend. Points are positioned by real timestamp (not
    index) so series with different sampling still line up. Server-rendered SVG,
-   no JS. Mirrors MetricChart's invariant-culture coords.
+   no JS. Geometry is emitted through Coord() in the invariant culture; the VALUE
+   LABELS are deliberately localized. See Coord().
    ═══════════════════════════════════════════════════════════════════════════ *@
 
 <div class="multi-series-chart">
@@ -101,6 +102,31 @@
 
     private static string TimeLabel(DateTime t) => t.ToLocalTime().ToString("HH:mm");
 
+    /// <summary>
+    /// ⭐ One coordinate, in the invariant culture, because an SVG number is not a displayed
+    /// number.
+    ///
+    /// <para><b>This file's header used to claim it "Mirrors MetricChart's invariant-culture
+    /// coords", and it did not.</b> The gridlines above do
+    /// (<c>gy.ToString("F1", Inv)</c>), but <see cref="LinePoints"/> built its pairs with plain
+    /// interpolation — <c>$"{x:F1},{y:F1}"</c> — which formats with
+    /// <see cref="System.Globalization.CultureInfo.CurrentCulture"/>. EntKube.Web pins no
+    /// culture, so on this product's own Swedish hosts the pair <c>(2, 70.4)</c> was emitted as
+    /// <c>2,0,70,4</c>.</para>
+    ///
+    /// <para>⚠️ <b>Nothing fails.</b> SVG's number grammar accepts a comma OR whitespace between
+    /// numbers, so the renderer reads four coordinates where two were meant, every later pair
+    /// shifts by one, and a smooth line appears that was never plotted from the data — while the
+    /// gridlines and axis labels stay correct, which is what makes it look like a real
+    /// measurement. A dot-decimal host hides it entirely; a comma-decimal host corrupts every
+    /// point. That is why a comment could claim the opposite for this long.</para>
+    ///
+    /// <para>The value labels (<see cref="AxisLabel"/>, <c>LastValue</c>) are left localized on
+    /// purpose: those are read by a person, and a Swedish operator should see <c>50,0</c>. The
+    /// distinction is geometry versus text, not one culture for the whole file.</para>
+    /// </summary>
+    private static string Coord(double value) => value.ToString("F1", Inv);
+
     private string LinePoints(MetricSeriesGroup s)
     {
         List<string> pts = [];
@@ -108,7 +134,7 @@
         {
             double x = Pad + (p.Timestamp.Ticks - _minTicks) / _spanTicks * (W - 2 * Pad);
             double y = H - Pad - (p.Value / _maxVal) * (H - 2 * Pad);
-            pts.Add($"{x:F1},{y:F1}");
+            pts.Add($"{Coord(x)},{Coord(y)}");
         }
         return string.Join(" ", pts);
     }
