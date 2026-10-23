@@ -89,7 +89,17 @@
 
             @if (Filtered().Count == 0)
             {
-                <p class="text-muted small mb-0">Nothing matches the current filters — everything here is up to date.</p>
+                @* The summary cards above are computed over the WHOLE report (UpgradeCount and
+                   friends on UpgradeReport), not over Filtered(), so an empty filtered set says
+                   nothing at all about the tenant's currency.
+
+                   This used to read "— everything here is up to date". With "Major behind only"
+                   selected, or a cluster chosen, or a search term typed, that all-clear rendered
+                   directly underneath a card reading "Updates available 12". SupplyChainTab, which
+                   has the same cards + filters + search shape, states only the first clause; this
+                   now matches it. (TenantAlertsTab does assert health in its empty state, and may:
+                   its cards are computed from the filtered set, so they cannot disagree with it.) *@
+                <p class="text-muted small mb-0">Nothing matches the current filters.</p>
             }
             else
             {
@@ -154,7 +164,31 @@
                                         @(c.LatestReleasedAt?.ToString("yyyy-MM-dd") ?? "—")
                                     </td>
                                     <td class="text-end text-nowrap">
-                                        @if (c.IsActionable && c.LatestVersion is not null)
+                                        @* ⭐ "Actionable" is not the same question as "is there a newer
+                                           version to move to". IsActionable is UpgradeAvailable OR
+                                           Deprecated, and Deprecated is only set when lag == UpToDate
+                                           (ComponentUpgradeService.Evaluate) — i.e. the installed version
+                                           already IS the newest candidate, so LatestVersion equals
+                                           InstalledVersion.
+
+                                           Gating the button on IsActionable alone therefore offered an
+                                           enabled "Upgrade" on every deprecated row: the dialog read
+                                           "1.2.3 → 1.2.3", the footer read "Upgrade to 1.2.3", the runner
+                                           skipped its repin (its own guard compares the requested version
+                                           against the stored one) and re-applied the identical chart, and
+                                           the dialog then said "<name> is now on 1.2.3" — after which the
+                                           reloaded row was still red "Deprecated". Nothing had changed and
+                                           the operator had been told the deprecation was resolved.
+
+                                           SemVer.OffersUpgrade is the house predicate for exactly this
+                                           comparison; ClusterDetail uses it (HasCatalogUpdate) to decide
+                                           whether its own button says "Upgrade" or "Apply".
+
+                                           ⚠️ Do NOT push this predicate into Filtered(): a deprecated row
+                                           genuinely needs attention and belongs in "Needs attention". It is
+                                           only the ACTION that does not exist — hence the note below, rather
+                                           than a row that quietly disappears. *@
+                                        @if (c.IsActionable && SemVer.OffersUpgrade(c.InstalledVersion, c.LatestVersion))
                                         {
                                             <button class="btn btn-sm btn-primary me-1"
                                                     @onclick="() => BeginUpgrade(c)"
@@ -162,6 +196,13 @@
                                                     title="@($"Upgrade {c.DisplayName} to {c.LatestVersion} on {c.ClusterName}")">
                                                 <i class="bi bi-arrow-up-circle me-1"></i>Upgrade
                                             </button>
+                                        }
+                                        else if (c.IsActionable)
+                                        {
+                                            <span class="text-muted small me-2"
+                                                  title="The repository publishes nothing newer than the installed version, so there is no upgrade to run from here. Resolving this means moving to a different chart or repository.">
+                                                No newer version published
+                                            </span>
                                         }
                                         <a class="btn btn-sm btn-outline-secondary"
                                            href="@ClusterLink(c.ClusterId)"
@@ -224,9 +265,9 @@
                                 <td class="fw-medium">@row.ClusterName</td>
                                 <td>
                                     <code class="small">@(row.ReportedVersion ?? "—")</code>
-                                    @if (row.Error is not null)
+                                    @if (row.Note is not null)
                                     {
-                                        <i class="bi bi-exclamation-circle text-warning ms-1 small" title="@row.Error"></i>
+                                        <i class="bi bi-exclamation-circle text-warning ms-1 small" title="@row.Note"></i>
                                     }
                                 </td>
                                 <td><span class="badge @SupportClass(row.Status.State)">@SupportText(row.Status.State)</span></td>
@@ -327,8 +368,35 @@
                                     </ul>
                                 </div>
                             }
-                            else
+                            else if (preflight.Error is null)
                             {
+                                @* ⭐ The all-clear is a claim about an inspection that HAPPENED, so it may
+                                   only render when one did.
+
+                                   This used to be a bare `else` on RequiresScaleDown, and
+                                   RequiresScaleDown is `Blocked.Count > 0` — which is also what every
+                                   FAILURE of the preflight produces. VolumePreflight.Failure(error) sets
+                                   Error and leaves Blocked at its empty initializer, and InspectAsync
+                                   returns Failure for a component it cannot find, a cluster that is not
+                                   this tenant's or has no kubeconfig, a component with no namespace
+                                   recorded, and a `kubectl get deployments` that threw — plus BeginUpgrade
+                                   catching anything else into Failure(ex.Message).
+
+                                   So "we could not look" rendered the amber "The volume check could not
+                                   run" banner AND, directly beneath it, a green check asserting "no
+                                   planned downtime" about a release nobody had inspected. The operator
+                                   approved what they were told was a zero-downtime roll; because Blocked
+                                   is empty the runner attempts no scale-down at all, so an RWO Deployment
+                                   then sits in Multi-Attach error until Helm's --wait expires.
+
+                                   ReleaseVolumeGuard exists precisely because an in-place roll can be
+                                   impossible, and ClusterDetail's equivalent dialog — the only other
+                                   consumer of VolumePreflight — makes no positive claim here at all. An
+                                   unknown must not render as an all-clear.
+
+                                   ⚠️ The amber banner above is the ONLY thing the error path now says about
+                                   volumes. Keep the two conditions complementary: if you make this `else`
+                                   unconditional again the false all-clear comes straight back. *@
                                 <div class="alert alert-success py-2 small mb-2">
                                     <i class="bi bi-check-circle me-1"></i>
                                     No workload in this release is blocked by an exclusive volume — Helm can roll it
@@ -371,7 +439,13 @@
                     </button>
                     @if (outcome is null)
                     {
-                        <button class="btn btn-sm @(preflight?.RequiresScaleDown == true ? "btn-warning" : "btn-primary")"
+                        @* The confirm button is the acknowledgment, so it has to name what is being
+                           acknowledged. Three cases, not two: a known-blocked release (downtime), an
+                           UNINSPECTED one (the amber banner above), and an inspected clean one. The
+                           middle case used to borrow the clean case's wording and its primary styling,
+                           which is the same false reassurance as the green banner, just on the button
+                           the operator actually presses. *@
+                        <button class="btn btn-sm @(preflight?.RequiresScaleDown == true || preflight?.Error is not null ? "btn-warning" : "btn-primary")"
                                 @onclick="RunUpgradeAsync"
                                 disabled="@(preflighting || running is not null)">
                             @if (running is not null)
@@ -379,8 +453,10 @@
                                 <span class="spinner-border spinner-border-sm me-1"></span>
                             }
                             @(preflight?.RequiresScaleDown == true
-                                ? $"Upgrade with downtime"
-                                : $"Upgrade to {target.LatestVersion}")
+                                ? "Upgrade with downtime"
+                                : preflight?.Error is not null
+                                    ? "Upgrade without the volume check"
+                                    : $"Upgrade to {target.LatestVersion}")
                         </button>
                     }
                 </div>
@@ -410,8 +486,17 @@
     private Guid? running;
     private ComponentUpgradeOutcome? outcome;
 
+    /// <summary>
+    /// One row of the Kubernetes support table.
+    /// </summary>
+    /// <param name="Note">
+    /// Why this row is not a plain answer: the cluster was unreachable, it returned no nodes, or
+    /// — see <see cref="SelectOldestKubelet"/> — some nodes report a kubelet version the support
+    /// calendar cannot place. Rendered as the warning icon beside the version, so anything that
+    /// makes the badge less than the whole truth has somewhere to be said.
+    /// </param>
     private sealed record ClusterVersionRow(
-        string ClusterName, string? ReportedVersion, KubernetesVersionStatus Status, string? Error);
+        string ClusterName, string? ReportedVersion, KubernetesVersionStatus Status, string? Note);
 
     private List<ClusterVersionRow> k8sRows = [];
     private bool k8sLoading;
@@ -509,14 +594,11 @@
 
                 // Report the OLDEST kubelet on the cluster: support ends when the least
                 // current node stops receiving patches, not when the newest one does.
-                string? oldest = result.Data
-                    .Select(n => n.KubeletVersion)
-                    .Where(v => !string.IsNullOrWhiteSpace(v))
-                    .OrderBy(v => SemVer.Parse(v))
-                    .FirstOrDefault();
+                (string? oldest, string? note) =
+                    SelectOldestKubelet(result.Data.Select(n => n.KubeletVersion), today);
 
                 rows.Add(new ClusterVersionRow(
-                    cluster.Name, oldest, KubernetesReleaseCalendar.Classify(oldest, today), null));
+                    cluster.Name, oldest, KubernetesReleaseCalendar.Classify(oldest, today), note));
             }
 
             k8sRows = rows;
@@ -526,6 +608,81 @@
         {
             k8sLoading = false;
         }
+    }
+
+    /// <summary>
+    /// Picks the kubelet version whose support window decides the cluster's badge, and says so
+    /// when that choice had to ignore a node.
+    /// </summary>
+    /// <remarks>
+    /// <para>⭐ <b>Only a version the calendar can place may decide the badge.</b> This used to be
+    /// <c>.OrderBy(v =&gt; SemVer.Parse(v)).FirstOrDefault()</c>. The sort key there is
+    /// <c>SemVer?</c>, <c>SemVer.Parse</c> returns null for anything it cannot read (a four-part
+    /// version, a non-numeric segment, a kwok node's literal <c>fake</c>), and
+    /// <c>Comparer&lt;SemVer&gt;.Default</c> orders null BEFORE every real version — so one
+    /// unreadable node was selected as the whole cluster's "oldest". <c>Classify</c> then parsed
+    /// that same string, returned <c>Unknown</c>, and the row rendered a grey "Unknown" badge with
+    /// "—" for End of life and "—" for Behind. A cluster genuinely sitting on an end-of-life minor
+    /// read as a cluster nobody could say anything about, which is the quietest possible way to
+    /// hide the most urgent row on the page.</para>
+    ///
+    /// <para>The ranking is therefore: versions <see cref="KubernetesReleaseCalendar.Classify"/>
+    /// can actually place in the support window first, oldest of those wins; unreadable ones sink
+    /// to the bottom, the way <c>HelmRepoIndexClient.ParseIndex</c> sinks unparseable chart
+    /// versions rather than dropping them. This also rules out a second route to the same grey
+    /// badge: a dev-build kubelet such as <c>v0.0.0-master+$Format:%H$</c> parses by numbers alone
+    /// and would win an ordering on <c>SemVer</c>, but 0.0.0 is in no support window.</para>
+    ///
+    /// <para>⚠️ If NOTHING can be placed — every node unreadable, or a whole cluster on a minor
+    /// newer than the calendar knows — "Unknown" is the honest answer and this returns the oldest
+    /// readable version (or the first reported string) so the row still shows what the nodes said.
+    /// Silence is only wrong when something could have been said.</para>
+    ///
+    /// <para>The returned note is what stops the narrowing from becoming its own silence: when the
+    /// badge comes from a subset of the nodes, the row says which ones it had to skip.</para>
+    /// </remarks>
+    public static (string? Version, string? Note) SelectOldestKubelet(
+        IEnumerable<string?> reportedVersions, DateOnly today)
+    {
+        List<string> reported =
+        [
+            .. reportedVersions
+                .Where(v => !string.IsNullOrWhiteSpace(v))
+                .Select(v => v!.Trim())
+        ];
+
+        if (reported.Count == 0)
+        {
+            return (null, null);
+        }
+
+        List<string> placeable =
+        [
+            .. reported.Where(v =>
+                KubernetesReleaseCalendar.Classify(v, today).State != KubernetesSupportState.Unknown)
+        ];
+
+        // Nothing placeable: keep reporting what the nodes said and let Classify answer Unknown.
+        List<string> pool = placeable.Count > 0 ? placeable : reported;
+
+        string oldest = pool
+            .OrderBy(v => SemVer.Parse(v) is null ? 1 : 0)
+            .ThenBy(v => SemVer.Parse(v))
+            .ThenBy(v => v, StringComparer.Ordinal)
+            .First();
+
+        if (placeable.Count == 0 || placeable.Count == reported.Count)
+        {
+            return (oldest, null);
+        }
+
+        List<string> skipped = [.. reported.Where(v => !placeable.Contains(v)).Distinct(StringComparer.Ordinal)];
+
+        return (oldest,
+            $"{reported.Count - placeable.Count} of {reported.Count} nodes report a kubelet version the "
+            + $"support calendar cannot place ({string.Join(", ", skipped.Take(3).Select(v => $"'{v}'"))}"
+            + (skipped.Count > 3 ? ", …" : "")
+            + "); the status beside this is the oldest version that could be placed.");
     }
 
     /// <summary>
