@@ -398,6 +398,25 @@ ERROR checkout failed trace-id: 4bf92f35…</pre>
         KubernetesOperationResult<List<string>> svc = await Traces.GetServicesAsync(
             ClusterId, namespaces: Namespaces, podPattern: PodPattern, windowMinutes: timeRangeMinutes);
         services = svc.IsSuccess ? svc.Data ?? [] : [];
+
+        // ⭐ Never query by a filter the filter row cannot display. A <select> whose bound value matches
+        // no rendered <option> paints as "All services" while the field behind it still holds the old
+        // value, so the filter becomes invisible AND still applies — the one combination that makes an
+        // empty result unreadable.
+        //
+        // ⚠️ The tenant host (TenantTracesTab) mounts this component with NO @key, so changing its
+        // cluster picker re-parameterises THIS instance; the portal host (CustomerObservability) keys on
+        // the scope and gets a fresh one, which is why only the tenant view was affected. The reset block
+        // in OnParametersSetAsync clears the cluster's RESULTS but not its FILTERS, so "checkout" picked
+        // on cluster A stayed in `selectedService` and went into the query for cluster B, which rendered
+        // "No traces match the selected criteria." about a cluster that was tracing perfectly well. This
+        // is the idiom LogBrowser.OnTimeRangeChanged already uses for its namespace/pod selection, and it
+        // covers the narrowed-time-window case here too, not just the cluster switch. A membership test
+        // rather than a blanket clear: if cluster B runs a "checkout" too, keeping the filter is what the
+        // operator meant. `minDurationMs`, `errorsOnly` and `timeRangeMinutes` are deliberately left
+        // alone — they mean the same thing on any cluster and are on screen the whole time.
+        if (!string.IsNullOrEmpty(selectedService) && !services.Contains(selectedService, StringComparer.Ordinal))
+            selectedService = "";
     }
 
     private async Task OnTimeRangeChanged()
@@ -412,6 +431,16 @@ ERROR checkout failed trace-id: 4bf92f35…</pre>
     {
         isQuerying = true;
         queryError = null;
+        // ⚠️ Clear the previous answer BEFORE the query, which is what LogBrowser.Search and
+        // MetricsExplorer.Chart do for the same reason. The result branch below only sets `queryError`
+        // on failure, so a search that failed used to leave the rows of the last SUCCESSFUL search on
+        // screen — under the filters now in the boxes, which is how they then read. Failure here is a
+        // routine outcome, not an exotic one: FederatedTraceService reports a tier that overran its
+        // 5s/30s budget as a failure whenever the surviving tier holds nothing for the query, and
+        // narrowing (ticking "Errors only", shrinking the window) is exactly what empties it. The rest
+        // of this view was already cleared unconditionally a few lines down, so the trace list was the
+        // lone survivor: the RED card and the service map vanished while their traces stayed.
+        traces = [];
         selectedTraceId = null;
         StateHasChanged();
 
@@ -484,9 +513,46 @@ ERROR checkout failed trace-id: 4bf92f35…</pre>
 
         KubernetesOperationResult<List<LokiLogStream>> l = await Logs.QueryByTraceAsync(ClusterId, traceId);
         if (l.IsSuccess && l.Data is not null)
-            traceLogs = l.Data.SelectMany(s => s.Entries).OrderBy(e => e.Timestamp).ToList();
+            traceLogs = l.Data.Where(InNamespaceScope)
+                .SelectMany(s => s.Entries).OrderBy(e => e.Timestamp).ToList();
 
         isLoadingTrace = false;
+    }
+
+    /// <summary>
+    /// ⭐ Whether a correlated log stream is inside this mount's <see cref="Namespaces"/> scope.
+    ///
+    /// <para>A trace id is shared by every service the request touched, so "the logs of this trace" is a
+    /// cluster-wide question as asked: <c>ILogBackend.QueryByTraceAsync</c> takes no namespace at all, and
+    /// <c>LogSegmentSchema.BuildTraceQuery</c> MUSTs on tenant + cluster + trace id only — unlike every
+    /// other log read, whose <c>LogQueryFilter.Namespaces</c> is <c>required</c>. The span half of the very
+    /// same pair does take the scope (<c>GetTraceAsync(..., namespaces: Namespaces)</c> →
+    /// <c>SpanSegmentSchema.BuildTraceQuery(..., namespaces)</c>), so in the confined portal
+    /// (<c>CustomerObservability</c>, which mounts this with the selected app's namespaces) the waterfall
+    /// was correctly limited to the customer's own namespaces while the pane directly below it printed raw
+    /// lines from any namespace on the cluster that carried the id — shared platform namespaces, and any
+    /// other tenant whose workload took part in the request. That contradicts this component's own contract
+    /// on <see cref="Namespaces"/> and the portal host's "Nothing here can reach another customer".</para>
+    ///
+    /// <para>⚠️ This is the UI half only, and the rest is NOT handled: the backend still READS cluster-wide,
+    /// so the out-of-scope lines still cross the wire, and its <c>limit</c> (500) is applied before this
+    /// filter — a trace with many out-of-scope lines can therefore leave fewer in-scope lines on screen than
+    /// exist. Closing that needs a namespace argument on <c>ILogBackend.QueryByTraceAsync</c> and a
+    /// namespace clause in <c>LogSegmentSchema.BuildTraceQuery</c>, which is a change to the in-cluster
+    /// node's wire surface and reaches no cluster until the chart's appVersion and both catalog pins are
+    /// bumped and a new image ships (see <c>ClusterRoutedBackends</c>'s note on precisely this hazard).</para>
+    ///
+    /// <para>A null/empty scope is the tenant view, which is cluster-wide by design — the same reading as
+    /// <c>SpanSegmentSchema</c>'s <c>namespaces is { Count: &gt; 0 }</c>. A stream with no namespace label
+    /// is treated as OUT of scope: when the question is whose log line this is, the only safe answer to
+    /// "unknown" is to not show it.</para>
+    /// </summary>
+    private bool InNamespaceScope(LokiLogStream stream)
+    {
+        if (Namespaces is not { Count: > 0 }) return true;
+        return stream.Labels.TryGetValue("namespace", out string? ns)
+               && !string.IsNullOrEmpty(ns)
+               && Namespaces.Contains(ns, StringComparer.Ordinal);
     }
 
     // ── RED summary (approximated from the returned buckets) ──
