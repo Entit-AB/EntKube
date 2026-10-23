@@ -2,12 +2,42 @@
 @using EntKube.Web.Services.Telemetry
 @inject IMetricsQuery Metrics
 
-@if (!available && !isLoading)
+@if (!string.IsNullOrEmpty(discoveryError) && !isLoading)
 {
+    @* ⭐ "The backend said no metrics" and "the backend could not be asked" are different answers
+       and get different screens. For as long as this component has existed they shared one: the
+       reassuring empty state below, because discovery was a bool and every failure of it — no
+       prometheus component on the cluster, no kubeconfig, no ready Prometheus pod, a 401/403 on
+       the API-server proxy, a WAN timeout — collapsed into the same false as a healthy, empty
+       Prometheus. An operator read an outage as an un-instrumented cluster and went off to
+       install a collector. Load() one method down has always shown res.Error; so does
+       ClusterMonitoring, AlertPanel and RabbitMQMonitoringPanel. This is the same house rule,
+       and TraceExplorer's banner carries the same lesson for spans. *@
+    <div class="alert alert-warning small py-2">
+        <span class="bi bi-exclamation-triangle me-1"></span>
+        <strong>Could not read this cluster's metrics.</strong>
+        <div class="mt-1 font-monospace">@discoveryError</div>
+        <div class="mt-1">
+            That is this cluster's Prometheus failing to answer — missing, unreachable through the
+            API-server proxy, or refusing the request. It says nothing about your apps'
+            instrumentation, so there is nothing to install until it is fixed.
+        </div>
+    </div>
+}
+else if (!available && !isLoading)
+{
+    @* Reached only when Prometheus answered. The text used to send the reader to the EntKube
+       Telemetry Collector and OTLP, which is the logs/traces path: this view reads the cluster's
+       own Prometheus over PromQL and EntKube stores no metrics of its own, so installing the
+       collector would not have changed a pixel of it. *@
     <div class="alert alert-light border text-muted small py-2">
         <span class="bi bi-graph-up me-1"></span>
-        No native metrics for this cluster yet. Install the <strong>EntKube Telemetry Collector</strong> and
-        instrument your apps to emit OpenTelemetry metrics (OTLP) to populate this view.
+        <strong>No metrics for this cluster yet.</strong>
+        <div class="mt-1">
+            This view queries the cluster's own <strong>Prometheus</strong>, and it knows no metric
+            names in this scope for the last 24 hours. Check that your apps expose a metrics
+            endpoint and that Prometheus is scraping them (ServiceMonitor / PodMonitor).
+        </div>
     </div>
 }
 else
@@ -114,31 +144,54 @@ else
     private bool isQuerying;
     private bool charted;
     private string? queryError;
+    /// <summary>Why discovery failed, when it failed. Null = Prometheus answered (possibly with nothing).</summary>
+    private string? discoveryError;
     private Guid _lastCluster;
 
     // The metric-name/service lists depend only on the cluster, so load them once per cluster rather than
-    // re-running HasData + two DISTINCT scans over the partitioned metrics table on every parameter set.
+    // re-running the two label-value scans on every parameter set.
     protected override async Task OnParametersSetAsync()
     {
         if (ClusterId == _lastCluster) return;
         _lastCluster = ClusterId;
-        series = []; grouped = []; charted = false; selectedMetric = "";
+
+        // ⚠️ Everything derived from the cluster we are leaving has to go, not only what is visible.
+        // selectedService used to survive the switch: the <select> re-renders with the new cluster's
+        // options and shows no selection (a Blazor <select> only takes its selection from options
+        // rendered in the same batch), so the box reads as "All services" while the field still holds
+        // cluster A's service name — and Load() puts it straight into the PromQL as
+        // service_name="<cluster A's service>". The chart then came back empty on a cluster that was
+        // emitting the metric perfectly well, or, if cluster B happened to run a service of the same
+        // name, silently narrowed to that one service with nothing on screen to say so.
+        // TenantMetricsTab passes no @key, so the same component instance is reused across the switch
+        // and this reset is the only thing standing between the two clusters.
+        series = []; grouped = []; charted = false; selectedMetric = ""; selectedService = "";
+        queryError = null; discoveryError = null;
 
         isLoading = true;
-        available = await Metrics.HasDataAsync(TenantId, ClusterId);
-        if (available)
-        {
-            // The name and service dropdowns are independent DISTINCT queries — run them
-            // concurrently so the load waits on the slower, not the sum.
-            Task<KubernetesOperationResult<List<string>>> namesTask =
-                Metrics.GetMetricNamesAsync(TenantId, ClusterId, namespaces: Namespaces, podPattern: PodPattern);
-            Task<KubernetesOperationResult<List<string>>> servicesTask =
-                Metrics.GetServicesAsync(TenantId, ClusterId, namespaces: Namespaces, podPattern: PodPattern);
-            await Task.WhenAll(namesTask, servicesTask);
 
-            metricNames = namesTask.Result.IsSuccess ? namesTask.Result.Data ?? [] : [];
-            services = servicesTask.Result.IsSuccess ? servicesTask.Result.Data ?? [] : [];
+        // The name and service dropdowns are independent label-value queries — run them
+        // concurrently so the load waits on the slower, not the sum. The names query is also the
+        // availability probe: IMetricsQuery.HasDataAsync answers the same question as a bool that
+        // cannot carry an error, and one query fewer is a bonus.
+        Task<KubernetesOperationResult<List<string>>> namesTask =
+            Metrics.GetMetricNamesAsync(TenantId, ClusterId, namespaces: Namespaces, podPattern: PodPattern);
+        Task<KubernetesOperationResult<List<string>>> servicesTask =
+            Metrics.GetServicesAsync(TenantId, ClusterId, namespaces: Namespaces, podPattern: PodPattern);
+        await Task.WhenAll(namesTask, servicesTask);
+
+        if (!namesTask.Result.IsSuccess)
+        {
+            discoveryError = namesTask.Result.Error;
+            metricNames = []; services = []; available = false;
         }
+        else
+        {
+            metricNames = namesTask.Result.Data ?? [];
+            services = servicesTask.Result.IsSuccess ? servicesTask.Result.Data ?? [] : [];
+            available = metricNames.Count > 0;
+        }
+
         isLoading = false;
     }
 

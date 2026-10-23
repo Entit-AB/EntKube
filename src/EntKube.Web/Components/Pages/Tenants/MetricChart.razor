@@ -90,6 +90,30 @@
     private const int Padding = 2;
 
     private static readonly System.Globalization.CultureInfo Inv = System.Globalization.CultureInfo.InvariantCulture;
+
+    /// <summary>
+    /// ⭐ Every SVG coordinate this component emits goes through here. SVG is not localized: its
+    /// number grammar only knows <c>.</c> as a decimal point, and both the <c>points</c> list and
+    /// the path data accept a comma <i>or</i> whitespace as the separator <i>between</i> numbers.
+    ///
+    /// <para>⚠️ The geometry used to be written with plain interpolation — <c>$"{x:F1},{y:F1}"</c>
+    /// — which formats with <see cref="System.Globalization.CultureInfo.CurrentCulture"/>.
+    /// EntKube.Web pins no culture (no RequestLocalization, no DefaultThreadCurrentCulture, and
+    /// unlike Agent/Cli/Mcp/Installer no <c>InvariantGlobalization</c> in the csproj), so on this
+    /// product's own Swedish hosts the pair <c>(2, 78)</c> came out as <c>"2,0,78,0"</c>. Nothing
+    /// throws: the renderer reads four numbers where two were meant, every later pair shifts by
+    /// one, and the result is a smooth line that was never plotted from the data — next to
+    /// gridlines and axis labels that stayed correct because they already used <c>Inv</c>.
+    /// Because <c>F1</c> always emits one decimal, a dot-culture host hides the bug completely and
+    /// a comma-culture host breaks every point of it.</para>
+    ///
+    /// <para>This mirrors CostHistoryChart's <c>F()</c> and ResourceTreePanel's
+    /// <c>FormattableString.Invariant</c> — invariant SVG geometry is the house rule.
+    /// ⚠️ MultiSeriesChart.razor:111 still has the raw interpolation and the same bug; it is a
+    /// different component and outside this change's unit.</para>
+    /// </summary>
+    private static string Coord(double value) => value.ToString("F1", Inv);
+
     private double[] GridLines => [Padding, Height / 2.0, Height - Padding];
 
     private string GradientId => $"grad-{Title?.GetHashCode():x}";
@@ -145,7 +169,7 @@
             {
                 double x = Padding + i * xStep;
                 double y = Height - Padding - (DataPoints[i].Value / maxVal * (Height - 2 * Padding));
-                points.Add($"{x:F1},{y:F1}");
+                points.Add($"{Coord(x)},{Coord(y)}");
             }
 
             return string.Join(" ", points);
@@ -165,28 +189,46 @@
             double xStep = (double)(Width - 2 * Padding) / (DataPoints.Count - 1);
 
             // Start at the bottom-left corner.
-            List<string> pathParts = [$"M {Padding:F1},{Height - Padding:F1}"];
+            List<string> pathParts = [$"M {Coord(Padding)},{Coord(Height - Padding)}"];
 
             // Line to each data point.
             for (int i = 0; i < DataPoints.Count; i++)
             {
                 double x = Padding + i * xStep;
                 double y = Height - Padding - (DataPoints[i].Value / maxVal * (Height - 2 * Padding));
-                pathParts.Add($"L {x:F1},{y:F1}");
+                pathParts.Add($"L {Coord(x)},{Coord(y)}");
             }
 
             // Close back to bottom-right.
             double lastX = Padding + (DataPoints.Count - 1) * xStep;
-            pathParts.Add($"L {lastX:F1},{Height - Padding:F1}");
+            pathParts.Add($"L {Coord(lastX)},{Coord(Height - Padding)}");
             pathParts.Add("Z");
 
             return string.Join(" ", pathParts);
         }
     }
 
+    /// <summary>
+    /// Red/amber/green for the header readout — ⭐ only for a chart that actually plots a
+    /// percentage, i.e. one whose caller passed <c>Unit="%"</c>.
+    ///
+    /// <para>⚠️ The 90/70 cut-offs used to be applied to the raw last value of <i>any</i> series,
+    /// which made the readout a health verdict about numbers that have no health. MetricsExplorer
+    /// renders whatever metric the user picked out of Prometheus' <c>__name__</c> list with no
+    /// Unit at all, so <c>jvm_memory_used_bytes</c> at 95 was danger red while
+    /// <c>sum(rate(http_errors_total))</c> at 12 errors/s was success green; KeycloakMonitoringPanel's
+    /// "Heap used" (Unit <c>B</c>) was red for any value above 90 bytes, i.e. always, and
+    /// ClusterMonitoring's "Pod Count" turned red at 90 pods. Every other 90/70 comparison in the
+    /// repo sits on a value whose name ends in Percent/pct; this was the one unconstrained site.</para>
+    ///
+    /// <para>Unitless and non-percent series now get the neutral readout that MultiSeriesChart —
+    /// the sibling the explorer renders on the breakdown branch of the same <c>if</c> — has always
+    /// used for an arbitrary series. The percent charts that meant to be coloured keep their
+    /// colours: ClusterMonitoring's CPU and Memory pass <c>Unit="%" MaxValue="100"</c>.</para>
+    /// </summary>
     private string GetValueColorClass()
     {
-        if (DataPoints.Count == 0)
+        if (DataPoints.Count == 0 || Unit != "%")
         {
             return "";
         }
