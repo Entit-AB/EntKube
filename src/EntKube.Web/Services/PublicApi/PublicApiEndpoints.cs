@@ -325,10 +325,15 @@ public static class PublicApiEndpoints
         }).RequireApiScope(ApiScopes.OpsRead);
 
         api.MapGet("/upgrades", async (
-            HttpContext ctx, ComponentUpgradeService upgrades, CancellationToken ct) =>
+            HttpContext ctx, EntKube.Contracts.Catalog.ICatalogApi catalog, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
-            UpgradeReport report = await upgrades.GetTenantReportAsync(tenantId, DateTime.UtcNow, ct);
+
+            // Catalog's own question, asked through Catalog's contract. The report is a read —
+            // the service behind it says so itself, and acting on a finding is a different class
+            // that goes through the component apply path.
+            EntKube.Contracts.Catalog.UpgradeReportSummary report =
+                await catalog.GetUpgradeReportAsync(tenantId, DateTime.UtcNow, ct);
 
             return Results.Ok(new
             {

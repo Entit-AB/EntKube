@@ -1,6 +1,62 @@
 namespace EntKube.Contracts.Catalog;
 
 /// <summary>Where an installed component is in its lifecycle.</summary>
+/// <summary>
+/// How an installed chart compares with what its repository publishes.
+///
+/// <para>⚠️ Mirrors <c>UpgradeStatus</c> member for member, and the names are <b>published</b>:
+/// <c>GET /api/v1/upgrades</c> emits <c>status</c> as <c>ToString()</c> on this value. Renaming a
+/// member here renames a field in a response the CLI and a monitoring integration read, so
+/// <c>CatalogUpgradeContractTests</c> pins the names, not only the ordinals — the same reason
+/// <c>AdvisorContractEnumTests</c> exists for Advisor.</para>
+/// </summary>
+public enum UpgradeAvailability
+{
+    UpgradeAvailable,
+    Deprecated,
+    UpToDate,
+    Unknown,
+}
+
+/// <summary>
+/// How far behind an installed chart is. Mirrors <c>VersionLag</c>; names are published the same
+/// way, as <c>lag</c>.
+/// </summary>
+public enum UpgradeLag
+{
+    Major,
+    Minor,
+    Patch,
+    UpToDate,
+}
+
+/// <summary>One installed component measured against its chart repository.</summary>
+public sealed record ComponentUpgradeSummary(
+    Guid ClusterId,
+    string ClusterName,
+    Guid ComponentId,
+    string DisplayName,
+    string? ChartName,
+    string? InstalledVersion,
+    string? LatestVersion,
+    UpgradeAvailability Status,
+    UpgradeLag Lag,
+    int VersionsBehind);
+
+/// <summary>
+/// Chart currency across a tenant's clusters.
+///
+/// <para>The counts are carried rather than computed by the caller: they are derived from
+/// <see cref="Components"/> on the module's own side, so a consumer cannot disagree with the
+/// module about what "needs upgrading" means.</para>
+/// </summary>
+public sealed record UpgradeReportSummary(
+    IReadOnlyList<ComponentUpgradeSummary> Components,
+    int UpgradeCount,
+    int MajorCount,
+    int DeprecatedCount,
+    int UnknownCount);
+
 public enum ComponentStatus
 {
     NotInstalled,
@@ -148,6 +204,25 @@ public interface ICatalogApi
     /// is no way to clear it through this contract, because nothing does — say so here rather than
     /// let a null argument mean two things.
     /// </param>
+    /// <summary>
+    /// What is out of date across this tenant's clusters, as of <paramref name="asOf"/>.
+    ///
+    /// <para><b>A read, despite where it sits.</b> The service behind it says so itself —
+    /// "read-only and side-effect free, it never touches a cluster" — and acting on a finding is
+    /// a different class entirely, which goes through the ordinary component apply path so that
+    /// exactly one route mutates a cluster. The route this serves is <c>OpsRead</c>.</para>
+    ///
+    /// <para>⚠️ <c>PublicApiContractAdoptionTests</c> had this listed as a gap that persisted
+    /// because "upgrading installs a chart", which conflates the report with the runner. The
+    /// report was always a read; only the action is not, and the action is not here.</para>
+    ///
+    /// <para><paramref name="asOf"/> is a parameter rather than <c>DateTime.UtcNow</c> inside,
+    /// because deprecation and release dates are compared against it and a caller that cannot
+    /// state the instant cannot be tested.</para>
+    /// </summary>
+    Task<UpgradeReportSummary> GetUpgradeReportAsync(
+        Guid tenantId, DateTime asOf, CancellationToken ct = default);
+
     Task<InstalledComponent?> MergeHelmValuesAsync(
         Guid tenantId, Guid componentId, IReadOnlyDictionary<string, string> formValues,
         string? configuration = null, CancellationToken ct = default);

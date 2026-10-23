@@ -105,9 +105,9 @@ public class PublicApiContractAdoptionTests
     /// <c>AdvisorStateService</c>, so this file reported zero while <c>IAdvisorApi</c> had eight
     /// methods and not one caller anywhere in the product.</para>
     ///
-    /// <para><b>What the nine are, and why each is still here.</b> None is an adoption that was
-    /// skipped; all four need contract surface that does not exist, which is a different change
-    /// from using surface that does:</para>
+    /// <para><b>What the eight are, and why each is still here.</b> None is an adoption that was
+    /// skipped; each needs contract surface that does not exist, which is a different change from
+    /// using surface that does:</para>
     /// <list type="bullet">
     ///   <item><c>CostRateService</c> ×4 and <c>CostLedgerService</c> ×2 — <b>Cost has no contract
     ///     at all.</b> Six of the nine are one module, and four of those six are writes (a price
@@ -116,10 +116,20 @@ public class PublicApiContractAdoptionTests
     ///   <item><c>KubernetesOperationsService</c> ×2 — Fleet has <c>IFleetApi</c>, which describes
     ///     clusters. These routes <em>act</em> on one. A contract that performs cluster operations
     ///     is the agent boundary (docs/decomposition.md §5), not a read method.</item>
-    ///   <item><c>ComponentUpgradeService</c> ×1 — Catalog has <c>ICatalogApi</c>, whose 44
-    ///     consumers make it the most adopted contract in the product, and it still has no upgrade
-    ///     method. Upgrading installs a chart; see <c>project-component-upgrade-action</c> for why
-    ///     that is not a read.</item>
+    ///   <item><s><c>ComponentUpgradeService</c> ×1 — Catalog has <c>ICatalogApi</c>, whose
+    ///     44 consumers make it the most adopted contract in the product, and it still has no
+    ///     upgrade method. Upgrading installs a chart; see <c>project-component-upgrade-action</c>
+    ///     for why that is not a read.</s>
+    ///     <para>⚠️ <b>That rationale was wrong about its own subject, and the error is
+    ///     left visible because it is the instructive kind.</b> It argued from the <em>action</em>
+    ///     to excuse the <em>report</em>. <c>ComponentUpgradeService</c>'s own doc comment says it
+    ///     is "Read-only and side-effect free — it never touches a cluster. Acting on a finding
+    ///     is <c>ComponentUpgradeRunner</c>'s job", and the route is <c>OpsRead</c>. So nothing
+    ///     about the upgrade <em>action</em> was ever a reason this read could not move, and the
+    ///     bullet reads as a justification only because the two share a word. Adopted in
+    ///     <see cref="CatalogUpgradeContractTests"/> as <c>ICatalogApi.GetUpgradeReportAsync</c>;
+    ///     the action genuinely stays out, and now for the stated reason rather than a borrowed
+    ///     one.</para></item>
     /// </list>
     ///
     /// <para>⚠️ The same hazard as the other ratchets: this counts a type NAME in a parameter
@@ -127,7 +137,7 @@ public class PublicApiContractAdoptionTests
     /// would count a comment naming one. Comments are stripped; the provider shape is not currently
     /// present and would need its own measure if it appeared.</para>
     /// </summary>
-    private const int BaselineModuleServices = 9;
+    private const int BaselineModuleServices = 8;
 
     [Fact]
     public void The_public_api_does_not_reach_past_a_contract_into_a_modules_services()
