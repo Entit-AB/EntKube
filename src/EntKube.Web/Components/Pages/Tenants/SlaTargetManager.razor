@@ -3,7 +3,8 @@
 @using EntKube.Web.Services
 @using Microsoft.EntityFrameworkCore
 @inject IncidentService IncidentService
-@inject IDbContextFactory<ApplicationDbContext> DbFactory
+@inject IDbContextFactory<EntKube.Web.Data.Modules.SupportDbContext> DbFactory
+@inject EntKube.Contracts.Delivery.IDeliveryApi Delivery
 @inject ToastService Toasts
 
 <ConfirmDialog Visible="@(pendingConfirm is not null)"
@@ -188,7 +189,12 @@ else
 
     private async Task Load()
     {
-        using ApplicationDbContext db = DbFactory.CreateDbContext();
+        // ⚠️ Support's own context. This page was on ApplicationDbContext because it needed three
+        // modules at once: Support's SlaTargets, Delivery's deployments and health snapshots, and
+        // the Customers hub. Delivery's two are asked through IDeliveryApi now, and Customers is a
+        // hub — exposed as a read-only IQueryable on every module context — so what is left is
+        // Support's own table. docs/decomposition.md §4.0.2.
+        using EntKube.Web.Data.Modules.SupportDbContext db = DbFactory.CreateDbContext();
 
         customers = await db.Customers
             .Include(c => c.Apps)
@@ -203,29 +209,71 @@ else
             .OrderBy(s => s.Customer!.Name).ThenBy(s => s.App!.Name)
             .ToListAsync();
 
-        // Compute compliance for each target
+        // Every deployment of this tenant's, once. This was a query PER TARGET: the scope
+        // predicate differs per target, but the set it filters does not.
+        List<EntKube.Contracts.Delivery.DeploymentSummary> allDeployments =
+            [.. await Delivery.GetDeploymentsForTenantAsync(TenantId)];
+
+        // DeploymentSummary carries no CustomerId, because a deployment reaches its customer
+        // through its app — Delivery's own traversal, and not something the contract needs to
+        // expose for this. The customers above are already loaded with their apps, so the map is
+        // free rather than another query.
+        Dictionary<Guid, Guid> customerOfApp = customers
+            .SelectMany(c => c.Apps.Select(a => new { AppId = a.Id, CustomerId = c.Id }))
+            .ToDictionary(x => x.AppId, x => x.CustomerId);
+
+        // One health-ratio call per DISTINCT window rather than per target, which is what
+        // ErrorBudgetService does with the same contract and for the same reason. Targets on the
+        // same window — and 30 days is the default — share a call.
+        DateTime now = DateTime.UtcNow;
+        List<Guid> allIds = [.. allDeployments.Select(d => d.Id)];
+
+        Dictionary<int, Dictionary<Guid, EntKube.Contracts.Delivery.DeploymentHealthRatio>> byWindow = [];
+
+        foreach (int window in slaTargets.Select(t => t.MeasurementWindowDays).Distinct())
+        {
+            byWindow[window] =
+                (await Delivery.GetHealthRatiosAsync(TenantId, allIds, now.AddDays(-window), now))
+                    .ToDictionary(r => r.DeploymentId);
+        }
+
         targets = [];
         foreach (SlaTarget t in slaTargets)
         {
-            // Find all deployments in scope
-            List<Guid> deploymentIds = await db.AppDeployments
+            List<Guid> deploymentIds = [.. allDeployments
                 .Where(d => (t.AppId == null || d.AppId == t.AppId)
-                         && (t.CustomerId == null || d.App.CustomerId == t.CustomerId)
-                         && d.App.Customer.TenantId == TenantId)
-                .Select(d => d.Id)
-                .ToListAsync();
+                         && (t.CustomerId == null
+                             || (customerOfApp.TryGetValue(d.AppId, out Guid owner)
+                                 && owner == t.CustomerId)))
+                .Select(d => d.Id)];
 
             double? compliance = null;
+
             if (deploymentIds.Count > 0)
             {
-                DateTime from = DateTime.UtcNow.AddDays(-t.MeasurementWindowDays);
-                var snaps = await db.DeploymentHealthSnapshots
-                    .Where(s => deploymentIds.Contains(s.DeploymentId) && s.SnapshotAt >= from)
-                    .Select(s => s.HealthStatus)
-                    .ToListAsync();
+                Dictionary<Guid, EntKube.Contracts.Delivery.DeploymentHealthRatio> ratios =
+                    byWindow[t.MeasurementWindowDays];
 
-                if (snaps.Count > 0)
-                    compliance = Math.Round((double)snaps.Count(s => s == HealthStatus.Healthy) / snaps.Count * 100, 2);
+                // ⚠️ POOLED, not the mean of per-deployment ratios. The two give different answers
+                // and this page has always pooled: every sample in scope counted once, so a busy
+                // deployment weighs more than a quiet one. Summing HealthySamples and
+                // TotalSamples across the scope is the same arithmetic the removed snapshot query
+                // did, with the counting left in the database.
+                int healthy = 0, total = 0;
+
+                foreach (Guid id in deploymentIds)
+                {
+                    if (ratios.TryGetValue(id, out EntKube.Contracts.Delivery.DeploymentHealthRatio? r))
+                    {
+                        healthy += r.HealthySamples;
+                        total += r.TotalSamples;
+                    }
+                }
+
+                if (total > 0)
+                {
+                    compliance = Math.Round((double)healthy / total * 100, 2);
+                }
             }
 
             targets.Add(new SlaTargetRow(t, t.Customer?.Name, t.App?.Name, compliance));
@@ -275,8 +323,14 @@ else
     {
         try
         {
-            using ApplicationDbContext db = DbFactory.CreateDbContext();
-            SlaTarget? found = await db.SlaTargets.FindAsync(target.Id);
+            using EntKube.Web.Data.Modules.SupportDbContext db = DbFactory.CreateDbContext();
+
+            // ⚠️ Scoped by tenant as well as id. This was FindAsync(target.Id) — the id was the
+            // whole authorization for a delete. Unreachable from this page, whose list is loaded
+            // with the tenant predicate, but an id is not permission and the check costs nothing.
+            SlaTarget? found = await db.SlaTargets
+                .FirstOrDefaultAsync(s => s.Id == target.Id && s.TenantId == TenantId);
+
             if (found is not null) db.SlaTargets.Remove(found);
             await db.SaveChangesAsync();
             await Load();
