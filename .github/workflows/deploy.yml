@@ -43,6 +43,40 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ⭐ Named before anything slow runs, because the failure this replaces was unreadable.
+      #
+      # With no credentials set, `docker/login-action` fails with "Username and password required"
+      # — three minutes into the run, from inside a third-party action, naming neither the secret
+      # nor even that a secret is the problem. Every run on main failed that way for a day while
+      # the stale image kept serving, and the deploy job is `skipped` rather than failed, so the
+      # summary reads as though nothing tried to deploy.
+      #
+      # A secret is never echoed. Only its NAME is reported, and only when it is empty.
+      - name: Check the credentials this workflow needs are set
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          missing=()
+          [ -n "$REGISTRY_USERNAME" ] || missing+=("REGISTRY_USERNAME")
+          [ -n "$REGISTRY_PASSWORD" ] || missing+=("REGISTRY_PASSWORD")
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            {
+              echo "### Build cannot start: missing repository secrets"
+              echo
+              for m in "${missing[@]}"; do echo "- \`$m\` is not set or is empty"; done
+              echo
+              echo "These are the registry credentials for \`${REGISTRY}\`. Set them with:"
+              echo '```'
+              for m in "${missing[@]}"; do echo "gh secret set $m"; done
+              echo '```'
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            echo "::error title=Missing secrets::${missing[*]} not set — see the job summary"
+            exit 1
+          fi
+
       - name: Derive an artifact-safe platform name
         run: echo "PLATFORM_PAIR=${PLATFORM//\//-}" >> "$GITHUB_ENV"
         env:
@@ -169,6 +203,36 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      # The same reasoning as the build job's check, for the four the deploy needs. Without it a
+      # half-configured repository builds and pushes successfully and then fails here inside
+      # ssh-action, which reports a connection problem rather than an unset host.
+      - name: Check the deploy credentials are set
+        env:
+          SERVER_HOST: ${{ secrets.SERVER_HOST }}
+          SERVER_USER: ${{ secrets.SERVER_USER }}
+          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
+          COMPOSE_DIR: ${{ secrets.COMPOSE_DIR }}
+        run: |
+          missing=()
+          [ -n "$SERVER_HOST" ]     || missing+=("SERVER_HOST")
+          [ -n "$SERVER_USER" ]     || missing+=("SERVER_USER")
+          [ -n "$SSH_PRIVATE_KEY" ] || missing+=("SSH_PRIVATE_KEY")
+          [ -n "$COMPOSE_DIR" ]     || missing+=("COMPOSE_DIR")
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            {
+              echo "### Image published, but the deploy cannot run"
+              echo
+              echo "The image for this commit IS in the registry — only the deploy step is"
+              echo "unconfigured, so a server can still be updated by hand."
+              echo
+              for m in "${missing[@]}"; do echo "- \`$m\` is not set or is empty"; done
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            echo "::error title=Missing deploy secrets::${missing[*]} not set — see the job summary"
+            exit 1
+          fi
+
       - name: Pull and restart via SSH
         uses: appleboy/ssh-action@v1
         with:
@@ -177,7 +241,7 @@ jobs:
           key: ${{ secrets.SSH_PRIVATE_KEY }}
           script: |
             cd ${{ secrets.COMPOSE_DIR }}
-            echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login ${{ secrets.REGISTRY_HOST }} -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
+            echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login ${{ env.REGISTRY }} -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
             docker compose pull
             docker compose up -d --remove-orphans
             docker image prune -f
