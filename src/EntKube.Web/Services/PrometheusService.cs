@@ -517,13 +517,13 @@ public class PrometheusService(
         if (hasNex && hasKsm)
         {
             // Preferred: kube-prometheus-stack full stack (node-exporter + kube-state-metrics).
-            Task<double> cpuT   = Scalar("100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)");
-            Task<double> memT   = Scalar("100 - (avg(node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)");
-            Task<double> nodesT = Scalar("count(kube_node_info)");
-            Task<double> rNodeT = Scalar("count(kube_node_status_condition{condition=\"Ready\",status=\"true\"})");
-            Task<double> podsT  = Scalar("count(kube_pod_info)");
-            Task<double> rPodsT = Scalar("sum(kube_pod_status_phase{phase=\"Running\"})");
-            Task<double> diskT  = Scalar("100 - (avg(node_filesystem_avail_bytes{mountpoint=\"/\"} / node_filesystem_size_bytes{mountpoint=\"/\"}) * 100)");
+            Task<double> cpuT   = Scalar(ClusterHealthQueries.NodeCpuPercent);
+            Task<double> memT   = Scalar(ClusterHealthQueries.NodeMemoryPercent);
+            Task<double> nodesT = Scalar(ClusterHealthQueries.TotalNodes);
+            Task<double> rNodeT = Scalar(ClusterHealthQueries.ReadyNodes);
+            Task<double> podsT  = Scalar(ClusterHealthQueries.TotalPods);
+            Task<double> rPodsT = Scalar(ClusterHealthQueries.RunningPods);
+            Task<double> diskT  = Scalar(ClusterHealthQueries.NodeDiskPercent);
 
             await Task.WhenAll(cpuT, memT, nodesT, rNodeT, podsT, rPodsT, diskT);
 
@@ -537,10 +537,10 @@ public class PrometheusService(
             logger.LogInformation(
                 "kube-state-metrics/node-exporter not scraped — using kubelet/cAdvisor metrics for cluster health");
 
-            Task<double> cpuT   = Scalar("100 * sum(rate(container_cpu_usage_seconds_total{container!=\"\",namespace!=\"\"}[5m])) / sum(machine_cpu_cores)");
-            Task<double> memT   = Scalar("100 * sum(container_memory_working_set_bytes{container!=\"\",namespace!=\"\"}) / sum(machine_memory_bytes)");
-            Task<double> nodesT = Scalar("count(count by (node) (kubelet_running_pods))");
-            Task<double> podsT  = Scalar("sum(kubelet_running_pods)");
+            Task<double> cpuT   = Scalar(ClusterHealthQueries.KubeletCpuPercent);
+            Task<double> memT   = Scalar(ClusterHealthQueries.KubeletMemoryPercent);
+            Task<double> nodesT = Scalar(ClusterHealthQueries.KubeletNodes);
+            Task<double> podsT  = Scalar(ClusterHealthQueries.KubeletRunningPods);
 
             await Task.WhenAll(cpuT, memT, nodesT, podsT);
 
@@ -906,15 +906,15 @@ public class PrometheusService(
 
                 if (hasNex > 0 && hasKsm > 0)
                 {
-                    cpuQ = Q("100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)");
-                    memQ = Q("100 - (avg(node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes) * 100)");
-                    podQ = Q("sum(kube_pod_status_phase{phase=\"Running\"})");
+                    cpuQ = Q(ClusterHealthQueries.NodeCpuPercent);
+                    memQ = Q(ClusterHealthQueries.NodeMemoryPercent);
+                    podQ = Q(ClusterHealthQueries.RunningPods);
                 }
                 else
                 {
-                    cpuQ = Q("100 * sum(rate(container_cpu_usage_seconds_total{container!=\"\",namespace!=\"\"}[5m])) / sum(machine_cpu_cores)");
-                    memQ = Q("100 * sum(container_memory_working_set_bytes{container!=\"\",namespace!=\"\"}) / sum(machine_memory_bytes)");
-                    podQ = Q("sum(kubelet_running_pods)");
+                    cpuQ = Q(ClusterHealthQueries.KubeletCpuPercent);
+                    memQ = Q(ClusterHealthQueries.KubeletMemoryPercent);
+                    podQ = Q(ClusterHealthQueries.KubeletRunningPods);
                 }
 
                 string cpuJson = await http.GetStringAsync($"{baseUrl}/api/v1/query_range?query={cpuQ}&start={start}&end={end}&step={step}", token);
