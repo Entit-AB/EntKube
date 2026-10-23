@@ -474,7 +474,12 @@ public class OperationsAdvisorService(
             string achieved = b.AchievedPercent is double a ? $"{a:0.##}%" : "n/a";
 
             // Already breached — the objective is missed for this window.
-            if (consumed >= 1.0)
+            //
+            // ⚠️ Strictly greater, matching ErrorBudgetStatus.IsBreached and the contract on
+            // BudgetConsumedFraction ("1.0 = exhausted, >1 = breached"). At exactly 1.0 the
+            // availability equals the objective, which meets it; such a deployment falls through
+            // to the budget-low finding below, which is what "exhausted but not missed" is.
+            if (consumed > 1.0)
             {
                 result.Add(new OperationsFinding
                 {
