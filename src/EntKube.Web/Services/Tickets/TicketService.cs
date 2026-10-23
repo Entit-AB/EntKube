@@ -838,7 +838,14 @@ public class TicketService(
     /// Whose ticket. An input: a ticket carries customer correspondence, and
     /// <c>CustomerTicketsPanel</c> — a customer-facing portal panel — reaches these by id.
     /// </param>
-    public async Task AddEventAsync(
+    /// <returns>
+    /// Whether the event was written. ⚠️ <b>This used to be <c>void</c>, and the refusal below
+    /// was therefore indistinguishable from success at every call site.</b> A customer's reply
+    /// to a ticket that had been moved to another tenant was dropped here and the caller went on
+    /// to mark the message handled, so the reply left the triage queue and landed nowhere while
+    /// the inbox stated it had been filed. Refusing is right; refusing silently was not.
+    /// </returns>
+    public async Task<bool> AddEventAsync(
         Guid tenantId, Guid ticketId, TicketEventKind kind, string detail, string? actor, DateTime at,
         bool customerVisible = true, CancellationToken ct = default)
     {
@@ -852,11 +859,12 @@ public class TicketService(
 
         if (!ticketIsTenants)
         {
-            return;
+            return false;
         }
 
         db.TicketEvents.Add(Event(ticketId, kind, at, actor, detail, customerVisible));
         await db.SaveChangesAsync(ct);
+        return true;
     }
 
     /// <summary>

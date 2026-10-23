@@ -156,22 +156,50 @@ public class SupportMailService(
                                   && s.State == MailSuggestionState.Accepted),
                     ct);
 
-            // What, if anything, proves this message belongs to a ticket already. The thread
-            // is one of our own Message-Ids, which we minted and sent to the people the
-            // ticket concerns; the token is the check characters on the reference in the
-            // subject. Either is something only a person we wrote to could be holding.
-            int? provenByThread = SupportMessageId.TicketNumberIn(message.InReplyTo);
+            // ⚠️ These two are NOT interchangeable, and treating them as one is what this
+            // reads as a correction of.
+            //
+            // The token is the check characters on the subject reference: an HMAC under a key
+            // only we hold, which is why TicketReference.ProvenIn describes itself as "what the
+            // decision to act without a person reading the message first rests on".
+            //
+            // The thread is a Message-Id of ours, and its random half is NOT checked against
+            // anything stored. SupportMessageId.TicketNumberIn says so in as many words — "it is
+            // not a secret and reading a number out of a crafted header is possible for anyone
+            // who knows a ticket number … it is not enough to build anything on that assumes
+            // only the recipients of our mail can produce one" — and the comment that used to
+            // stand here asserted the exact opposite, that either was "something only a person
+            // we wrote to could be holding". Anyone holding a ticket number, which is a number
+            // we tell the customer and allocate in sequence across the installation, can mint a
+            // matching In-Reply-To.
+            //
+            // So the thread still PLACES a message on its ticket — that is what it is for, and
+            // what keeps a reply working after the subject is mangled or the ticket is moved —
+            // but it no longer licenses acting without a person. That is the bound
+            // SupportMessageId states: it puts a suggestion in front of somebody.
+            int? threadedTo = SupportMessageId.TicketNumberIn(message.InReplyTo);
             int? provenByToken = references.ProvenIn(message.Subject);
 
             ArrivalDecision decision = ArrivalPolicy.Decide(
                 message, message.Suggestions, acknowledges, answeredRecently,
-                referenceIsProven: provenByThread is not null || provenByToken is not null);
+                referenceIsProven: provenByToken is not null);
 
             if (decision.Action == ArrivalAction.LeaveForAPerson)
             {
+                // The threaded number is reported here because this is now the branch that a
+                // thread-only match lands in. It used to be acted on automatically, so after
+                // this change an installation sees more mail waiting for a person, and the log
+                // has to say which of the two reasons that is — a message nobody could place at
+                // all reads very differently from one placed on a ticket by a header anyone
+                // could have written.
                 logger?.LogInformation(
-                    "Support mail from {From} was left for a person: {Reason}",
-                    message.FromAddress, decision.Reason);
+                    "Support mail from {From} was left for a person: {Reason}{Threaded}",
+                    message.FromAddress,
+                    decision.Reason,
+                    threadedTo is int threaded
+                        ? $" (it threads to ticket #{threaded}, which places it but does not "
+                          + "prove it — see SupportMessageId)"
+                        : "");
 
                 return message;
             }
@@ -218,12 +246,16 @@ public class SupportMailService(
 
                 int? onto = await NumberOfAsync(db, append.TicketId, ct);
 
-                if (onto is null || (onto != provenByThread && onto != provenByToken))
+                // Compared against the PROVEN number only. Including the threaded number here
+                // would re-admit what the gate above now refuses: a crafted In-Reply-To naming
+                // ticket A beside a valid token for ticket B would satisfy the cross-check and
+                // append to A.
+                if (onto is null || onto != provenByToken)
                 {
                     logger?.LogWarning(
                         "Support mail from {From} proved ticket #{Proven} but the suggestion "
                         + "pointed at #{Onto}; it is being left for a person.",
-                        message.FromAddress, provenByThread ?? provenByToken, onto);
+                        message.FromAddress, provenByToken, onto);
 
                     return message;
                 }
@@ -623,6 +655,53 @@ public class SupportMailService(
         InboundMailMessage message = suggestion.Message;
         Ticket? ticket = null;
 
+        // The ticket's own tenant, not the mailbox's.
+        //
+        // ⚠️ A ticket can be MOVED to another customer in another tenant, and the reporter goes
+        // on replying to the address they always wrote to — which is why candidate tickets are
+        // gathered with no tenant predicate and why ticket numbers are allocated across the
+        // installation. The branches below then wrote with `message.TenantId`, so for a moved
+        // ticket every one of them addressed a tenant that no longer owned it, the scoped write
+        // refused, and the refusal was invisible. The OpenTicket branch above already resolves
+        // the owning tenant from the customer for exactly this reason ("the ticket belongs with
+        // the customer"); this is the same rule applied to the branches that extend a ticket
+        // rather than create one.
+        //
+        // What authorises the write is the message's provenance, not tenant membership: a
+        // suggestion exists only where the mail threads to the ticket, carries a token we
+        // minted, or comes from the address that reported it — and a person accepts it by name.
+        async Task<Guid> OwningTenantOf(Guid ofTicket)
+        {
+            Guid owner = await db.Tickets.AsNoTracking()
+                .Where(t => t.Id == ofTicket)
+                .Select(t => t.TenantId)
+                .FirstOrDefaultAsync(ct);
+
+            // Gone, rather than elsewhere. Falling back to the message's own tenant keeps the
+            // scoped write as the thing that refuses, which NotDoneAsync then reports.
+            return owner == Guid.Empty ? message.TenantId : owner;
+        }
+
+        // ⭐ Leaves the message in the queue, because nothing was done to it.
+        //
+        // Everything below the switch — Accepted, Handled, HandledBy — is a claim about what
+        // happened, and it used to be made unconditionally. A branch whose write was refused
+        // therefore took the message out of triage and recorded a person as having dealt with
+        // it, which is how a customer's reply could be lost in a way that looked like success
+        // on the one screen an operator would check.
+        //
+        // Nothing is saved here on purpose: the context is discarded, so the suggestion stays
+        // Pending and the message stays where somebody will see it.
+        async Task<Ticket?> NotDoneAsync(string why)
+        {
+            logger?.LogWarning(
+                "Support mail from {From}: a {Kind} suggestion accepted by {Actor} could not be "
+                + "applied because {Why}; it is being left in the queue.",
+                message.FromAddress, suggestion.Kind, actor, why);
+
+            return await Task.FromResult<Ticket?>(null);
+        }
+
         switch (suggestion.Kind)
         {
             case MailSuggestionKind.OpenTicket when message.CustomerId is Guid customerId:
@@ -676,7 +755,16 @@ public class SupportMailService(
                 // the analyst cut at the line. Re-cutting here could disagree with what they
                 // read, and the one thing that must not happen is a customer receiving
                 // something nobody saw.
-                ticket = await tickets.ReplyToCustomerAsync(message.TenantId, repliedTo, suggestion.DraftText, actor, message.SentAt, ct);
+                ticket = await tickets.ReplyToCustomerAsync(
+                    await OwningTenantOf(repliedTo), repliedTo, suggestion.DraftText, actor,
+                    message.SentAt, ct);
+
+                // Null means the ticket was not there to reply on. Nothing was sent, so this
+                // must not go on to report that it was.
+                if (ticket is null)
+                {
+                    return await NotDoneAsync("the ticket it answers is no longer there");
+                }
 
                 message.TicketId = repliedTo;
 
@@ -693,26 +781,36 @@ public class SupportMailService(
                 // Not customer-visible, and the wording says what it means rather than
                 // pasting a report at somebody: the point is that a particular person did
                 // not hear from us, which is the part that needs acting on.
-                await tickets.AddEventAsync(message.TenantId, failedOn, TicketEventKind.Note,
-                    $"Mail we sent about this ticket was refused and did not arrive"
-                    + (message.FailedRecipient is string who ? $" for {who}" : "")
-                    + $". The server said:\n\n{message.Body}",
-                    actor, message.SentAt, customerVisible: false, ct);
+                Guid failedOwner = await OwningTenantOf(failedOn);
+
+                if (!await tickets.AddEventAsync(failedOwner, failedOn, TicketEventKind.Note,
+                        $"Mail we sent about this ticket was refused and did not arrive"
+                        + (message.FailedRecipient is string who ? $" for {who}" : "")
+                        + $". The server said:\n\n{message.Body}",
+                        actor, message.SentAt, customerVisible: false, ct))
+                {
+                    return await NotDoneAsync("the ticket the bounce concerns is no longer there");
+                }
 
                 message.TicketId = failedOn;
-                ticket = await tickets.GetAsync(message.TenantId, failedOn, ct);
+                ticket = await tickets.GetAsync(failedOwner, failedOn, ct);
                 message.CustomerId ??= ticket?.CustomerId;
                 break;
             }
 
             case MailSuggestionKind.AppendToTicket when suggestion.TicketId is Guid ticketId:
             {
-                await tickets.AddEventAsync(message.TenantId, ticketId, TicketEventKind.Note,
-                    $"From {message.FromAddress}: {message.Body}",
-                    actor, message.SentAt, customerVisible: true, ct);
+                Guid appendOwner = await OwningTenantOf(ticketId);
+
+                if (!await tickets.AddEventAsync(appendOwner, ticketId, TicketEventKind.Note,
+                        $"From {message.FromAddress}: {message.Body}",
+                        actor, message.SentAt, customerVisible: true, ct))
+                {
+                    return await NotDoneAsync("the ticket it belongs to is no longer there");
+                }
 
                 message.TicketId = ticketId;
-                ticket = await tickets.GetAsync(message.TenantId, ticketId, ct);
+                ticket = await tickets.GetAsync(appendOwner, ticketId, ct);
                 break;
             }
         }
