@@ -71,6 +71,13 @@ public class TicketBridgeAdmin(IDbContextFactory<SupportDbContext> dbFactory)
     /// CustomerId straight across and would otherwise point the connection at somebody
     /// else's customer.
     /// </param>
+    /// <param name="settings">
+    /// What to store. ⚠️ Two of these fields are not free-standing values:
+    /// <c>DefaultAppId</c> is only meaningful together with <c>CustomerId</c>, and the pair
+    /// (<c>System</c>, <c>Instance</c>) is half of the deduplication identity that existing
+    /// <see cref="ExternalTicketLink"/> rows are keyed on. Both are reconciled below rather
+    /// than copied blindly.
+    /// </param>
     public async Task<TicketBridgeConnection> SaveAsync(
         Guid tenantId, TicketBridgeConnection settings, CancellationToken ct = default)
     {
@@ -81,6 +88,26 @@ public class TicketBridgeAdmin(IDbContextFactory<SupportDbContext> dbFactory)
         {
             throw new InvalidOperationException(
                 "Customer not found, or it is not this tenant's.");
+        }
+
+        // ⭐ The application has to belong to the customer, and nothing else checks it.
+        // The form filters the application options by the chosen customer, so a stale id
+        // from a previously chosen customer renders as no selection at all — it reads as
+        // "None — decide per ticket" while the value underneath is somebody else's app.
+        // Downstream there is no second chance: TicketBridgeService.ResolveAppAsync
+        // constrains only its name-hint path to `a.CustomerId == connection.CustomerId`
+        // and falls back to a bare `return connection.DefaultAppId;`, and
+        // TicketService.CreateAsync takes the id without an owner check — so the ticket's
+        // support window, clock start and §14.6 exposure come from the wrong contract.
+        // TicketService.MoveAsync refuses exactly this pairing, and calls it "the one
+        // combination that would be silently wrong rather than obviously wrong."
+        if (settings.DefaultAppId is Guid defaultAppId
+            && !await db.Apps.AnyAsync(
+                a => a.Id == defaultAppId && a.CustomerId == settings.CustomerId, ct))
+        {
+            throw new InvalidOperationException(
+                "That application belongs to another customer. Choose one of this "
+                + "customer's, or none.");
         }
 
         TicketBridgeConnection? existing = settings.Id == Guid.Empty
@@ -101,6 +128,10 @@ public class TicketBridgeAdmin(IDbContextFactory<SupportDbContext> dbFactory)
         }
         else
         {
+            // ⚠️ Before the new values are copied on, while the old key is still readable:
+            // System and Instance are half of what deliveries are deduped on.
+            await RekeyLinksAsync(db, existing, settings.System, settings.Instance, ct);
+
             existing.CustomerId = settings.CustomerId;
             existing.System = settings.System;
             existing.Instance = settings.Instance;
@@ -117,6 +148,91 @@ public class TicketBridgeAdmin(IDbContextFactory<SupportDbContext> dbFactory)
 
         await db.SaveChangesAsync(ct);
         return existing;
+    }
+
+    /// <summary>
+    /// Moves this connection's existing <see cref="ExternalTicketLink"/> rows onto the
+    /// system and instance it is about to be saved with, so deduplication keeps matching.
+    ///
+    /// <para>⭐ <b>Editing the Instance used to re-key deduplication and silently split
+    /// every open incident in two.</b> A delivery is matched against existing links on
+    /// (<c>TenantId</c>, <c>System</c>, <c>Instance</c>, <c>ExternalId</c>) —
+    /// <c>TicketBridgeService.DeliverInternalAsync</c> builds that lookup from the
+    /// <i>connection's</i> current values, and the unique index in
+    /// <c>SupportModel</c> enforces the same four columns. The link rows keep the instance
+    /// copied when they were created. So correcting a typo, or following a customer to a
+    /// renamed host, left every existing link at the old address: the next delivery about
+    /// an already-mirrored incident matched nothing, took the raise branch, and opened a
+    /// second ticket — with no index violation, because the instance differed. Sending
+    /// systems resend on every field change, so that happens within minutes, and the
+    /// customer ends up with two tickets for one incident, each with its own SLA clock and
+    /// §14.6 penalty exposure, and the §28 report double-counting it.</para>
+    ///
+    /// <para>The mail side is the control: <see cref="ExternalTicketLink"/>'s own doc says
+    /// "the external id is the identity to dedupe on, exactly as
+    /// <c>InboundMailMessage.MessageId</c> is for mail", and <c>SupportMailService</c>
+    /// dedupes on (<c>TenantId</c>, <c>MessageId</c>) alone — no field of the mailbox
+    /// configuration is in that key, so editing a mailbox cannot re-key it. This class
+    /// already uses the immutable <c>ConnectionId</c> everywhere it counts links
+    /// (<c>ListAsync</c>, <c>DeleteAsync</c>); only raise-vs-append used the mutable pair.</para>
+    ///
+    /// <para>⚠️ <b>The deeper fix is outside this file.</b> Keying the delivery lookup on
+    /// <c>ConnectionId</c> — which <c>ExternalTicketLink</c> already carries and which no
+    /// edit changes — would remove the hazard rather than compensate for it. That lookup
+    /// lives in <c>src/EntKube.Web/Services/Tickets/Bridge/TicketBridgeService.cs</c> and
+    /// the index in <c>src/EntKube.Web/Data/Modules/SupportModel.cs</c>; changing either
+    /// means a migration, so this keeps the two in step from the only place that edits
+    /// them. <c>src/EntKube.Web/Data/TicketBridge.cs</c> still describes the link's
+    /// Instance as "copied at the time", which is now "kept in step with the connection".</para>
+    /// </summary>
+    private static async Task RekeyLinksAsync(
+        SupportDbContext db,
+        TicketBridgeConnection existing,
+        TicketSystem system,
+        string instance,
+        CancellationToken ct)
+    {
+        if (existing.System == system && existing.Instance == instance)
+        {
+            return;
+        }
+
+        List<ExternalTicketLink> links = await db.ExternalTicketLinks
+            .Where(l => l.ConnectionId == existing.Id)
+            .ToListAsync(ct);
+
+        if (links.Count == 0)
+        {
+            return;
+        }
+
+        // ⚠️ The unique index spans the tenant, not the connection, so another connection
+        // may already hold one of these external ids at the address this one is moving to.
+        // Moving onto it would throw from SaveChangesAsync half-way through the save, with
+        // nothing on screen to explain it.
+        List<string> externalIds = [.. links.Select(l => l.ExternalId)];
+
+        bool taken = await db.ExternalTicketLinks.AnyAsync(
+            l => l.ConnectionId != existing.Id
+                 && l.TenantId == existing.TenantId
+                 && l.System == system
+                 && l.Instance == instance
+                 && externalIds.Contains(l.ExternalId),
+            ct);
+
+        if (taken)
+        {
+            throw new InvalidOperationException(
+                $"Another connection already carries tickets from {system} at "
+                + $"\"{instance}\" under the same reference. Moving this one there would "
+                + "make two tickets claim the same incident.");
+        }
+
+        foreach (ExternalTicketLink link in links)
+        {
+            link.System = system;
+            link.Instance = instance;
+        }
     }
 
     /// <summary>

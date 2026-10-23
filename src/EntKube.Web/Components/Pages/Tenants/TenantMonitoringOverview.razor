@@ -302,6 +302,50 @@
     private int tenantCriticalAlerts;
     private int criticalIncidents;
     private int advisorActionable;
+
+    /// <summary>
+    /// Whether an advisor finding belongs in the "Needs attention" tile: due now or already
+    /// late, and not suppressed by a decision that is still in force.
+    ///
+    /// <para>⭐ <b>A snooze expires; the status does not.</b>
+    /// <see cref="AdvisorFindingStatus.Snoozed"/> is documented as "Hidden until
+    /// <c>AdvisorFindingState.SnoozedUntil</c> passes", and nothing ever puts the row back:
+    /// <c>AdvisorStateService</c> rewrites the status only on an explicit acknowledge,
+    /// dismiss or reactivate, its <c>ReconcileAsync</c> prunes only rows whose finding has
+    /// been <i>absent</i> for three days — so a finding that is still present keeps its
+    /// stale Snoozed row forever — and <c>OperationsAdvisorService.MergeStateAsync</c>
+    /// copies the status onto the finding with no comparison against now. The durations the
+    /// Advisor tab offers are 1, 3 and 7 days, so expired-but-still-Snoozed is the ordinary
+    /// steady state, not a corner case.</para>
+    ///
+    /// <para><b>What this used to do.</b> It tested the status alone —
+    /// <c>f.State is not Dismissed and not Snoozed</c> — and so read an expired snooze as
+    /// permanent suppression. An overdue finding snoozed until last week was listed by the
+    /// Advisor tab that this very tile clicks through to (which renders a
+    /// "Snoozed → &lt;past date&gt;" badge on it, with no <c>&gt; now</c> test), while the
+    /// tile showed 0 in green. The strip claimed nothing needed attention and the tab
+    /// behind it listed open overdue work.</para>
+    ///
+    /// <para>Both sites that render these findings as a list already pair the status with
+    /// the date: <c>OperationsAdvisorTab.razor</c>'s default filter, and
+    /// <c>FleetAdvisor.razor</c>'s <c>Visible</c> — whose <c>Priorities</c> list then
+    /// filters the identical <c>Overdue or Today</c> horizons off that pairing, which is the
+    /// same count as this tile, across the fleet instead of one tenant.</para>
+    ///
+    /// <para>⚠️ <c>AdvisorScanService.MaybeSendDigestAsync</c>
+    /// (<c>src/EntKube.Web/Services/AdvisorScanService.cs</c>) still carries the unpaired
+    /// predicate, so the notification digest goes on under-reporting expired snoozes and can
+    /// stay quiet about overdue work. It is outside this change's files; the fix there is
+    /// this same predicate.</para>
+    ///
+    /// <para>A Snoozed finding with no <c>SnoozedUntil</c> at all counts — <c>null &gt; now</c>
+    /// is false — which is deliberate and matches both controls: a snooze with no end is not
+    /// a snooze.</para>
+    /// </summary>
+    public static bool NeedsAttention(OperationsFinding f, DateTime now) =>
+        f.Horizon is AdvisorHorizon.Overdue or AdvisorHorizon.Today
+        && f.State != AdvisorFindingStatus.Dismissed
+        && !(f.State == AdvisorFindingStatus.Snoozed && f.SnoozedUntil > now);
     private DateTime? lastRefreshed;
     /// <summary>True until the database-backed half of the page has loaded — phase one.</summary>
     private bool isLoading;
@@ -366,9 +410,8 @@
         criticalIncidents = activeIncidents.Count(i => i.Severity == "critical");
         upcomingMaintenance = maintenanceTask.Result;
         currentOnCall = onCallTask.Result;
-        advisorActionable = advisorTask.Result.Findings.Count(f =>
-            f.Horizon is AdvisorHorizon.Overdue or AdvisorHorizon.Today
-            && f.State is not AdvisorFindingStatus.Dismissed and not AdvisorFindingStatus.Snoozed);
+        advisorActionable = advisorTask.Result.Findings.Count(
+            f => NeedsAttention(f, DateTime.UtcNow));
 
         // The tiles are placed before their contents are known, so the page has its shape
         // — and its links — immediately. Each tile says it is still measuring rather than
