@@ -146,6 +146,24 @@ public sealed class SegmentEngineOptions
     public int MaxCachedReaders { get; init; } = 64;
 
     /// <summary>
+    /// How many sealed segments a single query may hydrate from object storage at once.
+    ///
+    /// <para>⭐ A query opens a reader over EVERY segment overlapping its window before it reads a
+    /// document, and a segment outside the warm tier must be downloaded and unpacked first. That
+    /// was done one segment at a time, so a window reaching past
+    /// <see cref="WarmRetentionDays"/> cost N sequential round-trips to object storage — latency
+    /// multiplied by segment count, which is what "fetching logs is suddenly very slow" looks
+    /// like from the outside. Segments roll hourly, so a week-old window is well over a hundred
+    /// of them.</para>
+    ///
+    /// <para>⚠️ Bounded rather than unbounded: these downloads are also unpacked, which is CPU and
+    /// disk, and the same disk is the one <see cref="VolumeHighWaterPercent"/> is watching. Eight
+    /// overlaps the latency without turning a wide query into a disk-filling burst. Set 1 to
+    /// restore the old sequential behaviour.</para>
+    /// </summary>
+    public int MaxHydrationConcurrency { get; init; } = 8;
+
+    /// <summary>
     /// zstd level used to compress a sealed segment's archive before it is uploaded to object storage
     /// (see <see cref="SegmentArchive"/>). This is the dominant lever on at-rest telemetry size: sealing the
     /// whole Lucene segment directory with zstd-19 instead of Deflate roughly halves the stored archive
@@ -400,11 +418,22 @@ public abstract class SegmentManagerBase : IDisposable
 
         // Cached, immutable sealed-segment readers — reused across queries (opened once). Each is
         // IncRef'd for the life of this query so retention eviction can't close it mid-search.
-        var sealedReaders = new List<DirectoryReader>(segments.Count);
+        //
+        // ⭐ Hydrated CONCURRENTLY, up to MaxHydrationConcurrency. This was a sequential
+        // `foreach … await`, and a segment outside the warm tier has to be downloaded from object
+        // storage and unpacked before its reader opens — so a window reaching past
+        // WarmRetentionDays paid that round-trip once per segment, in series. Segments roll
+        // hourly, so a week-old log window is a hundred-odd of them: the query took a hundred
+        // round-trips where it needed about a dozen. Nothing was wrong with the index.
+        //
+        // ⚠️ Order is preserved deliberately. The readers go into a MultiReader whose order fixes
+        // the docBase of every sub-reader, and the collectors below resolve a hit through that
+        // ordering, so hydrating out of order would not be a reordered result — it would be a
+        // wrong one.
+        DirectoryReader[] hydrated = await HydrateAsync(segments, ct);
+        var sealedReaders = new List<DirectoryReader>(hydrated);
         try
         {
-            foreach (TelemetrySegment seg in segments)
-                sealedReaders.Add(await AcquireSegmentReaderAsync(seg, ct));
 
             var readers = new List<IndexReader>(1 + sealedReaders.Count);
             if (activeSearcher is not null) readers.Add(activeSearcher.IndexReader);
@@ -470,6 +499,58 @@ public abstract class SegmentManagerBase : IDisposable
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Acquires every sealed reader for a query, in parallel but IN ORDER.
+    ///
+    /// <para>⚠️ <b>Partial failure must not leak a reference.</b> Each successful acquire has
+    /// IncRef'd its reader on this query's behalf. If a later one throws — a transient object-store
+    /// error is the expected case — the successes would otherwise stay IncRef'd forever and their
+    /// Directory would never be disposed, so they are released here before the exception leaves.
+    /// The sequential loop this replaced got that for free from the caller's <c>finally</c>, which
+    /// only ever saw readers already added to its list.</para>
+    /// </summary>
+    private async Task<DirectoryReader[]> HydrateAsync(
+        IReadOnlyList<TelemetrySegment> segments, CancellationToken ct)
+    {
+        if (segments.Count == 0) return [];
+
+        // One segment is the common case (a short window inside the active index's neighbour) and
+        // does not need a semaphore or a task array.
+        if (segments.Count == 1) return [await AcquireSegmentReaderAsync(segments[0], ct)];
+
+        int limit = Math.Max(1, _options.MaxHydrationConcurrency);
+        using SemaphoreSlim gate = new(limit, limit);
+
+        async Task<DirectoryReader> OneAsync(TelemetrySegment seg)
+        {
+            await gate.WaitAsync(ct);
+            try { return await AcquireSegmentReaderAsync(seg, ct); }
+            finally { gate.Release(); }
+        }
+
+        // Indexed so the result keeps the catalog's order regardless of completion order.
+        Task<DirectoryReader>[] tasks = [.. segments.Select(OneAsync)];
+
+        try
+        {
+            return await Task.WhenAll(tasks);
+        }
+        catch
+        {
+            // Release what did succeed. WhenAll surfaces one exception; the others are observed
+            // here, which also stops them resurfacing as unobserved-task faults later.
+            foreach (Task<DirectoryReader> t in tasks)
+            {
+                if (t.IsCompletedSuccessfully)
+                {
+                    try { t.Result.DecRef(); } catch { /* already closed */ }
+                }
+            }
+
+            throw;
+        }
     }
 
     // Get-or-open the cached reader for a sealed segment, then IncRef it for the caller's query.
