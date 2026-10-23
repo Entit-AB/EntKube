@@ -118,7 +118,7 @@ public class PublicApiContractAdoptionTests
     /// hand, from the contract's record instead of the entity, because this is the one published
     /// surface a Terraform provider reads and its wire shape must be provably unmoved.</para>
     ///
-    /// <para><b>What the five are, and why each is still here.</b> None is an adoption that was
+    /// <para><b>What the four are, and why each is still here.</b> None is an adoption that was
     /// skipped; each needs contract surface that does not exist, which is a different change from
     /// using surface that does:</para>
     /// <list type="bullet">
@@ -150,8 +150,25 @@ public class PublicApiContractAdoptionTests
     /// position, so it cannot see a route that resolves a service from the provider by hand, and it
     /// would count a comment naming one. Comments are stripped; the provider shape is not currently
     /// present and would need its own measure if it appeared.</para>
+    ///
+    /// <para>⭐ <b>This constant went red on main, for the fifth time, and the mechanism is always
+    /// the same.</b> #350 lowered it 9 → 5 against a tree without the upgrade-report adoption;
+    /// #353 lowered it 9 → 8 against a tree without the cost contract. Both were correct about
+    /// their own tree. The merged tree measures <b>4</b>, which neither author could have written,
+    /// and the conflict was resolved by keeping one side's number instead of re-measuring. The
+    /// result passed the growth check — 4 is less than 5 — and failed only
+    /// <see cref="The_module_service_baseline_does_not_carry_slack"/>, which exists for exactly
+    /// this.</para>
+    ///
+    /// <para><b>So: a number here is a fact about a tree, and a merge produces a tree neither
+    /// author measured.</b> When this line conflicts, do not pick a side — take either, run
+    /// <see cref="The_module_service_baseline_does_not_carry_slack"/> on the merge result, and
+    /// write down what it reports. The failure message prints the measured count and names every
+    /// remaining site, so the correct value is one test run away. Two PRs that both lower this
+    /// cannot both be right after merging, and the one that merges second is not the one at
+    /// fault.</para>
     /// </summary>
-    private const int BaselineModuleServices = 5;
+    private const int BaselineModuleServices = 4;
 
     [Fact]
     public void The_public_api_does_not_reach_past_a_contract_into_a_modules_services()
