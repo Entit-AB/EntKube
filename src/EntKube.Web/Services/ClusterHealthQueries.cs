@@ -26,8 +26,8 @@ public static class ClusterHealthQueries
     /// This is the opposite of <see cref="NodeMemoryPercent"/>, where the series are nodes and
     /// nodes are not the same size — so do not "fix" this one to match that one.</para>
     /// </summary>
-    public const string NodeCpuPercent =
-        "100 - (avg(rate(node_cpu_seconds_total{mode=\"idle\"}[5m])) * 100)";
+    public static readonly string NodeCpuPercent =
+        $"100 - (avg(rate(node_cpu_seconds_total{{mode=\"idle\"}}[{PromRateWindow.Token}])) * 100)";
 
     /// <summary>
     /// Cluster memory in use, as a percentage, pooled over nodes.
@@ -113,8 +113,8 @@ public static class ClusterHealthQueries
     /// node-exporter. These were already pooled (<c>sum / sum</c>) and are unchanged — they are
     /// here so that both branches of a health query are read in one place.
     /// </summary>
-    public const string KubeletCpuPercent =
-        "100 * sum(rate(container_cpu_usage_seconds_total{container!=\"\",namespace!=\"\"}[5m])) / sum(machine_cpu_cores)";
+    public static readonly string KubeletCpuPercent =
+        $"100 * sum(rate(container_cpu_usage_seconds_total{{container!=\"\",namespace!=\"\"}}[{PromRateWindow.Token}])) / sum(machine_cpu_cores)";
 
     /// <inheritdoc cref="KubeletCpuPercent"/>
     public const string KubeletMemoryPercent =
