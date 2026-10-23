@@ -809,6 +809,75 @@ public class PrometheusService(
     }
 
     /// <summary>
+    /// The PromQL for container restarts <b>inside a window</b>, as a rollout verdict needs them.
+    ///
+    /// <para>⚠️ <c>kube_pod_container_status_restarts_total</c> is a <b>cumulative counter</b>:
+    /// an instant <c>sum()</c> of it is every restart every container in the namespace has ever
+    /// had. <see cref="GetDeploymentMetricsAsync"/> reports exactly that, correctly, for the
+    /// dashboards — "has anything here been restarting" is a reasonable question to answer with a
+    /// lifetime total. It is the wrong answer for "did <em>this</em> rollout restart", which is a
+    /// rate question, so this wraps it in <c>increase()</c> over the analysis window.</para>
+    ///
+    /// <para><c>increase()</c> is right across a rollout specifically because old pods' series end
+    /// and new pods' series begin at zero: a replacement pod that has restarted twice contributes
+    /// about two, not two plus the history of the pod it replaced.</para>
+    ///
+    /// <para>⚠️ Still namespace-scoped, which is a known imprecision rather than an oversight: a
+    /// namespace hosting two deployments will count a neighbour's restarts toward this rollout.
+    /// That is a far smaller error than counting all of history and it needs pod-ownership
+    /// labels to fix, so it is left stated rather than silently narrowed.</para>
+    /// </summary>
+    /// <summary>
+    /// The range to ask for, floored at one minute.
+    ///
+    /// <para>Prometheus cannot compute an <c>increase()</c> over a range shorter than its scrape
+    /// interval, and a rollout measured moments after it began would otherwise ask for a range of
+    /// zero and get nothing back. <c>RolloutAnalysis</c> reads nothing as <b>"restarts
+    /// unavailable"</b> and drops the check from the verdict — so the window that most needs the
+    /// check would silently lose it, which is a quieter failure than the one this whole change is
+    /// about and worth not trading for.</para>
+    /// </summary>
+    public static int RestartWindowSeconds(TimeSpan window) =>
+        Math.Max(60, (int)window.TotalSeconds);
+
+    public static string RestartsInWindowQuery(string ns, int windowSeconds) =>
+        $"sum(increase(kube_pod_container_status_restarts_total{{namespace=\"{ns}\"}}[{windowSeconds}s]))";
+
+    /// <summary>
+    /// Container restarts in the namespace over the last <paramref name="window"/>, for a rollout
+    /// verdict. See <see cref="RestartsInWindowQuery"/> for why this is not
+    /// <see cref="GetDeploymentMetricsAsync"/>'s <c>RestartCount</c>.
+    /// </summary>
+    public async Task<KubernetesOperationResult<int>> GetRestartsInWindowAsync(
+        Guid tenantId, Guid deploymentId, TimeSpan window, CancellationToken ct = default)
+    {
+        EntKube.Contracts.Delivery.DeploymentSummary? deployment =
+            await delivery.GetDeploymentAsync(tenantId, deploymentId, ct);
+
+        if (deployment is null)
+            return KubernetesOperationResult<int>.Failure("Deployment not found.");
+
+        string ns = deployment.Namespace ?? "";
+
+        var (info, error) = await ResolveReachableAsync(tenantId, deployment.ClusterId, ct);
+        if (info is null) return KubernetesOperationResult<int>.Failure(error!);
+
+        int seconds = RestartWindowSeconds(window);
+
+        return await WithServiceAsync<int>(
+            info.Cluster, info.Config.Namespace, info.Config.ServiceName, info.Config.ServicePort,
+            async (http, baseUrl, token) =>
+            {
+                string q = Q(RestartsInWindowQuery(ns, seconds));
+                double v = ExtractScalarValue(
+                    await http.GetStringAsync($"{baseUrl}/api/v1/query?query={q}", token));
+
+                return (int)Math.Round(v);
+            },
+            $"rollout restarts {deploymentId}", ct);
+    }
+
+    /// <summary>
     /// Returns CPU%, memory%, and pod-count time series for a cluster, selecting
     /// node-exporter/kube-state-metrics queries when available and falling back to
     /// kubelet/cAdvisor metrics when they are not scraped by this Prometheus instance.

@@ -134,14 +134,29 @@ public class RolloutService(
         }
 
         // ── Restarts, from Prometheus ──
+        //
+        // ⚠️ Over the analysis window, NOT GetDeploymentMetricsAsync's RestartCount. That one is
+        // an instant sum of kube_pod_container_status_restarts_total, which is a CUMULATIVE
+        // counter — every restart every container in the namespace has ever had. The dashboards
+        // want that figure and it is right for them; a rollout verdict is a rate question.
+        //
+        // Read as a lifetime total it made the restart check permanently unsatisfiable: with
+        // MaxRestarts defaulting to 3, any namespace that had ever accumulated four container
+        // restarts breached on EVERY subsequent rollout, however healthy the new version was —
+        // and RolloutWatcherService rolls back automatically on a breach, so deploys into a
+        // mature namespace were undone unattended and the verdict read "1247 container restarts
+        // (limit 3)", which is absurd on its face but internally consistent.
+        //
+        // This method is handed windowStart and now, and already uses them for the error-rate and
+        // latency signals. The restart signal was the one that did not.
         try
         {
-            KubernetesOperationResult<DeploymentMetricsSummary> metrics =
-                await prometheus.GetDeploymentMetricsAsync(tenantId, deployment.Id, ct);
+            KubernetesOperationResult<int> inWindow = await prometheus.GetRestartsInWindowAsync(
+                tenantId, deployment.Id, now - windowStart, ct);
 
-            if (metrics.IsSuccess && metrics.Data is not null)
+            if (inWindow.IsSuccess)
             {
-                restarts = metrics.Data.RestartCount;
+                restarts = inWindow.Data;
             }
         }
         catch (Exception ex)
