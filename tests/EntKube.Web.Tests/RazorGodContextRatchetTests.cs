@@ -34,7 +34,6 @@ public class RazorGodContextRatchetTests
     [
         // No single module context exposes every table these two touch, so they are the genuine
         // contract work — the only two of the original 31.
-        "SlaTargetManager.razor",          // SlaTargets (Support) + Delivery's deployments + Customers
 
         // Hub-only pages whose SUBJECT does not derive. These touch nothing but Tenant, Customer,
         // App and KubernetesCluster, which every module context exposes, so the tables cannot pick
@@ -42,7 +41,6 @@ public class RazorGodContextRatchetTests
         // Choosing for them is an architecture decision about which module owns the page, so it is
         // stated in a change of its own rather than guessed here.
         "SupportInbox.razor",              // SupportMailService (Support) + UserAccessService (Identity)
-        "TenantAlertsTab.razor",           // Incident, Prometheus (Telemetry) + Remediation (Fleet)
         "TenantMonitoringOverview.razor",  // Telemetry ×2 + OnCall (Support) + OperationsAdvisor (Advisor)
         "TicketDetail.razor",              // Support ×2 + UserAccessService (Identity)
         "UpgradesTab.razor",               // ComponentUpgrade (Catalog) + NodeManagement (Fleet)

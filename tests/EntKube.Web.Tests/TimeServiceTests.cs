@@ -472,7 +472,12 @@ public class TimeServiceTests : IDisposable
         db.SaveChanges();
     }
 
-    private void Authorise(Guid? ticketId = null, Guid? forAppId = null)
+    /// <summary>
+    /// <paramref name="hours"/> is the ceiling the customer stated. Null is "no explicit ceiling",
+    /// which is what the column documents and what the portal's "leave blank" means — so the
+    /// default keeps every existing caller's approval unlimited.
+    /// </summary>
+    private void Authorise(Guid? ticketId = null, Guid? forAppId = null, decimal? hours = null)
     {
         db.WorkAuthorisations.Add(new WorkAuthorisation
         {
@@ -481,10 +486,107 @@ public class TimeServiceTests : IDisposable
             CustomerId = customerId,
             TicketId = ticketId,
             AppId = forAppId,
+            Hours = hours,
             Month = TimeService.MonthBounds(September).From,
             ApprovedBy = "Entit AB",
         });
         db.SaveChanges();
+    }
+
+    /// <summary>
+    /// ⭐ <b>The ceiling on an approval is a limit, and it used to be read by nothing.</b>
+    ///
+    /// <para><c>WorkAuthorisation.Hours</c> is documented as "How many hours were authorised. Null
+    /// means no explicit ceiling", and the customer portal asks for it in those words — "Up to how
+    /// many more hours? Leave blank for no ceiling". The value was persisted to a decimal column
+    /// and then never looked at: <c>BeyondTheBankAsync</c> asked only whether an unnamed
+    /// authorisation EXISTED and returned 0 for the entire month.</para>
+    ///
+    /// <para>So a customer who approved one further hour against a three-hour overspill had all
+    /// three reported as authorised. ⚠️ And the portal latches: its <c>alreadyApproved</c> flag is
+    /// <c>UnauthorisedHours == 0</c>, so the Approve button then disappears for the rest of the
+    /// month and the operator's timebank panel — which shows <c>UnauthorisedHours &gt; 0</c> — shows
+    /// nothing either. Neither side is told the remaining two hours were never approved.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_ceiling_on_an_approval_limits_what_it_authorises()
+    {
+        UseHourBank(2m);
+        Guid ticket = AddTicket(TicketPriority.P3);
+        await Log(Tue(9), Tue(14), ticket);
+
+        // Three hours past the bank; the customer approves one of them.
+        Authorise(hours: 1m);
+
+        (DateTime from, DateTime to) = TimeService.MonthBounds(September);
+        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(tenantId, customerId, from, to);
+
+        statement.UnauthorisedHours.Should().Be(2m,
+            "one of the three hours past the bank was approved, not all three");
+    }
+
+    /// <summary>
+    /// Two approvals in a month authorise the sum of what they state. A customer who approves an
+    /// hour, is asked again, and approves another has authorised two.
+    /// </summary>
+    [Fact]
+    public async Task Several_ceilings_in_a_month_add_up()
+    {
+        UseHourBank(2m);
+        Guid ticket = AddTicket(TicketPriority.P3);
+        await Log(Tue(9), Tue(14), ticket);
+
+        Authorise(hours: 1m);
+        Authorise(hours: 1m);
+
+        (DateTime from, DateTime to) = TimeService.MonthBounds(September);
+        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(tenantId, customerId, from, to);
+
+        statement.UnauthorisedHours.Should().Be(1m);
+    }
+
+    /// <summary>
+    /// An approval that names more hours than were worked leaves nothing unauthorised, and does
+    /// not go negative. ⚠️ Without this the fix could have reported a credit.
+    /// </summary>
+    [Fact]
+    public async Task A_ceiling_larger_than_the_overspill_does_not_go_negative()
+    {
+        UseHourBank(2m);
+        Guid ticket = AddTicket(TicketPriority.P3);
+        await Log(Tue(9), Tue(14), ticket);
+
+        Authorise(hours: 99m);
+
+        (DateTime from, DateTime to) = TimeService.MonthBounds(September);
+        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(tenantId, customerId, from, to);
+
+        statement.UnauthorisedHours.Should().Be(0m);
+    }
+
+    /// <summary>
+    /// An approval scoped to one application does not clear the <em>portfolio</em> bank.
+    ///
+    /// <para>⚠️ Latent rather than live: <c>BeyondTheBankAsync</c> tested only
+    /// <c>TicketId == null</c>, where <c>BeyondTheCapsAsync</c> requires <c>AppId</c> to be null
+    /// as well, so an app-scoped row would have cleared the whole bank. Nothing in the product
+    /// creates one today — <c>CustomerHoursPanel</c> is the only creator and never sets
+    /// <c>AppId</c> — which is exactly why it was worth closing before something does.</para>
+    /// </summary>
+    [Fact]
+    public async Task An_app_scoped_approval_does_not_clear_the_portfolio_bank()
+    {
+        UseHourBank(2m);
+        Guid ticket = AddTicket(TicketPriority.P3);
+        await Log(Tue(9), Tue(14), ticket);
+
+        Authorise(forAppId: appId);
+
+        (DateTime from, DateTime to) = TimeService.MonthBounds(September);
+        CommittedHoursStatement statement = await time.GetCommittedHoursAsync(tenantId, customerId, from, to);
+
+        statement.UnauthorisedHours.Should().Be(3m,
+            "approving work on one application says nothing about the portfolio's hour bank");
     }
 
     [Fact]

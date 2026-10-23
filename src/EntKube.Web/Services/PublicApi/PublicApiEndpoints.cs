@@ -712,20 +712,23 @@ public static class PublicApiEndpoints
         // update in place and destroy. A read-only surface cannot be managed declaratively.
 
         api.MapGet("/cost-rates", async (
-            HttpContext ctx, CostRateService rates, CancellationToken ct) =>
+            HttpContext ctx, EntKube.Contracts.Cost.ICostApi cost, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
-            List<ClusterCostRate> all = await rates.ListAsync(tenantId, ct);
 
-            return Results.Ok(all.Select(ToCostRateDto));
+            return Results.Ok((await cost.ListRatesAsync(tenantId, ct)).Select(ToCostRateDto));
         }).RequireApiScope(ApiScopes.ConfigRead);
 
         api.MapGet("/cost-rates/{clusterId:guid}", async (
-            Guid clusterId, HttpContext ctx, CostRateService rates, CancellationToken ct) =>
+            Guid clusterId, HttpContext ctx, EntKube.Contracts.Cost.ICostApi cost,
+            CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
-            ClusterCostRate? rate = (await rates.ListAsync(tenantId, ct))
-                .FirstOrDefault(r => r.ClusterId == clusterId);
+
+            // Asked for by id. This used to fetch EVERY rate the tenant had and pick one out of
+            // the list in memory; the predicate belongs in the database, which is where Cost's
+            // own tenant scoping already applies it.
+            EntKube.Contracts.Cost.ClusterRate? rate = await cost.GetRateAsync(tenantId, clusterId, ct);
 
             // 404 rather than an empty object: a provider reading back a resource that no
             // longer exists must be able to tell, so it can plan a re-create instead of
@@ -735,7 +738,7 @@ public static class PublicApiEndpoints
 
         api.MapPut("/cost-rates/{clusterId:guid}", async (
             Guid clusterId, CostRateInput input, HttpContext ctx,
-            CostRateService rates, CancellationToken ct) =>
+            EntKube.Contracts.Cost.ICostApi cost, CancellationToken ct) =>
         {
             ApiTokenPrincipal principal = ctx.GetApiPrincipal()!;
 
@@ -745,9 +748,9 @@ public static class PublicApiEndpoints
             // configured price, which is the opposite of what CostRateInput's own comment
             // promised. And ChargeIdleCapacity, absent from that initializer entirely, took the
             // entity's `= true` on every single write.
-            ClusterCostRate? saved = await rates.PatchAsync(
+            EntKube.Contracts.Cost.ClusterRate? saved = await cost.PatchRateAsync(
                 principal.TenantId, clusterId,
-                new CostRatePatch(
+                new EntKube.Contracts.Cost.ClusterRatePatch(
                     input.CpuCoreHourCost,
                     input.MemoryGiBHourCost,
                     input.StorageGiBMonthCost,
@@ -765,10 +768,11 @@ public static class PublicApiEndpoints
         }).RequireApiScope(ApiScopes.ConfigWrite);
 
         api.MapDelete("/cost-rates/{clusterId:guid}", async (
-            Guid clusterId, HttpContext ctx, CostRateService rates, CancellationToken ct) =>
+            Guid clusterId, HttpContext ctx, EntKube.Contracts.Cost.ICostApi cost,
+            CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
-            bool deleted = await rates.DeleteAsync(tenantId, clusterId, ct);
+            bool deleted = await cost.DeleteRateAsync(tenantId, clusterId, ct);
 
             return deleted ? Results.NoContent() : Results.NotFound();
         }).RequireApiScope(ApiScopes.ConfigWrite);
@@ -818,7 +822,13 @@ public static class PublicApiEndpoints
             : null;
 
     /// <summary>Shape a price sheet is returned in. A DTO so the entity can move without breaking clients.</summary>
-    private static object ToCostRateDto(ClusterCostRate rate) => new
+    /// <summary>
+    /// ⚠️ Kept, and kept mapping by hand, although <c>ClusterRate</c> could be serialised
+    /// directly. This is the one published surface a Terraform provider reads, so the wire shape
+    /// must be provably unchanged by moving the data behind a contract — and a record serialised
+    /// by convention would tie these field names to whatever the JSON options happen to say.
+    /// </summary>
+    private static object ToCostRateDto(EntKube.Contracts.Cost.ClusterRate rate) => new
     {
         clusterId = rate.ClusterId,
         cpuCoreHourCost = rate.CpuCoreHourCost,
