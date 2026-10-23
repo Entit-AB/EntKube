@@ -148,7 +148,8 @@
                         <div class="col-md-4">
                             <label class="form-label small text-muted">Customer</label>
                             <InputSelect class="form-select form-select-sm"
-                                         @bind-Value="editing.CustomerId">
+                                         @bind-Value="editing.CustomerId"
+                                         @bind-Value:after="OnCustomerChanged">
                                 <option value="@Guid.Empty">Choose…</option>
                                 @foreach (Customer customer in customers)
                                 {
@@ -183,7 +184,18 @@
                             <InputSelect class="form-select form-select-sm"
                                          @bind-Value="editing.DefaultAppId">
                                 <option value="">None — decide per ticket</option>
-                                @foreach (EntKube.Web.Data.App app in AppsFor(editing.CustomerId))
+                                @* ⚠️ editing?. and not editing. — this loop is InputSelect's
+                                   ChildContent, a fragment the child re-renders on its own
+                                   (InputBase re-renders on a validation-state change, and the
+                                   EditForm raises one as it is torn down). So it runs once more
+                                   AFTER a successful save has set editing to null and the @@if
+                                   above has stopped rendering this block, and dereferencing it
+                                   there threw NullReferenceException out of the render tree —
+                                   which on a Blazor Server circuit is the circuit. Reproduced by
+                                   clicking Save in TicketBridgeCustomerSwitchRenderTests.
+                                   Guid.Empty matches no customer, so a form on its way out
+                                   renders no options, which is what it should do. *@
+                                @foreach (EntKube.Web.Data.App app in AppsFor(editing?.CustomerId ?? Guid.Empty))
                                 {
                                     <option value="@app.Id">@app.Name</option>
                                 }
@@ -260,6 +272,33 @@
 
     private IEnumerable<EntKube.Web.Data.App> AppsFor(Guid customerId) =>
         apps.Where(a => a.CustomerId == customerId).OrderBy(a => a.Name);
+
+    /// <summary>
+    /// Clears the chosen application when the customer changes, because it belonged to the
+    /// customer that was chosen before.
+    ///
+    /// <para>⭐ <b>Without this the form lied, and lied in the one direction that looks
+    /// fine.</b> The application options are filtered to <c>AppsFor(editing.CustomerId)</c>,
+    /// so after the customer is switched the previously chosen id is no longer among the
+    /// rendered options — the &lt;select&gt; has nothing to select and reads as
+    /// "None — decide per ticket", whose own help text promises that such a ticket "has no
+    /// support window and says so". The C# value underneath still held the other customer's
+    /// app id, and the save copied it straight through. Every inbound ticket on the
+    /// connection then filed against a foreign application, which is worse than no
+    /// application: <c>ResolveCoverAsync</c> takes SupportWindow and SlaApplied from that
+    /// other customer's contract, so the clock start, the breach times, the §13 call-out
+    /// flag and the §14.6 penalty exposure were all computed from the wrong agreement.
+    /// Reopening Edit showed "None" again, permanently.</para>
+    ///
+    /// <para>This is what the two other customer-drives-apps forms in this repo already do:
+    /// <c>SlaTargetManager.razor</c> declares <c>@@bind-Value:after="OnCustomerChanged"</c>
+    /// and that handler's first two statements are <c>filteredApps = []</c> and
+    /// <c>slaForm.AppId = null</c>; <c>TicketDetail.razor</c>'s move panel clears
+    /// <c>moveAppId</c> in its <c>@@onchange</c>. ⚠️ Clearing is deliberately silent rather
+    /// than preserved-if-the-name-matches: the operator is choosing a customer, and the
+    /// safe default for the application is the one the help text describes.</para>
+    /// </summary>
+    private void OnCustomerChanged() => editing!.DefaultAppId = null;
 
     private string Endpoint(Guid connectionId) =>
         $"{Nav.BaseUri.TrimEnd('/')}/api/tickets/inbound/{connectionId}";

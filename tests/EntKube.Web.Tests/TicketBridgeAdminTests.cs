@@ -50,6 +50,7 @@ public class TicketBridgeAdminTests : IDisposable
     private readonly Guid customerId = Guid.NewGuid();
     private readonly Guid otherCustomerId = Guid.NewGuid();
     private readonly Guid appId = Guid.NewGuid();
+    private readonly Guid otherAppId = Guid.NewGuid();
 
     public TicketBridgeAdminTests()
     {
@@ -64,6 +65,7 @@ public class TicketBridgeAdminTests : IDisposable
         db.Customers.Add(new Customer { Id = customerId, TenantId = tenantId, Name = "Entit AB" });
         db.Customers.Add(new Customer { Id = otherCustomerId, TenantId = tenantId, Name = "Entit Europe" });
         db.Apps.Add(new App { Id = appId, CustomerId = customerId, Name = "Journalportalen" });
+        db.Apps.Add(new App { Id = otherAppId, CustomerId = otherCustomerId, Name = "Europaportalen" });
         db.SaveChanges();
 
         admin = new TicketBridgeAdmin(new TestDbContextFactory(connection));
@@ -141,8 +143,16 @@ public class TicketBridgeAdminTests : IDisposable
         {
             // A real row, because these are foreign keys: CustomerId to a different
             // customer than the one saved, DefaultAppId to an application.
+            //
+            // ⚠️ DefaultAppId is OTHER customer's application, not appId. The pair is not
+            // two independent values — SaveAsync now refuses a default application that
+            // belongs to somebody other than the connection's customer, because the form
+            // filters the options by customer and so showed a stale foreign id as no
+            // selection at all. This test sets CustomerId to otherCustomerId in the same
+            // pass, so the distinctive application has to be otherCustomerId's; pairing it
+            // with appId asserted that an incoherent pair round-trips, which is the defect.
             return property.Name == nameof(TicketBridgeConnection.DefaultAppId)
-                ? appId
+                ? otherAppId
                 : otherCustomerId;
         }
 
