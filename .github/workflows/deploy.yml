@@ -1,6 +1,20 @@
-name: Build and Deploy
+name: Build and Publish
 
-# The management-plane image, built for linux/amd64 AND linux/arm64.
+# The management-plane image, built for linux/amd64 AND linux/arm64, and PUSHED. It does not
+# deploy: rolling the server is done by hand, deliberately, so this workflow's whole job is to put
+# a correct multi-arch manifest in the registry.
+#
+# It used to end with an SSH step that ran `docker compose pull && up -d` on one known host. That
+# is removed rather than disabled — the four secrets it needed (SERVER_HOST, SERVER_USER,
+# SSH_PRIVATE_KEY, COMPOSE_DIR) are no longer referenced anywhere, so a half-configured repository
+# can no longer fail after a successful push. `git log -- .github/workflows/deploy.yml` has the
+# step if it is ever wanted back.
+#
+# To roll a server by hand, on the host:
+#
+#   docker compose pull && docker compose up -d --remove-orphans
+#
+# The tags this publishes are the short commit SHA and, on the default branch, `latest`.
 #
 # Both architectures, because this image is no longer pulled only by one known server: entkube-install
 # and the desktop installer put it on whatever host an operator has, and arm64 servers — Graviton,
@@ -197,51 +211,3 @@ jobs:
           IMAGE: ${{ env.IMAGE }}
           VERSION: ${{ steps.meta.outputs.version }}
 
-  deploy:
-    name: Deploy to server
-    needs: merge
-    runs-on: ubuntu-latest
-
-    steps:
-      # The same reasoning as the build job's check, for the four the deploy needs. Without it a
-      # half-configured repository builds and pushes successfully and then fails here inside
-      # ssh-action, which reports a connection problem rather than an unset host.
-      - name: Check the deploy credentials are set
-        env:
-          SERVER_HOST: ${{ secrets.SERVER_HOST }}
-          SERVER_USER: ${{ secrets.SERVER_USER }}
-          SSH_PRIVATE_KEY: ${{ secrets.SSH_PRIVATE_KEY }}
-          COMPOSE_DIR: ${{ secrets.COMPOSE_DIR }}
-        run: |
-          missing=()
-          [ -n "$SERVER_HOST" ]     || missing+=("SERVER_HOST")
-          [ -n "$SERVER_USER" ]     || missing+=("SERVER_USER")
-          [ -n "$SSH_PRIVATE_KEY" ] || missing+=("SSH_PRIVATE_KEY")
-          [ -n "$COMPOSE_DIR" ]     || missing+=("COMPOSE_DIR")
-
-          if [ ${#missing[@]} -gt 0 ]; then
-            {
-              echo "### Image published, but the deploy cannot run"
-              echo
-              echo "The image for this commit IS in the registry — only the deploy step is"
-              echo "unconfigured, so a server can still be updated by hand."
-              echo
-              for m in "${missing[@]}"; do echo "- \`$m\` is not set or is empty"; done
-            } >> "$GITHUB_STEP_SUMMARY"
-
-            echo "::error title=Missing deploy secrets::${missing[*]} not set — see the job summary"
-            exit 1
-          fi
-
-      - name: Pull and restart via SSH
-        uses: appleboy/ssh-action@v1
-        with:
-          host: ${{ secrets.SERVER_HOST }}
-          username: ${{ secrets.SERVER_USER }}
-          key: ${{ secrets.SSH_PRIVATE_KEY }}
-          script: |
-            cd ${{ secrets.COMPOSE_DIR }}
-            echo "${{ secrets.REGISTRY_PASSWORD }}" | docker login ${{ env.REGISTRY }} -u "${{ secrets.REGISTRY_USERNAME }}" --password-stdin
-            docker compose pull
-            docker compose up -d --remove-orphans
-            docker image prune -f
