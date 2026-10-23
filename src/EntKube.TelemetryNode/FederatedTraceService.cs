@@ -90,8 +90,24 @@ public sealed class FederatedTraceService(
     /// <summary>
     /// Combines trace rows by trace id. A single trace can straddle the tiers — some of its spans sealed,
     /// the rest still in the active index — and would otherwise appear twice, each row under-reporting its
-    /// span count. Counts add; the trace starts at the earliest span either half saw and lasts as long as
-    /// the longer half measured; the root comes from whichever half actually holds the root span.
+    /// span count. Counts add; the trace starts at the earliest span either half saw; the root comes from
+    /// whichever half actually holds the root span.
+    ///
+    /// <para>⭐ <b>Duration is the wall-clock extent of the union</b> — latest end minus earliest start —
+    /// which is how every other site that reassembles a trace's duration computes it:
+    /// <c>SegmentTraceService.Summarize</c> (<c>maxEnd - minStart</c>, spans to summary, with a comment
+    /// naming max-single-duration as the wrong answer) and <c>SegmentTraceService.MergePartials</c>
+    /// (<c>end - start</c>, the intra-tier twin of this very merge). The detail view of the same screen
+    /// agrees: <c>TraceExplorer</c> draws its waterfall against
+    /// <c>spans.Max(s =&gt; (s.Start - traceStart) + s.DurationMs)</c>.</para>
+    ///
+    /// <para>⚠️ This used to read <c>DurationMs = Math.Max(existing.DurationMs, row.DurationMs)</c> — the
+    /// longer half's own duration. That equals the union's duration only when both halves start at the same
+    /// instant, which is the one thing that cannot happen to a trace split across tiers: the hot half is by
+    /// definition the later one. A trace whose early spans sealed at T spanning 120 ms and whose hot spans
+    /// ran from T+4.0s for 60 ms really lasted ~4.06 s and was badged "120 ms" — so it read as fast, and
+    /// both the latency hunt and the page's own <c>minDurationMs</c> floor (which is matched against this
+    /// number) went straight past it.</para>
     /// </summary>
     private static List<TraceSummary> MergeTraceSummaries(
         List<TraceSummary> sealedRows, List<TraceSummary> hotRows, int limit)
@@ -108,10 +124,17 @@ public sealed class FederatedTraceService(
 
             // An empty root service means that half never saw the root span, so prefer the half that did.
             bool takeRootFromNew = string.IsNullOrEmpty(existing.RootService) && !string.IsNullOrEmpty(row.RootService);
+            // Wall-clock extent of the union — see the note above. Both ends are measured as offsets from
+            // the merged start, so the half that started later contributes its own lead time plus its span.
+            DateTime start = existing.Start <= row.Start ? existing.Start : row.Start;
+            double extentMs = Math.Max(
+                (existing.Start - start).TotalMilliseconds + existing.DurationMs,
+                (row.Start - start).TotalMilliseconds + row.DurationMs);
+
             byTrace[row.TraceId] = existing with
             {
-                Start = existing.Start <= row.Start ? existing.Start : row.Start,
-                DurationMs = Math.Max(existing.DurationMs, row.DurationMs),
+                Start = start,
+                DurationMs = extentMs,
                 SpanCount = existing.SpanCount + row.SpanCount,
                 ErrorCount = existing.ErrorCount + row.ErrorCount,
                 RootService = takeRootFromNew ? row.RootService : existing.RootService,
