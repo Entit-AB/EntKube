@@ -81,6 +81,44 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ⭐ The same check the management-plane workflow grew, for the same reason: with no
+      # credentials set, `docker/login-action` fails with "Username and password required" from
+      # inside a third-party action, naming neither the secret nor that a secret is the cause.
+      #
+      # ⚠️ Gated on dry_run exactly as the login steps below are. A dry run never authenticates,
+      # so demanding credentials for one would break the only way to exercise this workflow
+      # without publishing — which is the case most likely to be run by somebody who does not
+      # hold the credentials at all.
+      #
+      # Only secret NAMES are echoed, never a value.
+      - name: Check the registry credentials are set
+        if: ${{ !inputs.dry_run }}
+        env:
+          REGISTRY_USERNAME: ${{ secrets.REGISTRY_USERNAME }}
+          REGISTRY_PASSWORD: ${{ secrets.REGISTRY_PASSWORD }}
+        run: |
+          missing=()
+          [ -n "$REGISTRY_USERNAME" ] || missing+=("REGISTRY_USERNAME")
+          [ -n "$REGISTRY_PASSWORD" ] || missing+=("REGISTRY_PASSWORD")
+
+          if [ ${#missing[@]} -gt 0 ]; then
+            {
+              echo "### Cannot publish: missing registry credentials"
+              echo
+              for m in "${missing[@]}"; do echo "- \`$m\` is not set or is empty"; done
+              echo
+              echo "Set them with:"
+              echo '```'
+              for m in "${missing[@]}"; do echo "gh secret set $m"; done
+              echo '```'
+              echo
+              echo "Re-run with \`dry_run\` to exercise the build without publishing."
+            } >> "$GITHUB_STEP_SUMMARY"
+
+            echo "::error title=Missing secrets::${missing[*]} not set — see the job summary"
+            exit 1
+          fi
+
       # Cross-building linux/arm64 on an amd64 runner needs the emulation binaries registered.
       - name: Set up QEMU
         uses: docker/setup-qemu-action@v3
