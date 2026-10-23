@@ -55,10 +55,10 @@ internal static class FleetServices
         services.AddScoped<RemediationService>();
         services.AddScoped<EntKube.Web.Services.Dr.VeleroService>();
         services.AddSingleton<EntKube.Web.Services.Dr.DrScanCache>();
-        services.AddHostedService<EntKube.Web.Services.Dr.DrScanService>();
+        services.AddSingletonWork<EntKube.Web.Services.Dr.DrScanService>();
         services.AddScoped<ClusterBlueprintService>();
         services.AddScoped<BlueprintFromClusterService>();
-        services.AddHostedService<BootstrapRunnerService>();
+        services.AddSingletonWork<BootstrapRunnerService>();
 
         // The module's contract — what everyone else is allowed to know about it.
         services.AddScoped<EntKube.Contracts.Fleet.IFleetApi, EntKube.Web.Modules.Api.FleetApi>();

@@ -51,7 +51,7 @@ internal static class SupportServices
         services.AddScoped<IInboundTicketAdapter, ServiceNowAdapter>();
         services.AddScoped<TicketBridgeService>();
         services.AddScoped<TicketBridgeAdmin>();
-        services.AddHostedService<EntKube.Web.Services.Mail.SupportMailPoller>();
+        services.AddSingletonWork<EntKube.Web.Services.Mail.SupportMailPoller>();
         services.AddScoped<EntKube.Web.Services.Reporting.MonthlyReportService>();
         services.AddScoped<EntKube.Contracts.Support.ISupportApi, EntKube.Web.Modules.Api.SupportApi>();
 

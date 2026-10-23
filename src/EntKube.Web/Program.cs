@@ -12,6 +12,7 @@ using EntKube.Web.Client.Pages;
 using EntKube.Web.Components;
 using EntKube.Web.Components.Account;
 using EntKube.Web.Data;
+using EntKube.Web.Modules;
 using EntKube.Web.Data.Modules;
 using EntKube.Web.Modules.Composition;
 using EntKube.Web.Services;
@@ -308,7 +309,7 @@ public class Program
             builder.Services.AddSingleton<IConnectionMultiplexer>(
                 _ => ConnectionMultiplexer.Connect(redisConnection));
             builder.Services.AddSingleton<IPresenceTracker, RedisPresenceTracker>();
-            builder.Services.AddHostedService<PresenceHeartbeatService>();
+            builder.Services.AddPerInstanceWork<PresenceHeartbeatService>();
         }
         else
         {
@@ -448,19 +449,19 @@ public class Program
         // decision sits above this and is unchanged — the viewers still see one ILogBackend.
         // See docs/telemetry-in-cluster.md.
         // One seal/retention loop per signal; each iterates that signal's live per-tenant managers.
-        builder.Services.AddHostedService(sp => new SegmentSealService(
+        builder.Services.AddSingletonWork(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<LogSegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
-        builder.Services.AddHostedService(sp => new SegmentSealService(
+        builder.Services.AddSingletonWork(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<VerboseLogSegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
-        builder.Services.AddHostedService(sp => new SegmentSealService(
+        builder.Services.AddSingletonWork(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<SpanSegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
-        builder.Services.AddHostedService(sp => new SegmentSealService(
+        builder.Services.AddSingletonWork(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<RumSegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
-        builder.Services.AddHostedService(sp => new SegmentSealService(
+        builder.Services.AddSingletonWork(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
 
@@ -469,7 +470,7 @@ public class Program
         // the tenant's object storage, and only on a plane with no bucket configured does it fall back to
         // dropping the oldest. Telemetry is held here again (docs/telemetry-central-again.md), so this is
         // the management plane's own disk — and a full one fails ingest for every cluster at once.
-        builder.Services.AddHostedService(sp => new VolumeGuardService(
+        builder.Services.AddSingletonWork(sp => new VolumeGuardService(
             [
                 sp.GetRequiredService<SegmentManagerRegistry<LogSegmentManager>>(),
                 sp.GetRequiredService<SegmentManagerRegistry<VerboseLogSegmentManager>>(),
@@ -517,7 +518,7 @@ public class Program
         builder.Services.AddScoped<EntKube.Web.Services.Rollouts.IRolloutStarter>(
             sp => sp.GetRequiredService<EntKube.Web.Services.Rollouts.RolloutService>());
 
-        builder.Services.AddHostedService(sp => sp.GetRequiredService<GitSyncService>());
+        builder.Services.AddSingletonWork(sp => sp.GetRequiredService<GitSyncService>());
 
         builder.Services.AddHttpClient("Notifications", client =>
         {

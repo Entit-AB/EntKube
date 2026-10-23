@@ -37,8 +37,8 @@ internal static class SecretsServices
     {
         services.AddScoped<VaultService>();
         services.AddScoped<SecretExpiryService>();
-        services.AddHostedService<SecretExpiryNotificationService>();
-        services.AddHostedService<ObservedSecretRefreshService>();
+        services.AddSingletonWork<SecretExpiryNotificationService>();
+        services.AddSingletonWork<ObservedSecretRefreshService>();
 
         return services;
     }

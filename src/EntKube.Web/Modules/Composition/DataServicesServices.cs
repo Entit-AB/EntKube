@@ -50,8 +50,8 @@ internal static class DataServicesServices
         services.AddScoped<ElasticsearchService>();
         services.AddScoped<HarborService>();
         services.AddScoped<OpenLdapService>();
-        services.AddHostedService<MessagingStatusPollingService>();
-        services.AddHostedService<SearchStatusPollingService>();
+        services.AddSingletonWork<MessagingStatusPollingService>();
+        services.AddSingletonWork<SearchStatusPollingService>();
 
         // The module's contract — what everyone else is allowed to know about it.
         services.AddScoped<EntKube.Contracts.DataServices.IDataServicesApi,

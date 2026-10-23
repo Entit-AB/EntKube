@@ -46,9 +46,9 @@ internal static class ConnectivityServices
         services.AddScoped<MtlsService>();
         services.AddScoped<MeshMtlsService>();
         services.AddScoped<OutboundMtlsService>();
-        services.AddHostedService<ExternalRouteHealthService>();
-        services.AddHostedService<AppL4RouteHealthService>();
-        services.AddHostedService<HeadscaleCertSyncService>();
+        services.AddSingletonWork<ExternalRouteHealthService>();
+        services.AddSingletonWork<AppL4RouteHealthService>();
+        services.AddSingletonWork<HeadscaleCertSyncService>();
 
         return services;
     }
