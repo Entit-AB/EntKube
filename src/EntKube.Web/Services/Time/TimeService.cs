@@ -440,13 +440,34 @@ public class TimeService(
             .Select(a => a.TicketId!.Value)
             .ToListAsync(ct)];
 
-        bool blanket = await db.WorkAuthorisations.AsNoTracking()
-            .AnyAsync(a => a.CustomerId == customerId && a.Month >= from && a.Month < to && a.TicketId == null, ct);
+        // Blanket authorisations for the month, each with the ceiling it states.
+        //
+        // ⚠️ This used to ask only whether such a row EXISTED and return 0m for the whole month,
+        // which reported every hour past the bank as authorised however small the ceiling was.
+        // WorkAuthorisation.Hours is documented as "How many hours were authorised. Null means no
+        // explicit ceiling", and the portal asks for it as "Up to how many more hours? Leave blank
+        // for no ceiling" — so a stated figure is a limit the customer set, and the value was
+        // persisted and then read by nothing.
+        //
+        // ⚠️ AppId is required to be null as well, matching BeyondTheCapsAsync. Testing only
+        // TicketId meant an APP-scoped approval cleared the entire portfolio bank — latent rather
+        // than live, because CustomerHoursPanel is the only creator in the product and never sets
+        // AppId, which is exactly why it is worth closing before one does.
+        List<decimal?> blanket = await db.WorkAuthorisations.AsNoTracking()
+            .Where(a => a.CustomerId == customerId && a.Month >= from && a.Month < to
+                        && a.TicketId == null && a.AppId == null)
+            .Select(a => a.Hours)
+            .ToListAsync(ct);
 
-        if (blanket)
+        // An approval with no ceiling covers the month, which is what null is documented to mean.
+        if (blanket.Any(h => h is null))
         {
             return 0m;
         }
+
+        // Several approvals in one month add up: each authorised that many further hours. An empty
+        // list sums to zero, so a customer who approved nothing is unaffected.
+        decimal blanketCeiling = blanket.Sum(h => h!.Value);
 
         HashSet<Guid> urgentTickets = [.. await db.Tickets.AsNoTracking()
             .Where(t => t.CustomerId == customerId
@@ -487,7 +508,9 @@ public class TimeService(
             }
         }
 
-        return unauthorised;
+        // The ceiling applies to what is left unauthorised, after the hours excused for urgency or
+        // named approval have already been taken out — those were never the customer's to approve.
+        return Math.Max(0m, unauthorised - blanketCeiling);
     }
 
     /// <summary>
@@ -525,11 +548,19 @@ public class TimeService(
             .Where(a => a.CustomerId == customerId && a.Month >= from && a.Month < to)
             .ToListAsync(ct);
 
-        // Nothing named at all is a blanket approval for the month, as it is for the bank.
-        if (authorisations.Any(a => a.TicketId is null && a.AppId is null))
+        // Nothing named at all is a blanket approval for the month, as it is for the bank — and
+        // as there, the ceiling it states is honoured rather than ignored. A portfolio-wide
+        // approval of N hours covers N hours across the capped applications; apportioning it
+        // between them would need the customer to have said which, and they were not asked.
+        List<decimal?> blanket =
+            [.. authorisations.Where(a => a.TicketId is null && a.AppId is null).Select(a => a.Hours)];
+
+        if (blanket.Any(h => h is null))
         {
             return 0m;
         }
+
+        decimal blanketCeiling = blanket.Sum(h => h!.Value);
 
         HashSet<Guid> authorisedTickets =
             [.. authorisations.Where(a => a.TicketId is not null).Select(a => a.TicketId!.Value)];
@@ -587,7 +618,9 @@ public class TimeService(
             }
         }
 
-        return unauthorised;
+        // As in the bank path: the portfolio-wide ceiling applies to what is left over once the
+        // named and urgent work has been excused.
+        return Math.Max(0m, unauthorised - blanketCeiling);
     }
 
     /// <summary>
