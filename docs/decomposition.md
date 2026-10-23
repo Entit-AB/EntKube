@@ -1662,3 +1662,124 @@ a year and should be treated as a continuous activity rather than a project.
 monolith into a product that agents, the CLI, the MCP server, Terraform and any future
 frontend can all build on — while it is still one process, and without touching a single
 line of Razor.
+
+---
+
+## 9. Running more than one instance (measured 2026-10-23)
+
+The ask: several EntKube instances behind a load balancer, sharing one vault, so that load
+spreads and no single instance is the installation. Every platform feature likewise.
+
+This section is the audit, not a design. It was measured by reading the code, and the
+headline is that the work divides very unevenly: **the vault is essentially ready, the UI is
+not, and four background services would do real damage quietly.**
+
+### 9.1 The vault is configuration, not code
+
+Taking the central ask first, because the answer is better than expected.
+
+| Piece | Where it lives | Shared by |
+|---|---|---|
+| Root key | `Vault:RootKey` config (`Program.cs:332`) | giving every instance the same value |
+| Per-tenant DEK | `SecretVaults.EncryptedDataKey` + `Nonce` | the database |
+| Secret values | `VaultSecrets.EncryptedValue` + `Nonce` | the database |
+
+Nothing secret is generated per process and nothing is written to local disk. The root key
+unseals a DEK from the database, which decrypts a value from the database — so **N instances
+pointed at one Postgres with one root key already share one vault**, and each is a live
+replica of the decrypt path. That is the redundancy the ask describes, and it needs no new
+component.
+
+⚠️ **One code defect spoils it, and only at N > 1.** `KubeconfigResolver.planCache`
+(`KubeconfigResolver.cs:24`) holds *decrypted* kubeconfig YAML in a `ConcurrentDictionary`
+with **no TTL**. The only eviction is `Invalidate(secretId)` at `VaultService.cs:760` — an
+in-process call on whichever instance performed the write. Rotation upserts in place
+(`secretId = existing.Id`, `VaultService.cs:728`), so the cache key does not change. An
+operator rotates a cluster credential on instance A; instances B and C keep using the revoked
+one **until their process restarts**, across the ~350 call sites that reach
+`cluster.Kubeconfig` through the materialization interceptor. In one instance this is
+invisible. It must be fixed before a second instance exists, not after.
+
+`dekCache` has the same shape and lower risk, since a DEK changes only on restore.
+
+**On backups.** `BackupService` decrypts every secret and writes **plaintext** into the
+bundle, re-sealing with the target's root key on restore (`BackupService.cs:12-17,634`). That
+is deliberate and right for server migration — the bundle needs no key — but it means a
+vault backup is a plaintext secret store, which is a different risk profile from a ciphertext
+copy. Worth deciding on explicitly rather than inheriting.
+
+### 9.2 What breaks first, and loudest
+
+All three are topology or configuration, and they will mask everything else until done.
+
+| # | What | Consequence of a second instance |
+|---|---|---|
+| 1 | **Blazor Server circuits**, `AddInteractiveServerComponents()` (`Program.cs:39`), no backplane | `POST /_blazor/negotiate` and `GET /_blazor?id=…` land on different instances about half the time. The connection token is known only to the process that minted it, so the circuit never starts: the page renders normally and responds to **nothing**. No login or feature needed to trigger it. |
+| 2 | **DataProtection key ring** on local disk (`Program.cs:189`) | Each container mints its own ring, so antiforgery tokens, the auth cookie and OIDC correlation/nonce stop surviving a hop. Login breaks. |
+| 3 | **Telemetry active tier** is a local Lucene index (`SegmentManagerBase.cs:245`) | Ingest lands on whichever instance the LB picked; a query searches only *that* process's writer. Up to `RollMaxDocs` (1,000,000) or `RollMaxAge` (1h) **per signal per tenant** is invisible to the other instance. Refresh the log view and lines appear and vanish. |
+
+1 and 2 are fixed by sticky sessions plus a shared ring — and `Presence:Provider=Redis`
+(`Program.cs:296-317`) already establishes Redis as an optional dependency, so it can back
+both without adding a component. 3 is not a configuration fix: see 9.5.
+
+### 9.3 What breaks silently, and is worse
+
+These do not announce themselves, which makes them the real hazard.
+
+| What | What two instances do |
+|---|---|
+| **`RolloutWatcherService`** (`Rollouts/RolloutWatcherService.cs:143`) | Both judge the same rollout failed and both call `RollbackAsync` → `kubectl rollout undo` with **no `--to-revision`**. The second undo rolls *forward* to the bad release. The automatic rollback cancels itself out, the bad release is live, and both instances record `RolledBack`. |
+| **`TelemetryAlertEvaluator`** (`TelemetryAlertEvaluator.cs:107,144`) | Incidents dedupe by lookup with no claim against a unique `(ClusterId, Fingerprint)` index (`TelemetryModel.cs:100`). A collision throws on the **single** `SaveChangesAsync` for the whole installation, rolling back that cycle for *every* tenant — and dispatch at line 146 never runs, so nobody is notified of anything. The file already warns about this failure mode by another route. |
+| **`BootstrapRunnerService`** (`BootstrapRunnerService.cs:121`) | The claim is a read-then-write with no conditional update, token or lease. Both instances read `Queued`, both write `Running`, and the same Helm releases and CNPG/Redis/RabbitMQ clusters are installed **twice on a real customer cluster**. The comment says "picked up by another pass", which is true across sequential passes in one process and false across processes. |
+| **Startup migrations + `MigrationReconciler`** (`Program.cs:1467`) | Both instances run EF migrations at boot, and the reconciler can drop and re-stamp. It refuses when data is at stake, but the race itself is unguarded. |
+
+### 9.4 The systemic gap
+
+The reason so many of the above are read-then-write:
+
+- **No optimistic concurrency anywhere.** `IsRowVersion`, `IsConcurrencyToken`, `[Timestamp]`
+  and `ConcurrencyCheck` appear nowhere in `src/EntKube.Web/Data` outside migrations.
+- **No lease primitive.** No leader election, no advisory lock, no distributed lock.
+- **Exactly one claim exists**: `CostLedgerWriter`'s hand-written `ExecuteUpdateAsync` CAS
+  (`Cost/CostLedgerWriter.cs:112-124`), written to stop double-billing. It is the pattern the
+  others need and the proof it is affordable.
+- **Every hosted service registers unconditionally.** All twelve module compositions are added
+  with no condition (`Program.cs:129`), so ~25 background services plus five
+  `SegmentSealService`s start on every instance. **There is not even a switch to run an
+  instance web-only.**
+
+### 9.5 The sequence this forces — and it is the plan's own first step
+
+The audit converges with §4.2 rather than competing with it. `entkube-worker` — "the 24
+hosted services", already named there as *highest value, lowest risk, extract this first* —
+is exactly what must stop running everywhere before a second instance is safe.
+
+So the order is:
+
+1. **A switch that decides whether this instance runs background work.** Cheapest possible
+   version of the worker extraction: configuration, not a new process. It immediately permits
+   *N web instances + 1 worker*, which is the whole ask minus telemetry. A ratchet should
+   assert every `AddHostedService` goes through it, or the next one added will not.
+2. **Shared DataProtection ring + sticky sessions.** Makes the UI survive a second instance.
+   Redis is already an optional dependency.
+3. **Fix `planCache`.** A TTL at minimum; cross-instance invalidation properly. This is the
+   one that is silent *and* security-relevant.
+4. **Claims on the four dangerous services**, following `CostLedgerWriter`'s CAS. Rollout
+   watching and bootstrap runs are the two that touch customer clusters.
+5. **Telemetry last, and as its own process.** The active tier cannot be shared by
+   configuration: one RWX volume fails on Lucene's `write.lock`, separate volumes split the
+   data. `SegmentSealService`'s own docstring says "single-replica by deployment, so no leader
+   election is needed" — it *asserts* the constraint rather than enforcing it. This is
+   `entkube-telemetry` from §4.2, and the audit is the argument for doing it.
+
+⚠️ **Nothing above should be read as "add leader election everywhere".** Twenty of the
+services audited are already safe — idempotent reconcilers, or claim-protected. The work is
+per-service and the list is in the audit, not a blanket mechanism.
+
+### 9.6 Three things the audit could not settle
+
+`ObservedSecretRefreshService`, `MessagingStatusPollingService` and
+`SearchStatusPollingService` came back **unclear** rather than being guessed at. Each
+reconciles live cluster state into the database on a timer, and whether a duplicate run is
+harmless depends on whether the write is idempotent in practice. They need reading before
+they are classified.
