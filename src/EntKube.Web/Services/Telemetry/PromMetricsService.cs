@@ -14,11 +14,39 @@ public sealed class PromMetricsService(PrometheusService prometheus, ILogger<Pro
 {
     private static readonly TimeSpan DiscoveryLookback = TimeSpan.FromHours(24);
 
+    /// <summary>
+    /// Whether this cluster's Prometheus knows any metric name at all.
+    ///
+    /// <para>⚠️ <b>A false from here is not evidence that the cluster has no metrics.</b> The bool
+    /// has no room for a reason, so every failure of the query lands on it identically: no
+    /// prometheus component on the cluster, no kubeconfig for the cluster, no ready Prometheus pod,
+    /// a 401/403 or a timeout on the API-server pod-proxy — all indistinguishable from a healthy
+    /// Prometheus that happens to know nothing. A caller that renders an empty state must therefore
+    /// <b>not</b> gate on this method. MetricsExplorer did, and for every one of those outages it
+    /// showed "no metrics for this cluster yet" with instructions to go and instrument your apps;
+    /// it now runs <see cref="GetMetricNamesAsync"/> itself and renders
+    /// <c>KubernetesOperationResult.Error</c> when the query fails, which is what every other
+    /// Prometheus consumer in the UI does.</para>
+    ///
+    /// <para>The method is kept because it is part of <see cref="IMetricsQuery"/> (widening the
+    /// seam to a result type is a bigger change than this fix, and nothing in the UI calls it any
+    /// more), but the reason is no longer thrown away in silence: it goes to the log.</para>
+    /// </summary>
     public async Task<bool> HasDataAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {
-        var names = await prometheus.GetLabelValuesAsync(
+        KubernetesOperationResult<List<string>> names = await prometheus.GetLabelValuesAsync(
             tenantId, clusterId, "__name__", null, DiscoveryLookback, ct);
-        return names.IsSuccess && names.Data is { Count: > 0 };
+
+        if (!names.IsSuccess)
+        {
+            logger.LogWarning(
+                "Metric discovery failed for cluster {ClusterId} (tenant {TenantId}): {Error}. " +
+                "Reporting 'no data', which a caller cannot tell from an empty Prometheus",
+                clusterId, tenantId, names.Error);
+            return false;
+        }
+
+        return names.Data is { Count: > 0 };
     }
 
     public Task<KubernetesOperationResult<List<string>>> GetMetricNamesAsync(
