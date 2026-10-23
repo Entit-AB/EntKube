@@ -419,6 +419,84 @@ public class TicketMoveTests : IDisposable
     }
 
     /// <summary>
+    /// ⚠️ The boundary the fix above had to be careful not to open.
+    ///
+    /// <para>Making the write succeed with the ticket's own tenant is what stops a moved
+    /// ticket's reply being lost — but a suggestion can point at a ticket merely because the
+    /// mail THREADS to it, and that header is forgeable by anyone who knows the number
+    /// (<c>SupportMessageId</c> says so). Before the fix a forged thread naming another
+    /// tenant's ticket was harmless only by accident, because the write refused. Making it
+    /// succeed without asking what justified the crossing would have converted a silent bug
+    /// into a way to put words on another tenant's ticket — customer-visible, on a history
+    /// §14.6 makes evidence, with an operator clicking accept and nothing on screen saying a
+    /// boundary was crossed.</para>
+    ///
+    /// <para>So a crossing needs something an outsider cannot produce: a token we minted, or
+    /// the message coming from the address the ticket records as its reporter. This sender is
+    /// a recorded contact of the customer — so the suggestion forms, which is the point — but
+    /// is <b>not</b> that reporter, and the subject carries no token.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_forged_thread_from_someone_who_is_not_the_reporter_does_not_cross_tenants()
+    {
+        Ticket ticket = await Reported();
+
+        await tickets.MoveAsync(ours, ticket.Id, theirCustomer, theirApp, "nils", null, Tue(11));
+
+        // Both domains are recognised for our customer, so neither sender is a stranger to the
+        // product — the only difference that matters is which one the ticket names as reporter.
+        foreach (string domain in new[] { "kund.example", "annan.example" })
+        {
+            db.CustomerEmailDomains.Add(new CustomerEmailDomain
+            {
+                Id = Guid.NewGuid(),
+                TenantId = ours,
+                CustomerId = ourCustomer,
+                Domain = domain,
+            });
+        }
+
+        await db.SaveChangesAsync();
+
+        InboundMailMessage? forged = await mail.IngestAsync(new InboundMailMessage
+        {
+            TenantId = ours,
+            MessageId = Guid.NewGuid().ToString("N"),
+            FromAddress = "bo@annan.example",
+            Subject = "Komplettering",
+            Body = "Lagg till det har.",
+            SentAt = Tue(12),
+
+            // Anyone who knows the number can mint this; nothing about it is checked.
+            InReplyTo = SupportMessageId.For(ticket.Number),
+        });
+
+        // ⚠️ Asserted, not tolerated. Measured by reverting the rule under test: the suggestion
+        // DOES form here, and without the rule the text crosses. Had this been written as "skip
+        // if no suggestion", the test would go on passing if placement ever stopped happening —
+        // green for the wrong reason, and the boundary never exercised.
+        MailSuggestion append = forged!.Suggestions
+            .Should().ContainSingle(s => s.Kind == MailSuggestionKind.AppendToTicket,
+                "the thread places the message on the ticket — that is the precondition for "
+                + "there being a boundary to refuse to cross")
+            .Subject;
+
+        await mail.AcceptAsync(ours, append.Id, "nils", Tue(13));
+
+        db.ChangeTracker.Clear();
+
+        (await db.TicketEvents.Where(e => e.TicketId == ticket.Id).Select(e => e.Detail)
+            .ToListAsync())
+            .Should().NotContain(d => d.Contains("Lagg till det har."),
+                "a threaded header is forgeable, so on its own it must not carry text across a "
+                + "tenant boundary onto a §14.6 history");
+
+        (await db.InboundMailMessages.AsNoTracking().FirstAsync(m => m.Id == forged.Id))
+            .State.Should().NotBe(MailTriageState.Handled,
+                "nothing was written, so it stays where somebody can look at both sides");
+    }
+
+    /// <summary>
     /// ⚠️ The companion invariant, which is the one that generalises: if a branch could not do
     /// what it claims, the message stays in the queue.
     ///

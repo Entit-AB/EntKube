@@ -670,16 +670,61 @@ public class SupportMailService(
         // What authorises the write is the message's provenance, not tenant membership: a
         // suggestion exists only where the mail threads to the ticket, carries a token we
         // minted, or comes from the address that reported it — and a person accepts it by name.
+        //
+        // ⚠️ Crossing the boundary needs more than a header, which is why this is not simply
+        // "use the ticket's tenant". A suggestion can point at a ticket because the mail THREADS
+        // to it, and that thread is forgeable by anyone who knows the number — see the note on
+        // referenceIsProven above. Before this change a forged thread naming another tenant's
+        // ticket was harmless only by accident: the write refused. Making the write succeed
+        // without also asking what justified the crossing would have turned a silent bug into a
+        // way to put words on another tenant's ticket, with an operator clicking accept and
+        // nothing on the screen telling them a boundary was being crossed. Measured, not
+        // supposed: with this rule reverted, A_forged_thread_from_someone_who_is_not_the_reporter
+        // writes the text onto the other tenant's ticket.
+        //
+        // So a crossing is allowed only on something an outsider cannot produce: a subject token
+        // we minted under a key only we hold, or the message coming from the address the ticket
+        // records as having reported it. Both hold for the case this exists to serve — the
+        // reporter replying to a ticket that has been moved away from them.
+        string? boundaryRefusal = null;
+
         async Task<Guid> OwningTenantOf(Guid ofTicket)
         {
-            Guid owner = await db.Tickets.AsNoTracking()
+            var row = await db.Tickets.AsNoTracking()
                 .Where(t => t.Id == ofTicket)
-                .Select(t => t.TenantId)
+                .Select(t => new { t.TenantId, t.Number, t.RequestedByEmail })
                 .FirstOrDefaultAsync(ct);
 
-            // Gone, rather than elsewhere. Falling back to the message's own tenant keeps the
-            // scoped write as the thing that refuses, which NotDoneAsync then reports.
-            return owner == Guid.Empty ? message.TenantId : owner;
+            if (row is null)
+            {
+                // Gone, rather than elsewhere. Falling back to the message's own tenant keeps the
+                // scoped write as the thing that refuses, which NotDoneAsync then reports.
+                return message.TenantId;
+            }
+
+            if (row.TenantId == message.TenantId)
+            {
+                // The ordinary case: nothing is being crossed, so there is nothing to justify.
+                return row.TenantId;
+            }
+
+            bool proven = references.ProvenIn(message.Subject) == row.Number;
+
+            bool fromTheReporter = row.RequestedByEmail is string reporter
+                && string.Equals(
+                    reporter.Trim(), message.FromAddress.Trim(), StringComparison.OrdinalIgnoreCase);
+
+            if (proven || fromTheReporter)
+            {
+                return row.TenantId;
+            }
+
+            boundaryRefusal =
+                $"ticket #{row.Number} belongs to another tenant and nothing unforgeable ties "
+                + "this message to it — a threaded header alone does not, so this needs somebody "
+                + "who can see both sides";
+
+            return message.TenantId;
         }
 
         // ⭐ Leaves the message in the queue, because nothing was done to it.
@@ -694,10 +739,12 @@ public class SupportMailService(
         // Pending and the message stays where somebody will see it.
         async Task<Ticket?> NotDoneAsync(string why)
         {
+            // The boundary reason wins when it is set: "no longer there" would be an actively
+            // wrong account of a ticket that is present and owned by somebody else.
             logger?.LogWarning(
                 "Support mail from {From}: a {Kind} suggestion accepted by {Actor} could not be "
                 + "applied because {Why}; it is being left in the queue.",
-                message.FromAddress, suggestion.Kind, actor, why);
+                message.FromAddress, suggestion.Kind, actor, boundaryRefusal ?? why);
 
             return await Task.FromResult<Ticket?>(null);
         }
