@@ -105,14 +105,28 @@ public class PublicApiContractAdoptionTests
     /// <c>AdvisorStateService</c>, so this file reported zero while <c>IAdvisorApi</c> had eight
     /// methods and not one caller anywhere in the product.</para>
     ///
-    /// <para><b>What the nine are, and why each is still here.</b> None is an adoption that was
-    /// skipped; all four need contract surface that does not exist, which is a different change
-    /// from using surface that does:</para>
+    /// <para><b>Now five.</b> <c>ICostApi</c> exists, and the four price-sheet routes use it — the
+    /// list, the single read, the upsert and the delete. That was the largest single gap this
+    /// measure showed, and it was a <em>write</em> contract, which is the shape the note below
+    /// doubted a contract could take: <c>PatchRateAsync</c> returns what is now stored and null
+    /// when the cluster is not this tenant's, so the route's 404 comes from the contract rather
+    /// than from a service's own predicate.</para>
+    ///
+    /// <para>Two things were worth doing in the move rather than after it. <c>GetRateAsync</c>
+    /// pushed a filter into the database that the route had been applying in memory — it fetched
+    /// every rate the tenant had in order to return one. And the response DTO is still mapped by
+    /// hand, from the contract's record instead of the entity, because this is the one published
+    /// surface a Terraform provider reads and its wire shape must be provably unmoved.</para>
+    ///
+    /// <para><b>What the five are, and why each is still here.</b> None is an adoption that was
+    /// skipped; each needs contract surface that does not exist, which is a different change from
+    /// using surface that does:</para>
     /// <list type="bullet">
-    ///   <item><c>CostRateService</c> ×4 and <c>CostLedgerService</c> ×2 — <b>Cost has no contract
-    ///     at all.</b> Six of the nine are one module, and four of those six are writes (a price
-    ///     sheet upsert and a delete), so this is not a read contract's shape either. It is the
-    ///     largest single gap this measure shows.</item>
+    ///   <item><c>CostLedgerService</c> ×2 — the cost history and the monthly roll-up. Deliberately
+    ///     a second slice: the history's wire shape is some twenty fields plus a nested coverage
+    ///     object and two collections, and a mapping that size is where fields vanish silently.
+    ///     It is worth its own change with its own field-by-field test rather than being bundled
+    ///     into the sheets.</item>
     ///   <item><c>KubernetesOperationsService</c> ×2 — Fleet has <c>IFleetApi</c>, which describes
     ///     clusters. These routes <em>act</em> on one. A contract that performs cluster operations
     ///     is the agent boundary (docs/decomposition.md §5), not a read method.</item>
@@ -127,7 +141,7 @@ public class PublicApiContractAdoptionTests
     /// would count a comment naming one. Comments are stripped; the provider shape is not currently
     /// present and would need its own measure if it appeared.</para>
     /// </summary>
-    private const int BaselineModuleServices = 9;
+    private const int BaselineModuleServices = 5;
 
     [Fact]
     public void The_public_api_does_not_reach_past_a_contract_into_a_modules_services()
