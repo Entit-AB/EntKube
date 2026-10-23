@@ -14,8 +14,64 @@ namespace EntKube.Web.Modules.Api;
 /// the tenant lives in the schema. Callers cannot forget to do that any more, because they
 /// no longer write the query.</para>
 /// </summary>
-public sealed class CatalogApi(IDbContextFactory<CatalogDbContext> dbFactory) : ICatalogApi
+public sealed class CatalogApi(
+    IDbContextFactory<CatalogDbContext> dbFactory,
+    // ⚠️ Optional, and last, so the existing positional constructions keep compiling — the same
+    // accommodation KeycloakService's gate parameter documents, and for the same reason: this is
+    // the most adopted contract in the product and ~85 test sites construct it directly. Making
+    // it required turned one new method into eighty-five edits, which is a cost paid by every
+    // future reader of those tests for no benefit to them.
+    //
+    // Unlike KeycloakService's, absence here is NOT harmless, so it is not treated as harmless:
+    // GetUpgradeReportAsync throws rather than returning an empty report. An empty report reads as
+    // "nothing is out of date", which is the worst available answer to a question about chart
+    // currency — silence that looks like good news. Every real caller resolves ICatalogApi from
+    // the container, which always supplies this.
+    EntKube.Web.Services.Upgrades.ComponentUpgradeService? upgrades = null) : ICatalogApi
 {
+    /// <summary>
+    /// Chart currency across the tenant, for everyone outside Catalog.
+    ///
+    /// <para>⚠️ The two enums are mapped by NAME, not by cast. <c>UpgradeStatus</c> and
+    /// <c>UpgradeAvailability</c> agree member for member today and
+    /// <c>CatalogUpgradeContractTests</c> pins that they do — but these names are published as
+    /// <c>status</c> and <c>lag</c> in the API response, so a cast would turn a reordered member
+    /// into a silently wrong field in a response a monitoring integration parses. Parsing by name
+    /// fails loudly instead, and the pin makes the failure impossible to reach unnoticed.</para>
+    /// </summary>
+    public async Task<UpgradeReportSummary> GetUpgradeReportAsync(
+        Guid tenantId, DateTime asOf, CancellationToken ct = default)
+    {
+        if (upgrades is null)
+        {
+            throw new InvalidOperationException(
+                "CatalogApi was constructed without ComponentUpgradeService and so cannot report "
+                + "chart currency. Resolve ICatalogApi from the container, or pass the service "
+                + "explicitly. Returning an empty report here would read as 'nothing is out of "
+                + "date', which is the one answer this must never give by accident.");
+        }
+
+        EntKube.Web.Services.Upgrades.UpgradeReport report =
+            await upgrades.GetTenantReportAsync(tenantId, asOf, ct);
+
+        return new UpgradeReportSummary(
+            [.. report.Components.Select(c => new ComponentUpgradeSummary(
+                c.ClusterId,
+                c.ClusterName,
+                c.ComponentId,
+                c.DisplayName,
+                c.ChartName,
+                c.InstalledVersion,
+                c.LatestVersion,
+                Enum.Parse<UpgradeAvailability>(c.Status.ToString()),
+                Enum.Parse<UpgradeLag>(c.Lag.ToString()),
+                c.VersionsBehind))],
+            report.UpgradeCount,
+            report.MajorCount,
+            report.DeprecatedCount,
+            report.UnknownCount);
+    }
+
     public async Task<InstalledComponent?> GetComponentAsync(
         Guid tenantId, Guid componentId, CancellationToken ct = default)
     {
