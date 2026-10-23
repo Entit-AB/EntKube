@@ -292,7 +292,22 @@ public class KeycloakService(
         string adminUsername,
         string adminPassword,
         string adminUrl,
-        Guid? registeredPostgresDatabaseId = null,
+        // ⚠️ NO DEFAULT, deliberately. This was `= null`, and it is written unconditionally below,
+        // so a caller that simply omitted it CLEARED an existing link rather than leaving it
+        // alone. ClusterDetail did exactly that: it has no registered-Postgres field, so saving
+        // the Keycloak component form there unlinked a registered-Postgres-backed Keycloak from
+        // its database — and since the two ids are mutually exclusive, with CnpgDatabaseId also
+        // null the instance was left with no database link at all, which
+        // KeycloakComponentConfig's own doc comment says cannot happen.
+        //
+        // A missing argument is invisible in review; a wrong one is in the diff. So the compiler
+        // asks instead, exactly as ChangeIntent's lack of a default does for the exec verbs.
+        //
+        // The deeper modelling point, left stated rather than refactored: two independent
+        // nullable ids cannot express "mutually exclusive", and cannot distinguish "no database"
+        // from "do not change the database". IdentityTab already models it correctly as ONE
+        // choice, a string prefixed cnpg: or regpg:.
+        Guid? registeredPostgresDatabaseId,
         CancellationToken ct = default)
     {
         using ApplicationDbContext db = dbFactory.CreateDbContext();
