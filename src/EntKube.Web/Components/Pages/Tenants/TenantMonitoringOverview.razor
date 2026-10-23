@@ -40,10 +40,10 @@
             </div>
             <div class="text-muted small">Running Pods</div>
         </div>
-        <div class="card border-0 text-center px-3 py-2 @(tenantActiveAlerts > 0 ? "bg-danger-subtle" : "bg-light")"
+        <div class="card border-0 text-center px-3 py-2 @(tenantCriticalAlerts > 0 ? "bg-danger-subtle" : tenantActiveAlerts > 0 ? "bg-warning-subtle" : "bg-light")"
              style="cursor:@(OnNavigateTab.HasDelegate ? "pointer" : "default")"
              @onclick='() => NavigateTo("alerts")'>
-            <div class="fw-bold fs-4 @(tenantActiveAlerts > 0 ? "text-danger" : "text-success")">@tenantActiveAlerts</div>
+            <div class="fw-bold fs-4 @(tenantCriticalAlerts > 0 ? "text-danger" : tenantActiveAlerts > 0 ? "text-warning" : "text-success")">@tenantActiveAlerts</div>
             <div class="text-muted small d-flex align-items-center gap-1">
                 Active Alerts
                 @if (OnNavigateTab.HasDelegate)
@@ -91,9 +91,20 @@
                 <div class="card-header d-flex align-items-center gap-2 py-2">
                     <span class="bi bi-hdd-rack-fill text-@ClusterBorderColor(vm)"></span>
                     <strong class="me-auto">@vm.Cluster.Name</strong>
-                    @if (vm.ActiveAlerts > 0)
+                    @if (vm.Firing.Critical > 0)
                     {
-                        <span class="badge bg-danger">@vm.ActiveAlerts alert@(vm.ActiveAlerts == 1 ? "" : "s")</span>
+                        <span class="badge bg-danger">
+                            @vm.Firing.Critical critical@(vm.Firing.Other > 0 ? $" + {vm.Firing.Other}" : "")
+                        </span>
+                    }
+                    else if (vm.Firing.Other > 0)
+                    {
+                        @* Amber, and named. Saying "Healthy" here was the defect: a warning is
+                           not an emergency, but it is not nothing, and the previous badge had
+                           no state between red and a green claim of health. *@
+                        <span class="badge bg-warning text-dark">
+                            @vm.Firing.Other warning@(vm.Firing.Other == 1 ? "" : "s")
+                        </span>
                     }
                     else if (vm.Loading)
                     {
@@ -162,7 +173,7 @@
                        class="btn btn-sm btn-link p-0 text-decoration-none">
                         <span class="bi bi-graph-up me-1"></span>Monitoring
                     </a>
-                    @if (vm.ActiveAlerts > 0 && OnNavigateTab.HasDelegate)
+                    @if (vm.Firing.Total > 0 && OnNavigateTab.HasDelegate)
                     {
                         <button class="btn btn-sm btn-link p-0 text-decoration-none text-danger"
                                 @onclick='() => NavigateTo("alerts")'>
@@ -285,6 +296,10 @@
     private List<MaintenanceWindow> upcomingMaintenance = [];
     private OnCallShift? currentOnCall;
     private int tenantActiveAlerts;
+
+    @* Everything firing is what "Active Alerts" counts; the criticals decide the COLOUR, so a
+       cluster with only warnings is neither hidden nor painted as an emergency. *@
+    private int tenantCriticalAlerts;
     private int criticalIncidents;
     private int advisorActionable;
     private DateTime? lastRefreshed;
@@ -327,10 +342,15 @@
 
         // ── Phase one: what the database already knows ──
 
-        Dictionary<Guid, int> perClusterCounts = await IncidentService
+        Dictionary<Guid, FiringCounts> perClusterCounts = await IncidentService
             .GetActiveCountsPerClusterAsync(clusters.Select(c => c.Id));
 
-        tenantActiveAlerts = perClusterCounts.Values.Sum();
+        // ⚠️ Everything firing, not just the criticals. The card below is captioned "Active
+        // Alerts", and it used to sum a count that excluded both warnings and any incident
+        // somebody had acknowledged — so acknowledging the last critical alert took this
+        // headline to zero and turned the page green.
+        tenantActiveAlerts = perClusterCounts.Values.Sum(c => c.Total);
+        tenantCriticalAlerts = perClusterCounts.Values.Sum(c => c.Critical);
 
         Task<List<AlertIncident>> incidentTask =
             IncidentService.GetActiveIncidentsForTenantAsync(TenantId);
@@ -379,13 +399,14 @@
         await InvokeAsync(StateHasChanged);
     }
 
-    private async Task<ClusterSummaryVm> LoadClusterSummaryAsync(KubernetesCluster cluster, int activeAlerts)
+    private async Task<ClusterSummaryVm> LoadClusterSummaryAsync(
+        KubernetesCluster cluster, FiringCounts firing)
     {
         bool hasPrometheus = cluster.Components.Any(c =>
             c.HelmChartName == "kube-prometheus-stack" && c.Status == ComponentStatus.Installed);
 
         if (!hasPrometheus)
-            return new ClusterSummaryVm(cluster, null, null, activeAlerts);
+            return new ClusterSummaryVm(cluster, null, null, firing);
 
         KubernetesOperationResult<ClusterHealthSummary> result =
             await PrometheusService.GetClusterHealthAsync(TenantId, cluster.Id);
@@ -394,7 +415,7 @@
             cluster,
             result.IsSuccess ? result.Data : null,
             result.IsSuccess ? null : result.Error,
-            activeAlerts);
+            firing);
     }
 
     /// <summary>
@@ -415,7 +436,8 @@
 
     private static string ClusterBorderColor(ClusterSummaryVm vm)
     {
-        if (vm.ActiveAlerts > 0) return "danger";
+        if (vm.Firing.Critical > 0) return "danger";
+        if (vm.Firing.Other > 0) return "warning";
         if (vm.Health is null) return "secondary";
         if (vm.Health.CpuUsagePercent >= 90 || vm.Health.MemoryUsagePercent >= 90) return "warning";
         return "success";
@@ -443,6 +465,6 @@
         KubernetesCluster Cluster,
         ClusterHealthSummary? Health,
         string? Error,
-        int ActiveAlerts,
+        FiringCounts Firing,
         bool Loading = false);
 }
