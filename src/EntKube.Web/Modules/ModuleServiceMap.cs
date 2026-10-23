@@ -215,6 +215,7 @@ public static partial class ModuleMap
         // ---- Cost ------------------------------------------------------------------
         [typeof(EntKube.Web.Services.Cost.CostLedgerService)] = Module.Cost,
         [typeof(EntKube.Web.Services.Cost.CostLedgerWriter)] = Module.Cost,
+        [typeof(Api.CostApi)] = Module.Cost,
         [typeof(EntKube.Web.Services.Cost.CostRateService)] = Module.Cost,
         [typeof(EntKube.Web.Services.Cost.CostReportService)] = Module.Cost,
         [typeof(EntKube.Web.Services.Cost.CostScanCache)] = Module.Cost,
