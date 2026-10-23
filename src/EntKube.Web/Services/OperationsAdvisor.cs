@@ -95,6 +95,41 @@ public sealed record OperationsFinding
     public AdvisorFindingStatus State { get; init; } = AdvisorFindingStatus.Active;
     public DateTime? SnoozedUntil { get; init; }
     public string? AcknowledgedBy { get; init; }
+
+    /// <summary>
+    /// ⭐ Whether a snooze on this finding is <b>still in force</b> at <paramref name="now"/>.
+    ///
+    /// <para><b>A snooze expires; the status does not.</b>
+    /// <see cref="AdvisorFindingStatus.Snoozed"/> documents itself as "Hidden until
+    /// <c>AdvisorFindingState.SnoozedUntil</c> passes" — so the status alone cannot answer this,
+    /// and nothing ever puts the row back. <c>AdvisorStateService</c> rewrites the status only on
+    /// an explicit acknowledge, dismiss or reactivate, and its reconcile prunes only rows whose
+    /// finding has been <em>absent</em>; a finding that is still present keeps a stale
+    /// <c>Snoozed</c> row forever.</para>
+    ///
+    /// <para>⚠️ This exists because the pairing was duplicated at four sites and two of them
+    /// forgot the date. <c>OperationsAdvisorTab</c>'s filter and <c>FleetAdvisor</c>'s
+    /// <c>Visible</c> paired it correctly; the overview tile and
+    /// <c>AdvisorScanService.MaybeSendDigestAsync</c> wrote
+    /// <c>State is not Dismissed and not Snoozed</c> and so excluded a finding whose snooze ran
+    /// out last week — permanently, since nothing resets it. Putting it on the record is what
+    /// stops the fifth copy getting it wrong.</para>
+    ///
+    /// <para>A <c>Snoozed</c> finding with no <see cref="SnoozedUntil"/> at all is NOT suppressed:
+    /// <c>null &gt; now</c> is false, deliberately, and both correct sites agree — a snooze with
+    /// no end is not a snooze.</para>
+    /// </summary>
+    public bool IsSnoozeInForceAt(DateTime now) =>
+        State == AdvisorFindingStatus.Snoozed && SnoozedUntil > now;
+
+    /// <summary>
+    /// Whether this finding should reach somebody now: due or already late, not dismissed, and
+    /// not under a snooze that is still running. See <see cref="IsSnoozeInForceAt"/>.
+    /// </summary>
+    public bool NeedsAttentionAt(DateTime now) =>
+        Horizon is AdvisorHorizon.Overdue or AdvisorHorizon.Today
+        && State != AdvisorFindingStatus.Dismissed
+        && !IsSnoozeInForceAt(now);
     public string? AssignedTo { get; init; }
     public DateTime? FirstSeenAt { get; init; }
 

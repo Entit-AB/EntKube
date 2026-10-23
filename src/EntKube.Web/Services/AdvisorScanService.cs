@@ -74,10 +74,19 @@ public class AdvisorScanService(
     private async Task<bool> MaybeSendDigestAsync(
         NotificationService notifications, Tenant tenant, AdvisorReport report, CancellationToken ct)
     {
-        // Only actionable, not-dismissed/snoozed items count toward a digest.
+        // ⚠️ An EXPIRED snooze used to silence this digest permanently. The predicate was
+        // `State is not Dismissed and not Snoozed`, which reads as "not snoozed" but means "was
+        // snoozed at some point": nothing ever rewrites the status when SnoozedUntil passes, so a
+        // finding snoozed for a day in March stayed out of every digest afterwards.
+        //
+        // That is worse here than on a page. The tile under-counted a number somebody was already
+        // looking at; this method returns false when nothing is actionable and the digest STAYS
+        // QUIET — so the one mechanism that reaches somebody not looking at the screen went silent
+        // about overdue work, with no symptom at all.
+        DateTime now = DateTime.UtcNow;
+
         List<OperationsFinding> actionable = report.Findings
-            .Where(f => f.State is not AdvisorFindingStatus.Dismissed and not AdvisorFindingStatus.Snoozed)
-            .Where(f => f.Horizon is AdvisorHorizon.Overdue or AdvisorHorizon.Today)
+            .Where(f => f.NeedsAttentionAt(now))
             .ToList();
         if (actionable.Count == 0) return false;   // nothing urgent — stay quiet, retry next cycle
 
