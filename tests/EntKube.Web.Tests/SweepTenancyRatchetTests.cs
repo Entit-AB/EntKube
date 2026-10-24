@@ -278,13 +278,26 @@ public class SweepTenancyRatchetTests
 
         foreach (string path in ManagementPlaneFiles())
         {
+            // ⚠️ The seam itself registers `AddHostedService<SingletonWorkHost<T>>`, which is the
+            // wrapper rather than a sweep. Counting it would add a service that does not exist and
+            // then demand it be classified.
+            if (Path.GetFileName(path) == "HostedWork.cs")
+            {
+                continue;
+            }
+
             string code = File.ReadAllText(path);
 
+            // ⚠️ Three verbs, not one. A hosted service now declares where it runs
+            // (`AddSingletonWork`/`AddPerInstanceWork`, docs/decomposition.md §9.5) and the bare
+            // `AddHostedService` is refused outside the seam by HostedWorkPlacementTests. Scanning
+            // only the old spelling found ONE registration instead of 32 — caught by the count
+            // guard below, which is the whole reason that guard exists.
             foreach (string pattern in new[]
                      {
-                         @"AddHostedService<([\w.]+)>",
-                         @"AddHostedService\(sp => new ([\w.]+)\(",
-                         @"AddHostedService\(sp => sp\.GetRequiredService<([\w.]+)>",
+                         @"Add(?:HostedService|SingletonWork|PerInstanceWork)<([\w.]+)>",
+                         @"Add(?:HostedService|SingletonWork)\(sp => new ([\w.]+)\(",
+                         @"Add(?:HostedService|SingletonWork)\(sp => sp\.GetRequiredService<([\w.]+)>",
                      })
             {
                 foreach (Match m in Regex.Matches(code, pattern))
