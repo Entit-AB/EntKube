@@ -1772,6 +1772,37 @@ So the order is:
    election is needed" — it *asserts* the constraint rather than enforcing it. This is
    `entkube-telemetry` from §4.2, and the audit is the argument for doing it.
 
+   ⭐ **It is smaller than it looks, because the seam already exists and is in production.**
+   This was measured rather than assumed (2026-10-24). `TelemetryBackendRouter` already holds
+   *both* paths and chooses per cluster:
+
+   ```csharp
+   public sealed class TelemetryBackendRouter(
+       SegmentLogService localLogs,        // in-process segment store
+       SegmentTraceService localTraces,
+       TelemetryNodeClient nodes,          // the same engine, over HTTP
+       …)
+   ```
+
+   A cluster with an in-cluster node is **already** answered over HTTP by
+   `EntKube.TelemetryNode` — a complete separate process with `NodeHttpApi`, `NodeIngest`,
+   `HttpLogBackend`, `HttpTraceBackend`, `RemoteSegmentCatalog` and its own budget and cache
+   services. Those reads are multi-instance safe today, because any web instance can call the
+   node. Only the fallback — a cluster with no node, served from the management plane's own
+   local index — is in-process, and that is the single thing a second instance gets wrong.
+
+   So `entkube-telemetry` is not a service to design. It is the node binary (or the same
+   engine behind the same `NodeHttpApi`) hosted beside the management plane, with the router's
+   `localLogs`/`localTraces` replaced by an HTTP backend pointing at it. The wire surface, the
+   federation, the catalog and the authorization model are all written and exercised.
+
+   ⚠️ One thing to carry across rather than rediscover: the router chooses by **data**, not by
+   configuration. An earlier version chose "in-cluster if a node is present", and installing
+   the indexer made that wrong — a node exists from that moment while ingest only moves when
+   the collector is re-applied, so every view read an empty node and showed nothing, with no
+   error. Whatever replaces `localLogs` must keep that property, or the split reintroduces a
+   silent empty answer.
+
 ⚠️ **Nothing above should be read as "add leader election everywhere".** Twenty of the
 services audited are already safe — idempotent reconcilers, or claim-protected. The work is
 per-service and the list is in the audit, not a blanket mechanism.
