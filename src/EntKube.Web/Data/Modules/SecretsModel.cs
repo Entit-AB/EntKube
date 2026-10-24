@@ -174,7 +174,38 @@ internal static class SecretsModel
             entity.HasKey(v => v.Id);
             entity.Property(v => v.CreatedBy).HasMaxLength(254);
 
-            entity.HasIndex(v => new { v.SecretId, v.VersionNumber });
+            // ⭐ A secret cannot have two version 4s. The number IS the identity of a
+            // version — it is what the UI shows ("v4"), what the history is ordered by,
+            // and what an operator means when they say which value to look at.
+            //
+            // <para><b>What this used to be.</b> The same index without <c>IsUnique()</c>.
+            // VaultService.ArchiveVersionAsync allocates the number by reading
+            // <c>MAX(VersionNumber) + 1</c> and inserting it, which is a read-then-write: two
+            // writers that read MAX=3 both insert 4, and with a non-unique index the database
+            // accepts both. Nothing failed, nothing logged — the history simply grew two rows
+            // numbered 4, and which one is the fourth version became undecidable afterwards.
+            // In one process this was mostly hidden; with a second web instance the same
+            // secret genuinely can be written from two places at once.</para>
+            //
+            // ⚠️ <b>Why the constraint and not only a tidier allocator.</b> The allocation
+            // lives behind one private helper, but that helper has ~30 call sites and a
+            // convention is only as good as the next caller: the observed-secret refresh path
+            // already had to grow its own claim (VaultService.cs ~2500) because the shared
+            // helper did not protect it. A unique index cannot be bypassed by a new call site,
+            // a raw SQL write, or a restore. It is the only place the invariant can be stated
+            // once and be true everywhere.
+            //
+            // ⚠️ What this costs: the loser of a genuine race now gets a DbUpdateException out
+            // of its SaveChangesAsync instead of silently corrupting the history. That save is
+            // already all-or-nothing, so the secret keeps its previous value and its unbroken
+            // history, and the caller fails visibly rather than succeeding wrongly. For a
+            // vault audit trail, loud and retryable beats quiet and wrong.
+            //
+            // ⚠️ Pre-existing duplicates would make the CREATE INDEX itself fail, and this
+            // application migrates itself at boot with no database console behind it
+            // (docs/decomposition.md §9.3), so that failure is an outage. The migration that
+            // adds this renumbers them first — see RenumberDuplicateSecretVersions.
+            entity.HasIndex(v => new { v.SecretId, v.VersionNumber }).IsUnique();
         });
 
         // VaultSecret — VpnRemoteEndpoint scoping (PSK/cert for a remote site).
