@@ -1,3 +1,11 @@
+# Single-instance EntKube. For two web instances plus a worker, see
+# docs/running-two-instances.md and docs/examples/Caddyfile.two-instances.
+#
+# ⚠️ Adding a second upstream to the reverse_proxy line below is NOT enough, and the way it fails
+# is silent: Caddy's default policy is `random`, so GET /_blazor?id=… reaches an instance that did
+# not mint the token about half the time, and the page renders perfectly while responding to
+# nothing. Sticky sessions (`lb_policy cookie`) are mandatory — a SignalR backplane does not help,
+# because a Blazor Server circuit lives in one process.
 {
 	email {env.ACME_EMAIL}
 }

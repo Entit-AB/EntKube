@@ -1,3 +1,13 @@
+# Single-instance EntKube — one `entkube` service, which runs both the UI and every background
+# sweep. For two web instances plus one worker see docs/running-two-instances.md and
+# docs/examples/docker-compose.two-instances.yml (a standalone stack, not an overlay on this file).
+#
+# ⚠️ Scaling this file with `--scale entkube=2` does NOT give a second instance. Three things
+# break at once: the Blazor circuits (no sticky sessions), the DataProtection key ring
+# (DataProtection__KeyPath below lands in the per-container data volume), and the telemetry active
+# index (one Lucene IndexWriter per /app/Data, so a shared volume fails on write.lock) — and every
+# background sweep would then run twice, which for four of them is damaging and silent.
+# See docs/decomposition.md §9.
 services:
   caddy:
     image: caddy:2

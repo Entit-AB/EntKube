@@ -1,0 +1,103 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# Caddy in front of two EntKube web instances plus one worker.
+# Copy this next to docker-compose.two-instances.yml as `Caddyfile`.
+#
+# The single-instance Caddyfile in the repo root is one line:
+#
+#     {env.DOMAIN} {
+#         reverse_proxy entkube:8080
+#     }
+#
+# Adding a second upstream to that line is NOT the change. Caddy's default load-balancing policy
+# is `random`, and under `random` EntKube does not work at all — see the sticky-session note below.
+#
+# ⚠️ `entkube-install` renders the single-instance Caddyfile and replaces this file wholesale on
+#    every run (EntKube.Installer.Core/Renderer.cs:75). The generated file's own header says to put
+#    hand-written config in a separate file and import it — but `import` cannot add upstreams to a
+#    `reverse_proxy` line that is already written, so a two-instance deployment has to own its
+#    Caddyfile. Run it from a directory the installer does not manage.
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+{
+	email {env.ACME_EMAIL}
+}
+
+{env.DOMAIN} {
+	# ── Telemetry ingest is pinned to the worker ─────────────────────────────────────────────────
+	#
+	# Everything collectors and the RUM beacon post lands under /ingest/* :
+	#   POST /ingest/otlp/v1/logs      (Program.cs:839)
+	#   POST /ingest/otlp/v1/traces    (Program.cs:876)
+	#   POST /ingest/otlp/v1/metrics   (Program.cs:920)
+	#   POST /ingest/rum/v1/{key}      (Program.cs:984)
+	#
+	# ⭐ These must all reach ONE instance, and specifically the instance that runs singleton work.
+	# Ingest appends to a process-local Lucene index, and SegmentSealService — the only thing that
+	# ever uploads that index to object storage — is registered through AddSingletonWork. So on a
+	# web instance (Workers:RunSingletonWork=false) ingest writes an active index that is NEVER
+	# sealed: it is invisible to every other instance, it never reaches the bucket, nothing trims
+	# it, and the volume grows until the disk does. Pinning ingest to the worker puts the writer
+	# and the sealer in the same process, which is the only arrangement that terminates.
+	#
+	# ⚠️ This does NOT make telemetry correct at two instances — it makes it consistently DELAYED
+	# instead of randomly inconsistent. See docs/running-two-instances.md.
+	#
+	# These endpoints authenticate with a stateless HMAC capability token (IngestTokenService), so
+	# pinning them costs no session state.
+	handle /ingest/* {
+		reverse_proxy entkube-worker:8080
+	}
+
+	# ── Everything else: the two web instances, with sticky sessions ─────────────────────────────
+	handle {
+		reverse_proxy entkube-web-1:8080 entkube-web-2:8080 {
+			# ⭐ THE LINE THE WHOLE DEPLOYMENT TURNS ON.
+			#
+			# A Blazor Server circuit lives in one process and no backplane changes that. Startup
+			# is two requests:
+			#
+			#     POST /_blazor/negotiate     -> instance A mints a connection token
+			#     GET  /_blazor?id=<token>    -> must reach instance A, which alone knows the token
+			#
+			# Under Caddy's default `random` policy the second request lands on the other instance
+			# about half the time. The failure is the worst kind: the server returns the page, the
+			# HTML renders, the CSS is right, and NOTHING RESPONDS. No error page, no login needed
+			# to reproduce, and nothing in the UI says why. Every interactive component in EntKube
+			# is affected, because every page is interactive server rendering.
+			#
+			# `lb_policy cookie <name>` makes Caddy set a cookie on the first response whose value
+			# is an HMAC of the chosen upstream's dial address, and route every later request
+			# carrying that cookie to the same upstream. Measured against caddy v2.11.7:
+			#
+			#     over TLS:    entkube_lb=<64 hex>; Path=/; HttpOnly; Secure; SameSite=None
+			#     plain HTTP:  entkube_lb=<64 hex>; Path=/; HttpOnly; SameSite=Lax
+			#
+			# Serve this over HTTPS. SameSite=None is what carries the cookie through an OIDC
+			# provider's cross-site POST back to /signin-oidc; the plain-HTTP Lax form would be
+			# withheld on exactly that request, and you would land on an instance that has neither
+			# your circuit nor your correlation state.
+			#
+			# ⚠️ Add an argument after the name and it becomes the HMAC secret, not a second cookie:
+			#     lb_policy cookie entkube_lb <secret>
+			# Optional. It stops a client choosing its own upstream by forging the cookie value; it
+			# is not a security boundary, since any client may open a circuit on any instance.
+			lb_policy cookie entkube_lb
+
+			# If the pinned instance is gone, fall through to the other one rather than 502.
+			# A retried request starts a NEW circuit, which is the correct outcome: the old
+			# circuit's state died with its process either way.
+			lb_retries 2
+
+			# Passive health checking only. EntKube exposes no health endpoint — there is no
+			# MapHealthChecks anywhere in src/ — so there is nothing for `health_uri` to probe, and
+			# pointing it at `/` would test an authentication redirect rather than the app. A dial
+			# failure takes the upstream out for 30s and the retry above covers the request.
+			fail_duration 30s
+
+			# Debug aid, left commented. `{upstream_hostport}` is the Caddy placeholder for the
+			# upstream the proxy chose; stamping it on the response names the instance that served
+			# each request without reading container logs. Verify it resolves on your Caddy version
+			# before relying on it — the documented use of this placeholder is `header_up Host`.
+			# header_down +X-EntKube-Upstream {upstream_hostport}
+		}
+	}
+}
