@@ -261,24 +261,97 @@ public class RolloutService(
         }
     }
 
-    /// <summary>Records the verdict and closes the rollout.</summary>
-    public async Task CloseAsync(
+    /// <summary>
+    /// Claims a rollout for judgement, returning true only to the caller that won it.
+    ///
+    /// <para>⭐ <b>This is the whole multi-instance fix.</b> Judging a rollout is not a read:
+    /// it ends in <c>kubectl rollout undo</c> against production. Two EntKube instances both
+    /// poll on a one-minute tick, so both find the same rollout <c>Watching</c> and due, both
+    /// measure the same failing window, and both undo. The second undo rolls <em>forward</em>
+    /// again — <c>rollout undo</c> with no <c>--to-revision</c> moves to the previous revision,
+    /// and after the first undo the previous revision is the bad release. The automatic
+    /// rollback therefore cancelled itself out, the bad release stayed live, and both
+    /// instances wrote a verdict saying it had been rolled back. That verdict is the worst
+    /// part: it is a record of something that did not happen.</para>
+    ///
+    /// <para>The claim is a compare-and-set on <see cref="DeploymentRollout.DecideAt"/>, modelled
+    /// directly on <c>CostLedgerWriter</c>'s per-cluster period cursor — the one other claim in
+    /// this codebase, which exists for the same reason (never do the costly thing twice) and in
+    /// the same shape: <c>Where(unchanged-since-I-read-it).ExecuteUpdateAsync(advance it)</c>,
+    /// with the loser taking <c>0</c> rows back and doing nothing at all.</para>
+    ///
+    /// <para>⚠️ This is a claim, not a lock. Nothing blocks, nothing is held, and losing is not
+    /// an error — a caller that loses has simply had its work done for it. There is no leader
+    /// election, no advisory lock and no lease table anywhere in EntKube, and this does not
+    /// introduce one.</para>
+    ///
+    /// <para>⚠️ <paramref name="decideAt"/> must be the value the caller itself read, not a
+    /// recomputed one. That is what makes the update a compare-and-set rather than a plain
+    /// write: if another instance moved the deadline between the read and here, no row matches
+    /// and we lose.</para>
+    ///
+    /// <para><paramref name="claimUntil"/> doubles as the re-arm. The deadline moves into the
+    /// future, so the winner's siblings stop seeing the rollout as due, and if the winner dies
+    /// mid-judgement the rollout becomes due again once the claim expires rather than being
+    /// stranded in <c>Watching</c> forever. ⚠️ A consequence worth knowing: a judgement that
+    /// crashes repeatedly pushes <c>DecideAt</c> forward each time, so the watcher's "too
+    /// overdue to judge" horizon is measured from the last attempt, not from the original
+    /// deadline. That is the direction we want to fail in — a retried verdict beats an
+    /// abandoned one — but it does mean <c>DecideAt</c> is not a historical record of when the
+    /// window first closed.</para>
+    /// </summary>
+    public async Task<bool> TryClaimForJudgementAsync(
+        Guid rolloutId, DateTime decideAt, DateTime claimUntil, CancellationToken ct = default)
+    {
+        await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
+
+        int claimed = await db.DeploymentRollouts
+            .Where(r => r.Id == rolloutId
+                && r.Status == DeploymentRolloutStatus.Watching
+                && r.DecideAt == decideAt)
+            .ExecuteUpdateAsync(s => s.SetProperty(r => r.DecideAt, claimUntil), ct);
+
+        return claimed > 0;
+    }
+
+    /// <summary>
+    /// Records the verdict and closes the rollout. Returns true if this call is the one that
+    /// closed it, false if it was already closed by someone else.
+    ///
+    /// <para>The write is a compare-and-set on <c>Status == Watching</c>. It used to be a
+    /// read-modify-write with nothing between the two halves:</para>
+    /// <code>
+    /// DeploymentRollout? rollout = await db.DeploymentRollouts.FirstOrDefaultAsync(...);
+    /// if (rollout is null) return;
+    /// rollout.Status = status;          // ← two instances both get here
+    /// await db.SaveChangesAsync(ct);    // ← and the later one wins
+    /// </code>
+    ///
+    /// <para>With the judgement claimed this is belt and braces against a second watcher, but
+    /// it is load-bearing against <see cref="OpenAsync"/>: a new apply landing mid-analysis
+    /// marks the open watch <c>Superseded</c>, and without the guard the watcher would then
+    /// overwrite that with a verdict about a release no longer running. Losing here is correct
+    /// — whoever closed it first closed it for a reason.</para>
+    /// </summary>
+    public async Task<bool> CloseAsync(
         Guid rolloutId, DeploymentRolloutStatus status, string verdict, RolloutSignals signals,
         DateTime now, CancellationToken ct = default)
     {
         await using DeliveryDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
-        DeploymentRollout? rollout = await db.DeploymentRollouts.FirstOrDefaultAsync(r => r.Id == rolloutId, ct);
-        if (rollout is null)
-        {
-            return;
-        }
+        // Computed out here rather than inside the expression tree: SetProperty takes the value
+        // as a constant to parameterize, not as something to translate into SQL.
+        string trimmed = verdict.Length > 1000 ? verdict[..1000] : verdict;
+        string signalsJson = JsonSerializer.Serialize(signals);
 
-        rollout.Status = status;
-        rollout.FinishedAt = now;
-        rollout.Verdict = verdict.Length > 1000 ? verdict[..1000] : verdict;
-        rollout.SignalsJson = JsonSerializer.Serialize(signals);
+        int closed = await db.DeploymentRollouts
+            .Where(r => r.Id == rolloutId && r.Status == DeploymentRolloutStatus.Watching)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, status)
+                .SetProperty(r => r.FinishedAt, (DateTime?)now)
+                .SetProperty(r => r.Verdict, trimmed)
+                .SetProperty(r => r.SignalsJson, signalsJson), ct);
 
-        await db.SaveChangesAsync(ct);
+        return closed > 0;
     }
 }
