@@ -1776,10 +1776,32 @@ So the order is:
 services audited are already safe — idempotent reconcilers, or claim-protected. The work is
 per-service and the list is in the audit, not a blanket mechanism.
 
-### 9.6 Three things the audit could not settle
+### 9.6 The three the audit could not settle, now settled (2026-10-24)
 
 `ObservedSecretRefreshService`, `MessagingStatusPollingService` and
-`SearchStatusPollingService` came back **unclear** rather than being guessed at. Each
-reconciles live cluster state into the database on a timer, and whether a duplicate run is
-harmless depends on whether the write is idempotent in practice. They need reading before
-they are classified.
+`SearchStatusPollingService` came back **unclear** rather than being guessed at, because
+whether a duplicate run is harmless depends on what the write actually does. Read:
+
+**`MessagingStatusPollingService` and `SearchStatusPollingService` — safe as they are.**
+Both call a `ReconcileAllAsync` that observes a live cluster and assigns a status
+(`cluster.Status = …`) derived from that observation. No inserts. Two instances observe the
+same cluster, derive the same value and write it; last write wins and both writes agree, so
+the state converges to the same place a single instance polling twice would reach. The cost
+of duplication is a second round of cluster API calls, not a wrong answer. They belong with
+the twenty already-safe reconcilers.
+
+**`ObservedSecretRefreshService` — a small, real defect.** The value is fine; the audit trail
+is not. `VaultService.RefreshAppSecretFromClusterAsync` compares the live Secret against the
+vault copy and, when they differ, calls `ArchiveVersionAsync` **before** writing the new
+value. Two instances that both observe the same change both append a version row, so one
+change is recorded as two. The plaintext converges correctly — the two ciphertexts differ
+only by nonce — so nothing is lost or corrupted; what is wrong is the record of *what changed
+and when*, which in a vault is not a cosmetic concern.
+
+⚠️ The method's own comment says the no-change skip exists to avoid "version-history churn",
+so the author was already guarding this property — against a slow poll rather than against a
+second instance. The fix is the same claim shape as the others: archive-and-write once per
+observed change. It is listed below the four in §9.3 because it corrupts a record rather than
+a cluster, not because it is imaginary.
+
+With these three read, every hosted service in the installation is classified.
