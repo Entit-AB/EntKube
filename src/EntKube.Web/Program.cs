@@ -1491,7 +1491,150 @@ public class Program
         return rows;
     }
 
+    /// <summary>
+    /// Runs the reconcile-and-migrate under a database lock, so two instances starting together
+    /// do not both do it.
+    ///
+    /// <para>⭐ <b>The retry loop below already made a concurrent <c>Migrate()</c> survivable by
+    /// accident</b> — the loser fails, backs off, and finds nothing pending on its next attempt.
+    /// What it does not protect is <see cref="MigrationReconciler.Reconcile"/>, which runs FIRST
+    /// and compares the live schema against the history table. Two of those interleaving can have
+    /// one instance stamping a migration as applied while the other is still creating its objects,
+    /// and the reconciler's whole job is to act when those two disagree. Production has no
+    /// database console (docs/decomposition.md §9.3), so a schema it leaves in a half-decided
+    /// state is the worst outcome in the audit.</para>
+    ///
+    /// <para>⚠️ The lock is held across BOTH steps, not just the migrate. Reconcile-then-migrate is
+    /// one decision; locking only the second half would leave exactly the race worth preventing.</para>
+    ///
+    /// <para><b>Per provider, because there is no portable answer:</b> Postgres takes a session
+    /// advisory lock, SQL Server <c>sp_getapplock</c> with a Session owner, and SQLite takes
+    /// nothing — it is a single file used as the local-development fallback, and a second process
+    /// sharing one SQLite file is not a deployment this supports. A provider nobody has taught
+    /// this method runs unlocked and says so at warning level rather than silently.</para>
+    ///
+    /// <para>⚠️ Both locks are released by the connection closing, which is the property that
+    /// matters: an instance killed mid-migration cannot leave the next one waiting forever.</para>
+    /// </summary>
     private static void MigrateWithRetry(DbContext db, ILogger logger)
+    {
+        System.Data.Common.DbConnection connection = db.Database.GetDbConnection();
+        bool wasClosed = connection.State != System.Data.ConnectionState.Open;
+
+        if (wasClosed)
+        {
+            connection.Open();
+        }
+
+        bool locked = TryTakeMigrationLock(connection, db.Database.ProviderName, logger);
+
+        try
+        {
+            MigrateWithRetryCore(db, logger);
+        }
+        finally
+        {
+            if (locked)
+            {
+                ReleaseMigrationLock(connection, db.Database.ProviderName, logger);
+            }
+
+            if (wasClosed)
+            {
+                connection.Close();   // also releases either lock, belt and braces
+            }
+        }
+    }
+
+    private static bool TryTakeMigrationLock(
+        System.Data.Common.DbConnection connection, string? provider, ILogger logger)
+    {
+        string? acquire = MigrationLock.TryAcquireSql(provider);
+
+        if (acquire is null)
+        {
+            // ⚠️ Two different silences, and only one is fine. SQLite is a single file used as the
+            // local-development fallback and genuinely needs nothing; anything else reaching here
+            // is a provider nobody taught this method, and running the reconciler unlocked is a
+            // thing an operator should be told about rather than discover.
+            if (!MigrationLock.NeedsNoLock(provider))
+            {
+                logger.LogWarning(
+                    "No migration lock is implemented for provider {Provider}; migrating unlocked. "
+                    + "Two instances starting together could reconcile the schema concurrently.",
+                    provider);
+            }
+
+            return false;
+        }
+
+        // Bounded rather than indefinite: a wedged holder should surface as a failed start the
+        // orchestrator can restart, not as an instance that hangs with no further log line.
+        TimeSpan budget = TimeSpan.FromMinutes(5);
+        DateTime deadline = DateTime.UtcNow + budget;
+        int waited = 0;
+
+        while (DateTime.UtcNow < deadline)
+        {
+            using (System.Data.Common.DbCommand cmd = connection.CreateCommand())
+            {
+                cmd.CommandText = acquire;
+
+                if (MigrationLock.WasGranted(cmd.ExecuteScalar()))
+                {
+                    if (waited > 0)
+                    {
+                        logger.LogInformation(
+                            "Took the migration lock after waiting {Waited}s for another instance.",
+                            waited);
+                    }
+
+                    return true;
+                }
+            }
+
+            if (waited == 0)
+            {
+                logger.LogInformation(
+                    "Another instance is migrating; waiting up to {Budget} minutes for it to finish.",
+                    budget.TotalMinutes);
+            }
+
+            Thread.Sleep(2000);
+            waited += 2;
+        }
+
+        // Deliberately loud and fatal: proceeding would run the reconciler against a schema
+        // somebody else is in the middle of changing.
+        logger.LogCritical(
+            "Could not take the migration lock within {Budget} minutes. Terminating rather than "
+            + "reconciling a schema another instance is changing.", budget.TotalMinutes);
+
+        throw new InvalidOperationException(
+            "Timed out waiting for the migration lock held by another EntKube instance.");
+    }
+
+    private static void ReleaseMigrationLock(
+        System.Data.Common.DbConnection connection, string? provider, ILogger logger)
+    {
+        string? release = MigrationLock.ReleaseSql(provider);
+        if (release is null) return;
+
+        try
+        {
+            using System.Data.Common.DbCommand cmd = connection.CreateCommand();
+            cmd.CommandText = release;
+            cmd.ExecuteNonQuery();
+        }
+        catch (Exception ex)
+        {
+            // Not fatal: closing the connection releases it anyway. Logged because a failure here
+            // means the connection is already in a state worth knowing about.
+            logger.LogWarning(ex, "Releasing the migration lock failed; the connection close will free it.");
+        }
+    }
+
+    private static void MigrateWithRetryCore(DbContext db, ILogger logger)
     {
         int maxRetries = 10;
         int delayMs = 1000;
