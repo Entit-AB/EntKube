@@ -145,6 +145,10 @@ mean something. With a cookie jar, **20 of 20** requests reached the same upstre
 no further `Set-Cookie`. `/ingest/*` answered from the pinned upstream throughout. The checks in
 [Verifying it worked](#verifying-it-worked) are those same commands.
 
+Then the `lb_policy` line was deleted and the same run repeated, because a check that cannot fail
+proves nothing: the two upstreams were still both reachable (11/9, so the harness had not changed),
+but with a cookie jar the 20 requests split **14/6** across them. That split is the dead circuit.
+
 ⚠️ A second argument after the name is the **HMAC secret**, not a second cookie name
 (`lb_policy cookie entkube_lb <secret>`). It is optional, and it stops a client picking its own
 upstream by forging the cookie — it is not a security boundary, since any client may open a circuit
@@ -243,6 +247,12 @@ done
 
 **Expect `0` ten times.** Caddy only sends `Set-Cookie` when it had to choose an upstream, so
 silence means every one of those requests was routed by the cookie you already held.
+
+⚠️ **This check is worthless unless check 1 printed `2`, and that is not a style point.** With
+`lb_policy cookie` deleted entirely, this loop still prints `0` ten times — there is no cookie to
+resend, so the absence it looks for is satisfied by the mechanism being *missing*. It was measured
+both ways: with the policy, `2` distinct values and `0` resends; without it, `0` distinct values
+and the same `0` resends. Only check 1's count distinguishes them.
 
 ### 3. ⭐ The circuit starts on the instance that minted it
 
