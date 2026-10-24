@@ -14,6 +14,13 @@ namespace EntKube.Web.Services.Rollouts;
 /// registered, so a background scope passes straight through. That is the behaviour we
 /// want: an automatic rollback that waited for a human to click a dialog would be
 /// useless at 3am, which is exactly when it matters.
+///
+/// <para>⭐ Because nothing here asks a human, nothing here may happen twice. Every
+/// judgement is claimed first — see <see cref="DecideAsync"/> — so that running two web
+/// instances, or a web instance beside a worker, produces one rollback and one verdict
+/// rather than two of each. The placement switch that lets an operator run <i>N</i> web +
+/// 1 worker is not enough on its own: with it off, or with two workers, the duplication is
+/// exactly as bad as before, and the duplication is what undoes the rollback.</para>
 /// </summary>
 public class RolloutWatcherService(
     IServiceScopeFactory scopeFactory,
@@ -34,6 +41,16 @@ public class RolloutWatcherService(
     /// period nobody observed.
     /// </summary>
     private static readonly TimeSpan MaxOverdue = TimeSpan.FromHours(6);
+
+    /// <summary>
+    /// How long one instance's claim on a judgement holds off the others.
+    ///
+    /// Comfortably longer than a tick, so a sibling never races the winner, and comfortably
+    /// longer than a measure-and-undo takes, so a slow rollback is not judged a second time
+    /// while it is still running. Short enough that a watcher killed mid-judgement leaves the
+    /// rollout unjudged for minutes rather than until <see cref="MaxOverdue"/> abandons it.
+    /// </summary>
+    private static readonly TimeSpan ClaimLease = TimeSpan.FromMinutes(10);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -124,7 +141,22 @@ public class RolloutWatcherService(
         }
     }
 
-    private async Task DecideAsync(
+    /// <summary>
+    /// Measures, judges and acts on one due rollout — at most once, however many instances
+    /// of EntKube are running.
+    ///
+    /// <para>⭐ The first thing it does is <em>claim</em> the rollout. Everything after the
+    /// claim writes to a cluster or to the rollout's verdict, and both must happen exactly
+    /// once. See <see cref="RolloutService.TryClaimForJudgementAsync"/> for what went wrong
+    /// without it: two instances, two <c>kubectl rollout undo</c>s, the second one rolling
+    /// forward onto the bad release again, and two verdicts both claiming a rollback.</para>
+    ///
+    /// <para>⚠️ Exposed rather than private so a test can drive one judgement end to end and
+    /// assert that a second attempt changes nothing — the same reason
+    /// <see cref="NotificationSeverityFor"/> is exposed. A verdict reached twice is not
+    /// something a unit test of the pure analysis can see.</para>
+    /// </summary>
+    public async Task DecideAsync(
         Guid tenantId, Guid rolloutId, DateTime now,
         IDbContextFactory<DeliveryDbContext> dbFactory, RolloutService rollouts,
         NotificationService notifications, CancellationToken ct)
@@ -140,7 +172,14 @@ public class RolloutWatcherService(
                 .AsNoTracking()
                 .FirstOrDefaultAsync(r => r.Id == rolloutId, ct);
 
-            if (rollout is null || rollout.Status != DeploymentRolloutStatus.Watching)
+            // ⚠️ `DecideAt > now` is not redundant with the query in RunAsync that found this
+            // rollout. That query ran at the top of the tick; by the time we get here another
+            // instance may have claimed the judgement and pushed the deadline out. Re-reading
+            // dueness is what catches the instance that arrives a moment late — the
+            // compare-and-set below catches the one that arrives at the same moment.
+            if (rollout is null
+                || rollout.Status != DeploymentRolloutStatus.Watching
+                || rollout.DecideAt > now)
             {
                 return;
             }
@@ -156,6 +195,17 @@ public class RolloutWatcherService(
             policy = await db.RolloutPolicies
                 .AsNoTracking()
                 .FirstOrDefaultAsync(p => p.DeploymentId == rollout.DeploymentId, ct);
+        }
+
+        // ⭐ Claim it. Nothing above this line writes anything; nothing below it may run twice.
+        // The loser logs and returns — it has not failed, it has been beaten, and its sibling
+        // is doing the work. (`decideAt` is the value read above, not a fresh one: that is what
+        // makes this a compare-and-set.)
+        if (!await rollouts.TryClaimForJudgementAsync(rolloutId, decideAt, now.Add(ClaimLease), ct))
+        {
+            logger.LogDebug(
+                "Rollout {RolloutId} is being judged by another instance; leaving it alone", rolloutId);
+            return;
         }
 
         if (deployment is null || policy is null)
