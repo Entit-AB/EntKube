@@ -15,6 +15,17 @@ namespace EntKube.Web.Services;
 ///
 /// Runs every 5 minutes. <see cref="VaultService.RefreshAppSecretFromClusterAsync"/>
 /// is a no-op when the live value is unchanged, so this does not churn version history.
+///
+/// <para>⚠️ <b>Why that sentence was not enough for a second instance.</b> "No-op when
+/// unchanged" guards against this timer polling faster than the owning controller writes.
+/// It says nothing about two instances polling the same secret at the same time: both read
+/// the same vault copy, both see the same live change, and — before the claim added in
+/// <see cref="VaultService.RefreshAppSecretFromClusterAsync"/> — both appended a version row,
+/// so one change was recorded as two. The value converged either way (the ciphertexts differ
+/// only by nonce); the audit trail did not. The refresh now claims the vault copy it diffed
+/// against, so the archive-and-write happens once per observed change no matter how many
+/// instances see it. This service is unchanged in behaviour and needs no switch or leader
+/// election of its own: a duplicate pass costs cluster API calls, not correctness.</para>
 /// </summary>
 public class ObservedSecretRefreshService(
     IServiceScopeFactory scopeFactory,
