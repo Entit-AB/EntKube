@@ -17,6 +17,10 @@ namespace EntKube.Web.Services;
 /// can fix the cause and resume, which re-runs from the failed step. Optional steps that
 /// fail are recorded but do not stop the run. Cancellation is cooperative — checked between
 /// steps, so a step already running to completion (e.g. a helm --wait) is not aborted.
+///
+/// Multi-instance: the poll loop may run on more than one instance at once (docs/decomposition.md
+/// §9.3). Reading the queue twice is harmless; executing a run twice is not, so a run is taken by
+/// an atomic claim — see <see cref="TryClaimAsync"/> — and an instance that loses it does nothing.
 /// </summary>
 public class BootstrapRunnerService(
     IServiceScopeFactory scopeFactory,
@@ -92,6 +96,56 @@ public class BootstrapRunnerService(
             .Where(r => r.Cluster.TenantId == tenantId && r.Status == BootstrapRunStatus.Queued)
             .OrderBy(r => r.CreatedAt);
 
+    /// <summary>
+    /// ⭐ Takes a queued run for this instance, as a single conditional UPDATE: the row moves
+    /// from Queued to Running only if it is still Queued when the database applies the write.
+    /// Returns true to exactly one caller; every other caller gets false and must do nothing
+    /// at all with the run — no logging it as skipped-and-retryable, no second attempt.
+    ///
+    /// <para>What this used to be: the loaded entity was assigned
+    /// <c>run.Status = BootstrapRunStatus.Running</c> and saved, guarded only by a
+    /// <c>run.Status != Queued</c> check on the value read a moment earlier, with the comment
+    /// "picked up by another pass". That is true of two sequential passes inside ONE process —
+    /// the first pass has already written Running before the second pass reads — and false of
+    /// two processes. Two instances polling 10s apart both read Queued, both write Running, and
+    /// both then run every step of the blueprint against the same customer cluster: the same
+    /// helm releases installed twice, the same CNPG / Redis / RabbitMQ clusters created twice.
+    /// The run's own steps are idempotent, but two runners interleaving on one cluster are not
+    /// a retry of a step, they are two writers racing over the same release.</para>
+    ///
+    /// <para>⚠️ This is a claim, not a lock. Nothing is held and nothing is released: losers
+    /// return false and are expected to lose, which is why a lost claim is not an error and is
+    /// not logged as one. A crash after a successful claim leaves the run Running with no runner
+    /// behind it; that is the same state the old code produced, and it is recovered the same way
+    /// (an operator cancels or resumes the run), because the alternative — a lease with an
+    /// expiry — is a bigger change than this one and would need agreeing first.</para>
+    ///
+    /// <para>⚠️ The tenant is part of the claim, not just of the read before it. This mirrors
+    /// the loading query: a run is only ever this tenant's run, and the one statement that
+    /// decides a run may proceed is the one place that must not take the pair apart.</para>
+    ///
+    /// <para>Modelled directly on CostLedgerWriter's per-cluster period claim, which exists for
+    /// the same reason one layer down (two writers, one hour, no double-billing). Public and
+    /// static for the same reason <see cref="QueuedFor"/> is: the race can then be run in a test
+    /// without a cluster, a scope factory or a poll loop.</para>
+    /// </summary>
+    /// <returns>true if this caller won the run and owns executing it; false if someone else did.</returns>
+    public static async Task<bool> TryClaimAsync(
+        ApplicationDbContext db, Guid runId, Guid tenantId, DateTime now, CancellationToken ct = default)
+    {
+        int claimed = await db.BootstrapRuns
+            .Where(r => r.Id == runId
+                        && r.Cluster.TenantId == tenantId
+                        && r.Status == BootstrapRunStatus.Queued)
+            .ExecuteUpdateAsync(s => s
+                .SetProperty(r => r.Status, BootstrapRunStatus.Running)
+                // Kept as ??=, not an unconditional assignment: a resumed run keeps the time it
+                // first started, which is what the UI's elapsed column is measured from.
+                .SetProperty(r => r.StartedAt, r => r.StartedAt ?? now), ct);
+
+        return claimed > 0;
+    }
+
     private async Task ExecuteRunAsync(Guid tenantId, Guid runId, CancellationToken ct)
     {
         // Each run gets its own scope so scoped services (registrar, orchestrator,
@@ -117,13 +171,18 @@ public class BootstrapRunnerService(
                 .Include(r => r.StepRuns)
                 .FirstOrDefaultAsync(r => r.Id == runId && r.Cluster.TenantId == tenantId, ct);
 
-            // Skip if it was cancelled or picked up by another pass in the meantime.
+            // Skip if it was cancelled, or already finished, before we got here.
             if (run is null || run.Status != BootstrapRunStatus.Queued) return;
 
-            run.Status = BootstrapRunStatus.Running;
-            run.StartedAt ??= DateTime.UtcNow;
             stepIds = run.StepRuns.OrderBy(s => s.Order).Select(s => s.Id).ToList();
-            await db.SaveChangesAsync(ct);
+
+            // ⭐ The read above is advice, not permission. Permission is the claim.
+            if (!await TryClaimAsync(db, runId, tenantId, DateTime.UtcNow, ct)) return;
+
+            // ExecuteUpdate writes behind the change tracker's back, so the entity loaded
+            // above still believes it is Queued. Drop it rather than leave a stale copy
+            // where a later SaveChanges in this scope could write Queued back over Running.
+            db.ChangeTracker.Clear();
 
             logger.LogInformation("BootstrapRunnerService: starting run {RunId} ({Blueprint}) with {Count} steps",
                 runId, run.BlueprintName, stepIds.Count);
