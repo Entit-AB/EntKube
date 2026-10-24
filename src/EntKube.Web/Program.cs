@@ -185,14 +185,49 @@ public class Program
         // survive container restarts. Without this the keys live in the container's
         // ephemeral filesystem (/app/.aspnet/DataProtection-Keys) and are regenerated on
         // every restart, invalidating all existing cookies and forcing every user to
-        // re-authenticate after each deploy. The path should be a mounted volume in
-        // containerized deployments (e.g. mount a volume at /app/keys).
-        string keyRingPath = builder.Configuration.GetValue<string>("DataProtection:KeyPath")
-            ?? Path.Combine(builder.Environment.ContentRootPath, "keys");
-        Directory.CreateDirectory(keyRingPath);
-        builder.Services.AddDataProtection()
-            .PersistKeysToFileSystem(new DirectoryInfo(keyRingPath))
+        // re-authenticate after each deploy.
+        //
+        // ⭐ WITH MORE THAN ONE INSTANCE THE RING MUST BE SHARED, and this is the defect that
+        // breaks a load-balanced deployment second (docs/decomposition.md §9.2). Each container
+        // minting its own ring means a request protected by instance A cannot be unprotected by
+        // instance B: the antiforgery token on a form POST, the auth cookie, and the OIDC
+        // correlation/nonce all stop surviving a hop, so login fails in a way that looks
+        // intermittent rather than misconfigured.
+        //
+        // Two ways to share it, in order of preference:
+        //
+        //   1. Redis — set ConnectionStrings:Redis. Nothing else to arrange, and it works when
+        //      instances are on different hosts. The multiplexer registered here is the same one
+        //      Presence:Provider=Redis uses, so a multi-instance install configures one Redis and
+        //      gets both.
+        //   2. A shared volume — point DataProtection:KeyPath at one RWX mount. Free when every
+        //      instance is on one host, which is the docker-compose case, and needs no Redis.
+        //
+        // ⚠️ SetApplicationName matters as much as the storage and is easy to lose: without a
+        // fixed name the purpose string is derived per application, so two instances sharing a
+        // ring still could not read each other's payloads.
+        string? redisConnection = SharedKeyRing.RedisConnection(builder.Configuration);
+
+        IDataProtectionBuilder dataProtection = builder.Services.AddDataProtection()
             .SetApplicationName("EntKube");
+
+        if (!string.IsNullOrWhiteSpace(redisConnection))
+        {
+            // Registered here rather than in the presence block below because DataProtection is
+            // configured first and needs the instance now. Presence resolves the same singleton,
+            // so one connection serves both and neither owns it.
+            IConnectionMultiplexer multiplexer = ConnectionMultiplexer.Connect(redisConnection);
+            builder.Services.AddSingleton(multiplexer);
+
+            dataProtection.PersistKeysToStackExchangeRedis(multiplexer, "EntKube:DataProtection:Keys");
+        }
+        else
+        {
+            string keyRingPath = SharedKeyRing.KeyPath(
+                builder.Configuration, builder.Environment.ContentRootPath);
+            Directory.CreateDirectory(keyRingPath);
+            dataProtection.PersistKeysToFileSystem(new DirectoryInfo(keyRingPath));
+        }
 
         // The database provider is selected based on the "DatabaseProvider" config value.
         // Supported values: "Sqlite" (default for local dev), "Postgres", "SqlServer".
@@ -301,13 +336,16 @@ public class Program
         string presenceProvider = builder.Configuration.GetValue<string>("Presence:Provider") ?? "InMemory";
         if (string.Equals(presenceProvider, "Redis", StringComparison.OrdinalIgnoreCase))
         {
-            string redisConnection = builder.Configuration.GetConnectionString("Redis")
-                ?? builder.Configuration.GetValue<string>("Presence:Redis:Configuration")
-                ?? throw new InvalidOperationException(
+            // ⚠️ The multiplexer is registered where DataProtection is configured, because that
+            // runs first and needs the instance immediately. Connecting a second one here would
+            // give the installation two connections to the same Redis for no reason, and the
+            // presence tracker would not be using the one the key ring depends on.
+            if (string.IsNullOrWhiteSpace(redisConnection))
+            {
+                throw new InvalidOperationException(
                     "Presence:Provider is 'Redis' but no Redis connection string was found " +
                     "(set ConnectionStrings:Redis or Presence:Redis:Configuration).");
-            builder.Services.AddSingleton<IConnectionMultiplexer>(
-                _ => ConnectionMultiplexer.Connect(redisConnection));
+            }
             builder.Services.AddSingleton<IPresenceTracker, RedisPresenceTracker>();
             builder.Services.AddPerInstanceWork<PresenceHeartbeatService>();
         }
