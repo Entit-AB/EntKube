@@ -2428,7 +2428,14 @@ public class VaultService(
             return ClusterRefreshResult.NotFound;
         }
 
-        byte[] dataKey = await UnsealVaultAsync(secret.Vault.TenantId, ct);
+        // ⚠️ This read `secret.Vault.TenantId`, and the commit that scoped the query by the asking
+        // tenant ("Two more sweeps act as each tenant", 1fdf96b) dropped the `.Include(s => s.Vault)`
+        // that made the navigation non-null — the tenant moved into the WHERE clause, which joins
+        // but does not populate. So every call that got this far threw NullReferenceException: the
+        // refresher logs one warning per secret and the UI button shows "Failed to refresh from
+        // cluster". The asking tenant is the right value anyway and is now unavoidable, because the
+        // query above refuses to return a secret whose vault belongs to anyone else.
+        byte[] dataKey = await UnsealVaultAsync(tenantId, ct);
         string currentValue = encryption.Decrypt(dataKey, secret.EncryptedValue, secret.Nonce);
 
         (bool changed, string? newValue) = secret.SecretType switch
@@ -2441,13 +2448,78 @@ public class VaultService(
         // Skip the value write (and version-history churn) when nothing changed — the
         // background refresher polls these on an interval — but always record that we
         // checked, so the UI can show how fresh the vault copy is.
+        //
+        // ⭐ When something DID change, archive-and-write happens once per observed change,
+        // claimed on the vault copy this call compared against.
+        //
+        // <para><b>What this used to do.</b> It assigned the new ciphertext onto the tracked row
+        // and called <see cref="ArchiveVersionAsync"/>, both unconditionally, inside the single
+        // SaveChangesAsync below. In one process that is correct: the only poller is
+        // ObservedSecretRefreshService's own 5-minute timer, which runs one pass at a time, and
+        // the no-change skip above already stopped a slow poll from churning version history.
+        // With a second instance the same guard no longer holds — both observe the SAME live
+        // change against the SAME vault copy, and both append a version row. <b>One change
+        // recorded as two.</b> The value itself converges (the two ciphertexts decrypt to the
+        // same plaintext and differ only by nonce), so nothing is lost or corrupted; what is
+        // wrong is the record of what changed and when, which for a vault is not cosmetic.</para>
+        //
+        // ⚠️ <b>What the claim is keyed on, and why it is not the secret id.</b> The key is
+        // (secret id, the nonce we read) — the nonce is freshly random on every value write, so
+        // it names the exact vault copy this call diffed the live Secret against:
+        //   • two instances that read the same copy hold the same nonce, so exactly one UPDATE
+        //     matches a row and the other matches none;
+        //   • a second, genuinely different change arrives in a later pass against the WINNER's
+        //     nonce, so it is claimed and archived on its own merits. A claim keyed on the id
+        //     alone — or on "this secret was refreshed in the last N minutes" — would be too
+        //     broad and would silently swallow that real second change, which is the same audit
+        //     hole in the other direction.
+        // It also makes an operator's own edit through the UI win: that write moves the nonce
+        // too, so a refresh that compared against the pre-edit copy loses instead of overwriting
+        // a change it never saw.
+        //
+        // A claim is NOT a lock (Cost/CostLedgerWriter.cs:112-124 is the one other claim in the
+        // codebase and the pattern followed here): the loser does nothing and does not error. It
+        // still records LastRefreshedFromClusterAt, because "this instance checked" is true of
+        // both, and it reports Unchanged — by the time it finished, the vault copy already held
+        // the live value.
         if (changed && newValue is not null)
         {
             (byte[] ciphertext, byte[] nonce) = encryption.Encrypt(dataKey, newValue);
-            await ArchiveVersionAsync(db, secret, ct);
-            secret.EncryptedValue = ciphertext;
-            secret.Nonce = nonce;
-            secret.UpdatedAt = DateTime.UtcNow;
+            byte[] observedNonce = secret.Nonce;
+            DateTime writtenAt = DateTime.UtcNow;
+
+            // ⚠️ The version row and the value must land together or not at all. A crash between
+            // them would record the change as ZERO versions — the same hole mirrored — so the
+            // claim, the archive insert and the value write share one transaction. The claim is
+            // the first statement in it, so the row lock is held only for the insert.
+            await using Microsoft.EntityFrameworkCore.Storage.IDbContextTransaction tx =
+                await db.Database.BeginTransactionAsync(ct);
+
+            int claimed = await db.Set<VaultSecret>()
+                .Where(s => s.Id == secret.Id && s.Nonce == observedNonce)
+                .ExecuteUpdateAsync(s => s
+                    .SetProperty(x => x.EncryptedValue, ciphertext)
+                    .SetProperty(x => x.Nonce, nonce)
+                    .SetProperty(x => x.UpdatedAt, writtenAt), ct);
+
+            if (claimed > 0)
+            {
+                // ⚠️ `secret` deliberately still carries the SUPERSEDED ciphertext and nonce:
+                // ExecuteUpdateAsync does not go through the change tracker, so the archive row
+                // gets the value that was just replaced — which is what a version row is.
+                // Assigning the new value onto the entity first, as this method used to, would
+                // archive the new value as though it were the old one.
+                await ArchiveVersionAsync(db, secret, ct);
+                secret.LastRefreshedFromClusterAt = writtenAt;
+                await db.SaveChangesAsync(ct);
+                await tx.CommitAsync(ct);
+                return ClusterRefreshResult.Updated;
+            }
+
+            // Lost the claim: another instance observed this same change and recorded it. Drop
+            // the (empty) transaction and fall through to the freshness stamp below.
+            await tx.RollbackAsync(ct);
+            changed = false;
         }
 
         secret.LastRefreshedFromClusterAt = DateTime.UtcNow;
@@ -2462,9 +2534,17 @@ public class VaultService(
         NoTarget,
         /// <summary>The target Secret could not be found or read in the cluster.</summary>
         NotFound,
-        /// <summary>The live value matched the vault copy — nothing to write.</summary>
+        /// <summary>
+        /// Nothing was written by this call, and the vault copy now holds the live value.
+        ///
+        /// <para>Reached two ways: the live value already matched the vault copy, or this call
+        /// observed a change but <em>lost the claim</em> to another instance that observed the
+        /// same change and recorded it. Both are "already up to date, nothing for me to do", and
+        /// deliberately share one result so one observed change is counted — and announced —
+        /// once installation-wide rather than once per instance.</para>
+        /// </summary>
         Unchanged,
-        /// <summary>The vault copy was updated to match the live value.</summary>
+        /// <summary>The vault copy was updated to match the live value, by this call.</summary>
         Updated,
     }
 
