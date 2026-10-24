@@ -1,0 +1,267 @@
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+# A worked two-instance EntKube deployment: 2 web + 1 worker, behind Caddy.
+#
+# This is a STANDALONE stack, not an overlay on ../../docker-compose.yml, and that is deliberate.
+# An overlay would have to replace the base `entkube` service's /app/Data mount and the base
+# Caddyfile, which depends on Compose's merge-by-mount-path rule — subtle, and the failure mode is
+# a shared Lucene index rather than an error. Copy this file, ./Caddyfile.two-instances and
+# ./env.two-instances.example into their own directory and run them from there.
+#
+# ⚠️ `entkube-install` REWRITES docker-compose.yml and the Caddyfile wholesale on every run
+#    (EntKube.Installer.Core/Renderer.cs:75 — "replaced wholesale on an upgrade"), and it renders
+#    the single-instance shape only. A two-instance deployment therefore lives OUTSIDE the
+#    installer's directory, or you re-apply these files after each installer run from the .bak it
+#    leaves behind.
+#
+# ⭐ The central point of the file's SHAPE: everything that must be IDENTICAL across the three app
+#    containers is in the `x-entkube-shared-env` anchor, and everything that must DIFFER is written
+#    out per service. Add an instance by copying a service block and the shared half comes along
+#    automatically — only the differing half is yours to get right.
+#
+# ⚠️ Read docs/running-two-instances.md § "What this does not make safe" before putting this in
+#    front of real customer clusters. Two instances is not yet "HA is done".
+# ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+# ── IDENTICAL on every app container ─────────────────────────────────────────────────────────────
+# Every variable here is shared on purpose. The three that actually hurt if they drift:
+#
+#   Vault__RootKey                       ⭐ this, plus one Postgres, IS the shared vault. The root
+#                                        key unseals a per-tenant DEK from the database, which
+#                                        decrypts a value from the database; nothing secret is
+#                                        generated per process and nothing is written to local
+#                                        disk. A container with a different root key does not get
+#                                        a degraded vault — it gets one whose every secret fails
+#                                        to decrypt. (docs/decomposition.md §9.1)
+#   ConnectionStrings__DefaultConnection  one database, or they are not one installation.
+#   DataProtection__KeyPath               see the keys volume at the bottom; the default puts the
+#                                        ring inside the PER-INSTANCE data volume.
+x-entkube-shared-env: &entkube-shared-env
+  # --- Database (one, shared) ---
+  DatabaseProvider: Postgres
+  ConnectionStrings__DefaultConnection: "Host=postgres;Port=5432;Database=entkube;Username=entkube;Password=${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+
+  # --- Vault encryption (identical, or the vault is not shared) ---
+  Vault__RootKey: "${VAULT__ROOTKEY:?set VAULT__ROOTKEY in .env — openssl rand -base64 32}"
+
+  # --- DataProtection key ring ---
+  # ⚠️ NOT the default. The reference compose file defaults this to /app/Data/keys, and /app/Data is
+  # PER-INSTANCE here (Lucene write.lock — see the volumes section). Leaving the default gives each
+  # container its own key ring, which is failure #2 in docs/decomposition.md §9.2: an antiforgery
+  # token, auth cookie or OIDC correlation value minted by one instance cannot be unprotected by
+  # another, so login fails about half the time and presents as flaky rather than misconfigured.
+  #
+  # /app/keys is a SEPARATE volume mounted into all three containers. This works on today's main:
+  # a file-system key ring is safe to share between processes, and SetApplicationName("EntKube")
+  # — the other half of a shared ring, and the half that is easy to lose — is already in Program.cs.
+  #
+  # Once PR #374 lands, ConnectionStrings__Redis below can back the ring instead. That is what you
+  # need when the instances are on DIFFERENT HOSTS and so cannot share a volume at all.
+  DataProtection__KeyPath: "/app/keys"
+
+  # --- Redis ---
+  # Today this buys cross-instance presence: "online now" on the admin users page is fed by a
+  # per-circuit handler, so with the in-memory tracker each instance reports only the users whose
+  # circuit it happens to hold. With PR #374 the same connection also backs the key ring.
+  ConnectionStrings__Redis: "redis:6379"
+  Presence__Provider: "Redis"
+
+  # --- Reverse proxy ---
+  # Required behind Caddy: without it ASP.NET Core sees the proxy's address and scheme rather than
+  # the client's, which breaks Blazor Server's SignalR negotiation among other things.
+  ASPNETCORE_FORWARDEDHEADERS_ENABLED: "true"
+
+  # --- Telemetry ---
+  Telemetry__PublicIngestUrl: "https://${DOMAIN:?set DOMAIN in .env}"
+  Telemetry__RetentionDays: "${TELEMETRY_RETENTION_DAYS:-14}"
+  Telemetry__DataPath: "/app/Data/telemetry"
+
+  # ⚠️ OBJECT STORAGE IS MANDATORY AT TWO INSTANCES, where at one instance it is optional.
+  # The sealed tier is the ONLY tier every instance can see: the catalog row lives in the shared
+  # Postgres and the archive in the bucket. With the local-disk fallback the archive lands on the
+  # sealing container's own volume, and every other container's query finds a catalog row whose
+  # bytes it cannot fetch. The bundled MinIO below is the simplest way to satisfy this; in
+  # production set Telemetry__StorageLinkId to a registered StorageLink instead and delete these.
+  Telemetry__ObjectStorage__Endpoint: "http://minio:9000"
+  Telemetry__ObjectStorage__Bucket: "${TELEMETRY_BUCKET:-entkube-telemetry}"
+  Telemetry__ObjectStorage__Region: "us-east-1"
+  Telemetry__ObjectStorage__AccessKey: "${MINIO_ROOT_USER:-entkube}"
+  Telemetry__ObjectStorage__SecretKey: "${MINIO_ROOT_PASSWORD:-changeme-minio}"
+  Telemetry__ObjectStorage__ForcePathStyle: "true"
+
+  # --- Container registry for EntKube-published components ---
+  Helm__Registries__entit_azurecr_io__Username: "${REGISTRY_USERNAME:-}"
+  Helm__Registries__entit_azurecr_io__Password: "${REGISTRY_PASSWORD:-}"
+
+  # --- Auth ---
+  Auth__AllowRegistration: "${AUTH_ALLOW_REGISTRATION:-false}"
+
+  # --- Single sign-on (optional; see docs/sso.md) ---
+  Oidc__Enabled: "${OIDC_ENABLED:-false}"
+  Oidc__Authority: "${OIDC_AUTHORITY:-}"
+  Oidc__ClientId: "${OIDC_CLIENT_ID:-}"
+  Oidc__ClientSecret: "${OIDC_CLIENT_SECRET:-}"
+  Oidc__DisplayName: "${OIDC_DISPLAY_NAME:-Single sign-on}"
+  Oidc__GroupsClaim: "${OIDC_GROUPS_CLAIM:-groups}"
+  Oidc__Scopes__0: "${OIDC_SCOPE:-groups}"
+  Oidc__AllowUsersWithoutMappedGroups: "${OIDC_ALLOW_UNMAPPED:-false}"
+
+  # Per-request logging, left ON because it is how you verify stickiness without adding anything:
+  # it names the container that served POST /_blazor/negotiate and the one that served
+  # GET /_blazor?id=… . See docs/running-two-instances.md § "Verifying it worked".
+  Logging__LogLevel__Microsoft__AspNetCore__Hosting__Diagnostics: "Information"
+
+# ⚠️ The image tag is in the shared half on purpose. Every instance runs EF migrations at boot
+# (docs/decomposition.md §9.3), so a rolling upgrade that leaves two different builds against one
+# database is a migration race between two different migration sets. Upgrade all three together.
+x-entkube-service: &entkube-service
+  image: ${REGISTRY:-entit.azurecr.io}/entkube:${IMAGE_TAG:-latest}
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+  restart: unless-stopped
+
+services:
+  # ── Infrastructure ─────────────────────────────────────────────────────────────────────────────
+  caddy:
+    image: caddy:2
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    environment:
+      DOMAIN: "${DOMAIN}"
+      ACME_EMAIL: "${ACME_EMAIL}"
+    depends_on:
+      - entkube-web-1
+      - entkube-web-2
+      - entkube-worker
+    restart: unless-stopped
+
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: entkube
+      POSTGRES_USER: entkube
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in .env}"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U entkube -d entkube"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 10s
+    restart: unless-stopped
+
+  # Shared by presence today, and by the DataProtection ring once #374 lands.
+  # appendonly, so a Redis restart does not invalidate every cookie in the installation.
+  redis:
+    image: redis:7-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes:
+      - redis-data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    restart: unless-stopped
+
+  # Object storage for sealed telemetry segments. Mandatory here — see the note in the shared env.
+  minio:
+    image: minio/minio:latest
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-entkube}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-changeme-minio}"
+    volumes:
+      - minio-data:/data
+    restart: unless-stopped
+
+  minio-init:
+    image: minio/mc:latest
+    depends_on:
+      - minio
+    environment:
+      MINIO_ROOT_USER: "${MINIO_ROOT_USER:-entkube}"
+      MINIO_ROOT_PASSWORD: "${MINIO_ROOT_PASSWORD:-changeme-minio}"
+      TELEMETRY_BUCKET: "${TELEMETRY_BUCKET:-entkube-telemetry}"
+    entrypoint: >
+      /bin/sh -c "
+      until mc alias set tel http://minio:9000 $$MINIO_ROOT_USER $$MINIO_ROOT_PASSWORD; do echo 'waiting for minio'; sleep 2; done &&
+      mc mb --ignore-existing tel/$$TELEMETRY_BUCKET &&
+      echo 'telemetry bucket ready'"
+    restart: "no"
+
+  # ── The one instance that runs the sweeps ──────────────────────────────────────────────────────
+  # ⭐ Exactly one container in the installation may have Workers__RunSingletonWork true. That is
+  # the whole of "N web + 1 worker": every hosted service registered through
+  # HostedWork.AddSingletonWork starts here and nowhere else.
+  #
+  # ⚠️ The flag DEFAULTS TO TRUE (HostedWork.RunsSingletonWork), deliberately, so that an existing
+  # single-instance install keeps sweeping on upgrade. The mistake is therefore not setting it here
+  # — it is FORGETTING to set it false on a web instance. What follows is silent: two
+  # RolloutWatcherServices both call `kubectl rollout undo` with no --to-revision, so the second
+  # undo rolls FORWARD to the bad release while both record RolledBack (docs/decomposition.md §9.3).
+  #
+  # This container also receives all telemetry ingest — see Caddyfile.two-instances and
+  # docs/running-two-instances.md § "Why ingest is pinned to the worker".
+  entkube-worker:
+    <<: *entkube-service
+    environment:
+      <<: *entkube-shared-env
+      Workers__RunSingletonWork: "true"
+    volumes:
+      - worker-data:/app/Data
+      - entkube-keys:/app/keys
+
+  # ── Web instances: serve circuits, run no sweeps ───────────────────────────────────────────────
+  entkube-web-1:
+    <<: *entkube-service
+    environment:
+      <<: *entkube-shared-env
+      Workers__RunSingletonWork: "false"
+    volumes:
+      - web-1-data:/app/Data
+      - entkube-keys:/app/keys
+
+  entkube-web-2:
+    <<: *entkube-service
+    environment:
+      <<: *entkube-shared-env
+      Workers__RunSingletonWork: "false"
+    volumes:
+      - web-2-data:/app/Data
+      - entkube-keys:/app/keys
+
+networks:
+  default:
+    name: entkube
+
+volumes:
+  postgres-data:
+  redis-data:
+  minio-data:
+  caddy-data:
+  caddy-config:
+
+  # ⚠️ ONE PER APP CONTAINER, never one shared mount.
+  # /app/Data holds the telemetry active index, which is a Lucene IndexWriter. One RWX volume shared
+  # by three processes fails on Lucene's write.lock; separate volumes split the data. It is not a
+  # thing that can be shared by configuration, which is exactly why telemetry needs its own process
+  # (docs/decomposition.md §9.5 step 5) rather than a setting.
+  worker-data:
+  web-1-data:
+  web-2-data:
+
+  # ⭐ The one piece of /app state that IS shared, and must be: the DataProtection key ring.
+  # Separate from /app/Data precisely so that "share the keys" and "do not share the index" can both
+  # be true at once. The keys are stored unencrypted at rest (no DPAPI or X.509 wrapper on Linux),
+  # the same as in the single-instance deployment — treat this volume as secret material.
+  entkube-keys:

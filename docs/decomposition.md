@@ -1761,7 +1761,9 @@ So the order is:
    *N web instances + 1 worker*, which is the whole ask minus telemetry. A ratchet should
    assert every `AddHostedService` goes through it, or the next one added will not.
 2. **Shared DataProtection ring + sticky sessions.** Makes the UI survive a second instance.
-   Redis is already an optional dependency.
+   Redis is already an optional dependency. The worked deployment that steps 1 and 2 add up to —
+   compose, Caddy, the environment matrix, how to verify it, and what it still does not make safe
+   — is [running-two-instances.md](running-two-instances.md).
 3. **Fix `planCache`.** A TTL at minimum; cross-instance invalidation properly. This is the
    one that is silent *and* security-relevant.
 4. **Claims on the four dangerous services**, following `CostLedgerWriter`'s CAS. Rollout

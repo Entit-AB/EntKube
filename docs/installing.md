@@ -594,3 +594,21 @@ volume that looks like it holds the data and does not.
 
 The consequence is that the two files are separate renderings of the same knowledge.
 `InstallerRendererTests` pins the parts that must not drift.
+
+---
+
+## More than one instance
+
+The installer renders the **single-instance** shape only: one `entkube` service and a one-line
+`reverse_proxy` in the Caddyfile. It has no option for a second instance and is not going to grow
+one, because the differences are structural rather than a matter of values — a second instance
+needs its own data volume, a shared key-ring volume the single-instance layout does not have, a
+load-balancing policy, and exactly one container with `Workers__RunSingletonWork` left true.
+
+⚠️ Both `docker-compose.yml` and the `Caddyfile` are **replaced wholesale** on every installer run.
+A hand-edited multi-instance deployment must therefore live in a directory the installer does not
+manage, or be re-applied from the `.bak` after each run.
+
+[`running-two-instances.md`](running-two-instances.md) is the worked deployment: two web instances
+plus one worker, the full environment matrix, the sticky-session directive Caddy actually needs,
+how to verify it — and a plain statement of what it still does not make safe.
