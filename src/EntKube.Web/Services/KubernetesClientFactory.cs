@@ -1,4 +1,5 @@
 using System.Diagnostics;
+using System.Globalization;
 using System.Text;
 using System.Net.Http.Json;
 using System.Text.Json;
@@ -543,13 +544,295 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         return string.Join(" ", args);
     }
 
+    // ════════════════════════════════════════════════════════════════
+    //  A rollback that names the revision it wants
+    // ════════════════════════════════════════════════════════════════
+
+    /// <summary>The annotation Kubernetes stamps the current revision number onto.</summary>
+    private const string RevisionAnnotation = "deployment.kubernetes.io/revision";
+
     /// <summary>
-    /// Rolls every Deployment in a namespace back to its previous recorded revision. See
+    /// The annotation listing the revision numbers a ReplicaSet has <em>already served</em>.
+    ///
+    /// <para>Kubernetes writes it when it reuses an existing ReplicaSet for a new revision, which
+    /// is exactly what an undo does: rolling back to revision 4 does not restore the number 4, it
+    /// re-points the Deployment at revision 4's ReplicaSet and renumbers that ReplicaSet to the
+    /// new maximum. ⚠️ Revision 4 therefore <b>disappears</b> from the history, and the bad
+    /// release keeps its own number — which is why a second relative undo lands back on it.</para>
+    /// </summary>
+    private const string RevisionHistoryAnnotation = "deployment.kubernetes.io/revision-history";
+
+    /// <summary>
+    /// What a namespace rollback will do to one Deployment, decided before anything runs.
+    /// </summary>
+    /// <param name="Workload">The <c>deployment.apps/&lt;name&gt;</c> identifier handed to kubectl.</param>
+    /// <param name="ToRevision">
+    /// The revision to pin the undo to, or null when no undo will be run for this workload.
+    /// ⚠️ Never 0 and never negative: kubectl reads <c>--to-revision=0</c> as "the previous one",
+    /// which is the relative move this plan exists to replace, so a 0 here would silently restore
+    /// the defect rather than fail.
+    /// </param>
+    /// <param name="AlreadyRolledBack">
+    /// True when the workload is <em>already</em> sitting on a revision somebody brought forward
+    /// from the past. Then there is nothing to undo, and undoing anyway would move it on to the
+    /// release we are trying to get rid of. ⚠️ This is not a failure — the state we wanted is the
+    /// state it is in — and reporting it as one would page a human about a rollback that worked.
+    /// </param>
+    /// <param name="Explanation">The operator-facing line recorded against this workload.</param>
+    public sealed record WorkloadUndoStep(
+        string Workload, int? ToRevision, bool AlreadyRolledBack, string Explanation);
+
+    /// <summary>One ReplicaSet's place in a Deployment's history.</summary>
+    private sealed record RevisionRecord(int Revision, DateTimeOffset CreatedAt, bool HasServedBefore);
+
+    /// <summary>
+    /// ⭐ Works out, for every Deployment in a namespace, <b>which revision number</b> its undo
+    /// should name — or why it must not be undone at all.
+    ///
+    /// <para><b>What this used to be.</b> The rollback ran
+    /// <c>kubectl rollout undo deployment.apps/x -n ns</c> with no <c>--to-revision</c>. That is a
+    /// <em>relative</em> move — "whatever is one step back from wherever you are right now" —
+    /// evaluated at the instant kubectl runs. It is correct only if nothing has moved the workload
+    /// since the watch opened, and nothing guarantees that. A second undo from any source (an
+    /// operator typing <c>kubectl rollout undo</c> while the watcher is judging; a retry after a
+    /// partial failure; a second instance, before the judgement claim existed) steps the workload
+    /// <em>forward</em> again — from the good revision back on to the bad release — and reports
+    /// success while doing it.</para>
+    ///
+    /// <para>⚠️ <b>Pinning alone does not fix that, and it is worth being exact about why.</b>
+    /// An undo renumbers: after rolling back to revision 4, revision 4's ReplicaSet is renumbered
+    /// to the new maximum and the number 4 is gone, so a second attempt that recomputed
+    /// "the one below current" would compute the bad release's number and pin <em>that</em>.
+    /// Pinning makes the command absolute; it is the refusal below that makes a second undo
+    /// harmless.</para>
+    ///
+    /// <para>⭐ <b>The tell that a workload has already been rolled back</b> is that its current
+    /// ReplicaSet is not the most recently <em>created</em> one. Creation timestamps never change,
+    /// while revision numbers are rewritten on every undo, so "something newer than what you are
+    /// running exists" is the one statement about this that survives renumbering. Kubernetes'
+    /// own <c>revision-history</c> annotation says the same thing from the other side and is
+    /// checked too, because creation timestamps are serialised to whole seconds and two
+    /// ReplicaSets born in the same second would tie.</para>
+    ///
+    /// <para>⚠️ <b>What this still cannot know.</b> <c>DeploymentRollout</c> records no revision
+    /// number — see <c>RolloutService.RollbackAsync</c> — so this is "the revision below the one
+    /// running now", not "the revision this watch started from". They are the same thing when
+    /// nobody else has touched the namespace, and the refusal above is what catches the case where
+    /// somebody has. A release applied outside EntKube between the watch opening and the verdict
+    /// is still invisible here.</para>
+    ///
+    /// <para>Pure and public so the whole decision is assertable without a cluster — the same
+    /// reason <see cref="BuildScaleArguments"/> and <see cref="BuildDrainArguments"/> are.</para>
+    /// </summary>
+    public static List<WorkloadUndoStep> PlanNamespaceUndo(string deploymentsJson, string replicaSetsJson)
+    {
+        Dictionary<string, List<RevisionRecord>> byOwner = [];
+
+        using (JsonDocument replicaSets = JsonDocument.Parse(replicaSetsJson))
+        {
+            foreach (JsonElement rs in ListItems(replicaSets))
+            {
+                if (!rs.TryGetProperty("metadata", out JsonElement meta))
+                {
+                    continue;
+                }
+
+                // A ReplicaSet with no revision annotation is not part of a Deployment's recorded
+                // history, and must not be allowed to look like revision 0.
+                if (!int.TryParse(Annotation(meta, RevisionAnnotation), out int revision))
+                {
+                    continue;
+                }
+
+                DateTimeOffset created = DateTimeOffset.MinValue;
+                if (meta.TryGetProperty("creationTimestamp", out JsonElement ts)
+                    && ts.ValueKind == JsonValueKind.String
+                    && DateTimeOffset.TryParse(
+                        ts.GetString(), CultureInfo.InvariantCulture,
+                        DateTimeStyles.RoundtripKind, out DateTimeOffset parsed))
+                {
+                    created = parsed;
+                }
+
+                bool servedBefore = !string.IsNullOrWhiteSpace(Annotation(meta, RevisionHistoryAnnotation));
+
+                // ⚠️ Owner uid, not a name prefix. Two Deployments in one namespace whose names
+                // share a prefix ("api" and "api-worker") would cross-contaminate each other's
+                // history, and the pinned revision would then come off the wrong workload.
+                if (!meta.TryGetProperty("ownerReferences", out JsonElement owners)
+                    || owners.ValueKind != JsonValueKind.Array)
+                {
+                    continue;
+                }
+
+                foreach (JsonElement owner in owners.EnumerateArray())
+                {
+                    if (!owner.TryGetProperty("kind", out JsonElement kind)
+                        || kind.ValueKind != JsonValueKind.String
+                        || kind.GetString() != "Deployment"
+                        || !owner.TryGetProperty("uid", out JsonElement ownerUidElement)
+                        || ownerUidElement.ValueKind != JsonValueKind.String)
+                    {
+                        continue;
+                    }
+
+                    string? ownerUid = ownerUidElement.GetString();
+                    if (string.IsNullOrEmpty(ownerUid))
+                    {
+                        continue;
+                    }
+
+                    if (!byOwner.TryGetValue(ownerUid, out List<RevisionRecord>? history))
+                    {
+                        history = [];
+                        byOwner[ownerUid] = history;
+                    }
+
+                    history.Add(new RevisionRecord(revision, created, servedBefore));
+                }
+            }
+        }
+
+        List<WorkloadUndoStep> steps = [];
+
+        using JsonDocument deployments = JsonDocument.Parse(deploymentsJson);
+
+        foreach (JsonElement deployment in ListItems(deployments))
+        {
+            if (!deployment.TryGetProperty("metadata", out JsonElement meta))
+            {
+                continue;
+            }
+
+            string name = meta.TryGetProperty("name", out JsonElement nameElement)
+                ? nameElement.GetString() ?? string.Empty
+                : string.Empty;
+
+            if (name.Length == 0)
+            {
+                continue;
+            }
+
+            string workload = $"deployment.apps/{name}";
+            string uid = meta.TryGetProperty("uid", out JsonElement uidElement)
+                ? uidElement.GetString() ?? string.Empty
+                : string.Empty;
+
+            if (!int.TryParse(Annotation(meta, RevisionAnnotation), out int current))
+            {
+                steps.Add(new WorkloadUndoStep(workload, null, false,
+                    "Kubernetes has recorded no current revision for it, so there is no revision "
+                    + "to name and a relative undo would be a guess."));
+                continue;
+            }
+
+            List<RevisionRecord> revisions =
+                uid.Length > 0 && byOwner.TryGetValue(uid, out List<RevisionRecord>? owned)
+                    ? owned
+                    : [];
+
+            RevisionRecord? live = revisions.FirstOrDefault(r => r.Revision == current);
+
+            if (live is null)
+            {
+                steps.Add(new WorkloadUndoStep(workload, null, false,
+                    $"The ReplicaSet for its current revision {current} is gone, so what it is "
+                    + "running now cannot be established."));
+                continue;
+            }
+
+            if (revisions.Any(r => r.CreatedAt > live.CreatedAt) || live.HasServedBefore)
+            {
+                steps.Add(new WorkloadUndoStep(workload, null, true,
+                    $"Already rolled back: revision {current} is an older ReplicaSet brought "
+                    + "forward, so undoing again would move it on to the release being rolled "
+                    + "back. Left alone."));
+                continue;
+            }
+
+            int? target = revisions
+                .Where(r => r.Revision < current)
+                .Select(r => (int?)r.Revision)
+                .Max();
+
+            if (target is not int toRevision)
+            {
+                steps.Add(new WorkloadUndoStep(workload, null, false,
+                    $"No revision earlier than {current} is still recorded — a first release, or "
+                    + "the revision history limit pruned it — so there is nothing to roll back to."));
+                continue;
+            }
+
+            steps.Add(new WorkloadUndoStep(workload, toRevision, false,
+                $"Roll back from revision {current} to revision {toRevision}."));
+        }
+
+        return steps;
+    }
+
+    /// <summary>
+    /// <c>kubectl rollout undo &lt;workload&gt; -n &lt;ns&gt; --to-revision=N</c>. Public and
+    /// static so the command line is assertable without a cluster.
+    ///
+    /// <para>⚠️ Throws rather than emitting <c>--to-revision=0</c>. Zero is kubectl's own spelling
+    /// of "the previous revision", so a 0 slipping through would reinstate the relative undo while
+    /// looking, in the command line and in the logs, exactly like the pinned one.</para>
+    /// </summary>
+    public static string BuildUndoArguments(string workload, string ns, int toRevision, string kubeconfigPath)
+    {
+        if (toRevision < 1)
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(toRevision), toRevision,
+                "A pinned rollback must name a real revision: kubectl reads --to-revision=0 as "
+                + "\"the previous one\", which is the relative move this replaces.");
+        }
+
+        return $"rollout undo {workload} -n {ns} --to-revision={toRevision} --kubeconfig={kubeconfigPath}";
+    }
+
+    /// <summary>
+    /// How a pinned undo's failure is reported. The revision number is in the text on purpose:
+    /// the expected failure here is kubectl's "unable to find specified revision N in history",
+    /// which happens when the history limit prunes the ReplicaSet between the plan and the undo,
+    /// and an operator reading the verdict needs to know which revision went missing.
+    ///
+    /// <para>⭐ A pinned undo that fails loudly is the point. The relative one it replaced could
+    /// not fail this way — it always found <em>something</em> to move to, including the release
+    /// being rolled back.</para>
+    /// </summary>
+    public static string DescribeUndoFailure(string workload, int toRevision, string error) =>
+        $"{workload}: could not roll back to revision {toRevision} — {error.Trim()}";
+
+    /// <summary>Enumerates a kubectl list's <c>items</c>, tolerating a response that has none.</summary>
+    private static IEnumerable<JsonElement> ListItems(JsonDocument doc) =>
+        doc.RootElement.TryGetProperty("items", out JsonElement items)
+        && items.ValueKind == JsonValueKind.Array
+            ? items.EnumerateArray()
+            : [];
+
+    /// <summary>One annotation off a metadata block, or null if the block carries none.</summary>
+    private static string? Annotation(JsonElement metadata, string name) =>
+        metadata.TryGetProperty("annotations", out JsonElement annotations)
+        && annotations.ValueKind == JsonValueKind.Object
+        && annotations.TryGetProperty(name, out JsonElement value)
+        && value.ValueKind == JsonValueKind.String
+            ? value.GetString()
+            : null;
+
+    /// <summary>
+    /// Rolls every Deployment in a namespace back to the revision it was on before its current
+    /// one, naming that revision explicitly. See
     /// <see cref="IKubernetesClientFactory.UndoDeploymentsAsync"/>.
     ///
-    /// <para>The list and the undos run under one acknowledgment, because they are one decision:
-    /// asking per workload would put the operator in the middle of a half-rolled-back
-    /// namespace.</para>
+    /// <para>The list, the history read and the undos run under one acknowledgment, because they
+    /// are one decision: asking per workload would put the operator in the middle of a
+    /// half-rolled-back namespace.</para>
+    ///
+    /// <para>⭐ Every undo names <c>--to-revision</c>, and a workload that has already been rolled
+    /// back is left alone rather than undone a second time. See <see cref="PlanNamespaceUndo"/>
+    /// for what the relative undo did instead, and why a second one rolled <em>forward</em> on to
+    /// the bad release.</para>
     /// </summary>
     public async Task<Clusters.WorkloadUndoResult> UndoDeploymentsAsync(
         string ns, string kubeconfig, string? summary = null, CancellationToken ct = default)
@@ -569,8 +852,10 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         {
             await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
 
-            (int listCode, string listOut, string listErr) = await RunKubectlRawAsync(
-                $"get deployments -n {ns} --kubeconfig={kubeconfigPath} -o name", ct);
+            // -o json rather than -o name: the names alone cannot say which revision anything is
+            // on, and which revision is the whole question.
+            (int listCode, string deploymentsJson, string listErr) = await RunKubectlRawAsync(
+                $"get deployments -n {ns} --kubeconfig={kubeconfigPath} -o json", ct);
 
             if (listCode != 0)
             {
@@ -578,10 +863,34 @@ public class KubernetesClientFactory : IKubernetesClientFactory
                     false, $"Could not list workloads to roll back: {listErr.Trim()}");
             }
 
-            string[] workloads = listOut
-                .Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries);
+            (int historyCode, string replicaSetsJson, string historyErr) = await RunKubectlRawAsync(
+                $"get replicasets -n {ns} --kubeconfig={kubeconfigPath} -o json", ct);
 
-            if (workloads.Length == 0)
+            // ⚠️ Not a degrade back to the relative undo. Without the ReplicaSets there is no
+            // revision history, so the only undo still available is the blind one — and the blind
+            // one is the defect, not the fallback. Refusing leaves the bad release live and says
+            // so, which a human can act on; a blind undo might instead quietly restore it.
+            if (historyCode != 0)
+            {
+                return new Clusters.WorkloadUndoResult(
+                    false,
+                    "Could not read the revision history to roll back to, and will not roll back "
+                    + $"blindly: {historyErr.Trim()}");
+            }
+
+            List<WorkloadUndoStep> plan;
+
+            try
+            {
+                plan = PlanNamespaceUndo(deploymentsJson, replicaSetsJson);
+            }
+            catch (JsonException ex)
+            {
+                return new Clusters.WorkloadUndoResult(
+                    false, $"Could not read the namespace's revision history: {ex.Message}");
+            }
+
+            if (plan.Count == 0)
             {
                 return new Clusters.WorkloadUndoResult(false, $"No Deployments found in namespace {ns}.");
             }
@@ -589,17 +898,35 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             List<string> results = [];
             bool allSucceeded = true;
 
-            foreach (string workload in workloads)
+            foreach (WorkloadUndoStep step in plan)
             {
-                (int code, string output, string error) = await RunKubectlRawAsync(
-                    $"rollout undo {workload} -n {ns} --kubeconfig={kubeconfigPath}", ct);
+                if (step.ToRevision is not int toRevision)
+                {
+                    results.Add($"{step.Workload}: {step.Explanation}");
 
-                results.Add($"{workload}: {(code == 0 ? output.Trim() : error.Trim())}");
+                    // ⚠️ Only one of the two refusals is a failure. "Already rolled back" means
+                    // the workload is where we wanted to put it, so failing the whole rollback
+                    // over it would page a human about a rollback that worked. "Cannot pin a
+                    // revision" means the bad release is still live, which is a failure.
+                    if (!step.AlreadyRolledBack)
+                    {
+                        allSucceeded = false;
+                    }
+
+                    continue;
+                }
+
+                (int code, string output, string error) = await RunKubectlRawAsync(
+                    BuildUndoArguments(step.Workload, ns, toRevision, kubeconfigPath), ct);
 
                 if (code != 0)
                 {
+                    results.Add(DescribeUndoFailure(step.Workload, toRevision, error));
                     allSucceeded = false;
+                    continue;
                 }
+
+                results.Add($"{step.Workload}: rolled back to revision {toRevision}. {output.Trim()}");
             }
 
             return new Clusters.WorkloadUndoResult(allSucceeded, string.Join('\n', results));

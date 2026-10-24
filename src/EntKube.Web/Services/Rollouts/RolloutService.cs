@@ -225,12 +225,32 @@ public class RolloutService(
     }
 
     /// <summary>
-    /// Rolls a workload back to its previous revision with <c>kubectl rollout undo</c>.
+    /// Rolls a workload back with <c>kubectl rollout undo</c>, naming the revision it wants.
     ///
-    /// Undo rather than re-applying an older manifest: undo asks Kubernetes to restore the
+    /// <para>Undo rather than re-applying an older manifest: undo asks Kubernetes to restore the
     /// revision it actually recorded, which is the state that was genuinely running.
     /// Reconstructing that from EntKube's own history would be a guess at what the cluster
-    /// had, and a wrong guess during an incident is the worst possible time to find out.
+    /// had, and a wrong guess during an incident is the worst possible time to find out.</para>
+    ///
+    /// <para>⭐ <b>The undo is pinned, because a relative one is only right by luck.</b> The seam
+    /// used to run <c>rollout undo &lt;workload&gt; -n &lt;ns&gt;</c> with no
+    /// <c>--to-revision</c>, which means "one step back from wherever you are at the moment this
+    /// runs". That is correct only if nothing else has moved the workload since the watch opened.
+    /// An operator undoing by hand while the watcher judges, a retry after a partial failure, or
+    /// any second undo from any source moves it <em>again</em> — off the good revision and back on
+    /// to the bad one — and reports success. The judgement claim stops two EntKube instances
+    /// doing it; it cannot stop a human, a retry, or anything outside this process. See
+    /// <c>KubernetesClientFactory.PlanNamespaceUndo</c> for the pinning and for the refusal that
+    /// leaves an already-rolled-back workload alone.</para>
+    ///
+    /// <para>⚠️ <b>The revision this watch started from is not recorded anywhere.</b>
+    /// <see cref="DeploymentRollout"/> holds <c>StartedAt</c>, <c>DecideAt</c>, <c>TriggeredBy</c>,
+    /// the verdict and the signals — no revision number, and <see cref="OpenAsync"/> reads no
+    /// cluster state at all, so there was never a moment at which one was observed. Capturing it
+    /// would be a schema change plus a cluster read on the apply path. Until then the seam pins
+    /// "the revision below the one running now", read at rollback time, and <b>refuses</b> rather
+    /// than inventing a number when it cannot establish one. Do not read a pinned rollback as a
+    /// guarantee that the workload returns to precisely what this watch saw go out.</para>
     /// </summary>
     public async Task<(bool Success, string Output)> RollbackAsync(
         Guid tenantId, AppDeployment deployment, CancellationToken ct = default)
@@ -268,11 +288,17 @@ public class RolloutService(
     /// it ends in <c>kubectl rollout undo</c> against production. Two EntKube instances both
     /// poll on a one-minute tick, so both find the same rollout <c>Watching</c> and due, both
     /// measure the same failing window, and both undo. The second undo rolls <em>forward</em>
-    /// again — <c>rollout undo</c> with no <c>--to-revision</c> moves to the previous revision,
+    /// again — <c>rollout undo</c> with no <c>--to-revision</c> moved to the previous revision,
     /// and after the first undo the previous revision is the bad release. The automatic
     /// rollback therefore cancelled itself out, the bad release stayed live, and both
     /// instances wrote a verdict saying it had been rolled back. That verdict is the worst
     /// part: it is a record of something that did not happen.</para>
+    ///
+    /// <para>⚠️ The undo is no longer relative — see <see cref="RollbackAsync"/> — so a second one
+    /// is now refused at the seam rather than rolling forward. The claim is still load-bearing and
+    /// is the wrong thing to remove: without it two instances still both measure, both decide, and
+    /// both write a verdict, and the seam's refusal would make the loser's verdict read "already
+    /// rolled back" for a rollback it did not perform.</para>
     ///
     /// <para>The claim is a compare-and-set on <see cref="DeploymentRollout.DecideAt"/>, modelled
     /// directly on <c>CostLedgerWriter</c>'s per-cluster period cursor — the one other claim in
