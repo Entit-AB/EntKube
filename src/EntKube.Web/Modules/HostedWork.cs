@@ -99,6 +99,18 @@ public static class HostedWork
     public static IServiceCollection AddPerInstanceWork<T>(this IServiceCollection services)
         where T : class, IHostedService
         => services.AddHostedService<T>();
+
+    /// <summary>
+    /// As above, for a service the caller constructs — the five <c>SegmentSealService</c>
+    /// registrations are five instances of one type, one per signal.
+    /// </summary>
+    public static IServiceCollection AddPerInstanceWork<T>(
+        this IServiceCollection services, Func<IServiceProvider, T> factory)
+        where T : class, IHostedService
+    {
+        services.AddHostedService(factory);
+        return services;
+    }
 }
 
 /// <summary>

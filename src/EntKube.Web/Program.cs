@@ -486,20 +486,36 @@ public class Program
         // otherwise to the management plane's local segment store. LogQueryService's existing native-vs-Loki
         // decision sits above this and is unchanged — the viewers still see one ILogBackend.
         // See docs/telemetry-in-cluster.md.
+        // ⭐ PER-INSTANCE, not singleton — and classifying these as singleton work was a mistake
+        // worth recording, because it was silent.
+        //
+        // A SegmentManagerRegistry holds managers created in THIS process, each owning a Lucene
+        // index under this process's DataPath. A sealer seals its own registry. Run it only on the
+        // instance that holds singleton work and every other instance ingests into an active index
+        // that is never sealed: invisible to every other instance, never uploaded to object
+        // storage, never trimmed, and growing until the disk is full. Its final shutdown seal
+        // never runs either, so a pod termination strands whatever that instance had buffered.
+        //
+        // ⚠️ Sealing is also what MAKES telemetry distributed. A sealed segment lands in object
+        // storage with its row in the shared catalog, so every instance can read it; an unsealed
+        // one is readable only by the process holding it. Sealing on every instance is therefore
+        // not a concession to multi-instance — it is the mechanism by which one instance's ingest
+        // becomes everyone's data, bounded by RollMaxAge.
+        //
         // One seal/retention loop per signal; each iterates that signal's live per-tenant managers.
-        builder.Services.AddSingletonWork(sp => new SegmentSealService(
+        builder.Services.AddPerInstanceWork(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<LogSegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
-        builder.Services.AddSingletonWork(sp => new SegmentSealService(
+        builder.Services.AddPerInstanceWork(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<VerboseLogSegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
-        builder.Services.AddSingletonWork(sp => new SegmentSealService(
+        builder.Services.AddPerInstanceWork(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<SpanSegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
-        builder.Services.AddSingletonWork(sp => new SegmentSealService(
+        builder.Services.AddPerInstanceWork(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<RumSegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
-        builder.Services.AddSingletonWork(sp => new SegmentSealService(
+        builder.Services.AddPerInstanceWork(sp => new SegmentSealService(
             sp.GetRequiredService<SegmentManagerRegistry<TraceSummarySegmentManager>>(), segmentOptions,
             sp.GetRequiredService<ILogger<SegmentSealService>>()));
 
@@ -508,7 +524,7 @@ public class Program
         // the tenant's object storage, and only on a plane with no bucket configured does it fall back to
         // dropping the oldest. Telemetry is held here again (docs/telemetry-central-again.md), so this is
         // the management plane's own disk — and a full one fails ingest for every cluster at once.
-        builder.Services.AddSingletonWork(sp => new VolumeGuardService(
+        builder.Services.AddPerInstanceWork(sp => new VolumeGuardService(
             [
                 sp.GetRequiredService<SegmentManagerRegistry<LogSegmentManager>>(),
                 sp.GetRequiredService<SegmentManagerRegistry<VerboseLogSegmentManager>>(),
