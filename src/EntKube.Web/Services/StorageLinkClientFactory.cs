@@ -120,8 +120,16 @@ public sealed class StorageLinkClientFactory(
         {
             // Project the cluster entity (not the unmapped Kubeconfig column) so the materialization
             // interceptor resolves the kubeconfig from the vault.
+            // ⚠️ The tenant predicate is NOT redundant with the ComponentId being ours. A
+            // component id is a bare Guid on this row, and the fallback query directly below
+            // already scopes by link.TenantId — so a lookup that does not is the odd one out in
+            // its own method. What it returns is a KUBECONFIG, which makes it the most expensive
+            // row in the schema to answer about the wrong tenant. BackupService copies
+            // ComponentId straight through on restore, so "the writer always scoped it" is a
+            // property of today's write path rather than of this row.
             KubernetesCluster? cluster = await db.ClusterComponents
-                .Where(c => c.Id == link.ComponentId.Value)
+                .Where(c => c.Id == link.ComponentId.Value
+                    && c.Cluster.TenantId == link.TenantId)
                 .Select(c => c.Cluster)
                 .FirstOrDefaultAsync(ct);
             if (!string.IsNullOrWhiteSpace(cluster?.Kubeconfig))

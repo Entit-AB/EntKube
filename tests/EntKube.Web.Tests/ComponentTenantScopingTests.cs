@@ -80,6 +80,34 @@ public class ComponentTenantScopingTests
             + "not told there is more left than there is");
     }
 
+    /// <summary>
+    /// ⭐ The health check, and it is the whole reason the two Facts above mean anything.
+    ///
+    /// <para>⚠️ Both <c>Baseline</c> and <c>CannotBeScoped</c> are empty, so those Facts assert
+    /// that <c>Measure()</c> returns NOTHING — which a scan matching nothing satisfies perfectly.
+    /// It did: before the regex was corrected to cross a dot, this scan classified <b>zero</b>
+    /// component-by-id lookups anywhere outside Catalog, and passed.</para>
+    ///
+    /// <para>A volume assertion of the kind <c>RazorGodContextRatchetTests</c> uses
+    /// (<c>files.Count &gt; 100</c>) will not serve here, because the honest number is small. So
+    /// the known site is named instead: it must still be SEEN, whether or not it is an offender.
+    /// If it is renamed or respelled, this fails and asks for the scan to be followed, rather
+    /// than quietly measuring nothing again.</para>
+    /// </summary>
+    [Fact]
+    public void The_scan_still_classifies_the_lookups_it_is_meant_to_see()
+    {
+        Measure(out List<string> considered);
+
+        considered.Should().NotBeEmpty(
+            "a scan that classifies nothing passes both Facts above while proving nothing at all");
+
+        considered.Should().Contain(
+            s => s.StartsWith("StorageLinkClientFactory", StringComparison.Ordinal),
+            "ResolveKubeconfigAsync fetches a component by id and returns a kubeconfig; it is the "
+            + "one lookup of this shape outside Catalog and the scan must keep seeing it");
+    }
+
     /// <summary>Which module owns each service, from <c>ModuleServiceMap</c>.</summary>
     private static IReadOnlyDictionary<string, string> Owners(string root)
     {
@@ -90,8 +118,19 @@ public class ComponentTenantScopingTests
             .ToDictionary(g => g.Key, g => g.First().Groups[2].Value, StringComparer.Ordinal);
     }
 
-    private static List<string> Measure()
+    private static List<string> Measure() => Measure(out _);
+
+    /// <summary>
+    /// The offenders, and — via <paramref name="considered"/> — every component-by-id lookup the
+    /// scan actually classified, scoped or not.
+    ///
+    /// <para>⚠️ The second list exists because the first one being empty is ambiguous: it means
+    /// either "every lookup carries a tenant" or "the pattern matched nothing". Those read
+    /// identically and only one of them is good news.</para>
+    /// </summary>
+    private static List<string> Measure(out List<string> considered)
     {
+        considered = [];
         string root = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, Web));
 
         Directory.Exists(root).Should().BeTrue(
@@ -127,8 +166,17 @@ public class ComponentTenantScopingTests
                 string statement = string.Join(' ',
                     lines.Skip(i).Take(8).Select(l => l.Trim()));
 
-                bool byComponentId = Regex.IsMatch(statement, @"c\.Id\s*==\s*\w*[Cc]omponent\w*");
-                if (!byComponentId || statement.Contains("TenantId", StringComparison.Ordinal)) continue;
+                // ⚠️ `[\w\.]` not `\w`: \w CANNOT CROSS A DOT, so the original pattern matched only a
+                // BARE identifier. `c.Id == link.ComponentId.Value` — a real unscoped lookup
+                // returning a kubeconfig — did not match it, and neither would
+                // `c.Id == comp.ComponentId` or `c.Id == request.ComponentId.Value`. The scan
+                // classified ZERO candidates and was green for that reason alone.
+                bool byComponentId = Regex.IsMatch(statement, @"c\.Id\s*==\s*[\w\.]*[Cc]omponent\w*");
+                if (!byComponentId) continue;
+
+                considered.Add($"{file}.{EnclosingMethod(lines, i)}");
+
+                if (statement.Contains("TenantId", StringComparison.Ordinal)) continue;
 
                 found.Add($"{file}.{EnclosingMethod(lines, i)}");
             }
