@@ -250,6 +250,34 @@ public class FederatedLogBackendTests
     }
 
     /// <summary>
+    /// ⚠️ <b>THE SHIPPED VALUES, which no test could see.</b> Every budget test in this file supplies
+    /// both budgets itself, so all of them passed with the two defaults set <em>equal</em> — which is
+    /// the pre-fix state and the exact incident the member docs describe. And the defaults are not
+    /// fallbacks: <c>Program.cs</c> constructs this with (sealedTier, hotTier, logger) and nothing
+    /// else, so the <c>??</c> values <b>are</b> the production configuration.
+    ///
+    /// <para>The invariant worth pinning is the relation, not the number 30. A behavioural test
+    /// cannot tell 30s from 5s without a sealed half that stalls for more than five seconds, which
+    /// is five seconds of suite time to catch one constant — so the relation is asserted directly
+    /// and the behaviour tests below keep doing what they are good at, which is proving the budgets
+    /// reach the right halves.</para>
+    /// </summary>
+    [Fact]
+    public void The_shipped_budgets_give_the_sealed_tier_longer_than_the_hot_one()
+    {
+        FederatedLogBackend.DefaultSealedBudget.Should().BeGreaterThan(
+            FederatedLogBackend.DefaultHotBudget,
+            "the sealed half reads immutable archives out of object storage and the hot half is one "
+            + "in-cluster hop; holding the sealed half to the hot half's budget abandoned it and "
+            + "returned the empty hot half as a SUCCESSFUL answer, which reads as 'no logs here'");
+
+        FederatedLogBackend.DefaultSealedBudget.Should().BeGreaterThanOrEqualTo(
+            TimeSpan.FromSeconds(20),
+            "a cold first query downloads and opens segments; a sealed budget shaved back towards "
+            + "the hot one re-opens the same hole by degrees rather than at once");
+    }
+
+    /// <summary>
     /// The sealed tier gets a budget of its own, long enough to cover a cold read from object storage —
     /// otherwise the fix above just turns a silent empty into a reliable error.
     /// </summary>

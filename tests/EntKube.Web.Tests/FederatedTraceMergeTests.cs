@@ -22,8 +22,11 @@ public class FederatedTraceMergeTests
     private static readonly Guid Cluster = Guid.NewGuid();
     private static readonly DateTime T0 = new(2026, 10, 23, 9, 0, 0, DateTimeKind.Utc);
 
-    private static FederatedTraceService Federated(ITraceQueryService sealedTier, ITraceQueryService hotTier) =>
-        new(sealedTier, hotTier, allTiers: hotTier, NullLogger<FederatedTraceService>.Instance);
+    private static FederatedTraceService Federated(
+        ITraceQueryService sealedTier, ITraceQueryService hotTier,
+        TimeSpan? halfBudget = null, TimeSpan? sealedBudget = null) =>
+        new(sealedTier, hotTier, allTiers: hotTier, NullLogger<FederatedTraceService>.Instance,
+            halfBudget, sealedBudget);
 
     private static TraceSummary Row(
         DateTime start, double durationMs, int spans = 1, int errors = 0,
@@ -124,7 +127,77 @@ public class FederatedTraceMergeTests
         merged.RootName.Should().Be("POST /checkout");
     }
 
-    private sealed class FakeTraces(List<TraceSummary> rows) : ITraceQueryService
+    // ── Budgets: the trace side carried the identical pair to the log side, untested ──
+
+    /// <summary>
+    /// ⚠️ <b>The trace side had no budget test of any kind.</b> It carries the same sealed/hot pair as
+    /// <see cref="FederatedLogBackendTests"/>, with the same degradation policy and the same
+    /// object-storage reasoning, and nothing asserted either the values or which half each reached.
+    /// <c>Program.cs</c> constructs this with four arguments and no budgets, so the defaults are the
+    /// shipped configuration rather than a fallback.
+    /// </summary>
+    [Fact]
+    public void The_shipped_budgets_give_the_sealed_tier_longer_than_the_hot_one()
+    {
+        FederatedTraceService.DefaultSealedBudget.Should().BeGreaterThan(
+            FederatedTraceService.DefaultHotBudget,
+            "same reason as the log federation: the sealed half reads archives out of object storage, "
+            + "so a cold first query is slow by design rather than by fault");
+
+        FederatedTraceService.DefaultSealedBudget.Should().BeGreaterThanOrEqualTo(
+            TimeSpan.FromSeconds(20));
+    }
+
+    /// <summary>
+    /// The trace twin of the log side's worst outcome. An abandoned sealed half plus a healthy, empty
+    /// hot half must not merge into a successful empty list: a trace list showing nothing reads as
+    /// "there are no traces", and there is no way for the UI to say otherwise.
+    /// </summary>
+    [Fact]
+    public async Task A_slow_sealed_half_does_not_come_back_as_an_empty_answer()
+    {
+        FederatedTraceService sut = Federated(
+            new FakeTraces([Row(T0, 120)], delay: TimeSpan.FromMilliseconds(400)),
+            new FakeTraces([]),   // hot tier: healthy, fast, holding nothing — everything is sealed
+            halfBudget: TimeSpan.FromMilliseconds(100),
+            sealedBudget: TimeSpan.FromMilliseconds(100));
+
+        KubernetesOperationResult<List<TraceSummary>> result =
+            await sut.ListTracesAsync(Cluster, null, T0.AddHours(-1), T0.AddHours(1));
+
+        result.IsSuccess.Should().BeFalse(
+            "returning the empty hot half as a complete answer tells the viewer there are no traces, "
+            + "when in fact the tier holding them was abandoned");
+        result.Error.Should().Contain("sealed");
+    }
+
+    /// <summary>
+    /// And the budgets reach the halves they are meant for. This is what the constants test cannot do
+    /// and what the log side's equivalent proves there: swap the two and the sealed half is held to the
+    /// hot half's window.
+    /// </summary>
+    [Fact]
+    public async Task The_sealed_tier_is_given_longer_than_the_hot_one()
+    {
+        FederatedTraceService sut = Federated(
+            new FakeTraces([Row(T0, 120)], delay: TimeSpan.FromMilliseconds(300)),
+            new FakeTraces([]),
+            halfBudget: TimeSpan.FromMilliseconds(100),
+            sealedBudget: TimeSpan.FromSeconds(5));
+
+        KubernetesOperationResult<List<TraceSummary>> result =
+            await sut.ListTracesAsync(Cluster, null, T0.AddHours(-1), T0.AddHours(1));
+
+        result.IsSuccess.Should().BeTrue("the sealed tier was well inside its own budget");
+        result.Data.Should().ContainSingle().Which.DurationMs.Should().Be(120);
+    }
+
+    /// <summary>
+    /// <paramref name="delay"/> exists so this fixture can exercise the budgets at all. Without it the
+    /// trace side had no budget test of any kind — neither the shipped values nor which half each one
+    /// reaches — while carrying the identical pair to the log side.
+    /// </summary>
+    private sealed class FakeTraces(List<TraceSummary> rows, TimeSpan delay = default) : ITraceQueryService
     {
         public Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default) => Task.FromResult(true);
 
@@ -133,11 +206,14 @@ public class FederatedTraceMergeTests
             string? podPattern = null, int windowMinutes = 60)
             => Task.FromResult(KubernetesOperationResult<List<string>>.Success([]));
 
-        public Task<KubernetesOperationResult<List<TraceSummary>>> ListTracesAsync(
+        public async Task<KubernetesOperationResult<List<TraceSummary>>> ListTracesAsync(
             Guid clusterId, string? service, DateTime from, DateTime to,
             double minDurationMs = 0, bool errorsOnly = false, int limit = 50, CancellationToken ct = default,
             IReadOnlyList<string>? namespaces = null, string? podPattern = null)
-            => Task.FromResult(KubernetesOperationResult<List<TraceSummary>>.Success(rows));
+        {
+            if (delay > TimeSpan.Zero) await Task.Delay(delay, CancellationToken.None);
+            return KubernetesOperationResult<List<TraceSummary>>.Success(rows);
+        }
 
         public Task<KubernetesOperationResult<List<SpanRecord>>> GetTraceAsync(
             Guid clusterId, string traceId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null)
