@@ -1631,6 +1631,75 @@ precisely why it was worth doing as tokens rather than as component CSS.
 
 ---
 
+## 6.1 The shape of the API work, measured (2026-10-26)
+
+Phase 1's exit criterion — *"`EntKube.Cli` can do everything the Tenants UI can do"* — is the
+right test, and the 79.7k and 11.4k figures beside it are still accurate (81,575 and 11,457
+today). What they do not say is **how much of that is behaviour and how much is markup**, and the
+two are different kinds of work in different phases.
+
+Measured by splitting each `.razor` file at its `@code` directive:
+
+| Area | total | `@code` | markup | code share |
+|---|---:|---:|---:|---:|
+| Tenants | 81,575 | **36,026** | 45,549 | 44% |
+| Portal | 11,457 | **5,224** | 6,233 | 45% |
+| Account | 3,018 | 1,741 | 1,277 | 57% |
+| Shared | 3,190 | 1,619 | 1,571 | 50% |
+| Admin | 1,893 | 712 | 1,181 | 37% |
+| Fleet | 502 | 155 | 347 | 30% |
+
+Across every `.razor` file in `src/`: **45,603 lines of C# sit inside components** — 21% of the
+170,635 lines of hand-written C# in the product. (The repo also holds 3.15M lines of *generated*
+EF migration code; any ratio computed over all `.cs` files is meaningless without excluding it.)
+
+Reproduce:
+
+```sh
+find src/ -name '*.razor' | while read p; do
+  t=$(wc -l < "$p"); c=$(grep -n '@code' "$p" | head -1 | cut -d: -f1)
+  [ -n "$c" ] && echo $((t - c))
+done | awk '{s+=$1} END {print s}'
+```
+
+### Why the split is the useful number
+
+The markup half is **Phase 4** work: a new frontend rewrites it, and counting it as API work
+overstates Phase 1 by more than double. The `@code` half is **Phase 1** work, and it is the thing
+that actually blocks everything else.
+
+⚠️ **The blocker is not that the API is thin. It is that the operations are not callable at all.**
+The product API is 22 endpoints — **17 reads and 5 writes**, the writes being deployment
+sync/restart, advisor acknowledge, and cost-rate put/delete. Every other operation EntKube
+performs exists as an event handler inside a component. `DatabaseTab.razor` is 6,375 lines of
+which 2,863 are one `@code` block holding **129 methods** and injecting 7 services;
+`ClusterDetail.razor` injects **25**. You cannot put an HTTP surface in front of an event
+handler, so "write more endpoints" is not the work — there is nothing yet to expose.
+
+This also explains why the eight `I{Module}Api` contracts total only ~40 methods, three of them
+with exactly one (`ISupportApi`, `ITelemetryApi`, `IDataServicesApi`). That is not neglect: by the
+contracts README's own rule 3 they cover *what one module offers another module*, which is a far
+smaller set than what a client needs. ⚠️ **Contracts scoped that way can never grow into the
+product API by themselves** — the rule that keeps them honest as a module boundary is the same
+rule that stops them becoming a client surface. The README's "the HTTP surface can be generated
+from them" holds only once the behaviour exists as services to put behind them.
+
+### What this changes about sequencing
+
+Extracting behaviour out of a component into a service **leaves Blazor Server working** — the
+component keeps rendering and calls the service instead. So it needs no frontend decision, no new
+deployable, and no API design committed up front. It is Phase 0/1 work available now, and it is
+the only phase that unblocks microservices, BFFs, agents and the CLI at once, because all four
+want the same thing: operations that are callable without a browser.
+
+It also quantifies why **Portal first** (Phase 4, item 18) is right: ~5.2k lines of behaviour to
+extract against Tenants' ~36k, a factor of seven.
+
+⚠️ **`@code` lines are an upper bound on what moves, not a target.** A component legitimately
+keeps render state, form binding, validation display and event wiring. The honest claim is that
+the extractable operations are *within* those 36k lines, not that 36k lines relocate. Any PR doing
+this should report what it moved and what it deliberately left.
+
 ## 7. What not to do
 
 - **Don't split the database** beyond Support and Telemetry. 287 cross-entity navigations
