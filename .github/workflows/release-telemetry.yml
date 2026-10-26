@@ -35,9 +35,17 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ⚠️ MUST NAME THE SAME SDK AS global.json, which this repo now carries. This said '10.0.x',
+      # which installs the newest 10.0 SDK; global.json asks for 10.0.1xx, and an SDK that is not
+      # installed is a hard refusal — `dotnet test` would not run at all rather than run against the
+      # wrong compiler. Floating here stopped being merely imprecise and became a break.
+      #
+      # SdkPinTests checks EVERY dotnet-version in every workflow against the Dockerfile's tag, this
+      # one included, so it cannot drift back to a floating version quietly. docs/releasing.md has
+      # the bump procedure.
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '10.0.101'
 
       # These tests check that every catalog form field targets a real chart value, and that the pinned
       # chart version matches Chart.yaml. Both failures are silent at install time — a value quietly

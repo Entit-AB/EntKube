@@ -1,0 +1,25 @@
+{
+  // ⚠️ THIS FILE IS WHAT MAKES THE SDK PIN BIND. Without it, naming a version in CI does nothing.
+  //
+  // `actions/setup-dotnet` with `dotnet-version: 10.0.101` installs that SDK into /usr/share/dotnet
+  // — alongside the newer one the runner image already ships. `dotnet` then selects the HIGHEST
+  // SDK it finds there, so the job kept compiling with 10.0.403 while the workflow said 10.0.101.
+  // The version input chooses what to INSTALL; only a global.json chooses what to RUN.
+  //
+  // That is not a theory about CI. It is why the Tests job failed at build on every run from #389
+  // through #394 inclusive: #394 added the pin and changed nothing, because nothing read it.
+  //
+  // ⚠️ `version` MUST MATCH the Dockerfile's `sdk:` tag. The image is the artifact; a suite built
+  // with a different compiler is not testing the artifact. SdkPinTests holds the two together, so
+  // bumping one alone fails the suite rather than quietly reintroducing the split.
+  //
+  // rollForward is `latestPatch`, not `disable`: 10.0.1xx and 10.0.4xx are different FEATURE BANDS
+  // and it was the band that broke (10.0.403's Razor compiler mis-generates a `__builder` lambda in
+  // a switch arm — see #395). Patches inside the shipped band are the same compiler generation, so
+  // a developer on 10.0.108 is fine; one on 10.0.403 is told to install 10.0.1xx instead of
+  // discovering the difference as malformed generated C#.
+  "sdk": {
+    "version": "10.0.101",
+    "rollForward": "latestPatch"
+  }
+}

@@ -58,25 +58,30 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      # ⚠️ PINNED, AND IT MUST TRACK THE Dockerfile's `sdk:` TAG (currently 10.0.101).
+      # ⚠️ THE VERSION HERE CHOOSES WHAT TO INSTALL. global.json CHOOSES WHAT RUNS.
       #
-      # This was '10.0.x', which setup-dotnet floats to the newest 10.0 SDK — 10.0.403 on the day
-      # this job was added. Its Razor compiler cannot build
-      # Components/Pages/Tenants/DatabaseTab.razor or ClusterDetail.razor: the generated C# comes
-      # out malformed ("The type '<invalid-global-code>' already contains a definition for
-      # 'StorageService'"), and every injected type in both files then fails to resolve. The job
-      # failed at BUILD and never ran a test.
+      # Naming 10.0.101 below is necessary and NOT sufficient, which is the whole history of this
+      # job. setup-dotnet installs the SDK it is given into /usr/share/dotnet, next to the newer one
+      # the runner image already ships; `dotnet` then picks the HIGHEST SDK in that directory. With
+      # no global.json in the repo, this job compiled with 10.0.403 while the workflow said 10.0.101
+      # — so #394 added the pin, reported it as the fix, and changed nothing. It failed at build on
+      # every run from #389 through #394 inclusive, and never reached a test.
       #
-      # The image build was unaffected throughout, because the Dockerfile pins sdk:10.0.101 — so
-      # for its first three runs this job compiled something nobody ships and reported on it. A
-      # test job that uses a different compiler from the artifact is not testing the artifact.
-      #
-      # ⚠️ 10.0.403 remains a real upgrade blocker, not a CI quirk. Bumping the Dockerfile's SDK
-      # will hit the same wall, and this pin is the thing that will say so loudly. Bump both
-      # together, or neither. See docs/releasing.md.
+      # global.json now pins the feature band, and SdkPinTests holds the names together: the
+      # Dockerfile's `sdk:` tag is the authority, global.json must ask for it, and EVERY
+      # dotnet-version in every workflow — this one and release-telemetry.yml — must install it.
+      # Bump them in one commit or the suite fails. See docs/releasing.md.
       - uses: actions/setup-dotnet@v4
         with:
           dotnet-version: '10.0.101'
+
+      # The log must SAY which compiler it used. Both failures this job has had were invisible in
+      # its own output: first it tested an artifact nobody ships, then it ignored a pin that looked
+      # right in the YAML. Two lines of output make the next mismatch readable instead of inferred.
+      - name: Say which SDK this is
+        run: |
+          echo "selected: $(dotnet --version)"
+          dotnet --list-sdks
 
       - name: Run the suite
         run: dotnet test tests/EntKube.Web.Tests/EntKube.Web.Tests.csproj --nologo
