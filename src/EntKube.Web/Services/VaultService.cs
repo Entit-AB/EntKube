@@ -3720,6 +3720,27 @@ public class VaultService(
     /// Archives the current encrypted value of a secret as a new version row, then
     /// prunes old versions so at most MaxVersionsPerSecret are kept. The caller is
     /// responsible for calling SaveChangesAsync after this returns.
+    ///
+    /// <para>⚠️ <b>The version number is allocated by a read-then-write, and that is only
+    /// safe because the database says so.</b> <c>MAX + 1</c> is read here and the row is
+    /// inserted by the caller's SaveChangesAsync; between those two moments another
+    /// instance can read the same MAX. There is no application-side interlock, and with
+    /// ~30 call sites through this helper there is no realistic way to add one that a new
+    /// caller cannot forget.</para>
+    ///
+    /// <para>⭐ What makes the number unique is the unique index on
+    /// (SecretId, VersionNumber) — SecretsModel.cs, where the reasoning is written out.
+    /// Before it existed, two writers that read MAX=3 both inserted a row numbered 4 and
+    /// the database took both: <b>one secret, two version 4s</b>, with no error anywhere
+    /// and no way afterwards to say which was the fourth value. Now the loser's
+    /// SaveChangesAsync throws DbUpdateException and its whole write — version row and new
+    /// secret value together — rolls back, leaving the secret exactly as the winner left
+    /// it. A failed save the caller can retry, instead of a history nobody can read.</para>
+    ///
+    /// <para>⚠️ Do not "fix" that exception by catching it here. The insert belongs to the
+    /// caller's SaveChangesAsync, which also carries the new ciphertext; swallowing the
+    /// conflict would commit a value change with no version row, which is the same audit
+    /// hole in the other direction.</para>
     /// </summary>
     private static async Task ArchiveVersionAsync(
         SecretsDbContext db, VaultSecret secret, CancellationToken ct)

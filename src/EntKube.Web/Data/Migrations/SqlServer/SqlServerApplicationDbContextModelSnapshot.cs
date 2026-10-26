@@ -8450,7 +8450,8 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.HasKey("Id");
 
-                    b.HasIndex("SecretId", "VersionNumber");
+                    b.HasIndex("SecretId", "VersionNumber")
+                        .IsUnique();
 
                     b.ToTable("VaultSecretVersions", (string)null);
                 });
