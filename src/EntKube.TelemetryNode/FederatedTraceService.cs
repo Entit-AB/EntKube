@@ -186,11 +186,22 @@ public sealed class FederatedTraceService(
 
     /// <summary>Same budget as the log federation, for the same reason — see <c>FederatedLogBackend</c>.
     /// A half that cannot answer costs this many seconds, not its client's 30s ceiling.</summary>
-    private readonly TimeSpan _hotBudget = halfBudget ?? TimeSpan.FromSeconds(5);
+    private readonly TimeSpan _hotBudget = halfBudget ?? DefaultHotBudget;
+
+    /// <summary>
+    /// ⚠️ The shipped configuration, as on the log side — <c>Program.cs</c> constructs this with
+    /// four arguments and no budgets. Named so the sealed-longer-than-hot invariant can be
+    /// asserted; the trace side had no budget test of ANY kind, so both these values and the
+    /// per-half routing were unpinned.
+    /// </summary>
+    public static readonly TimeSpan DefaultHotBudget = TimeSpan.FromSeconds(5);
+
+    /// <inheritdoc cref="DefaultHotBudget"/>
+    public static readonly TimeSpan DefaultSealedBudget = TimeSpan.FromSeconds(30);
 
     /// <summary>The sealed tier's larger budget, and the same reasoning as the log side: this half reads
     /// archives out of object storage, so a cold first query is slow by design rather than by fault.</summary>
-    private readonly TimeSpan _sealedBudget = sealedBudget ?? TimeSpan.FromSeconds(30);
+    private readonly TimeSpan _sealedBudget = sealedBudget ?? DefaultSealedBudget;
 
     /// <summary>Same degradation policy as the log federation, including the one exception it makes: a
     /// surviving half that is EMPTY is reported as a failure rather than as an answer, because a trace list

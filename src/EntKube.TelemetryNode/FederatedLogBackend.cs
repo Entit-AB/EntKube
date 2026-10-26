@@ -183,7 +183,22 @@ public sealed class FederatedLogBackend(
     /// <para>The overrunning half is left running rather than cancelled: it is already in flight, and its
     /// failure is worth logging. The client timeout stays as the hard ceiling behind this one.</para>
     /// </summary>
-    private readonly TimeSpan _hotBudget = halfBudget ?? TimeSpan.FromSeconds(5);
+    private readonly TimeSpan _hotBudget = halfBudget ?? DefaultHotBudget;
+
+    /// <summary>
+    /// ⚠️ THESE TWO ARE THE SHIPPED CONFIGURATION, not fallbacks. Nothing passes budgets:
+    /// <c>Program.cs</c> builds this with (sealedTier, hotTier, logger) only, so the values below
+    /// are what every querier actually runs with, and the constructor parameters exist for tests.
+    ///
+    /// <para>Named rather than inlined so that the one invariant that matters — sealed strictly
+    /// longer than hot — can be asserted. It could not be before: every budget test supplies both
+    /// values itself, so all of them passed with the defaults set equal, which is the pre-fix
+    /// state and the incident described at length above.</para>
+    /// </summary>
+    public static readonly TimeSpan DefaultHotBudget = TimeSpan.FromSeconds(5);
+
+    /// <inheritdoc cref="DefaultHotBudget"/>
+    public static readonly TimeSpan DefaultSealedBudget = TimeSpan.FromSeconds(30);
 
     /// <summary>
     /// The sealed tier's own, larger budget.
@@ -201,7 +216,7 @@ public sealed class FederatedLogBackend(
     /// the background and left its segment readers open. First search empty, second search fine, and
     /// nothing anywhere saying why.</para>
     /// </summary>
-    private readonly TimeSpan _sealedBudget = sealedBudget ?? TimeSpan.FromSeconds(30);
+    private readonly TimeSpan _sealedBudget = sealedBudget ?? DefaultSealedBudget;
 
     /// <param name="isEmpty">
     /// Whether a surviving half's answer contains nothing. Supplied per call because emptiness is
