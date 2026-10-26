@@ -408,16 +408,38 @@ public class KnowledgeServiceTests : IDisposable
     // ---- Health ------------------------------------------------------------------------
 
     /// <summary>
-    /// The figure at the top of the panel and the list underneath it come from the same
-    /// gaps, so they cannot say different things.
+    /// Which checks a bare application fails — by name, not by count.
+    ///
+    /// <para>⚠️ <b>BOTH ASSERTIONS HERE USED TO BE TAUTOLOGIES</b>, and the test could not fail for
+    /// any input. It read
+    /// <c>FailedChecks.Should().Be(Gaps.Select(g =&gt; g.Check).Distinct().Count())</c> against a
+    /// <c>FailedChecks</c> that <em>is</em> <c>Gaps.Select(g =&gt; g.Check).Distinct().Count()</c>,
+    /// and <c>PassedChecks.Should().Be(TotalChecks - FailedChecks)</c> against a
+    /// <c>PassedChecks</c> that <em>is</em> <c>TotalChecks - FailedChecks</c> — each the
+    /// implementation restated, over the same object.</para>
+    ///
+    /// <para>Its stated purpose cannot be tested, which is why it ended up that way: the headline
+    /// figure and the list underneath are both derived from the one <c>Gaps</c> field, so they
+    /// cannot disagree by construction. There is nothing there to protect. The one mutation that
+    /// could make them disagree — dropping the <c>Distinct()</c> — is already killed by
+    /// <see cref="Many_gaps_of_one_kind_are_one_failed_check"/>, and this fixture's counts are
+    /// already pinned with literals by
+    /// <see cref="An_empty_application_does_not_score_zero_for_checks_nothing_can_fail"/>.</para>
+    ///
+    /// <para>So rather than delete it, it now asserts the thing neither sibling does: <b>which</b>
+    /// three checks a bare application fails. A gap that reported the wrong
+    /// <see cref="KnowledgeCheck"/> would keep the count at three and pass both of them.</para>
     /// </summary>
     [Fact]
-    public async Task Health_counts_the_same_checks_the_gaps_report()
+    public async Task A_bare_application_fails_exactly_the_three_checks_it_can_fail()
     {
         KnowledgeHealth health = await knowledge.GetHealthAsync(tenantId, appId, Now);
 
-        health.FailedChecks.Should().Be(health.Gaps.Select(g => g.Check).Distinct().Count());
-        health.PassedChecks.Should().Be(KnowledgeHealth.TotalChecks - health.FailedChecks);
+        health.Gaps.Select(g => g.Check).Distinct().Should().BeEquivalentTo(
+            new[] { KnowledgeCheck.Architecture, KnowledgeCheck.Runbook, KnowledgeCheck.Classification },
+            "nothing is written and no classification is recorded, while Freshness, "
+            + "DependencyHours and EndOfLife have nothing to be wrong about — a gap mislabelled "
+            + "with another check keeps the count at three and is invisible to a count assertion");
     }
 
     /// <summary>
