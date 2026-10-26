@@ -5790,56 +5790,23 @@
 
     private static RenderFragment GetMongoManagedStatusBadge(MongoClusterStatus status) => status switch
     {
-        MongoClusterStatus.Running => __builder =>
-        {
-            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Running</span>
-        },
-        MongoClusterStatus.Creating => __builder =>
-        {
-            <span class="badge bg-warning text-dark"><i class="bi bi-hourglass me-1"></i>Creating</span>
-        },
-        MongoClusterStatus.Upgrading => __builder =>
-        {
-            <span class="badge bg-info"><i class="bi bi-arrow-up-circle me-1"></i>Upgrading</span>
-        },
-        MongoClusterStatus.Restoring => __builder =>
-        {
-            <span class="badge bg-info"><i class="bi bi-clock-history me-1"></i>Restoring</span>
-        },
-        MongoClusterStatus.Failed => __builder =>
-        {
-            <span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>
-        },
-        MongoClusterStatus.Deleting => __builder =>
-        {
-            <span class="badge bg-secondary"><i class="bi bi-trash me-1"></i>Deleting</span>
-        },
-        _ => __builder =>
-        {
-            <span class="badge bg-secondary">@status</span>
-        }
+        MongoClusterStatus.Running => @<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Running</span>,
+        MongoClusterStatus.Creating => @<span class="badge bg-warning text-dark"><i class="bi bi-hourglass me-1"></i>Creating</span>,
+        MongoClusterStatus.Upgrading => @<span class="badge bg-info"><i class="bi bi-arrow-up-circle me-1"></i>Upgrading</span>,
+        MongoClusterStatus.Restoring => @<span class="badge bg-info"><i class="bi bi-clock-history me-1"></i>Restoring</span>,
+        MongoClusterStatus.Failed => @<span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>,
+        MongoClusterStatus.Deleting => @<span class="badge bg-secondary"><i class="bi bi-trash me-1"></i>Deleting</span>,
+        _ => @<span class="badge bg-secondary">@status</span>
     };
 
     // ──────── Status Helpers (CNPG) ────────
 
     private static RenderFragment GetStatusBadge(string status) => status.ToLowerInvariant() switch
     {
-        "cluster in healthy state" or "healthy" or "running" => __builder =>
-        {
-            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Healthy</span>
-        },
-        "setting up primary" or "creating primary" or "pending" => __builder =>
-        {
-            <span class="badge bg-warning text-dark"><i class="bi bi-hourglass me-1"></i>Provisioning</span>
-        },
-        "failed" or "error" => __builder =>
-        {
-            <span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>
-        },
-        _ => __builder =>
-        {
-            <span class="badge bg-secondary">@status</span>
-        }
+        "cluster in healthy state" or "healthy" or "running" => @<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Healthy</span>,
+        "setting up primary" or "creating primary" or "pending" => @<span class="badge bg-warning text-dark"><i class="bi bi-hourglass me-1"></i>Provisioning</span>,
+        "failed" or "error" => @<span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>,
+        _ => @<span class="badge bg-secondary">@status</span>
     };
 
     // ──────── Registered PostgreSQL ────────
@@ -6343,33 +6310,12 @@
 
     private static RenderFragment GetManagedStatusBadge(CnpgClusterStatus status) => status switch
     {
-        CnpgClusterStatus.Running => __builder =>
-        {
-            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Running</span>
-        },
-        CnpgClusterStatus.Creating => __builder =>
-        {
-            <span class="badge bg-warning text-dark"><i class="bi bi-hourglass me-1"></i>Creating</span>
-        },
-        CnpgClusterStatus.Upgrading => __builder =>
-        {
-            <span class="badge bg-info"><i class="bi bi-arrow-up-circle me-1"></i>Upgrading</span>
-        },
-        CnpgClusterStatus.Restoring => __builder =>
-        {
-            <span class="badge bg-info"><i class="bi bi-clock-history me-1"></i>Restoring</span>
-        },
-        CnpgClusterStatus.Failed => __builder =>
-        {
-            <span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>
-        },
-        CnpgClusterStatus.Deleting => __builder =>
-        {
-            <span class="badge bg-secondary"><i class="bi bi-trash me-1"></i>Deleting</span>
-        },
-        _ => __builder =>
-        {
-            <span class="badge bg-secondary">@status</span>
-        }
+        CnpgClusterStatus.Running => @<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Running</span>,
+        CnpgClusterStatus.Creating => @<span class="badge bg-warning text-dark"><i class="bi bi-hourglass me-1"></i>Creating</span>,
+        CnpgClusterStatus.Upgrading => @<span class="badge bg-info"><i class="bi bi-arrow-up-circle me-1"></i>Upgrading</span>,
+        CnpgClusterStatus.Restoring => @<span class="badge bg-info"><i class="bi bi-clock-history me-1"></i>Restoring</span>,
+        CnpgClusterStatus.Failed => @<span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>,
+        CnpgClusterStatus.Deleting => @<span class="badge bg-secondary"><i class="bi bi-trash me-1"></i>Deleting</span>,
+        _ => @<span class="badge bg-secondary">@status</span>
     };
 }

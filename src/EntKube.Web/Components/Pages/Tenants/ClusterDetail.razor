@@ -2995,30 +2995,12 @@ else if (section == "components")
 
     private static RenderFragment GetStatusBadge(ComponentStatus status) => status switch
     {
-        ComponentStatus.NotInstalled => __builder =>
-        {
-            <span class="badge bg-secondary">Not Installed</span>
-        },
-        ComponentStatus.Installing => __builder =>
-        {
-            <span class="badge bg-info text-dark"><i class="bi bi-arrow-repeat me-1"></i>Installing</span>
-        },
-        ComponentStatus.Installed => __builder =>
-        {
-            <span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Installed</span>
-        },
-        ComponentStatus.Failed => __builder =>
-        {
-            <span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>
-        },
-        ComponentStatus.Uninstalling => __builder =>
-        {
-            <span class="badge bg-warning text-dark"><i class="bi bi-arrow-repeat me-1"></i>Uninstalling</span>
-        },
-        _ => __builder =>
-        {
-            <span class="badge bg-secondary">Unknown</span>
-        }
+        ComponentStatus.NotInstalled => @<span class="badge bg-secondary">Not Installed</span>,
+        ComponentStatus.Installing => @<span class="badge bg-info text-dark"><i class="bi bi-arrow-repeat me-1"></i>Installing</span>,
+        ComponentStatus.Installed => @<span class="badge bg-success"><i class="bi bi-check-circle me-1"></i>Installed</span>,
+        ComponentStatus.Failed => @<span class="badge bg-danger"><i class="bi bi-x-circle me-1"></i>Failed</span>,
+        ComponentStatus.Uninstalling => @<span class="badge bg-warning text-dark"><i class="bi bi-arrow-repeat me-1"></i>Uninstalling</span>,
+        _ => @<span class="badge bg-secondary">Unknown</span>
     };
 
     // ──────── Secrets ────────
