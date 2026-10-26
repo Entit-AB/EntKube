@@ -32,8 +32,15 @@ public class RazorGodContextRatchetTests
     /// </summary>
     private static readonly string[] Remaining =
     [
-        // No single module context exposes every table these two touch, so they are the genuine
-        // contract work — the only two of the original 31.
+        // ⚠️ THE "GENUINE CONTRACT WORK" CATEGORY IS NOW EMPTY, and that is the useful fact about
+        // this list. Two of the original 31 touched tables NO single module context exposed —
+        // CustomerStatusDashboard (Telemetry's AlertIncidents + Delivery's AppDeployments and
+        // DeploymentHealthSnapshots) and SlaTargetManager (Support's SlaTargets + Delivery's
+        // deployments + Customers). Both were converted, so nothing below is blocked on a contract.
+        //
+        // Everything that remains is the OPPOSITE case: the tables cannot pick a context because
+        // every context exposes them. Finishing this list is therefore a sequence of ownership
+        // decisions, one per page, with no contract work left in it at all.
 
         // Hub-only pages whose SUBJECT does not derive. These touch nothing but Tenant, Customer,
         // App and KubernetesCluster, which every module context exposes, so the tables cannot pick
