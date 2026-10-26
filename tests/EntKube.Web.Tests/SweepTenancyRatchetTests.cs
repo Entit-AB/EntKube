@@ -296,8 +296,8 @@ public class SweepTenancyRatchetTests
             foreach (string pattern in new[]
                      {
                          @"Add(?:HostedService|SingletonWork|PerInstanceWork)<([\w.]+)>",
-                         @"Add(?:HostedService|SingletonWork)\(sp => new ([\w.]+)\(",
-                         @"Add(?:HostedService|SingletonWork)\(sp => sp\.GetRequiredService<([\w.]+)>",
+                         @"Add(?:HostedService|SingletonWork|PerInstanceWork)\(sp => new ([\w.]+)\(",
+                         @"Add(?:HostedService|SingletonWork|PerInstanceWork)\(sp => sp\.GetRequiredService<([\w.]+)>",
                      })
             {
                 foreach (Match m in Regex.Matches(code, pattern))

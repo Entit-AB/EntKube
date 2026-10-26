@@ -83,6 +83,53 @@ public class HostedWorkPlacementTests
     }
 
     /// <summary>
+    /// ⭐ Work whose subject is THIS PROCESS must run on every instance, and getting this wrong is
+    /// silent.
+    ///
+    /// <para>All five <c>SegmentSealService</c> registrations and <c>VolumeGuardService</c> were
+    /// first classified as singleton work, which was a mistake. A <c>SegmentManagerRegistry</c>
+    /// holds managers created in this process, each owning a Lucene index under this process's
+    /// <c>DataPath</c>; a sealer seals its own registry, and the volume guard measures its own
+    /// disk. Run them only where singleton work runs and every other instance ingests into an
+    /// active index that is <b>never sealed</b> — invisible to the others, never uploaded to
+    /// object storage, never trimmed, growing until the disk fills — and its final shutdown seal
+    /// never runs either, so a pod termination strands whatever it had buffered.</para>
+    ///
+    /// <para>⚠️ Sealing is also what MAKES telemetry distributed, which is the deeper reason this
+    /// is pinned. A sealed segment lands in object storage with its row in the shared catalog, so
+    /// every instance can read it; an unsealed one is readable only by the process holding it.
+    /// Sealing on every instance is the mechanism by which one instance's ingest becomes
+    /// everyone's data.</para>
+    ///
+    /// <para><c>PresenceHeartbeatService</c> is here for the same shape of reason: it re-stamps
+    /// the circuits held by its own process, so a single leader would report every other
+    /// instance's users as offline.</para>
+    /// </summary>
+    [Theory]
+    [InlineData("SegmentSealService")]
+    [InlineData("VolumeGuardService")]
+    [InlineData("PresenceHeartbeatService")]
+    public void Work_about_this_process_runs_on_every_instance(string service)
+    {
+        string program = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, Web, "Program.cs"));
+        string code = Strip(File.ReadAllText(program));
+
+        // Every registration of this type must be the per-instance one. Matched on the type name
+        // rather than a count, because the five sealers differ only in their argument.
+        Regex singleton = new(@"AddSingletonWork\([^;]*\b" + Regex.Escape(service) + @"\b", RegexOptions.Singleline);
+        Regex perInstance = new(@"AddPerInstanceWork\([^;]*\b" + Regex.Escape(service) + @"\b|AddPerInstanceWork<"
+            + Regex.Escape(service) + ">", RegexOptions.Singleline);
+
+        perInstance.Matches(code).Count.Should().BeGreaterThan(0,
+            $"{service} owns state belonging to its own process, so it must run on every instance");
+
+        singleton.Matches(code).Should().BeEmpty(
+            $"{service} registered as singleton work means every other instance keeps state "
+            + "nothing ever drains — for the sealers that is an unsealed index growing until the "
+            + "disk fills");
+    }
+
+    /// <summary>
     /// ⚠️ Defaults to TRUE, and the direction matters more than the value.
     ///
     /// <para>Every existing single-instance install must keep sweeping without being
