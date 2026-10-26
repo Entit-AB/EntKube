@@ -60,9 +60,10 @@ public class MongoServiceTests : IDisposable
 
     // ──────── Helpers ────────
 
-    private async Task<(Tenant tenant, KubernetesCluster cluster, StorageLink storageLink)> SeedTenantWithClusterAsync()
+    private async Task<(Tenant tenant, KubernetesCluster cluster, StorageLink storageLink)> SeedTenantWithClusterAsync(
+        string slug = "testco")
     {
-        Tenant tenant = new() { Id = Guid.NewGuid(), Name = "TestCo", Slug = "testco" };
+        Tenant tenant = new() { Id = Guid.NewGuid(), Name = $"TestCo-{slug}", Slug = slug };
         db.Tenants.Add(tenant);
 
         Data.Environment env = new()
@@ -395,6 +396,17 @@ public class MongoServiceTests : IDisposable
         await sut.CreateClusterAsync(tenant.Id, cluster.Id, "mongo-1", "ns1", 3, "10Gi", null, null);
         await sut.CreateClusterAsync(tenant.Id, cluster.Id, "mongo-2", "ns2", 1, "5Gi", null, null);
 
+        // ⚠️ A SECOND TENANT'S CLUSTER, which is what makes this test about the word "Only".
+        // Without a foreign row there is nothing for the predicate to exclude, so an UNFILTERED
+        // query satisfies both assertions below and deleting
+        // `.Where(c => c.TenantId == tenantId)` from MongoService.GetClustersAsync changes no
+        // result. Measured before this row existed: it did not.
+        (Tenant stranger, KubernetesCluster strangerCluster, _) =
+            await SeedTenantWithClusterAsync("otherco");
+
+        await sut.CreateClusterAsync(
+            stranger.Id, strangerCluster.Id, "not-yours", "ns3", 1, "5Gi", null, null);
+
         // Act
 
         List<MongoCluster> result = await sut.GetClustersAsync(tenant.Id);
@@ -403,6 +415,10 @@ public class MongoServiceTests : IDisposable
 
         result.Should().HaveCount(2);
         result.Select(c => c.Name).Should().Contain("mongo-1").And.Contain("mongo-2");
+
+        result.Select(c => c.Name).Should().NotContain("not-yours",
+            "another tenant's MongoDB cluster must not appear, which is the whole claim in this "
+            + "test's name");
     }
 
     // ──────── CreateDatabaseAsync ────────

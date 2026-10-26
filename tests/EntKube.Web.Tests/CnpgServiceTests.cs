@@ -833,6 +833,27 @@ public class CnpgServiceTests : IDisposable
         };
 
         db.CnpgClusters.AddRange(cnpg1, cnpg2);
+
+        // ⚠️ A SECOND TENANT'S CLUSTER, which is what makes this test about the word "Only".
+        // Without a foreign row there is nothing for the predicate to exclude, so an UNFILTERED
+        // query satisfies every assertion below and deleting
+        // `.Where(c => c.TenantId == tenantId)` from CnpgService.GetClustersAsync changes no
+        // result. Measured before this row existed: it did not.
+        (Tenant stranger, KubernetesCluster strangerCluster, _) =
+            await SeedTenantWithClusterAsync("otherco");
+
+        db.CnpgClusters.Add(new CnpgCluster
+        {
+            Id = Guid.NewGuid(),
+            TenantId = stranger.Id,
+            KubernetesClusterId = strangerCluster.Id,
+            Name = "not-yours",
+            Namespace = "databases",
+            PostgresVersion = "18",
+            StorageSize = "10Gi",
+            Status = CnpgClusterStatus.Running
+        });
+
         await db.SaveChangesAsync();
 
         // Act
@@ -844,6 +865,10 @@ public class CnpgServiceTests : IDisposable
         results.Should().HaveCount(2);
         results.Should().Contain(c => c.Name == "cluster-1");
         results.Should().Contain(c => c.Name == "cluster-2");
+
+        results.Should().NotContain(c => c.Name == "not-yours",
+            "another tenant's CNPG cluster must not appear, which is the whole claim in this "
+            + "test's name");
     }
 
     // ──────── Manifest Generation ────────
