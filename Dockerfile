@@ -24,6 +24,12 @@ WORKDIR /src
 # Without this workload the publish output silently omits those files.
 RUN dotnet workload install wasm-tools
 
+# global.json too, so THIS build checks the pin rather than being the one place exempt from it.
+# The `sdk:` tag above is the authority for which compiler ships, and global.json is what every
+# other build — CI, a laptop, release.sh — selects by. Copying it in means a tag and a global.json
+# that disagree fail here, loudly, instead of waiting for someone to run SdkPinTests. The base
+# image contains exactly the tagged SDK, so this is satisfied whenever the two already agree.
+COPY global.json ./
 COPY Directory.Build.props ./
 COPY src/EntKube.Web/EntKube.Web.csproj src/EntKube.Web/
 COPY src/EntKube.Web.Client/EntKube.Web.Client.csproj src/EntKube.Web.Client/

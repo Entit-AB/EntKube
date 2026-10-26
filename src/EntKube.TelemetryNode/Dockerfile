@@ -22,6 +22,10 @@ ARG TARGETARCH
 
 WORKDIR /src
 
+# global.json too — see the comment on the management-plane Dockerfile. Both images must be built
+# by the SDK their tag names, and copying the selector in makes a tag that disagrees with it fail
+# here rather than at whatever later point someone runs the suite.
+COPY global.json ./
 COPY Directory.Build.props ./
 COPY src/EntKube.Telemetry/EntKube.Telemetry.csproj src/EntKube.Telemetry/
 COPY src/EntKube.TelemetryNode/EntKube.TelemetryNode.csproj src/EntKube.TelemetryNode/

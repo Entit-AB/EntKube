@@ -62,13 +62,44 @@ with the short SHA plus `latest`, pushes to ACR, then SSHes to the server and ru
 up -d`. Newest-wins is correct here because there is exactly one deployment and it is the one CI just
 built.
 
-Nothing about a release is version-pinned, so nothing needs bumping.
+Nothing about a release is version-pinned except the SDK, which is pinned in three places — see
+below. Nothing else needs bumping.
 
 `scripts/release.sh web` does the same build from a laptop, tagging the short SHA so an image built there
 and one built by CI from the same commit carry the same tag. With `--push` it also moves `latest`, because
 that is the tag `docker-compose.yml` on the server pulls — a push that updated only the SHA tag would
 build an image the server never sees. It does not deploy: the server still has to pull, which is the SSH
 step in `deploy.yml`.
+
+### Three places must name the same SDK
+
+The image is the artifact, so the compiler that builds the suite has to be the compiler that builds the
+image. Three kinds of place name an SDK — four files, as things stand — and they all have to agree:
+
+1. **`Dockerfile`'s `mcr.microsoft.com/dotnet/sdk:` tag** — the compiler that builds what customers run.
+   This one is the authority; everything else exists to match it.
+2. **`global.json`'s `sdk.version`** — what `dotnet` actually *selects*, everywhere: CI, a laptop, the
+   `release.sh` build.
+3. **Every `dotnet-version` in `.github/workflows/`** — what CI *installs*. Necessary, and on its own
+   useless. Both `deploy.yml` and `release-telemetry.yml` have one, and a workflow that installs an SDK
+   `global.json` will not accept does not run against the wrong compiler — it does not run at all.
+
+⚠️ **(3) without (2) does nothing.** `actions/setup-dotnet` installs the SDK it is given into
+`/usr/share/dotnet`, next to the newer one the runner image already ships, and `dotnet` then picks the
+highest SDK in that directory. Without a `global.json` the pin is decoration: the Tests job named
+10.0.101 and compiled with 10.0.403 anyway. The version input chooses what to install; only
+`global.json` chooses what runs.
+
+`SdkPinTests` holds all of them together, so bumping one alone fails the suite. To bump, change every one of them
+in one commit. Expect the bump itself to be the hard part rather than the pinning: 10.0.403's Razor
+compiler mis-generates a hand-written `__builder` lambda used as a switch-expression arm, which is why
+those were replaced with the `@<...>` template form the compiler documents.
+
+`rollForward` is `latestPatch` on purpose. 10.0.1xx and 10.0.4xx are different feature bands and it was
+the band that broke, so patches inside the shipped band are allowed and the next band is not — a
+developer on 10.0.403 is told to install 10.0.1xx by name instead of discovering the difference as
+malformed generated C#. Bumping `global.json` alone does not produce a red test, incidentally: the SDK
+refuses to run at all and names the file and the version it wanted, which is the better failure.
 
 ### The compiler and the image no longer have to share an architecture
 
