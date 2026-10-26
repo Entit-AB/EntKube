@@ -485,6 +485,43 @@ public class JitAccessServiceTests : IDisposable
         JitAccessService.ClampDuration(TimeSpan.FromDays(30)).Should().Be(JitAccessService.MaximumDuration);
     }
 
+    /// <summary>
+    /// ⚠️ <b>The three default assertions above cannot see the ceiling, because the expectation
+    /// moves with the value.</b> <c>ClampDuration(null).Should().Be(DefaultDuration)</c> is an
+    /// identity — <c>ClampDuration</c> literally returns that field — so it holds for any
+    /// <c>DefaultDuration</c> whatsoever, including one far above <c>MaximumDuration</c>. And the
+    /// default path genuinely is not clamped: both <c>requested is null</c> and
+    /// <c>requested &lt;= Zero</c> return early, <em>above</em> the
+    /// <c>requested &gt; MaximumDuration</c> comparison. So the half of this test's name that says
+    /// "is capped" would survive a <c>DefaultDuration</c> of thirty days.
+    ///
+    /// <para>This is insurance rather than a live defect, and worth saying so: both shipped
+    /// callers — <c>RequestAsync</c> and <c>ApproveAsync</c> — pass an explicit duration from
+    /// <see cref="JitAccessService.DurationOptionsMinutes"/>, so nothing reaches the unclamped
+    /// path today. What is missing is only that two adjacent, individually documented constants
+    /// have no stated relation, and the one that is called a "hard ceiling" does not bind the
+    /// other. Three lines fix that; the asymmetry in <c>ClampDuration</c> is left alone, since
+    /// reordering it would change behaviour nobody asked to change.</para>
+    /// </summary>
+    [Fact]
+    public void The_default_lifetime_is_inside_the_hard_ceiling()
+    {
+        JitAccessService.DefaultDuration.Should().BeLessThanOrEqualTo(JitAccessService.MaximumDuration,
+            "MaximumDuration is documented as a hard ceiling — 'anything longer stops being "
+            + "just-in-time' — and ClampDuration returns DefaultDuration from two guards that sit "
+            + "ABOVE the ceiling comparison, so a default beyond it is handed out unclamped");
+
+        JitAccessService.DurationOptionsMinutes.Should().Contain(
+            (int)JitAccessService.DefaultDuration.TotalMinutes,
+            "the default has to be a lifetime either side could also have picked deliberately; "
+            + "a default nobody can choose from the queue is a second, hidden policy");
+
+        JitAccessService.DurationOptionsMinutes.Should().OnlyContain(
+            m => m <= (int)JitAccessService.MaximumDuration.TotalMinutes,
+            "the options list's own doc says they are 'all inside MaximumDuration' — asserted "
+            + "here rather than trusted, since a new option is a one-token edit");
+    }
+
     [Fact]
     public async Task A_grant_longer_than_the_ceiling_is_shortened_not_refused()
     {
