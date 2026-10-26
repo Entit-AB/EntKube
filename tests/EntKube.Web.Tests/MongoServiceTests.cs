@@ -351,6 +351,28 @@ public class MongoServiceTests : IDisposable
 
     // ──────── DeleteClusterAsync ────────
 
+    /// <summary>
+    /// ⚠️ <b>"AndKubernetes" was unasserted.</b> Both mocks were stubbed with all-
+    /// <c>It.IsAny</c> matchers, neither was verified, and the one assertion was that the row had
+    /// gone. <c>DeleteClusterAsync</c> wraps every cluster-side delete in
+    /// <c>catch (Exception) { }</c> and removes the row regardless — deliberately, so an
+    /// undeployed cluster stays deletable — so that assertion held with the Kubernetes leg
+    /// removed entirely.
+    ///
+    /// <para>What leaks is the <c>MongoDBCommunity</c> CR, and with it the StatefulSet, its pods
+    /// and its PVCs, running in the tenant's namespace after the UI has reported the cluster
+    /// deleted. The vault copy of the admin password <em>is</em> removed, so the surviving
+    /// database is also one nobody holds credentials for.</para>
+    ///
+    /// <para>⚠️ The stale <c>{name}-admin-password</c> Secret is NOT the hazard it looks like: a
+    /// same-name recreate applies a fresh secret before the cluster manifest, and
+    /// <c>kubectl apply</c> replaces the key, so it is silently overwritten. The CR delete is the
+    /// one that matters. Checked rather than assumed, because the obvious reading is the wrong
+    /// one.</para>
+    ///
+    /// <para>Verified on <see cref="IKubernetesClientFactory"/>, not <c>IClusterClient</c>: the
+    /// product calls the latter, but this fixture mocks the factory the former forwards to.</para>
+    /// </summary>
     [Fact]
     public async Task DeleteClusterAsync_RemovesFromDbAndKubernetes()
     {
@@ -378,6 +400,52 @@ public class MongoServiceTests : IDisposable
 
         MongoCluster? deleted = await db.MongoClusters.FindAsync(created.Id);
         deleted.Should().BeNull();
+
+        k8sFactory.Verify(f => f.DeleteManifestAsync(
+            "mongodbcommunity.mongodbcommunity.mongodb.com", "delete-me", "databases",
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once,
+            "without this the StatefulSet, its pods and its PVCs keep running after the row is "
+            + "gone — a live database nobody can see and nobody holds the password for");
+
+        k8sFactory.Verify(f => f.DeleteManifestAsync(
+            "secret", "delete-me-admin-password", "databases",
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+
+        // No schedule was passed to CreateClusterAsync, so the CronJob branch is guarded off.
+        k8sFactory.Verify(f => f.DeleteManifestAsync(
+            "cronjob", It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    /// <summary>
+    /// The conditional CronJob delete, which the test above cannot reach: its fixture passes no
+    /// schedule, so that branch was unexecuted rather than weakly covered. A schedule requires a
+    /// StorageLink alongside it — <c>CreateClusterAsync</c> refuses one without the other.
+    /// </summary>
+    [Fact]
+    public async Task DeleteClusterAsync_WithABackupSchedule_AlsoDeletesTheCronJob()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        k8sFactory.Setup(f => f.ApplyManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ReturnsAsync(string.Empty);
+
+        k8sFactory.Setup(f => f.DeleteManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        MongoCluster created = await sut.CreateClusterAsync(
+            tenant.Id, cluster.Id, "scheduled-me", "databases", 1, "5Gi", storageLink.Id, "0 2 * * *");
+
+        await sut.DeleteClusterAsync(tenant.Id, created.Id);
+
+        k8sFactory.Verify(f => f.DeleteManifestAsync(
+            "cronjob", "scheduled-me-scheduled-backup", "databases",
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once,
+            "a CronJob outliving its cluster keeps firing mongodump against a StatefulSet that is "
+            + "no longer there, and keeps failing silently");
     }
 
     // ──────── GetClustersAsync ────────

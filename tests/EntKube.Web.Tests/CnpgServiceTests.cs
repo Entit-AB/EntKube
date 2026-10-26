@@ -312,6 +312,25 @@ public class CnpgServiceTests : IDisposable
 
     // ──────── DeleteClusterAsync ────────
 
+    /// <summary>
+    /// ⚠️ <b>"AndDatabase" was the only half this asserted.</b> It stubbed
+    /// <c>DeleteManifestAsync</c> with all-<c>It.IsAny</c> matchers, never verified it, and
+    /// checked one thing: that the row was gone. <c>DeleteClusterAsync</c> wraps every
+    /// cluster-side delete in <c>catch (Exception) { }</c> and removes the row regardless — by
+    /// design, so a cluster that never deployed is still deletable — so that assertion is reached
+    /// whatever the Kubernetes leg does, <em>including not running at all</em>.
+    ///
+    /// <para>The stub was not even load-bearing: delete it and the loose mock returns a null
+    /// <c>Task</c>, the <c>NullReferenceException</c> is swallowed by the same catch, and the test
+    /// still passes having asked Kubernetes for nothing. What leaks is a live CNPG
+    /// <c>Cluster</c> with its pods and PVCs, plus a barmancloud <c>ObjectStore</c> still writing
+    /// to the tenant's bucket, while the UI reports the cluster deleted.</para>
+    ///
+    /// <para>So the deletes are verified by exact kind and name, the idiom this file already uses
+    /// on the major-upgrade path. Names matter more than counts here: <c>--ignore-not-found</c>
+    /// means a wrong kind or name silently no-ops and orphans the real resource rather than
+    /// failing.</para>
+    /// </summary>
     [Fact]
     public async Task DeleteClusterAsync_RemovesFromK8sAndDatabase()
     {
@@ -350,6 +369,102 @@ public class CnpgServiceTests : IDisposable
             .AsNoTracking()
             .FirstOrDefaultAsync(c => c.Id == cnpg.Id);
         deleted.Should().BeNull();
+
+        // The two resources the method unconditionally deletes, by the names it builds them from.
+        k8sFactory.Verify(f => f.DeleteManifestAsync(
+            "clusters.postgresql.cnpg.io", "to-delete", "databases",
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once,
+            "the row disappearing while the CNPG Cluster keeps running is the orphan this test is named for");
+
+        k8sFactory.Verify(f => f.DeleteManifestAsync(
+            "objectstores.barmancloud.cnpg.io", "to-delete-object-store", "databases",
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once,
+            "a left-behind ObjectStore keeps writing backups to the tenant's bucket, and is billed for");
+
+        // No BackupSchedule was seeded, so the third leg is guarded off. Asserting Times.Never
+        // keeps the two branches honest: without it, a change that deleted a ScheduledBackup
+        // unconditionally would pass here and fail in a cluster that has none.
+        k8sFactory.Verify(f => f.DeleteManifestAsync(
+            "scheduledbackups.postgresql.cnpg.io", It.IsAny<string>(), It.IsAny<string>(),
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
+    }
+
+    /// <summary>
+    /// The conditional third delete, which the test above cannot reach — its fixture seeds no
+    /// <c>BackupSchedule</c>, so that branch was not weakly covered but <b>unexecuted</b>.
+    /// </summary>
+    [Fact]
+    public async Task DeleteClusterAsync_WithABackupSchedule_AlsoDeletesTheScheduledBackup()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        CnpgCluster cnpg = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = cluster.Id,
+            Name = "to-delete-scheduled",
+            Namespace = "databases",
+            PostgresVersion = "18",
+            StorageSize = "10Gi",
+            BackupSchedule = "0 0 * * *",
+            Status = CnpgClusterStatus.Running
+        };
+
+        db.CnpgClusters.Add(cnpg);
+        await db.SaveChangesAsync();
+
+        k8sFactory.Setup(f => f.DeleteManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns(Task.CompletedTask);
+
+        await sut.DeleteClusterAsync(tenant.Id, cnpg.Id);
+
+        k8sFactory.Verify(f => f.DeleteManifestAsync(
+            "scheduledbackups.postgresql.cnpg.io", "to-delete-scheduled-scheduled", "databases",
+            It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once,
+            "a ScheduledBackup outliving its cluster keeps firing backup jobs against a Cluster "
+            + "that no longer exists");
+    }
+
+    /// <summary>
+    /// The catch block is deliberate — "so the user isn't stuck with an un-deletable entry" — but
+    /// nothing proved it was deliberate rather than accidental. A row that survives a Kubernetes
+    /// failure would be a cluster nobody can remove from the UI.
+    /// </summary>
+    [Fact]
+    public async Task DeleteClusterAsync_WhenKubernetesRefuses_StillRemovesTheRow()
+    {
+        (Tenant tenant, KubernetesCluster cluster, StorageLink storageLink) = await SeedTenantWithClusterAsync();
+
+        CnpgCluster cnpg = new()
+        {
+            Id = Guid.NewGuid(),
+            TenantId = tenant.Id,
+            KubernetesClusterId = cluster.Id,
+            Name = "unreachable",
+            Namespace = "databases",
+            PostgresVersion = "18",
+            StorageSize = "10Gi",
+            Status = CnpgClusterStatus.Running
+        };
+
+        db.CnpgClusters.Add(cnpg);
+        await db.SaveChangesAsync();
+
+        k8sFactory.Setup(f => f.DeleteManifestAsync(
+                It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("API server unreachable"));
+
+        await sut.DeleteClusterAsync(tenant.Id, cnpg.Id);
+
+        using ApplicationDbContext verifyDb = dbFactory.CreateDbContext();
+        (await verifyDb.CnpgClusters.AsNoTracking()
+            .FirstOrDefaultAsync(c => c.Id == cnpg.Id)).Should().BeNull(
+            "the local record must go even when the cluster leg fails, or an undeployed cluster "
+            + "becomes permanently undeletable");
     }
 
     // ──────── UpgradeClusterAsync ────────
@@ -754,6 +869,27 @@ public class CnpgServiceTests : IDisposable
 
     // ──────── DeleteDatabaseAsync ────────
 
+    /// <summary>
+    /// ⚠️ <b>Nothing looked at the DROP statement.</b> The SQL was stubbed with all-
+    /// <c>It.IsAny</c> matchers and never verified, so the two assertions — the row is gone, no
+    /// vault secrets remain — were reached whether or not any SQL was sent, and whether or not it
+    /// named the right database. <c>DeleteDatabaseAsync</c> builds
+    /// <c>DROP DATABASE IF EXISTS "{database.Name}"; DROP ROLE IF EXISTS "{database.Owner}"</c>
+    /// inside <c>catch (InvalidOperationException) { }</c>, so a left-behind production database
+    /// and role would not have failed this test.
+    ///
+    /// <para>⚠️ The sharper risk is not a missing DROP but a <b>misaimed</b> one:
+    /// <c>cnpg.Name</c>, <c>cnpg.Namespace</c> and the primary secret name are all in scope two
+    /// lines from the interpolation, so an edit that reached for the wrong one would drop a
+    /// <em>sibling</em> database of the same tenant. The row lookup is tenant-scoped, so the blast
+    /// radius stops at one tenant — but inside it this is data loss.</para>
+    ///
+    /// <para>So the call is captured and the <b>seeded values</b> are asserted, read back off the
+    /// returned entity rather than written as literals. Deliberately NOT asserted: the statement
+    /// text, the <c>IF EXISTS</c> clause, or the ordering — those would pin the implementation and
+    /// fail on a harmless rewording. What is asserted is where it was routed and what it aimed at.
+    /// </para>
+    /// </summary>
     [Fact]
     public async Task DeleteDatabaseAsync_RemovesDatabaseAndSecrets()
     {
@@ -776,13 +912,22 @@ public class CnpgServiceTests : IDisposable
         db.CnpgClusters.Add(cnpg);
         await db.SaveChangesAsync();
 
+        // Every SQL call, in order, with where it was aimed. CreateDatabaseAsync below makes one
+        // of its own, so the delete's call is identified by position rather than by being alone.
+        List<(string Cluster, string Namespace, string Sql)> sqlCalls = [];
         k8sFactory.Setup(f => f.ExecuteSqlAsync(
                 It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(),
                 It.IsAny<string>(), It.IsAny<ChangeIntent>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, string, string, ChangeIntent, CancellationToken>(
+                (clusterName, ns, sql, _, _, _) => sqlCalls.Add((clusterName, ns, sql)))
             .Returns(Task.CompletedTask);
 
         CnpgDatabase database = await sut.CreateDatabaseAsync(
             tenant.Id, cnpg.Id, "to-remove");
+
+        int callsAfterCreate = sqlCalls.Count;
+        callsAfterCreate.Should().BeGreaterThan(0,
+            "the create path must have run SQL, or the capture below is measuring nothing");
 
         // Act
 
@@ -797,6 +942,28 @@ public class CnpgServiceTests : IDisposable
             .Where(s => s.CnpgDatabaseId == database.Id)
             .ToListAsync();
         remainingSecrets.Should().BeEmpty();
+
+        // The drop actually happened, and was aimed at the seeded database.
+        sqlCalls.Should().HaveCount(callsAfterCreate + 1,
+            "the delete must send exactly one statement — none means a database left running "
+            + "after the UI said it was gone");
+
+        (string Cluster, string Namespace, string Sql) drop = sqlCalls[^1];
+
+        drop.Cluster.Should().Be(cnpg.Name);
+        drop.Namespace.Should().Be(cnpg.Namespace,
+            "routed to the cluster that owns the database, not to whatever was last in scope");
+
+        drop.Sql.Should().Contain(database.Name,
+            "this assertion is the only thing between a delete request and a DROP aimed at a "
+            + "sibling database of the same tenant");
+        drop.Sql.Should().Contain(database.Owner,
+            "the role outlives the database otherwise, and a re-create of the same name then "
+            + "collides with an existing role");
+
+        drop.Sql.Should().NotContain($"\"{cnpg.Name}\"",
+            "the cluster name is in scope two lines from the interpolation; dropping it instead "
+            + "of the database is the specific confusion this guards");
     }
 
     // ──────── GetClustersAsync ────────
