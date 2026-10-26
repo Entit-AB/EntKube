@@ -39,7 +39,9 @@ jobs:
   # excuse it being red, which was a mistake. Nothing `needs:` it, so the image is genuinely
   # unaffected; but a failed job fails the RUN, and a red cross on main is the whole of what most
   # people ever see of CI. "It does not gate the image" is true and answers a question nobody was
-  # asking. See `continue-on-error` on the job itself.
+  # asking. What makes the name true is `continue-on-error` on the SUITE STEP — see the comment
+  # there, and note that the same keyword on the JOB does not do it, which is the mistake that
+  # left main non-green for a further run.
   #
   # Until it existed, NO workflow ran the test suite. This one builds and pushes on every push to
   # main, release-telemetry.yml runs a single filtered catalog check, and that was all — so main
@@ -58,36 +60,37 @@ jobs:
   # real one, so it is left to a person rather than assumed.
   test:
     name: Tests (reporting only — does not gate the image)
-    runs-on: ubuntu-latest
 
-    # ⚠️ THIS IS WHAT MAKES THE NAME TRUE. Without it the job gated the only signal anyone reads.
+    # ⚠️ PINNED, not `ubuntu-latest`. The `ubuntu-latest` label began migrating to Ubuntu 26 on
+    # 2026-10-19 (actions/runner-images#14748) and the rollout is gradual, so that label can give
+    # one OS on one run and another on the next — which is a confound in anything timed, and a
+    # source of "it worked yesterday" that nothing in the repo would record.
     #
-    # "Does not gate the image" was accurate and beside the point. Nothing `needs:` this job, so the
-    # image really did keep building and publishing — but a failed job fails the RUN, and the run's
-    # red cross on main is what a person actually sees. So a job documented as reporting-only put
-    # main in a failed state for every push from #389 onwards, and did it while never once having
-    # run a test: its first three attempts failed at build on the wrong SDK, and the next three sat
-    # for an hour and were cancelled.
+    # ⚠️ IT IS NOT THE CAUSE OF THIS JOB'S SLOWNESS, checked rather than assumed: all six runs
+    # whose logs survive report ubuntu24/20261012.334, so every slow run so far was Ubuntu 24.
+    # This is pinned to stop the migration becoming a second variable while the first is open.
     #
-    # Reported twice as "the build in GitHub fails", which is the correct reading. A check that is
-    # always red is worse than no check: it costs attention every time and it buries the real
-    # failure it exists to surface.
-    #
-    # continue-on-error keeps the job running and its log readable, while its failure no longer
-    # fails the run — so main goes green and a genuine `build`/`merge` failure stands out instead of
-    # being lost in a cross that was there yesterday too. ⚠️ THE TRADE IS REAL AND DELIBERATE: a
-    # red suite is now quiet. That is the right way round only while this job cannot be trusted to
-    # finish; when it passes reliably, remove this line and let it speak again.
-    continue-on-error: true
+    # The arm64 build below was already pinned, so until now the two architectures were one
+    # migration away from building on different operating systems.
+    runs-on: ubuntu-24.04
 
-    # ⚠️ BOUNDED, because an unbounded job reports nothing. This suite runs in about eight
-    # minutes on a developer machine and has twice run for an HOUR here and then been
-    # cancelled — "The operation was canceled." with no test output at all, and GitHub discards
-    # the log of a job that ends that way, so each occurrence cost an hour and taught nothing.
+    # ⚠️ THE BOUND BELONGS ON THE STEP, NOT THE JOB — and the first attempt put it on the job.
     #
-    # 45 minutes is deliberately generous rather than tight: the point is not to make a slow run
-    # fail, it is to make a STUCK run end while its log still exists.
-    timeout-minutes: 45
+    # A JOB `timeout-minutes` expiry is a CANCELLATION: the keyword's own documentation says
+    # "before GitHub automatically cancels it". `continue-on-error` is documented only for a job
+    # that FAILS, and the runner's ApplyContinueOnError returns immediately unless the result is
+    # Failed — so a cancellation is unreachable by it. Cancelling also discards the job's log,
+    # which is why three hour-long runs taught nothing at all.
+    #
+    # A STEP `timeout-minutes` expiry is recorded as FAILED ("The action '…' has timed out after N
+    # minutes."), so `continue-on-error` genuinely applies there: the step's conclusion becomes
+    # success, the JOB STAYS ALIVE, every later step runs, and the log survives. That is the whole
+    # difference, and it is why this moved.
+    #
+    # The job bound below is deliberately ABOVE the step bound so it can never be the thing that
+    # fires. If it ever does, something outside the suite is wrong — read the log rather than
+    # raising the number.
+    timeout-minutes: 60
 
     steps:
       - uses: actions/checkout@v4
@@ -112,30 +115,46 @@ jobs:
       # The log must SAY which compiler it used. Both failures this job has had were invisible in
       # its own output: first it tested an artifact nobody ships, then it ignored a pin that looked
       # right in the YAML. Two lines of output make the next mismatch readable instead of inferred.
-      - name: Say which SDK this is
+      # And the machine, because "slower than a laptop" was an inference and this makes it a
+      # number. ~12 core-minutes of work taking over 55 here needs the core count on the record.
+      - name: Say which SDK and which machine this is
         run: |
           echo "selected: $(dotnet --version)"
           dotnet --list-sdks
+          echo "--- machine ---"
+          echo "cores:  $(nproc)"
+          echo "memory: $(free -h | awk '/^Mem:/ {print $2" total, "$7" available"}')"
+          echo "os:     $(. /etc/os-release && echo "$PRETTY_NAME")"
 
-      # ⚠️ --blame-hang IS THE DIAGNOSTIC THIS JOB HAS BEEN MISSING. `dotnet test` prints nothing
-      # between "a total of 1 test files matched" and its final summary, so a run that stops
-      # making progress looks exactly like a run that is merely slow — which is why two hour-long
-      # failures here produced no evidence whatsoever. With this, a test that sits for five
-      # minutes ends the run and NAMES ITSELF in a sequence file.
+      # ⚠️ --blame-hang WAS REMOVED, having been added by me to diagnose this and then having
+      # plausibly made it worse. It never tripped at 5 minutes on any run, so it answered nothing;
+      # it attaches a data collector that changes how VSTest hosts the tests; and when the job was
+      # torn down the process tree did not die for ten minutes, which is the behaviour a collector
+      # makes more likely. A diagnostic that may be part of the symptom is not a diagnostic.
       #
-      # Five minutes is far above any test's real cost: the whole suite is ~8 minutes locally, and
-      # measured at 2 parallel threads it still finishes in ~8, so no single test is anywhere near
-      # this. Anything that trips it is stuck, not slow.
+      # `console;verbosity=normal` replaces what it was meant to provide, and it is the one that
+      # survives a bounded run: the .trx is written only at the END of a run, so a run cut short
+      # leaves none — but the job is no longer cancelled, so its LOG is kept, and the log now
+      # carries per-test names as they execute. That is what identifies a slow or stuck test.
       #
-      # The .trx carries per-test durations, which is the other thing nobody could see: it answers
-      # "which tests are slow here" without another hour of guessing. Uploaded on failure too —
-      # especially on failure, since that is when it is worth reading.
+      # Two bounds, innermost first. `timeout --signal=INT 38m` asks dotnet to stop and lets it
+      # flush, which can still produce a .trx; the step's own 40-minute bound is the backstop if it
+      # ignores that. `set +e` plus the explicit exit keeps the real code visible in the summary
+      # below instead of swallowing it.
       - name: Run the suite
-        run: >-
-          dotnet test tests/EntKube.Web.Tests/EntKube.Web.Tests.csproj --nologo
-          --blame-hang --blame-hang-timeout 5min
-          --logger "trx;LogFileName=tests.trx"
-          --results-directory ${{ runner.temp }}/testresults
+        id: suite
+        timeout-minutes: 40
+        continue-on-error: true
+        run: |
+          set +e
+          timeout --signal=INT --kill-after=60s 38m \
+            dotnet test tests/EntKube.Web.Tests/EntKube.Web.Tests.csproj --nologo \
+            --logger "trx;LogFileName=tests.trx" \
+            --logger "console;verbosity=normal" \
+            --results-directory "${{ runner.temp }}/testresults"
+          code=$?
+          echo "exit-code=$code" >> "$GITHUB_OUTPUT"
+          exit $code
 
       - name: Keep the results, whatever happened
         if: always()
@@ -145,6 +164,23 @@ jobs:
           path: ${{ runner.temp }}/testresults
           if-no-files-found: warn
           retention-days: 14
+
+      # ⚠️ Green must not mean silent. `continue-on-error` rewrites the step's CONCLUSION but not
+      # its `outcome`, so the truth is still readable — and writing it to the run summary is what
+      # keeps "the run is green" from quietly meaning "nobody looked". Exit 124 is `timeout`'s own
+      # code for having had to kill the command, which distinguishes "the suite failed" from "the
+      # suite did not finish".
+      - name: Say what the suite actually did
+        if: always()
+        run: |
+          {
+            echo "### Test suite: ${{ steps.suite.outcome }} (exit ${{ steps.suite.outputs.exit-code }})"
+            if [ "${{ steps.suite.outputs.exit-code }}" = "124" ]; then
+              echo
+              echo "⚠️ Did not finish inside 38 minutes — bounded, not failed."
+              echo "This suite is ~12 core-minutes of work and ~8 minutes on a dev machine."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
 
   # Each architecture builds on a runner of that architecture and pushes BY DIGEST — no tag.
   #
@@ -161,7 +197,7 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
 
@@ -260,7 +296,8 @@ jobs:
   merge:
     name: Publish the manifest list
     needs: build
-    runs-on: ubuntu-latest
+    # Pinned for the same reason as the others — see the test job.
+    runs-on: ubuntu-24.04
     outputs:
       image-tag: ${{ steps.meta.outputs.version }}
 
