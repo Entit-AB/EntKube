@@ -694,6 +694,57 @@ public class BackupService(
             // Secret version history — re-encrypt each historical value with the destination
             // vault's fresh DEK, resolving the vault via the parent secret (recorded above).
             Dictionary<Guid, Guid> vaultIdBySecretId = bundle.VaultSecrets.ToDictionary(s => s.Id, s => s.VaultId);
+
+            // ⭐ A bundle can carry two rows with the same (SecretId, VersionNumber), and the
+            // destination now refuses them.
+            //
+            // `ArchiveVersionAsync` allocated version numbers as MAX + 1 with no uniqueness behind
+            // it, so any installation that ever had two writers archive the same secret at once
+            // recorded one change as two "version 4" rows. The unique index added alongside this
+            // repairs that going forward and renumbers what is already there — but a BUNDLE
+            // captured BEFORE the repair still holds the duplicates, and this method writes
+            // VersionNumber straight through. Restoring such a bundle would fail at
+            // SaveChangesAsync, and it would fail on exactly the installations the repair exists
+            // for.
+            //
+            // ⚠️ Only secrets that actually collide are renumbered, matching what the migration
+            // does. A pruned history is legitimately non-dense — ten versions are kept, so an old
+            // secret's rows may be numbered 7 and 8 — and renumbering those to 1 and 2 would
+            // rewrite a correct history to make it look tidier.
+            HashSet<Guid> collidingSecrets =
+            [
+                .. bundle.VaultSecretVersions
+                    .GroupBy(v => v.SecretId)
+                    .Where(g => g.Select(v => v.VersionNumber).Distinct().Count() != g.Count())
+                    .Select(g => g.Key)
+            ];
+
+            Dictionary<Guid, int> renumbered = [];
+
+            foreach (Guid secretId in collidingSecrets)
+            {
+                int next = 1;
+
+                // Creation order, with the id as the tiebreak, so the restored history reads in
+                // the order it happened — the same ordering the migration's ROW_NUMBER uses.
+                foreach (VaultSecretVersionRecord v in bundle.VaultSecretVersions
+                             .Where(v => v.SecretId == secretId)
+                             .OrderBy(v => v.CreatedAt)
+                             .ThenBy(v => v.Id))
+                {
+                    renumbered[v.Id] = next++;
+                }
+            }
+
+            if (collidingSecrets.Count > 0)
+            {
+                logger.LogWarning(
+                    "{Count} secret(s) in this bundle carry duplicate version numbers — a bundle "
+                    + "taken before the uniqueness repair. Their history is renumbered in creation "
+                    + "order on restore; no value is lost.",
+                    collidingSecrets.Count);
+            }
+
             foreach (VaultSecretVersionRecord vr in bundle.VaultSecretVersions)
             {
                 if (!vaultIdBySecretId.TryGetValue(vr.SecretId, out Guid vaultId) ||
@@ -705,7 +756,11 @@ public class BackupService(
                 (byte[] ciphertext, byte[] vNonce) = encryption.Encrypt(dek, vr.PlaintextValue);
                 db.VaultSecretVersions.Add(new VaultSecretVersion
                 {
-                    Id = vr.Id, SecretId = vr.SecretId, VersionNumber = vr.VersionNumber,
+                    Id = vr.Id,
+                    SecretId = vr.SecretId,
+                    VersionNumber = renumbered.TryGetValue(vr.Id, out int fixedNumber)
+                        ? fixedNumber
+                        : vr.VersionNumber,
                     EncryptedValue = ciphertext, Nonce = vNonce,
                     CreatedBy = vr.CreatedBy, CreatedAt = vr.CreatedAt,
                 });
