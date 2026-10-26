@@ -1700,6 +1700,77 @@ keeps render state, form binding, validation display and event wiring. The hones
 the extractable operations are *within* those 36k lines, not that 36k lines relocate. Any PR doing
 this should report what it moved and what it deliberately left.
 
+### 6.2 Which Portal component to start with — and why it is not the biggest (measured 2026-10-26)
+
+§6.1 measured `@code` lines per area and warned they are an upper bound rather than a target. Measuring
+*per component* turns that caveat into a decision, and reverses the obvious one: **the largest `@code`
+block in Portal is close to the worst place to start.**
+
+Portal is 21 components and 5,245 `@code` lines. The four that matter:
+
+| component | `@code` | injects | extractable operations | what the rest is |
+|---|---|---|---|---|
+| `PortalSecretsDetail` | 794 | 12 | **high** | vault writes, cross-service orchestration |
+| `CustomerLogBrowser` | 580 | 3 | **near zero** | UI toggles, JS interop, computed render props |
+| `PortalDatabasesPanel` | 427 | 6 | high | create/connect/detach/sync/rotate |
+| `PortalAppRoutesPanel` | 323 | 4 | low–medium | mostly form wiring |
+
+`CustomerLogBrowser` is the counter-example worth keeping. 580 lines looks like the second-biggest prize;
+almost none of it moves. It is `selectedPod`, `textFilter`, `tsMode`, `wrapLines`, `follow`, `copied`,
+`pendingScroll`, an `ElementReference`, an `IJSObjectReference`, and computed properties that exist to
+render — all of which legitimately belong to a component. Its actual querying already lives in an injected
+`LogQueryService`. **Line count measures how much code is in the page, not how much of it is an
+operation**, and those are different questions.
+
+#### The first extraction, named
+
+`PortalSecretsDetail.SyncAllToKubernetes` → `SyncDeploymentBindingsAsync` is **~125 lines of pure
+orchestration with no render state at all** (126 lines, measured), and it uses 9 of that component's
+12 injects. It:
+
+1. syncs the app's vault secrets (environment-scoped when in environment context);
+2. loads every deployment of the app;
+3. for each, fans out over five binding families — DB (dispatching three sub-types off
+   `CnpgDatabaseId` / `MongoDatabaseId` / `RegisteredPostgresDatabaseId`), cache, messaging, storage,
+   identity — filtering each on `SyncEnabled`;
+4. isolates failures twice over: per family, so one family failing to load does not stop the others, and
+   per binding, so one broken binding does not stop its siblings.
+
+"Re-sync every bound credential for this app" is an operation the CLI and the API both need, and today it
+is reachable only by clicking a button. That makes it the highest-value single extraction in Portal.
+
+⚠️ **It also mixes presentation into the operation**, which is the part that makes it uncallable rather
+than merely misplaced: the per-binding results are accumulated as pre-formatted strings
+(`$"✓ db/{binding.KubernetesSecretName}"`, `$"✗ identity/{name}: {ex.Message}"`). A service has to return
+the outcomes structured and let the page format them, or the API inherits a display format as its
+contract.
+
+#### ⚠️ The cost nobody would see coming: the collaborators cannot be mocked
+
+All nine services this orchestration depends on — `VaultService`, `DeploymentService`, `CnpgService`,
+`MongoService`, `RegisteredPostgresService`, `RedisService`, `RabbitMQService`, `StorageService`,
+`KeycloakService` — are **concrete classes whose methods are not virtual**, and **nothing in the suite
+mocks any of them** (`Mock<…Service>` appears zero times for all nine). Moq cannot intercept a
+non-virtual method, so the extracted service cannot be unit-tested against test doubles as written.
+
+The options, with their real costs:
+
+- **Real-service fixture.** Construct all nine against `TestDbContextFactory` and a mocked
+  `IKubernetesClientFactory`, the shape `CnpgServiceTests` and `MongoServiceTests` already use for one
+  service each. Nine at once is the honest price, and it is the only option that tests the dispatch and
+  the failure isolation — which is the behaviour actually worth pinning.
+- **Narrow interfaces per collaborator.** Cleanest long-term and what Phase 1 wants anyway, but it is a
+  far larger change than the extraction it is meant to enable, so it should not be smuggled in with it.
+- **Extract without tests.** Not acceptable for a credential path.
+
+This is worth stating before anyone starts: the extraction itself is an afternoon, and the fixture is the
+project. A PR that discovers this halfway through will either grow a nine-service fixture by accident or
+ship a credential operation with no coverage.
+
+⚠️ The extracted service would also sit in Secrets while depending on DataServices, Identity and Delivery
+services directly — acceptable for Phase 0 (it is strictly better than a Razor page doing it), and exactly
+the edge Phase 1's contracts exist to replace. Record it as a known follow-up rather than a surprise.
+
 ## 7. What not to do
 
 - **Don't split the database** beyond Support and Telemetry. 287 cross-entity navigations
