@@ -58,9 +58,25 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # ⚠️ PINNED, AND IT MUST TRACK THE Dockerfile's `sdk:` TAG (currently 10.0.101).
+      #
+      # This was '10.0.x', which setup-dotnet floats to the newest 10.0 SDK — 10.0.403 on the day
+      # this job was added. Its Razor compiler cannot build
+      # Components/Pages/Tenants/DatabaseTab.razor or ClusterDetail.razor: the generated C# comes
+      # out malformed ("The type '<invalid-global-code>' already contains a definition for
+      # 'StorageService'"), and every injected type in both files then fails to resolve. The job
+      # failed at BUILD and never ran a test.
+      #
+      # The image build was unaffected throughout, because the Dockerfile pins sdk:10.0.101 — so
+      # for its first three runs this job compiled something nobody ships and reported on it. A
+      # test job that uses a different compiler from the artifact is not testing the artifact.
+      #
+      # ⚠️ 10.0.403 remains a real upgrade blocker, not a CI quirk. Bumping the Dockerfile's SDK
+      # will hit the same wall, and this pin is the thing that will say so loudly. Bump both
+      # together, or neither. See docs/releasing.md.
       - uses: actions/setup-dotnet@v4
         with:
-          dotnet-version: '10.0.x'
+          dotnet-version: '10.0.101'
 
       - name: Run the suite
         run: dotnet test tests/EntKube.Web.Tests/EntKube.Web.Tests.csproj --nologo
