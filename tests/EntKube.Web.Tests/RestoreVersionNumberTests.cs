@@ -4,6 +4,9 @@ using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using System.IO.Compression;
+using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace EntKube.Web.Tests;
 
@@ -21,10 +24,17 @@ namespace EntKube.Web.Tests;
 /// repair exists for: the ones that had duplicates. A restore is also the one operation an
 /// operator reaches for when things are already bad.</para>
 ///
-/// <para>⚠️ <b>These tests assert the RENUMBERING, not the absence of an exception.</b> The unique
-/// index arrives in a separate change, so on this branch a duplicate would insert happily and a
-/// "does not throw" test would pass while proving nothing. What makes the index safe is that the
-/// numbers coming out are distinct and in the right order, so that is what is asserted.</para>
+/// <para>⚠️ <b>These tests assert the RENUMBERING, not merely the absence of an exception.</b>
+/// What makes the index safe is that the numbers coming out are distinct AND in the right order
+/// carrying the right values, so that is what is asserted.</para>
+///
+/// <para>⚠️ <b>The duplicates cannot be seeded through EF.</b> They once could — the unique index
+/// landed in a separate change, and until it did a duplicate inserted happily. Now the index is
+/// part of the model, <c>EnsureCreated</c> builds it, and seeding two version 4s fails in the
+/// FIXTURE long before any restore runs. That is the index working. The state under test was never
+/// really a database anyway: it is a FILE written by an older build, so these tests export a legal
+/// bundle and rewrite the numbers in it, rather than trying to persuade a repaired schema to hold
+/// the very thing it exists to refuse.</para>
 /// </summary>
 public sealed class RestoreVersionNumberTests : IDisposable
 {
@@ -77,7 +87,11 @@ public sealed class RestoreVersionNumberTests : IDisposable
     private ApplicationDbContext Destination() => new(
         new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(destination).Options);
 
-    /// <summary>Seeds one secret and the version rows given, with the numbers given verbatim.</summary>
+    /// <summary>
+    /// Seeds one secret and the version rows given. ⚠️ The numbers must be DISTINCT — the unique
+    /// index is in the model, so a colliding seed fails here rather than in the restore under test.
+    /// Use <see cref="ForceAllVersionsToNumber"/> to make the exported bundle collide.
+    /// </summary>
     private Guid SeedSecret(string name, params (int Number, string Value, int MinutesAgo)[] versions)
     {
         using ApplicationDbContext db = Source();
@@ -108,12 +122,61 @@ public sealed class RestoreVersionNumberTests : IDisposable
         return secretId;
     }
 
-    /// <summary>Exports from the source and imports into the destination, as the round-trip tests do.</summary>
-    private async Task RoundTripAsync()
+    /// <summary>
+    /// Exports from the source and imports into the destination, optionally rewriting the bundle
+    /// in between to stand in for one written by an older build.
+    /// </summary>
+    private async Task RoundTripAsync(Func<byte[], byte[]>? rewriteBundle = null)
     {
         byte[] bundle = await exporter.ExportAsync("nils");
+        if (rewriteBundle is not null)
+        {
+            bundle = rewriteBundle(bundle);
+        }
+
         using MemoryStream stream = new(bundle);
         await importer.ImportAsync(stream, wipeExisting: false);
+    }
+
+    /// <summary>
+    /// Rewrites an exported bundle so every version row of <paramref name="secretId"/> carries the
+    /// same number — a bundle precisely as the pre-repair allocator would have written one.
+    /// </summary>
+    private static byte[] ForceAllVersionsToNumber(byte[] bundle, Guid secretId, int number)
+    {
+        JsonNode root;
+        using (MemoryStream packed = new(bundle))
+        using (GZipStream unpack = new(packed, CompressionMode.Decompress))
+        {
+            root = JsonNode.Parse(unpack) ?? throw new InvalidOperationException("empty bundle");
+        }
+
+        int rewritten = 0;
+        foreach (JsonNode? v in root["VaultSecretVersions"]!.AsArray())
+        {
+            if (v is null || Guid.Parse(v["SecretId"]!.GetValue<string>()) != secretId)
+            {
+                continue;
+            }
+
+            v["VersionNumber"] = number;
+            rewritten++;
+        }
+
+        // ⚠️ Without this the fixture could silently stop colliding — a renamed JSON property or a
+        // changed id would rewrite nothing, the restore would have no duplicates to resolve, and
+        // every assertion below would pass while testing the healthy path twice over.
+        rewritten.Should().BeGreaterThan(1,
+            "the fixture's whole purpose is a COLLISION, so it must have rewritten more than one row");
+
+        using MemoryStream repacked = new();
+        using (GZipStream pack = new(repacked, CompressionLevel.Optimal, leaveOpen: true))
+        using (Utf8JsonWriter writer = new(pack))
+        {
+            root.WriteTo(writer);
+        }
+
+        return repacked.ToArray();
     }
 
     private List<VaultSecretVersion> RestoredVersions(Guid secretId)
@@ -132,9 +195,9 @@ public sealed class RestoreVersionNumberTests : IDisposable
     {
         Guid secretId = SeedSecret("api-key",
             (4, "older", 20),
-            (4, "newer", 10));
+            (5, "newer", 10));
 
-        await RoundTripAsync();
+        await RoundTripAsync(b => ForceAllVersionsToNumber(b, secretId, 4));
 
         List<VaultSecretVersion> restored = RestoredVersions(secretId);
 
@@ -157,9 +220,9 @@ public sealed class RestoreVersionNumberTests : IDisposable
     {
         Guid secretId = SeedSecret("api-key",
             (4, "older", 20),
-            (4, "newer", 10));
+            (5, "newer", 10));
 
-        await RoundTripAsync();
+        await RoundTripAsync(b => ForceAllVersionsToNumber(b, secretId, 4));
 
         List<VaultSecretVersion> restored = RestoredVersions(secretId);
 
@@ -205,10 +268,10 @@ public sealed class RestoreVersionNumberTests : IDisposable
     [Fact]
     public async Task One_colliding_secret_does_not_renumber_its_neighbour()
     {
-        Guid colliding = SeedSecret("api-key", (4, "a", 20), (4, "b", 10));
+        Guid colliding = SeedSecret("api-key", (4, "a", 20), (5, "b", 10));
         Guid healthy = SeedSecret("db-password", (7, "seventh", 20), (8, "eighth", 10));
 
-        await RoundTripAsync();
+        await RoundTripAsync(b => ForceAllVersionsToNumber(b, colliding, 4));
 
         RestoredVersions(colliding).Select(v => v.VersionNumber).Should().OnlyHaveUniqueItems();
         RestoredVersions(healthy).Select(v => v.VersionNumber).Should().Equal([7, 8]);
