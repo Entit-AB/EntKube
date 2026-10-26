@@ -36,9 +36,15 @@ namespace EntKube.Web.Tests;
 /// predicates and not a second one; with the lookups scoped, an app id that reaches this method
 /// is already the caller's, and deriving the tenant from it gives the right answer. The check is
 /// now redundant rather than wrong, and passing the caller's tenant makes it independent of its
-/// callers' diligence instead of inheriting it. The test below cannot tell the two
-/// implementations apart — which is the finding, and why it says so out loud instead of claiming
-/// a catch it does not make.</para>
+/// callers' diligence instead of inheriting it.</para>
+///
+/// <para>⚠️ <b>That note used to end by saying the test "cannot tell the two implementations
+/// apart", and gave the wrong reason.</b> It could not tell them apart because it never called the
+/// method: the request left <c>TlsMode</c> at its default, so an earlier guard threw and
+/// <c>ValidateClientCertificateAsync</c> was not entered — it could not have told a correct
+/// implementation from a deleted one either. A caveat that names the wrong cause is worse than
+/// none, because it reads as "pinned, just not precisely". See the test itself for what it took
+/// to actually reach the check.</para>
 ///
 /// <para>These are behavioural tests rather than a source scan on purpose: a scan can say a
 /// predicate is present, and only a foreign id can say it works. Each test seeds two tenants and
@@ -61,6 +67,8 @@ public class RouteTenantScopingTests : IDisposable
     private readonly Guid l4RouteA = Guid.NewGuid();
     private readonly Guid bundleA = Guid.NewGuid();
     private readonly Guid appB = Guid.NewGuid();
+    private readonly Guid routeB = Guid.NewGuid();
+    private readonly Guid bundleB = Guid.NewGuid();
 
     public RouteTenantScopingTests()
     {
@@ -119,10 +127,33 @@ public class RouteTenantScopingTests : IDisposable
             ServiceName = "pg", ServicePort = 5432,
             GatewayName = "gw-l4", GatewayNamespace = "istio-ingress",
         });
-        db.ClientCaBundles.Add(new ClientCaBundle
+        // B owns a hostname of its own. Without it, the deployment-route test below could only
+        // ever reach the FIRST of the two tenant predicates in AddDeploymentRouteAsync — a route
+        // id B passes legitimately is the only way to put the second one on trial.
+        db.AppRoutes.Add(new AppRoute
         {
-            Id = bundleA, TenantId = tenantA, Name = "Alpha clients",
+            Id = routeB, AppId = appB, Hostname = "records.beta.example",
+            TlsMode = TlsMode.ClusterIssuer, ClusterIssuerName = "letsencrypt",
         });
+        db.ClientCaBundles.AddRange(
+            new ClientCaBundle { Id = bundleA, TenantId = tenantA, Name = "Alpha clients" },
+            new ClientCaBundle { Id = bundleB, TenantId = tenantB, Name = "Beta clients" });
+        // ⚠️ BOTH ANCHORS CARRY A CA, and that is load-bearing rather than tidy. An anchor with no
+        // certificate is refused by its own guard in ValidateClientCertificateAsync — the one
+        // below the tenant predicate — with the same exception type. While bundleA was seeded
+        // empty, the trust-anchor test was answered by that guard instead and would have passed
+        // with the tenant predicate deleted.
+        db.ClientCaCertificates.AddRange(
+            new ClientCaCertificate
+            {
+                Id = Guid.NewGuid(), BundleId = bundleA, Name = "Alpha Root CA",
+                Pem = "-----BEGIN CERTIFICATE-----\nQUxQSEE=\n-----END CERTIFICATE-----",
+            },
+            new ClientCaCertificate
+            {
+                Id = Guid.NewGuid(), BundleId = bundleB, Name = "Beta Root CA",
+                Pem = "-----BEGIN CERTIFICATE-----\nQkVUQQ==\n-----END CERTIFICATE-----",
+            });
         db.SaveChanges();
 
         var catalog = new Mock<EntKube.Contracts.Catalog.ICatalogApi>();
@@ -225,12 +256,61 @@ public class RouteTenantScopingTests : IDisposable
         dr.CanaryServiceName.Should().BeNull();
     }
 
+    /// <summary>
+    /// ⚠️ <b>PathPrefix is set, and the message is asserted</b>, for the same reason the AddRoute
+    /// test sets a TLS mode. The first version passed neither: <c>PathPrefix</c> then defaults to
+    /// <c>"/"</c> — twice over, at <c>AppDeploymentRouteRequest</c>'s own default and again at
+    /// <c>AddDeploymentRouteAsync</c>'s null-or-whitespace fallback — and the fixture already
+    /// seeds <c>deploymentRouteA</c> on <c>routeA</c> at <c>"/"</c>. So the collision guard
+    /// <em>below</em> both tenant predicates threw the same <see cref="InvalidOperationException"/>,
+    /// and the test passed against a build with both predicates deleted.
+    ///
+    /// <para>Two refusals and one type is a test that cannot say which guard answered. Pinning the
+    /// message is what makes the difference, because the collision guard's wording ("Path prefix
+    /// '...' is already in use on this hostname") shares no phrase with a tenant refusal.</para>
+    ///
+    /// <para>⚠️ <b>The phrase has to name its own guard.</b> Asserting the shared tail "does not
+    /// belong to this tenant" was not enough and was caught by mutation: both predicates end with
+    /// it, so deleting the <c>AppRoute</c> one left this case green, answered by the
+    /// <c>AppDeployment</c> one. The two cases assert "App route not found" and "Deployment not
+    /// found" respectively — the halves that differ.</para>
+    ///
+    /// <para><c>routeB</c> is the second half: tenant B passes a route id of its own, which clears
+    /// the first predicate, so only the <c>AppDeployment</c> one can refuse it. Without that case
+    /// either predicate alone still covers the other, and the pair can only catch their total
+    /// removal.</para>
+    /// </summary>
     [Fact]
     public async Task A_stranger_cannot_link_a_deployment_route_to_someone_else_s_hostname()
     {
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => routes.AddDeploymentRouteAsync(tenantB, routeA, deploymentA,
-                new AppDeploymentRouteRequest { ServiceName = "theirs", ServicePort = 80 }));
+        // "/api", not the default "/": a free prefix, so no collision can answer in a tenant
+        // predicate's place.
+        AppDeploymentRouteRequest request = new()
+        {
+            PathPrefix = "/api", ServiceName = "theirs", ServicePort = 80,
+        };
+
+        (await routes.Invoking(r => r.AddDeploymentRouteAsync(tenantB, routeA, deploymentA, request))
+                .Should().ThrowAsync<InvalidOperationException>())
+            .Which.Message.Should().Contain("App route not found",
+                "the type alone is also thrown by the path-collision guard below both predicates — "
+                + "and \"does not belong to this tenant\" is not enough either, because BOTH "
+                + "predicates say that: asserting the shared phrase left this case green with the "
+                + "AppRoute predicate deleted, answered by the deployment one instead");
+
+        // B's own hostname, A's deployment: clears the AppRoute predicate so the AppDeployment
+        // one is the only thing left that can refuse.
+        (await routes.Invoking(r => r.AddDeploymentRouteAsync(tenantB, routeB, deploymentA, request))
+                .Should().ThrowAsync<InvalidOperationException>())
+            .Which.Message.Should().Contain("Deployment not found",
+                "a route id the caller legitimately owns must still not reach another tenant's "
+                + "deployment — this is the half the first case cannot reach");
+
+        // The siblings in this file all check the post-state; this one did not. A method that
+        // swallowed the error and returned would otherwise graft a rule onto A's hostname unseen.
+        await using ApplicationDbContext check = factory.CreateDbContext();
+        (await check.AppDeploymentRoutes.CountAsync(r => r.AppRouteId == routeA)).Should().Be(1);
+        (await check.AppDeploymentRoutes.CountAsync(r => r.AppRouteId == routeB)).Should().Be(0);
     }
 
     [Fact]
@@ -258,21 +338,72 @@ public class RouteTenantScopingTests : IDisposable
 
     /// <summary>
     /// A route may not point at another tenant's mTLS trust anchor: doing so would publish it on
-    /// that anchor's listener port and accept that tenant's client certificates.
+    /// that anchor's listener port and accept that tenant's client certificates. Anchors are
+    /// isolated by <c>ListenerPort</c> rather than by hostname, and bundles sharing a port are
+    /// merged into one trust store, so a foreign anchor admits its signer on every host there.
     ///
-    /// <para>⚠️ This passes against the old derived-tenant implementation too — see the class
-    /// note. It pins the rule, not the fix.</para>
+    /// <para>⚠️ <b>THIS TEST DID NOT REACH THE CHECK IT NAMES.</b> It is kept with the full
+    /// request it needs rather than quietly corrected, because the way it failed is the lesson.
+    /// It passed <c>Hostname</c>, <c>RequireClientCertificate</c> and <c>ClientCaBundleId</c> and
+    /// nothing else, which leaves <c>TlsMode</c> at <c>ClusterIssuer</c> with no issuer name — so
+    /// <c>AddRouteAsync</c> threw "ClusterIssuer name is required when using automatic TLS." four
+    /// guards above <c>ValidateClientCertificateAsync</c>, and the method under test was never
+    /// entered. <b>The warning against exactly this is eighty lines up</b>, on
+    /// <see cref="A_stranger_cannot_add_a_route_to_someone_else_s_app"/>, which sets a TLS mode
+    /// for this reason.</para>
+    ///
+    /// <para>⚠️ A second blocker sat behind the first: <c>bundleA</c> was seeded with no CA, and
+    /// the empty-anchor guard <em>below</em> the tenant predicate throws the same exception type.
+    /// Supplying the TLS mode alone would have moved the test from one wrong guard to another, so
+    /// the fixture now gives both anchors a certificate. Three guards answered one
+    /// <c>ThrowsAsync&lt;InvalidOperationException&gt;</c>; the message is asserted so that only
+    /// one of them can.</para>
+    ///
+    /// <para>The class note above says this test "cannot tell the two implementations apart". That
+    /// was true for a reason the note gets wrong: not because the derivation happens to give the
+    /// right answer, but because the method never ran. It could not tell a correct implementation
+    /// from a deleted one.</para>
     /// </summary>
     [Fact]
     public async Task A_stranger_cannot_point_a_route_at_another_tenant_s_trust_anchor()
     {
-        await Assert.ThrowsAsync<InvalidOperationException>(
-            () => routes.AddRouteAsync(tenantB, appB, new AppRouteRequest
-            {
-                Hostname = "mtls.beta.example",
-                RequireClientCertificate = true,
-                ClientCaBundleId = bundleA,
-            }));
+        (await routes.Invoking(r => r.AddRouteAsync(tenantB, appB, new AppRouteRequest
+                {
+                    Hostname = "mtls.beta.example",
+                    TlsMode = TlsMode.ClusterIssuer,
+                    ClusterIssuerName = "letsencrypt",
+                    RequireClientCertificate = true,
+                    ClientCaBundleId = bundleA,
+                }))
+                .Should().ThrowAsync<InvalidOperationException>())
+            .Which.Message.Should().Be("Trust anchor not found for this tenant.",
+                "the type alone is also thrown by the TLS-mode guard above this check and the "
+                + "empty-anchor guard below it — only the message says which one answered");
+
+        await using ApplicationDbContext check = factory.CreateDbContext();
+        (await check.AppRoutes.CountAsync(r => r.Hostname == "mtls.beta.example")).Should().Be(0);
+    }
+
+    /// <summary>
+    /// The owner half of the pair. A predicate that refuses <em>every</em> anchor also passes the
+    /// test above, so one of these without the other proves nothing: this one fails if the check
+    /// over-rejects, that one fails if it under-rejects.
+    /// </summary>
+    [Fact]
+    public async Task The_owner_may_point_a_route_at_its_own_trust_anchor()
+    {
+        AppRoute route = await routes.AddRouteAsync(tenantB, appB, new AppRouteRequest
+        {
+            Hostname = "mtls.beta.example",
+            TlsMode = TlsMode.ClusterIssuer,
+            ClusterIssuerName = "letsencrypt",
+            RequireClientCertificate = true,
+            ClientCaBundleId = bundleB,
+        });
+
+        route.ClientCaBundleId.Should().Be(bundleB,
+            "tenant B's own anchor must survive the check that rejects tenant A's");
+        route.RequireClientCertificate.Should().BeTrue();
     }
 
     public void Dispose()

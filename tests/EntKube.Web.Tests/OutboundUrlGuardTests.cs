@@ -96,10 +96,38 @@ public class OutboundUrlGuardTests
         Check(url).IsAllowed.Should().BeFalse();
     }
 
+    /// <summary>
+    /// ⚠️ <c>0.0.0.0</c> ALONE PROVED NEITHER OF THE TWO GUARDS THAT REFUSE IT. It is caught by
+    /// <c>address.Equals(IPAddress.Any)</c> in the early block, and again by the <c>0 =&gt; false</c>
+    /// arm of the octet switch — so deleting <em>either</em> left this test green, because the
+    /// other answered. Two redundant guards and one input is one guard's worth of coverage.
+    ///
+    /// <para>The last two cases are the separating inputs, each reachable by exactly one guard:
+    /// <c>0.1.2.3</c> is not <c>IPAddress.Any</c> so only the switch arm refuses it, and
+    /// <c>::</c> is not IPv4 so only <c>Equals(IPAddress.IPv6Any)</c> does — without it the IPv6
+    /// branch falls through every link-local/site-local/multicast/unique-local check and returns
+    /// <c>true</c>. <c>http://[::]/hook</c> is reachable input: <c>Validate</c> strips the
+    /// brackets and parses the literal, and on Linux a connect to the unspecified address is
+    /// serviced as loopback — so that is the IPv4 <c>0.0.0.0</c> hole in the other family.</para>
+    ///
+    /// <para>Nothing is broken today; all five are refused. What was missing was the ratchet, so
+    /// that a future "remove the redundant check" tidy-up cannot pass.</para>
+    ///
+    /// <para>⚠️ <b>One of the three clauses stays unpinned, and deliberately so.</b> Deleting
+    /// <c>|| address.Equals(IPAddress.Any)</c> on its own changes no behaviour at all: every IPv4
+    /// <c>0.0.0.0</c> falls through to <c>0 =&gt; false</c>, so that clause is defence in depth
+    /// rather than a guard, and no input can distinguish its presence. It is
+    /// <c>Equals(IPAddress.IPv6Any)</c> that carries real weight, because the IPv6 branch has no
+    /// equivalent arm. Measured, not assumed: of the three single-clause deletions, two now fail
+    /// and the third is behaviour-equivalent — a test claiming to catch it would be asserting
+    /// against the implementation's shape, not its behaviour.</para>
+    /// </summary>
     [Theory]
     [InlineData("http://0.0.0.0/hook")]
     [InlineData("http://224.0.0.1/hook")]
     [InlineData("http://255.255.255.255/hook")]
+    [InlineData("http://0.1.2.3/hook")]       // 0.0.0.0/8 — only the octet switch catches this
+    [InlineData("http://[::]/hook")]          // IPv6Any — only the Equals clause catches this
     public void Unspecified_multicast_and_broadcast_are_refused(string url)
     {
         Check(url).IsAllowed.Should().BeFalse();
@@ -223,6 +251,12 @@ public class OutboundUrlGuardTests
     [InlineData("127.0.0.1", false)]
     [InlineData("10.255.255.255", false)]
     [InlineData("::1", false)]
+    // The unspecified addresses, pinned on the predicate itself rather than only through
+    // Validate's parsing — the same separating pair as the theory above, plus 0.0.0.0, which
+    // reached this predicate from nowhere before.
+    [InlineData("0.0.0.0", false)]
+    [InlineData("0.1.2.3", false)]
+    [InlineData("::", false)]
     public void Classifies_addresses_as_publicly_routable_or_not(string address, bool expected)
     {
         OutboundUrlGuard.IsPubliclyRoutable(IPAddress.Parse(address)).Should().Be(expected);

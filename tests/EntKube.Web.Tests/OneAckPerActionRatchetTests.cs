@@ -1,4 +1,7 @@
+using System.Reflection;
 using System.Text.RegularExpressions;
+using EntKube.Web.Services;
+using EntKube.Web.Services.Clusters;
 using FluentAssertions;
 
 namespace EntKube.Web.Tests;
@@ -97,10 +100,6 @@ public class OneAckPerActionRatchetTests
         Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, Web, "Components"));
 
     /// <summary>
-    /// The seam verbs that raise an acknowledgment. Taken from the factory rather than guessed:
-    /// each of these calls <c>_gate.AcknowledgeAsync</c> before it touches the cluster.
-    /// </summary>
-    /// <summary>
     /// ⚠️ <b>First-party helpers that reach a gated verb one level down.</b> Omitting these is
     /// how the first version of this scan missed nine methods — every binding writer, because
     /// they all write through <c>SharedSecretKeys</c> since #305, and
@@ -114,6 +113,21 @@ public class OneAckPerActionRatchetTests
         @"SharedSecretKeys\.RemoveAsync\(",
     ];
 
+    /// <summary>
+    /// The seam verbs that raise an acknowledgment. Taken from the factory rather than guessed:
+    /// each of these calls <c>_gate.AcknowledgeAsync</c> before it touches the cluster.
+    ///
+    /// <para>⚠️ <b>STRINGS, NOT SYMBOLS — so a rename is this ratchet's blind spot.</b> They are
+    /// real members of <see cref="IClusterClient"/> and <see cref="IKubernetesClientFactory"/>, so
+    /// a hand-edit cannot land silently: sibling tests call them as compile-checked symbols and
+    /// the test project would stop building. But a rename-<em>symbol</em> refactor — the normal way
+    /// anyone renames an interface method — updates every one of those references and leaves this
+    /// array stale, with nothing red. <see cref="GatedCall"/> would then match nothing, the
+    /// offender count would be 0, and both ratchets below would pass against a tree they can no
+    /// longer see. <see cref="Every_gated_verb_still_exists_on_the_seam"/> is what makes that
+    /// rename fail here instead, the same way <c>ExecChangeIntentTests</c> reflects over its nine
+    /// exec verbs.</para>
+    /// </summary>
     private static readonly string[] GatedVerbs =
     [
         "ApplyManifestAsync", "ApplyManifestInNamespaceAsync", "ReplaceSecretAsync",
@@ -250,6 +264,18 @@ public class OneAckPerActionRatchetTests
             "if this stops finding operator actions, the member scan has broken and both "
             + "assertions in this file are vacuous");
 
+        // ⚠️ AND THE SECOND NUMBER. The check above guards AnyMember — the set being scanned —
+        // and says nothing about GatedCall, the pattern that decides the offender list. A scan
+        // needs both: what it enumerated AND what it matched. With a GatedCall that matches
+        // nothing, every assertion in this file is satisfied by an empty offender list while the
+        // count above is unchanged, which is exactly how a verb rename would go green and blind.
+        OperatorActions().Count(a => GatedCall.Matches(a.Body).Count >= 2)
+            .Should().BeGreaterThan(20,
+                "if no operator action makes two gated changes any more, the BeginOperation / "
+                + "DeclareConsequence exclusion in FindActionsThatAskTwice is carrying no weight "
+                + "and this ratchet is passing against nothing — 69 actions match today, so this "
+                + "floor has real headroom and only a broken GatedCall can breach it");
+
         found.Should().BeEquivalentTo(AsksNothingBecauseTheUiAlreadyDid.Keys,
             "an operator action that suppresses every acknowledgment has to say why here — the "
             + "reason is that the UI already confirmed the act, and nothing in the source can "
@@ -269,18 +295,82 @@ public class OneAckPerActionRatchetTests
     }
 
     /// <summary>
-    /// The banked number has to be re-measured when it falls. With both at zero this cannot fire
-    /// on a falling count — there is nothing left to fall — so what it now guards is a future
-    /// re-opening of the backlog: convert something new, forget to re-bank, and this says so.
+    /// The banked number has to be re-measured when it falls, so that a conversion banks its own
+    /// number instead of leaving room for the next regression to slip in free.
+    ///
+    /// <para>⚠️ <b>THIS ASSERTION USED TO BE UNFALSIFIABLE.</b> It read
+    /// <c>(Baseline - found) &lt;= AllowedDrift</c>, and with <c>Baseline</c> and
+    /// <c>AllowedDrift</c> both now 0 that reduces to <c>-found &lt;= 0</c> — true for every
+    /// possible tree, since a count cannot be negative. It could not go red at all. The slack
+    /// existed for a real reason (two conversions in flight made <c>main</c> red four times when
+    /// the second merged), but that reason died with the backlog: at zero there is nothing left
+    /// to fall, so the exact-match form the sibling ratchets use is now the correct one and
+    /// carries no merge hazard.</para>
+    ///
+    /// <para>⚠️ <b>Be clear about what that buys, which is less than it looks.</b> At
+    /// <c>Baseline</c> 0 this now coincides with
+    /// <see cref="No_new_operator_action_asks_more_than_once"/> — a count above zero fails both —
+    /// so it catches nothing its sibling does not. What changed is that it is <em>falsifiable</em>
+    /// instead of a tautology, and it earns its keep the moment the baseline is non-zero again,
+    /// where it is the only thing that notices a count that fell without being re-banked.
+    /// Verified by raising the banked number against an unchanged tree: it fails and names both
+    /// figures.</para>
     /// </summary>
     [Fact]
     public void The_ratchet_does_not_carry_unbounded_slack()
     {
         int found = FindActionsThatAskTwice().Count;
 
-        (Baseline - found).Should().BeLessThanOrEqualTo(AllowedDrift,
+        found.Should().Be(Baseline,
             $"now {found}, banked {Baseline} — re-bank it, or the gap becomes headroom for "
             + "offenders nobody converted");
+    }
+
+    /// <summary>
+    /// ⚠️ <b>Every verb in <see cref="GatedVerbs"/> is still a real member of the seam.</b>
+    /// <see cref="GatedCall"/> is built from those strings, so a verb that no longer exists
+    /// matches nothing — and because the baseline is 0, an offender list that silently empties
+    /// passes forever. A rename-symbol refactor updates every compiled call site and cannot touch
+    /// a string array, which makes this the one failure mode the compiler cannot catch for us.
+    ///
+    /// <para>So the strings are checked against reflection rather than against another list: the
+    /// same guard <c>ExecChangeIntentTests</c> puts on its nine exec verbs. Both interfaces are
+    /// needed — callers reach the seam through <see cref="IClusterClient"/> while the verbs were
+    /// taken from <see cref="IKubernetesClientFactory"/> — and the two helper hops and the one
+    /// private bare-called helper are checked too, since blinding any of them blinds the scan the
+    /// same way.</para>
+    /// </summary>
+    [Fact]
+    public void Every_gated_verb_still_exists_on_the_seam()
+    {
+        HashSet<string> seam =
+        [
+            .. typeof(IClusterClient).GetMethods().Select(m => m.Name),
+            .. typeof(IKubernetesClientFactory).GetMethods().Select(m => m.Name),
+        ];
+
+        // Named individually rather than as a set comparison: the seam has many more methods than
+        // this list, so the question is one-directional — does each verb still exist?
+        foreach (string verb in GatedVerbs)
+        {
+            seam.Should().Contain(verb,
+                $"GatedCall is built from this string, so if '{verb}' was renamed on the seam the "
+                + "pattern stops matching it and the ratchet goes green against work it can no "
+                + "longer see — rename it here too");
+        }
+
+        // The two one-hop helpers. Their regexes name the type as well as the method, so both
+        // halves have to still resolve.
+        typeof(SharedSecretKeys).GetMethod("WriteAsync").Should().NotBeNull(
+            "GatedThroughHelpers matches SharedSecretKeys.WriteAsync( by name");
+        typeof(SharedSecretKeys).GetMethod("RemoveAsync").Should().NotBeNull(
+            "GatedThroughHelpers matches SharedSecretKeys.RemoveAsync( by name");
+
+        // ApplyRawYamlAsync is private and called bare inside its own class, so it has no
+        // interface to reflect over — but it is still a verb GatedCall depends on by name.
+        File.ReadAllText(Path.Combine(ServicesRoot, "KubernetesOperationsService.cs"))
+            .Should().Contain("ApplyRawYamlAsync",
+                "GatedCall matches this one without a dot; renaming it blinds that branch");
     }
 
     /// <summary>
