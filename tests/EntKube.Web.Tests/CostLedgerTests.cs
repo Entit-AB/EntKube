@@ -1,8 +1,11 @@
 using EntKube.Web.Data;
+using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.Cost;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
+using System.Data.Common;
 using Microsoft.Extensions.Logging.Abstractions;
 
 namespace EntKube.Web.Tests;
@@ -696,5 +699,127 @@ public class CostLedgerTests : IDisposable
 
         await db.SaveChangesAsync();
         db.ChangeTracker.Clear();
+    }
+
+    /// <summary>
+    /// ⭐ The per-cluster period claim, raced for real.
+    ///
+    /// <para>⚠️ <b><c>A_writer_that_loses_the_race_for_a_period_books_nothing</c> does not exercise
+    /// the claim, and could not.</b> It starts two <c>RecordAsync</c> tasks and awaits them
+    /// together, but every context in this class shares one <see cref="SqliteConnection"/> and
+    /// Microsoft.Data.Sqlite completes its async methods synchronously — so the first writer runs
+    /// to completion before the second begins. The second then reads a cursor the first already
+    /// advanced, <c>CostAccrual.Measure</c> returns an empty span on its <c>last &gt;= now</c>
+    /// branch (whose own comment names this case: "a period already claimed by another writer"),
+    /// and it <c>continue</c>s TEN LINES BEFORE the claim. Measured: deleting the
+    /// <c>LastSampleAt == seen</c> condition entirely — making the claim unconditional — left all
+    /// 32 tests in this file passing.</para>
+    ///
+    /// <para>⚠️ That matters more here than it would elsewhere. This <c>ExecuteUpdateAsync</c> is
+    /// the ONLY claim-before-write primitive in the codebase: there is no leader election, no
+    /// advisory lock, and no <c>IsRowVersion</c>/<c>IsConcurrencyToken</c> anywhere. It is the
+    /// whole of what stops two instances double-booking an hour, and double-booking is the failure
+    /// this file's own summary ranks as the most expensive to get wrong.</para>
+    ///
+    /// <para>So the interleaving is forced: a command interceptor lets the racer read the cursor,
+    /// runs a competing writer that claims and advances it, and only then allows the racer's
+    /// conditional <c>UPDATE</c> to execute. Its <c>WHERE LastSampleAt == seen</c> now matches
+    /// nothing, which is the entire point of the primitive.</para>
+    ///
+    /// <para>This is the shape <see cref="TelemetryIncidentClaimTests"/> describes itself as having
+    /// copied FROM this writer — "both read before either wrote". It is also the only place
+    /// <c>CostLedgerWriteResult.ClustersAlreadyClaimed</c> is ever read: it was assigned and never
+    /// once observed, in src or in tests.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_period_claimed_between_the_read_and_the_claim_books_nothing()
+    {
+        await RecordAsync(Noon, Report(cpuCost: 730m));
+
+        ClaimRaceInterceptor interceptor = new();
+        CostLedgerWriter racer = new(
+            new RacingCostFactory(connection, interceptor),
+            NullLogger<CostLedgerWriter>.Instance);
+
+        // Runs after the racer has read the cursor and before its claim lands.
+        interceptor.OnClaimAboutToRun = () => RecordAsync(Noon.AddHours(1), Report(cpuCost: 730m));
+
+        CostLedgerWriteResult result = await racer.RecordAsync(
+            tenantId,
+            Report(cpuCost: 730m),
+            new Dictionary<Guid, ClusterCostRate>
+            {
+                [clusterId] = new ClusterCostRate
+                {
+                    ClusterId = clusterId, Currency = "EUR", ChargeOnRequests = true,
+                },
+            },
+            Noon.AddHours(1));
+
+        // ⚠️ Health check FIRST, and it is not optional. If the interceptor never matched the
+        // claim — a renamed table, a reshaped command, EF batching it differently — then no race
+        // was staged, and every assertion below would pass for precisely the wrong reason: the
+        // same wrong reason the sequential test passes for today.
+        interceptor.Fired.Should().BeTrue(
+            "the interceptor must have caught the claim's UPDATE, or no race happened at all");
+
+        result.ClustersAlreadyClaimed.Should().Be(1,
+            "the racer lost the period and must say so, rather than failing silently");
+
+        result.ClustersAccrued.Should().Be(0,
+            "a writer that loses the claim books nothing — the only safe direction to fail in");
+
+        (await db.CostLedgerEntries.SingleAsync()).CpuCost.Should().Be(1m,
+            "the hour is booked exactly once, by the competitor that won the claim");
+    }
+
+    /// <summary>
+    /// Lets a competitor run between the racer's cursor READ and its conditional claim.
+    ///
+    /// <para>⚠️ A <see cref="SaveChangesInterceptor"/> cannot do this job: <c>ExecuteUpdateAsync</c>
+    /// never goes through <c>SaveChanges</c>, so the claim is invisible to the interceptor shape
+    /// <c>SecretVersionNumberUniquenessTests</c> uses for its own race. This hooks the command
+    /// instead.</para>
+    /// </summary>
+    private sealed class ClaimRaceInterceptor : DbCommandInterceptor
+    {
+        public Func<Task>? OnClaimAboutToRun { get; set; }
+
+        /// <summary>Whether the claim was actually caught. Asserted, not assumed.</summary>
+        public bool Fired { get; private set; }
+
+        public override async ValueTask<InterceptionResult<int>> NonQueryExecutingAsync(
+            DbCommand command, CommandEventData eventData, InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            if (OnClaimAboutToRun is not null
+                && command.CommandText.Contains("CostLedgerCursors", StringComparison.Ordinal)
+                && command.CommandText.Contains("UPDATE", StringComparison.OrdinalIgnoreCase))
+            {
+                // Disarmed before running, so the competitor's own claim is not intercepted
+                // and this cannot recurse.
+                Func<Task> competitor = OnClaimAboutToRun;
+                OnClaimAboutToRun = null;
+                Fired = true;
+                await competitor();
+            }
+
+            return result;
+        }
+    }
+
+    /// <summary>
+    /// The same single connection every other context here uses, plus the interceptor. Mirrors
+    /// <c>TestDbContextFactory.Create</c> so the racer differs from the ordinary writer in exactly
+    /// one respect.
+    /// </summary>
+    private sealed class RacingCostFactory(SqliteConnection connection, IInterceptor interceptor)
+        : IDbContextFactory<CostDbContext>
+    {
+        public CostDbContext CreateDbContext()
+            => new(new DbContextOptionsBuilder<CostDbContext>()
+                .UseSqlite(connection)
+                .AddInterceptors(interceptor)
+                .Options);
     }
 }
