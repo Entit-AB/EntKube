@@ -60,7 +60,19 @@ jobs:
   # real one, so it is left to a person rather than assumed.
   test:
     name: Tests (reporting only — does not gate the image)
-    runs-on: ubuntu-latest
+
+    # ⚠️ PINNED, not `ubuntu-latest`. The `ubuntu-latest` label began migrating to Ubuntu 26 on
+    # 2026-10-19 (actions/runner-images#14748) and the rollout is gradual, so that label can give
+    # one OS on one run and another on the next — which is a confound in anything timed, and a
+    # source of "it worked yesterday" that nothing in the repo would record.
+    #
+    # ⚠️ IT IS NOT THE CAUSE OF THIS JOB'S SLOWNESS, checked rather than assumed: all six runs
+    # whose logs survive report ubuntu24/20261012.334, so every slow run so far was Ubuntu 24.
+    # This is pinned to stop the migration becoming a second variable while the first is open.
+    #
+    # The arm64 build below was already pinned, so until now the two architectures were one
+    # migration away from building on different operating systems.
+    runs-on: ubuntu-24.04
 
     # ⚠️ THE BOUND BELONGS ON THE STEP, NOT THE JOB — and the first attempt put it on the job.
     #
@@ -103,10 +115,16 @@ jobs:
       # The log must SAY which compiler it used. Both failures this job has had were invisible in
       # its own output: first it tested an artifact nobody ships, then it ignored a pin that looked
       # right in the YAML. Two lines of output make the next mismatch readable instead of inferred.
-      - name: Say which SDK this is
+      # And the machine, because "slower than a laptop" was an inference and this makes it a
+      # number. ~12 core-minutes of work taking over 55 here needs the core count on the record.
+      - name: Say which SDK and which machine this is
         run: |
           echo "selected: $(dotnet --version)"
           dotnet --list-sdks
+          echo "--- machine ---"
+          echo "cores:  $(nproc)"
+          echo "memory: $(free -h | awk '/^Mem:/ {print $2" total, "$7" available"}')"
+          echo "os:     $(. /etc/os-release && echo "$PRETTY_NAME")"
 
       # ⚠️ --blame-hang WAS REMOVED, having been added by me to diagnose this and then having
       # plausibly made it worse. It never tripped at 5 minutes on any run, so it answered nothing;
@@ -179,7 +197,7 @@ jobs:
       matrix:
         include:
           - platform: linux/amd64
-            runner: ubuntu-latest
+            runner: ubuntu-24.04
           - platform: linux/arm64
             runner: ubuntu-24.04-arm
 
@@ -278,7 +296,8 @@ jobs:
   merge:
     name: Publish the manifest list
     needs: build
-    runs-on: ubuntu-latest
+    # Pinned for the same reason as the others — see the test job.
+    runs-on: ubuntu-24.04
     outputs:
       image-tag: ${{ steps.meta.outputs.version }}
 

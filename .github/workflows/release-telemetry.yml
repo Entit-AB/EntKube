@@ -31,7 +31,9 @@ env:
 jobs:
   verify:
     name: Verify chart and catalog agree
-    runs-on: ubuntu-latest
+    # Pinned rather than `ubuntu-latest`: that label is mid-migration to Ubuntu 26
+    # (actions/runner-images#14748). See deploy.yml's test job.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -83,7 +85,9 @@ jobs:
   publish:
     name: Build and publish
     needs: verify
-    runs-on: ubuntu-latest
+    # Pinned rather than `ubuntu-latest`: that label is mid-migration to Ubuntu 26
+    # (actions/runner-images#14748). See deploy.yml's test job.
+    runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
