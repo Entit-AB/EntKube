@@ -1809,6 +1809,80 @@ So the order is:
 services audited are already safe — idempotent reconcilers, or claim-protected. The work is
 per-service and the list is in the audit, not a blanket mechanism.
 
+### 9.7 The last telemetry gap, and the pattern that already solves it (2026-10-26)
+
+With every instance sealing its own index (`AddPerInstanceWork`, the sealer reclassification),
+telemetry **writes** are distributed: a sealed segment lands in object storage with its row in
+the shared catalog, and any instance can read it. One gap remains.
+
+**A query on instance B cannot see what instance A ingested in the last `RollMaxAge`.** The
+active index exists only in the process writing it. That is not an oversight — `SegmentScope`
+says so outright:
+
+> the hot active index exists only in the process writing it, while sealed segments live in
+> object storage and can be read by any pod that can reach the bucket
+
+#### ⚠️ Do not reach for a shorter RollMaxAge
+
+It is the obvious fix and it is the wrong one. **There is no compaction anywhere in
+`EntKube.Telemetry`** — nothing merges sealed segments after they are written. At 90-day
+retention and hourly rolling, a tenant already accumulates roughly 2,160 segments per signal;
+at five-minute rolling that becomes ~26,000, and a query opens a reader over every segment
+overlapping its window. Shortening the window trades a one-hour visibility gap for a permanent
+query cost, and the hydration work that made log fetches slow is the evidence of what that
+costs.
+
+Compaction would make the trade viable and does not exist. That is its own change.
+
+#### The pattern is already built — for the in-cluster split
+
+`SegmentScope` has three values and the split already uses all of them:
+
+| Scope | Reads | Answerable by |
+|---|---|---|
+| `Hot` | only the unsealed active index | the process that wrote it |
+| `Sealed` | only sealed segments | any pod with bucket access |
+| `All` | both | a single process that owns the whole index |
+
+And `SegmentLogService`'s own doc comment describes the arrangement:
+
+> The querier runs one instance at `Sealed` for what it can read from object storage, and the
+> indexer exposes a second instance at `Hot` on an internal route for the querier to merge in.
+
+That is exactly the shape a multi-instance management plane needs, running today in customer
+clusters. `FederatedLogBackend`, `HttpLogBackend`, `HttpTraceBackend` and the node's HTTP API
+are the machinery, and they are exercised in production.
+
+#### What is actually missing: peer discovery
+
+The management plane is a single process today, so it runs at `All` and has never needed to ask
+another instance anything. To distribute it:
+
+1. Each instance exposes its **own** `Hot` tier on an internal route — the indexer already does
+   this; the route and the backend exist.
+2. A query becomes `Sealed` **once** (shared, any instance) plus `Hot` from **every** instance,
+   merged. `FederatedLogBackend` already merges across sources.
+3. Instances have to know their peers. This is the only genuinely new part.
+
+⚠️ **Step 3 is where the design decision lives**, and it is an operational one rather than a
+code one: a static list of instance URLs in configuration (works everywhere, must be updated
+when scaling), DNS against a headless Service (Kubernetes-native, nothing to maintain), or
+registration rows in the shared database (self-maintaining, needs liveness and cleanup). The
+first is the smallest honest step and the one a `docker compose` deployment can use unchanged.
+
+⚠️ And a budget caveat that is already recorded elsewhere in this programme: sealed and hot need
+DIFFERENT query budgets. A single budget once returned a *successful empty answer* when the
+sealed half timed out. A federated read that silently drops a peer's hot tier is the same defect
+— a partial answer must fail rather than look complete.
+
+#### What this means for sequencing
+
+`entkube-telemetry` as a separate deployable (§4.2) and this are **alternatives, not steps**.
+A single telemetry process removes the gap by having one writer again; peer federation removes
+it by making every writer readable. The first is less code and more operations; the second is
+more code and no new deployable. Both are legitimate, and neither should be started without
+deciding which.
+
 ### 9.6 The three the audit could not settle, now settled (2026-10-24)
 
 `ObservedSecretRefreshService`, `MessagingStatusPollingService` and
