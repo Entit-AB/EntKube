@@ -151,6 +151,12 @@ public class RolloutWatcherService(
     /// without it: two instances, two <c>kubectl rollout undo</c>s, the second one rolling
     /// forward onto the bad release again, and two verdicts both claiming a rollback.</para>
     ///
+    /// <para>⚠️ The claim covers EntKube's own instances and nothing else. The undo itself is
+    /// pinned to a named revision and refuses a workload that has already been rolled back — see
+    /// <see cref="RolloutService.RollbackAsync"/> — which is what covers an operator undoing by
+    /// hand mid-judgement, or a retry after a partial rollback. Neither mechanism replaces the
+    /// other.</para>
+    ///
     /// <para>⚠️ Exposed rather than private so a test can drive one judgement end to end and
     /// assert that a second attempt changes nothing — the same reason
     /// <see cref="NotificationSeverityFor"/> is exposed. A verdict reached twice is not
