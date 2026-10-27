@@ -1763,13 +1763,61 @@ The options, with their real costs:
   far larger change than the extraction it is meant to enable, so it should not be smuggled in with it.
 - **Extract without tests.** Not acceptable for a credential path.
 
-This is worth stating before anyone starts: the extraction itself is an afternoon, and the fixture is the
-project. A PR that discovers this halfway through will either grow a nine-service fixture by accident or
-ship a credential operation with no coverage.
+~~This is worth stating before anyone starts: the extraction itself is an afternoon, and the fixture is
+the project.~~
 
-⚠️ The extracted service would also sit in Secrets while depending on DataServices, Identity and Delivery
-services directly — acceptable for Phase 0 (it is strictly better than a Razor page doing it), and exactly
-the edge Phase 1's contracts exist to replace. Record it as a known follow-up rather than a surprise.
+#### ⚠️ That was wrong, and the third option is the cheap one (done 2026-10-27)
+
+The two options above are a false choice, and the paragraph they led to — "the fixture is the project" —
+would have sent the next person down the expensive path. **The concrete-class problem only blocks testing
+if the behaviour reaches those services directly.** It does not have to.
+
+Expressed as two small records — `BindingFamily` (how to list a family's bindings) and `BindingToSync`
+(how to sync one) — the orchestration takes delegates instead of services:
+
+```csharp
+public static async Task<(List<BindingSyncOutcome>, List<FamilyLoadFailure>)>
+    RunFamiliesAsync(IReadOnlyList<BindingFamily> families, CancellationToken ct = default)
+```
+
+Everything that carries behaviour is then testable with lambdas — the `SyncEnabled` filter, both layers of
+failure isolation, the shape of the report — and the nine services become one line of wiring each, in a
+private `FamiliesFor` that contains no decisions. No fixture, no interfaces, and no coverage traded away.
+Thirteen tests, four mutations verified.
+
+**The general lesson, which is not about this page.** "These collaborators cannot be mocked" is a fact
+about *reaching* them, not about the behaviour that uses them. Before paying for a fixture or inventing
+interfaces, check whether the behaviour can be separated from the collaboration — because if it can, the
+part worth testing usually needs none of them. The question to ask is not "how do I fake these nine
+services" but "what here is a decision, and does it actually need a service to make it".
+
+What remains untested is `FamiliesFor` and the one-line-per-target dispatch, which is the right thing to
+leave: both are deliberately free of decisions, and the dispatch's one real choice (`ResolveTarget`) was
+pulled out as a pure function and tested exhaustively.
+
+⚠️ **It also found a silent success.** The page dispatched with `if / else if / else if` and no final
+branch, then reported `✓ db/{name}` regardless — so a `DatabaseBinding` naming no database at all was
+reported as synced while nothing was sent. The three ids are each `Guid?` and documented "mutually
+exclusive", which guarantees at *most* one and not at least one, and no schema constraint requires one.
+Not a row anyone has been shown to have; the point is that the code could not have told them.
+
+⚠️ The extracted service sits in Secrets while depending on DataServices, Identity and Delivery services
+directly — acceptable for Phase 0 (it is strictly better than a Razor page doing it), and exactly the edge
+Phase 1's contracts exist to replace. Recorded in the class doc and in `ModuleServiceMap` rather than left
+to be discovered.
+
+#### What it actually cost, against the estimate
+
+| | predicted | measured |
+|---|---|---|
+| orchestration moved | ~126 lines | 126 lines |
+| injects on the page | 12 | **6** (seven died, one added) |
+| test fixture | "the project" | **none** — 13 tests, all lambdas |
+
+The `@code` block did not shrink by 126 lines: about 60 lines of formatting and wiring stayed, which is
+what §6.1 means by "report what it moved and what it deliberately left". Turning the outcomes into the
+text in the box is a page's job, and the service returning data rather than `"✓ db/{name}"` strings is the
+specific thing that makes it callable by anything else.
 
 ## 7. What not to do
 
