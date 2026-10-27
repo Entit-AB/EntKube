@@ -229,6 +229,61 @@ public sealed class TestDbContextFactory(SqliteConnection connection)
 ///
 /// Seed a cluster's kubeconfig with <see cref="SeedKubeconfigAsync"/>. Dispose to tear it down.
 /// </summary>
+/// <summary>
+/// ⚠️ <b>ONE INTERCEPTOR INSTANCE FOR THE WHOLE SUITE, and that is the entire point of this type.</b>
+///
+/// <para><c>IMaterializationInterceptor</c> is an <c>ISingletonInterceptor</c>, and EF Core hashes
+/// its singleton interceptors <b>by reference</b> into the key for its internal service provider
+/// (<c>CoreOptionsExtension.GetServiceProviderHashCode</c> /
+/// <c>ShouldUseSameServiceProvider</c>). <c>ServiceProviderCache.Instance</c> is a <b>static</b>
+/// dictionary with no <c>Remove</c> and no <c>Clear</c>. So a new interceptor instance per test
+/// meant a new EF internal provider per test, cached for the life of the process, each holding its
+/// own <c>ModelSource</c> cache — a full 165-entity model. About 740 of them, at roughly 11 MB
+/// each: the suite peaked at <b>8.3 GB</b> and the CI runner has 7.8 GB, which is why the Tests
+/// job had never once finished.</para>
+///
+/// <para>⚠️ EF SAYS SO ITSELF, and the fixture used to silence it:
+/// <c>ManyServiceProvidersCreatedWarning</c> — "commonly caused by injection of a new singleton
+/// service instance into every DbContext instance" — was suppressed here with the comment "expected
+/// in tests, not a leak". It fires past the twentieth provider, so it had been logging hundreds of
+/// times. The suppression is now <c>Throw</c> rather than <c>Ignore</c>: if anything reintroduces a
+/// per-test interceptor, the suite fails instead of quietly costing gigabytes.</para>
+///
+/// <para><b>The product interceptor still does the work</b>, which matters: the reason every
+/// context here carries one is that a module context without it hands back a cluster whose
+/// <c>Kubeconfig</c> is silently null, and a test-only replacement would stop proving that. This
+/// routes by connection string — unique per <see cref="InterceptingTestDb"/> — so there is no
+/// ambient state and no dependence on which thread a materialization happens on.</para>
+/// </summary>
+internal sealed class RoutingKubeconfigInterceptor : IMaterializationInterceptor
+{
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, KubeconfigMaterializationInterceptor> ByConnection = new(StringComparer.Ordinal);
+
+    public static readonly RoutingKubeconfigInterceptor Instance = new();
+
+    private RoutingKubeconfigInterceptor() { }
+
+    public static void Register(string connectionString, KubeconfigMaterializationInterceptor real)
+        => ByConnection[connectionString] = real;
+
+    /// <summary>
+    /// Called from <see cref="InterceptingTestDb.Dispose"/>. Without it the routing table would
+    /// become the very retention it exists to remove — smaller per entry, but still one live
+    /// resolver and service provider per test for the life of the run.
+    /// </summary>
+    public static void Unregister(string connectionString)
+        => ByConnection.TryRemove(connectionString, out _);
+
+    public object InitializedInstance(MaterializationInterceptionData materializationData, object entity)
+    {
+        string? connectionString = materializationData.Context.Database.GetConnectionString();
+
+        return connectionString is not null && ByConnection.TryGetValue(connectionString, out KubeconfigMaterializationInterceptor? real)
+            ? real.InitializedInstance(materializationData, entity)
+            : entity;
+    }
+}
+
 public sealed class InterceptingTestDb : IDisposable
 {
     public string ConnectionString { get; } = $"DataSource=file:test-{Guid.NewGuid():N}?mode=memory&cache=shared";
@@ -260,7 +315,13 @@ public sealed class InterceptingTestDb : IDisposable
             .BuildServiceProvider();
 
         Resolver = new KubeconfigResolver(sp, Encryption);
-        Factory = new InterceptingFactory(ConnectionString, new KubeconfigMaterializationInterceptor(Resolver));
+
+        // The product interceptor, registered against this database and reached through the one
+        // shared routing instance — so EF sees a single singleton interceptor for the whole suite.
+        RoutingKubeconfigInterceptor.Register(
+            ConnectionString, new KubeconfigMaterializationInterceptor(Resolver));
+
+        Factory = new InterceptingFactory(ConnectionString);
 
         using ApplicationDbContext ctx = plain.CreateDbContext();
         ctx.Database.EnsureCreated();
@@ -294,7 +355,11 @@ public sealed class InterceptingTestDb : IDisposable
         }
     }
 
-    public void Dispose() => keepAlive.Dispose();
+    public void Dispose()
+    {
+        RoutingKubeconfigInterceptor.Unregister(ConnectionString);
+        keepAlive.Dispose();
+    }
 
     /// <summary>
     /// A factory with NO kubeconfig interceptor — this is the one the resolver itself holds, and
@@ -318,9 +383,11 @@ public sealed class InterceptingTestDb : IDisposable
                 typeof(TContext),
                 new DbContextOptionsBuilder<TContext>()
                     .UseSqlite(connectionString)
-                    // Each test class builds its own interceptor instance, so the full suite
-                    // creates many EF internal service providers — expected in tests, not a leak.
-                    .ConfigureWarnings(w => w.Ignore(CoreEventId.ManyServiceProvidersCreatedWarning))
+                    // ⚠️ The comment here used to read "expected in tests, not a leak". It was a
+                    // leak, and the biggest one in the suite — see RoutingKubeconfigInterceptor.
+                    // This path never carried an interceptor, so it always collapsed into one
+                    // provider; Throw keeps it that way.
+                    .ConfigureWarnings(w => w.Throw(CoreEventId.ManyServiceProvidersCreatedWarning))
                     .Options)!;
     }
 
@@ -329,7 +396,7 @@ public sealed class InterceptingTestDb : IDisposable
     /// reason — and every one of them carries the kubeconfig interceptor, because a module
     /// context without it hands back a cluster whose Kubeconfig is silently null.
     /// </summary>
-    public sealed class InterceptingFactory(string connectionString, KubeconfigMaterializationInterceptor interceptor)
+    public sealed class InterceptingFactory(string connectionString)
         : IDbContextFactory<ApplicationDbContext>,
           IDbContextFactory<IdentityDbContext>,
           IDbContextFactory<FleetDbContext>,
@@ -351,8 +418,11 @@ public sealed class InterceptingTestDb : IDisposable
                 typeof(TContext),
                 new DbContextOptionsBuilder<TContext>()
                     .UseSqlite(connectionString)
-                    .AddInterceptors(interceptor)
-                    .ConfigureWarnings(w => w.Ignore(CoreEventId.ManyServiceProvidersCreatedWarning))
+                    .AddInterceptors(RoutingKubeconfigInterceptor.Instance)
+                    // ⚠️ THROW, not Ignore. One shared interceptor means EF builds one internal
+                    // provider, so this cannot fire — and if a change reintroduces a per-instance
+                    // interceptor it fails here instead of costing gigabytes silently.
+                    .ConfigureWarnings(w => w.Throw(CoreEventId.ManyServiceProvidersCreatedWarning))
                     .Options)!;
 
         IdentityDbContext IDbContextFactory<IdentityDbContext>.CreateDbContext() => Create<IdentityDbContext>();
