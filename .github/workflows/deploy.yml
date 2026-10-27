@@ -163,12 +163,42 @@ jobs:
         continue-on-error: true
         run: |
           set +e
+
+          # ⚠️ A MEMORY SAMPLER, because the stall blames no test and the machine is the suspect.
+          # One run streamed output steadily to its bound; the next went silent for 25 MINUTES
+          # after a test that took 1m16s, on the same commit. Nothing single-test explains that.
+          # This box is 2 cores and 7.8 GB, and every test class builds a fresh EF model over 165
+          # entities plus an in-memory SQLite database — if that tips into swap or GC thrash,
+          # everything stops at once and no individual test looks guilty. Thirty-second samples
+          # either show the collapse or rule the machine out; both are worth more than another
+          # round of my guessing.
+          ( while true; do
+              echo "[mem $(date -u +%H:%M:%S)] $(free -m | awk '/^Mem:/ {print "used="$3"M avail="$7"M"}') \
+          load=$(cut -d" " -f1-3 /proc/loadavg)"
+              sleep 30
+            done ) &
+          SAMPLER=$!
+
+          # ⚠️ --blame-hang IS BACK, AND I REMOVED IT ONE RUN AGO. The reasoning then was that it
+          # had never tripped so it answered nothing, and that its data collector might be part of
+          # the undead-process-tree problem. The first half is now obsolete: a 25-minute silence is
+          # exactly what it exists to name, and it was absent for the one run that showed one. The
+          # second half was about teardown during a JOB cancellation, which the step-level bound
+          # has since removed.
+          #
+          # 15 minutes, not 5. On two saturated cores a test needing under a second of CPU can wait
+          # minutes to be scheduled — the earlier "3 m 18 s" test measured queueing, not work — so a
+          # low threshold would fire on contention and name an innocent test. 15 is above any
+          # queueing seen and far below the 48-minute bound.
           timeout --signal=INT --kill-after=60s 48m \
             dotnet test tests/EntKube.Web.Tests/EntKube.Web.Tests.csproj --nologo \
+            --blame-hang --blame-hang-timeout 15min \
             --logger "trx;LogFileName=tests.trx" \
             --logger "console;verbosity=normal" \
             --results-directory "${{ runner.temp }}/testresults"
           code=$?
+
+          kill "$SAMPLER" 2>/dev/null || true
           echo "exit-code=$code" >> "$GITHUB_OUTPUT"
           exit $code
 
