@@ -90,7 +90,7 @@ jobs:
     # The job bound below is deliberately ABOVE the step bound so it can never be the thing that
     # fires. If it ever does, something outside the suite is wrong — read the log rather than
     # raising the number.
-    timeout-minutes: 60
+    timeout-minutes: 70
 
     steps:
       - uses: actions/checkout@v4
@@ -137,17 +137,33 @@ jobs:
       # leaves none — but the job is no longer cancelled, so its LOG is kept, and the log now
       # carries per-test names as they execute. That is what identifies a slow or stuck test.
       #
-      # Two bounds, innermost first. `timeout --signal=INT 38m` asks dotnet to stop and lets it
-      # flush, which can still produce a .trx; the step's own 40-minute bound is the backstop if it
-      # ignores that. `set +e` plus the explicit exit keeps the real code visible in the summary
-      # below instead of swallowing it.
+      # Two bounds, innermost first. `timeout --signal=INT` asks dotnet to stop and lets it flush,
+      # which can still produce a .trx; the step's own bound is the backstop if it ignores that.
+      # `set +e` plus the explicit exit keeps the real code visible in the summary below.
+      #
+      # ⚠️ 38 MINUTES WAS ABOUT TWO MINUTES SHORT, which the first bounded run finally showed —
+      # it exited 124 having very nearly finished. Measured from that run's log:
+      #
+      #     build + startup   11.5 min   (10.8 of it compiling 14 assemblies)
+      #     test phase        26.8 min   (killed here, not finished)
+      #
+      # and the machine it ran on: 2 cores, 7.8 GB. That is the whole explanation. The suite is
+      # ~12 core-minutes of work; on 2 cores that is ~6 minutes if perfectly parallel, and this
+      # runner is roughly 4-5x slower per core than a developer machine, which lands on ~28
+      # minutes of tests. There is no hang and nothing pathological — the earlier suspicion of one
+      # was wrong, and `--blame-hang` never tripping was the first evidence of that.
+      #
+      # ⚠️ A test reported as taking "3 m 18 s" is NOT a slow test. xUnit reports wall-clock, and
+      # with both cores saturated a test needing 0.86 s of CPU (measured locally) can sit minutes
+      # in the scheduler queue. Read long individual durations here as contention, not as a
+      # culprit, or you will go hunting for a bug that is not there. I did.
       - name: Run the suite
         id: suite
-        timeout-minutes: 40
+        timeout-minutes: 50
         continue-on-error: true
         run: |
           set +e
-          timeout --signal=INT --kill-after=60s 38m \
+          timeout --signal=INT --kill-after=60s 48m \
             dotnet test tests/EntKube.Web.Tests/EntKube.Web.Tests.csproj --nologo \
             --logger "trx;LogFileName=tests.trx" \
             --logger "console;verbosity=normal" \
@@ -177,8 +193,10 @@ jobs:
             echo "### Test suite: ${{ steps.suite.outcome }} (exit ${{ steps.suite.outputs.exit-code }})"
             if [ "${{ steps.suite.outputs.exit-code }}" = "124" ]; then
               echo
-              echo "⚠️ Did not finish inside 38 minutes — bounded, not failed."
-              echo "This suite is ~12 core-minutes of work and ~8 minutes on a dev machine."
+              echo "⚠️ Did not finish inside 48 minutes — bounded, not failed."
+              echo "Expected ~40 min here: ~11 min build + ~28 min tests on 2 cores."
+              echo "If this trips repeatedly the suite has grown past the runner, and the"
+              echo "options are splitting the test project, sharding, or a bigger runner."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
