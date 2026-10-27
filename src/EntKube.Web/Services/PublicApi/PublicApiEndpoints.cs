@@ -268,6 +268,71 @@ public static class PublicApiEndpoints
         // The JSON is unchanged. category/severity/horizon/state are still ToString() on enums
         // that now come from the contract, and AdvisorContractEnumTests pins their NAMES against
         // the entity enums for exactly that reason.
+        // ── App secrets ────────────────────────────────────────────────────────────────
+        //
+        // ⚠️ THIS IS THE FIRST ROUTE THAT EXISTS BECAUSE AN OPERATION WAS LIFTED OUT OF A PAGE.
+        // Until it was extracted, "re-sync this app's bound credentials" could only be run by
+        // pressing a button in PortalSecretsDetail — 126 lines of orchestration with no render
+        // state in them, and no way for a CLI, a pipeline or this API to reach it. That is what
+        // docs/decomposition.md §6.1 means by the blocker being that operations are not callable
+        // at all rather than that the API is thin. Secrets' contract has exactly this one method
+        // for exactly this one caller.
+        //
+        // ⚠️ PARTIAL SUCCESS IS THE NORMAL CASE, so this does not return a bare ok/not-ok. One
+        // binding failing must not stop its siblings and one unlistable family must not stop the
+        // others, which means a sync routinely ends with some bindings synced and some not. A
+        // caller that reads only a boolean would report a wholly unreachable cluster as a success
+        // whenever one other binding worked, so the per-binding outcomes are the response and
+        // `failed` is offered alongside rather than instead.
+        //
+        // 207 rather than 200 when something failed: the request was handled, the work was not
+        // wholly done, and a pipeline that treats any 2xx as "fine" should at least have to opt
+        // into that reading.
+        api.MapPost("/apps/{appId:guid}/secrets/sync", async (
+            Guid appId, Guid? environmentId, HttpContext ctx,
+            EntKube.Contracts.Delivery.IDeliveryApi delivery,
+            EntKube.Contracts.Secrets.ISecretsApi secrets,
+            EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
+            CancellationToken ct) =>
+        {
+            ApiTokenPrincipal principal = ctx.GetApiPrincipal()!;
+
+            // An API request has no Blazor circuit, so there is nobody for the gate to ask — but
+            // the token is answerable, and naming it is what puts a name in the audit trail
+            // instead of "nobody was asked". Same declaration as the sync and restart routes.
+            using IDisposable unattended = gate.DeclareUnattended(
+                $"api-token:{principal.TokenName}");
+
+            // ⚠️ Asked of Delivery before anything is written. The sync below takes the tenant and
+            // passes it down, and every service it reaches is tenant-scoped — but a tenant that is
+            // only an input is not an authorization check until something is filtered by it, and a
+            // foreign app id would otherwise come back as an empty success rather than a 404.
+            if (await delivery.GetAppAsync(principal.TenantId, appId, ct) is null)
+            {
+                return Results.NotFound();
+            }
+
+            EntKube.Contracts.Secrets.AppSecretSyncResult result =
+                await secrets.SyncAppSecretsAsync(principal.TenantId, appId, environmentId, ct);
+
+            object body = new
+            {
+                failed = result.AnythingFailed,
+                output = result.Output,
+                bindings = result.Bindings
+                    .Select(b => new { kind = b.Kind.ToString(), secret = b.SecretName, error = b.Error })
+                    .ToList(),
+                unlistedFamilies = result.UnlistedFamilies
+                    .Select(f => new { kind = f.Kind.ToString(), error = f.Error })
+                    .ToList(),
+                fatalError = result.FatalError,
+            };
+
+            return result.AnythingFailed
+                ? Results.Json(body, statusCode: StatusCodes.Status207MultiStatus)
+                : Results.Ok(body);
+        }).RequireApiScope(ApiScopes.AppsWrite);
+
         api.MapGet("/advisor/findings", async (
             HttpContext ctx, EntKube.Contracts.Advisor.IAdvisorApi advisor, CancellationToken ct) =>
         {
