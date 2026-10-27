@@ -1868,8 +1868,29 @@ The densest single targets anywhere, by this measure:
 | 50 | 6 | `Portal/CustomerPortal` · `LoadCustomerAsync` |
 
 `ClusterDetail.LoadComponentDetailAsync` — 191 lines reaching 13 services — is half again the size of the
-block this measurement came out of, and is the obvious next one. ⚠️ It is also in the file whose Razor
-the 10.0.403 compiler choked on (§ the SDK pin), so it is already a file worth having less in it.
+block this measurement came out of. ⚠️ It is also in the file whose Razor the 10.0.403 compiler choked on
+(see the SDK pin), so it is already a file worth having less in it.
+
+#### ⚠️ But spot-check the top of the list before believing it — this one is not 191 extractable lines
+
+Reading it: most of the method assigns form fields (`editRepoUrl`, `editChartName`, `editNamespace`,
+`editReleaseName`, `editValues`, `editFormFieldValues`). Populating an edit form is a component's job and
+is not an operation any API would call. **That is the third time a metric has overstated a target** —
+line count, then operation names, now service count — and the pattern is the same each time: the measure
+sees the shape of the code, never what the code is *for*.
+
+What is genuinely in there is a *sub-operation*: **resolve a component's effective configuration**, layered
+catalog defaults → stored YAML → vault secrets → pseudo-path `IComponentFormValueProvider`s. "What is this
+component actually configured with?" is a real question an API has to answer, and today it can only be
+answered by opening a page.
+
+⚠️ **Treat it as delicate rather than large.** That layering is precisely where a wrong answer is silent:
+a value that fails to re-populate is later written back as a catalog default over live configuration,
+which has happened before. Any extraction here wants the layering pinned by tests first, and is better
+done as "resolve the effective values" alone than as "move the 191 lines".
+
+So the honest ranking of what to do next is by *sub-operation*, and this list stops being a work queue at
+that point — each candidate needs the same ten minutes of reading that this one did before it earns a PR.
 
 ## 7. What not to do
 
