@@ -37,6 +37,7 @@ internal static class SecretsServices
     {
         services.AddScoped<VaultService>();
         services.AddScoped<AppSecretSyncService>();
+        services.AddScoped<EntKube.Contracts.Secrets.ISecretsApi, Modules.Api.SecretsApi>();
         services.AddScoped<SecretExpiryService>();
         services.AddSingletonWork<SecretExpiryNotificationService>();
         services.AddSingletonWork<ObservedSecretRefreshService>();

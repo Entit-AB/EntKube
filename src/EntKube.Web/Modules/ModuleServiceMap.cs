@@ -170,6 +170,9 @@ public static partial class ModuleMap
         // Orchestrates DataServices, Identity and Delivery services from Secrets — a Phase 0 edge
         // that Phase 1's module contracts are meant to replace. See AppSecretSyncService's doc.
         [typeof(AppSecretSyncService)] = Module.Secrets,
+        // The sixth module contract's implementation. Mapped like FleetApi, CatalogApi and the
+        // rest, so ModuleCompositionTests can hold Secrets to registering only what it owns.
+        [typeof(Api.SecretsApi)] = Module.Secrets,
 
         // ---- Telemetry -------------------------------------------------------------
         [typeof(AlertEscalationService)] = Module.Telemetry,
