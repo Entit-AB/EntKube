@@ -36,6 +36,7 @@ internal static class SecretsServices
     internal static IServiceCollection AddSecretsModule(this IServiceCollection services)
     {
         services.AddScoped<VaultService>();
+        services.AddScoped<AppSecretSyncService>();
         services.AddScoped<SecretExpiryService>();
         services.AddSingletonWork<SecretExpiryNotificationService>();
         services.AddSingletonWork<ObservedSecretRefreshService>();

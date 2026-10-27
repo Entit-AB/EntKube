@@ -1763,13 +1763,134 @@ The options, with their real costs:
   far larger change than the extraction it is meant to enable, so it should not be smuggled in with it.
 - **Extract without tests.** Not acceptable for a credential path.
 
-This is worth stating before anyone starts: the extraction itself is an afternoon, and the fixture is the
-project. A PR that discovers this halfway through will either grow a nine-service fixture by accident or
-ship a credential operation with no coverage.
+~~This is worth stating before anyone starts: the extraction itself is an afternoon, and the fixture is
+the project.~~
 
-⚠️ The extracted service would also sit in Secrets while depending on DataServices, Identity and Delivery
-services directly — acceptable for Phase 0 (it is strictly better than a Razor page doing it), and exactly
-the edge Phase 1's contracts exist to replace. Record it as a known follow-up rather than a surprise.
+#### ⚠️ That was wrong, and the third option is the cheap one (done 2026-10-27)
+
+The two options above are a false choice, and the paragraph they led to — "the fixture is the project" —
+would have sent the next person down the expensive path. **The concrete-class problem only blocks testing
+if the behaviour reaches those services directly.** It does not have to.
+
+Expressed as two small records — `BindingFamily` (how to list a family's bindings) and `BindingToSync`
+(how to sync one) — the orchestration takes delegates instead of services:
+
+```csharp
+public static async Task<(List<BindingSyncOutcome>, List<FamilyLoadFailure>)>
+    RunFamiliesAsync(IReadOnlyList<BindingFamily> families, CancellationToken ct = default)
+```
+
+Everything that carries behaviour is then testable with lambdas — the `SyncEnabled` filter, both layers of
+failure isolation, the shape of the report — and the nine services become one line of wiring each, in a
+private `FamiliesFor` that contains no decisions. No fixture, no interfaces, and no coverage traded away.
+Thirteen tests, four mutations verified.
+
+**The general lesson, which is not about this page.** "These collaborators cannot be mocked" is a fact
+about *reaching* them, not about the behaviour that uses them. Before paying for a fixture or inventing
+interfaces, check whether the behaviour can be separated from the collaboration — because if it can, the
+part worth testing usually needs none of them. The question to ask is not "how do I fake these nine
+services" but "what here is a decision, and does it actually need a service to make it".
+
+What remains untested is `FamiliesFor` and the one-line-per-target dispatch, which is the right thing to
+leave: both are deliberately free of decisions, and the dispatch's one real choice (`ResolveTarget`) was
+pulled out as a pure function and tested exhaustively.
+
+⚠️ **It also found a silent success.** The page dispatched with `if / else if / else if` and no final
+branch, then reported `✓ db/{name}` regardless — so a `DatabaseBinding` naming no database at all was
+reported as synced while nothing was sent. The three ids are each `Guid?` and documented "mutually
+exclusive", which guarantees at *most* one and not at least one, and no schema constraint requires one.
+Not a row anyone has been shown to have; the point is that the code could not have told them.
+
+⚠️ The extracted service sits in Secrets while depending on DataServices, Identity and Delivery services
+directly — acceptable for Phase 0 (it is strictly better than a Razor page doing it), and exactly the edge
+Phase 1's contracts exist to replace. Recorded in the class doc and in `ModuleServiceMap` rather than left
+to be discovered.
+
+#### What it actually cost, against the estimate
+
+| | predicted | measured |
+|---|---|---|
+| orchestration moved | ~126 lines | 126 lines |
+| injects on the page | 12 | **6** (seven died, one added) |
+| test fixture | "the project" | **none** — 13 tests, all lambdas |
+
+The `@code` block did not shrink by 126 lines: about 60 lines of formatting and wiring stayed, which is
+what §6.1 means by "report what it moved and what it deliberately left". Turning the outcomes into the
+text in the box is a page's job, and the service returning data rather than `"✓ db/{name}"` strings is the
+specific thing that makes it callable by anything else.
+
+### 6.3 Ranking by orchestration instead of by line count (measured 2026-10-27)
+
+§6.2 rated components "high" or "low" yield by reading their operation *names*. That was better than
+counting lines and still not good enough: it rated `PortalDatabasesPanel` **high** on the strength of
+`CreateDatabase`, `Connect`, `Detach`, `RotatePassword` — and reading them shows each is a 15-line
+wrapper (guard → **one** service call → toast → reload) around a service that already exists. Nothing
+to extract. Same error as `CustomerLogBrowser`, one level subtler: I measured *"are there operations?"*
+instead of *"is there behaviour in them?"*.
+
+#### The signal that does discriminate
+
+Learned from the one extraction actually done: **an operation worth extracting either calls several
+distinct domain services, or loops over things with its own failure handling.** A thin wrapper calls one
+service and shows a toast — that is page code and should stay. So, per method: count distinct injected
+services used, loops, and `catch` blocks; keep methods of ≥15 lines that use ≥2 services or loop with
+their own error handling.
+
+⚠️ **Exclude UI plumbing from the service count.** Counting `ToastService`, `IJSRuntime`,
+`NavigationManager` and `AuthenticationStateProvider` as collaborators turned every thin wrapper into
+"orchestration" on the first run, and inflated Portal's total by 49 %. A toast is not a dependency the
+API needs.
+
+The script is nine lines of Python over the `.razor` files; it is a heuristic, not a proof, and the point
+is that it is cheap to re-run and does not flatter a page the way line count does.
+
+#### What it says
+
+| | raw `@code` | candidate orchestration | components with any |
+|---|---|---|---|
+| Portal | 5,245 | **602** | 10 of 21 |
+| Tenants | 36,026 | **2,728** | 40 |
+
+⚠️ **Raw `@code` overstates the opportunity by roughly nine to one.** Portal is not 5.2k lines of
+extractable behaviour; it is about 600, and 126 of those have now been taken. §6.1's "~5.2k against
+~36k, a factor of seven" compared two numbers that both mostly measure render state — the real ratio is
+**4.5x**, and the argument for doing Portal first is correspondingly weaker than it looked.
+
+The densest single targets anywhere, by this measure:
+
+| lines | services | component · operation |
+|---|---|---|
+| **191** | **13** | `Tenants/ClusterDetail` · `LoadComponentDetailAsync` |
+| 132 | 3 | `Portal/CustomerStatusDashboard` · `LoadData` |
+| 98 | 2 | `Tenants/IdentityTab` · `SwitchRealmTab` (9 `catch` blocks) |
+| 80 | 2 | `Tenants/DatabaseTab` · `ExecuteBackupRestore` |
+| 57 | 6 | `Tenants/ClusterDetail` · `LoadCatalogFormAsync` |
+| 50 | 6 | `Portal/CustomerPortal` · `LoadCustomerAsync` |
+
+`ClusterDetail.LoadComponentDetailAsync` — 191 lines reaching 13 services — is half again the size of the
+block this measurement came out of. ⚠️ It is also in the file whose Razor the 10.0.403 compiler choked on
+(see the SDK pin), so it is already a file worth having less in it.
+
+#### ⚠️ But spot-check the top of the list before believing it — this one is not 191 extractable lines
+
+Reading it: most of the method assigns form fields (`editRepoUrl`, `editChartName`, `editNamespace`,
+`editReleaseName`, `editValues`, `editFormFieldValues`). Populating an edit form is a component's job and
+is not an operation any API would call. **That is the third time a metric has overstated a target** —
+line count, then operation names, now service count — and the pattern is the same each time: the measure
+sees the shape of the code, never what the code is *for*.
+
+What is genuinely in there is a *sub-operation*: **resolve a component's effective configuration**, layered
+catalog defaults → stored YAML → vault secrets → pseudo-path `IComponentFormValueProvider`s. "What is this
+component actually configured with?" is a real question an API has to answer, and today it can only be
+answered by opening a page.
+
+⚠️ **Treat it as delicate rather than large.** That layering is precisely where a wrong answer is silent:
+a value that fails to re-populate is later written back as a catalog default over live configuration,
+which has happened before. Any extraction here wants the layering pinned by tests first, and is better
+done as "resolve the effective values" alone than as "move the 191 lines".
+
+So the honest ranking of what to do next is by *sub-operation*, and this list stops being a work queue at
+that point — each candidate needs the same ten minutes of reading that this one did before it earns a PR.
 
 ## 7. What not to do
 
