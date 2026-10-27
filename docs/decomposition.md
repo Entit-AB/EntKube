@@ -1819,6 +1819,58 @@ what §6.1 means by "report what it moved and what it deliberately left". Turnin
 text in the box is a page's job, and the service returning data rather than `"✓ db/{name}"` strings is the
 specific thing that makes it callable by anything else.
 
+### 6.3 Ranking by orchestration instead of by line count (measured 2026-10-27)
+
+§6.2 rated components "high" or "low" yield by reading their operation *names*. That was better than
+counting lines and still not good enough: it rated `PortalDatabasesPanel` **high** on the strength of
+`CreateDatabase`, `Connect`, `Detach`, `RotatePassword` — and reading them shows each is a 15-line
+wrapper (guard → **one** service call → toast → reload) around a service that already exists. Nothing
+to extract. Same error as `CustomerLogBrowser`, one level subtler: I measured *"are there operations?"*
+instead of *"is there behaviour in them?"*.
+
+#### The signal that does discriminate
+
+Learned from the one extraction actually done: **an operation worth extracting either calls several
+distinct domain services, or loops over things with its own failure handling.** A thin wrapper calls one
+service and shows a toast — that is page code and should stay. So, per method: count distinct injected
+services used, loops, and `catch` blocks; keep methods of ≥15 lines that use ≥2 services or loop with
+their own error handling.
+
+⚠️ **Exclude UI plumbing from the service count.** Counting `ToastService`, `IJSRuntime`,
+`NavigationManager` and `AuthenticationStateProvider` as collaborators turned every thin wrapper into
+"orchestration" on the first run, and inflated Portal's total by 49 %. A toast is not a dependency the
+API needs.
+
+The script is nine lines of Python over the `.razor` files; it is a heuristic, not a proof, and the point
+is that it is cheap to re-run and does not flatter a page the way line count does.
+
+#### What it says
+
+| | raw `@code` | candidate orchestration | components with any |
+|---|---|---|---|
+| Portal | 5,245 | **602** | 10 of 21 |
+| Tenants | 36,026 | **2,728** | 40 |
+
+⚠️ **Raw `@code` overstates the opportunity by roughly nine to one.** Portal is not 5.2k lines of
+extractable behaviour; it is about 600, and 126 of those have now been taken. §6.1's "~5.2k against
+~36k, a factor of seven" compared two numbers that both mostly measure render state — the real ratio is
+**4.5x**, and the argument for doing Portal first is correspondingly weaker than it looked.
+
+The densest single targets anywhere, by this measure:
+
+| lines | services | component · operation |
+|---|---|---|
+| **191** | **13** | `Tenants/ClusterDetail` · `LoadComponentDetailAsync` |
+| 132 | 3 | `Portal/CustomerStatusDashboard` · `LoadData` |
+| 98 | 2 | `Tenants/IdentityTab` · `SwitchRealmTab` (9 `catch` blocks) |
+| 80 | 2 | `Tenants/DatabaseTab` · `ExecuteBackupRestore` |
+| 57 | 6 | `Tenants/ClusterDetail` · `LoadCatalogFormAsync` |
+| 50 | 6 | `Portal/CustomerPortal` · `LoadCustomerAsync` |
+
+`ClusterDetail.LoadComponentDetailAsync` — 191 lines reaching 13 services — is half again the size of the
+block this measurement came out of, and is the obvious next one. ⚠️ It is also in the file whose Razor
+the 10.0.403 compiler choked on (§ the SDK pin), so it is already a file worth having less in it.
+
 ## 7. What not to do
 
 - **Don't split the database** beyond Support and Telemetry. 287 cross-entity navigations
