@@ -42,6 +42,15 @@ public sealed class EntKubeApiClient : IDisposable
     public Task<ApiResult> PostAsync(string path, CancellationToken ct = default) =>
         SendAsync(HttpMethod.Post, path, ct);
 
+    /// <summary>
+    /// A bodyless DELETE. ⚠️ There is deliberately no <c>PutAsync</c> here: every PUT on the
+    /// public API carries a JSON body, and a client method that silently sent none would turn a
+    /// partial update into a request the server reads as "no fields supplied". When a caller needs
+    /// PUT it needs body support designed with it, not a method shaped like this one.
+    /// </summary>
+    public Task<ApiResult> DeleteAsync(string path, CancellationToken ct = default) =>
+        SendAsync(HttpMethod.Delete, path, ct);
+
     private async Task<ApiResult> SendAsync(HttpMethod method, string path, CancellationToken ct)
     {
         try

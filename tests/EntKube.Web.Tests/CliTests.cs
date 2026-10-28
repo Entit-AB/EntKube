@@ -129,8 +129,18 @@ public class CliTests
     {
         // A read command issued as POST would be a surprising side effect from something
         // an operator expects to be safe.
-        CliCommands.All.Where(c => c.IsPost).Select(c => c.Usage)
-            .Should().BeEquivalentTo(["deployments sync", "deployments restart"]);
+        //
+        // ⚠️ Widened from IsPost to Mutates when the CLI gained DELETE. A bool called IsPost
+        // stopped describing the property this test is for the moment a second write verb
+        // existed — and `cost rates clear` is at least as surprising as any POST.
+        CliCommands.All.Where(c => c.Mutates).Select(c => c.Usage)
+            .Should().BeEquivalentTo([
+                "deployments sync",
+                "deployments restart",
+                "cost rates clear",
+                "advisor ack",
+                "secrets sync",
+            ]);
     }
 
     // ── Table rendering ──

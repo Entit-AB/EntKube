@@ -11,7 +11,21 @@ public sealed record CliCommand
     /// <summary>Builds the API path from the parsed arguments. Throws <see cref="CliUsageException"/> on bad input.</summary>
     public required Func<CliArgs, string> BuildPath { get; init; }
 
-    public bool IsPost { get; init; }
+    /// <summary>
+    /// Which verb to send. A bool was enough while POST was the only write; DELETE made it two
+    /// bits pretending to be one, which is how a third verb gets added as a second bool.
+    /// </summary>
+    public CliVerb Verb { get; init; } = CliVerb.Get;
+
+    /// <summary>Kept so existing definitions read the same; projects onto <see cref="Verb"/>.</summary>
+    public bool IsPost
+    {
+        get => Verb == CliVerb.Post;
+        init => Verb = value ? CliVerb.Post : CliVerb.Get;
+    }
+
+    /// <summary>True for anything that is not a read — what an operator wants warned about.</summary>
+    public bool Mutates => Verb is CliVerb.Post or CliVerb.Delete;
 
     /// <summary>Columns for the default table view: header → JSON property path.</summary>
     public (string Header, string Path)[] Columns { get; init; } = [];
@@ -27,6 +41,8 @@ public sealed record CliCommand
 }
 
 /// <summary>Thrown for a mistake in how the command was invoked, as opposed to a failure from the API.</summary>
+public enum CliVerb { Get, Post, Delete }
+
 public sealed class CliUsageException(string message) : Exception(message);
 
 /// <summary>The CLI's command table.</summary>
@@ -169,6 +185,65 @@ public static class CliCommands
             BuildPath = _ => "/api/v1/disaster-recovery",
             Columns = [("CLUSTER", "cluster"), ("VELERO", "veleroInstalled"), ("RESTORABLE", "restorable"),
                        ("LAST BACKUP", "lastUsableBackupAt"), ("SCHEDULES", "scheduleCount")],
+        },
+
+        // ── Everything below exists because the API had routes the CLI could not reach ──
+        //
+        // ⚠️ The gap was found by comparing the two surfaces, not by anyone noticing: seven of
+        // twenty-three endpoints had no command, and one of them was added the same week by the
+        // same author who then did not add its command. `CliEndpointParityTests` now fails when
+        // that happens again, which is the actual fix — this list is just today's backlog.
+
+        new CliCommand
+        {
+            Path = ["cost", "months"],
+            Description = "List the months that have a cost ledger",
+            BuildPath = _ => "/api/v1/cost/months",
+            Columns = [("MONTH", "month"), ("CLUSTERS", "clusters"), ("TOTAL", "total")],
+        },
+        new CliCommand
+        {
+            Path = ["cost", "rates", "list"],
+            Description = "List per-cluster cost rates",
+            BuildPath = _ => "/api/v1/cost-rates",
+            Columns = [("CLUSTER", "clusterName"), ("CPU", "cpuCorePerMonth"),
+                       ("MEMORY", "memoryGiBPerMonth"), ("STORAGE", "storageGiBPerMonth"),
+                       ("IDLE", "chargeIdleCapacity"), ("CLUSTER ID", "clusterId")],
+        },
+        new CliCommand
+        {
+            Path = ["cost", "rates", "show"],
+            Description = "Show one cluster's cost rate (--cluster <id>)",
+            BuildPath = a => $"/api/v1/cost-rates/{a.Required("cluster")}",
+        },
+        new CliCommand
+        {
+            Path = ["cost", "rates", "clear"],
+            Description = "Remove a cluster's cost rate, falling back to the defaults (--cluster <id>)",
+            BuildPath = a => $"/api/v1/cost-rates/{a.Required("cluster")}",
+            Verb = CliVerb.Delete,
+        },
+        new CliCommand
+        {
+            Path = ["advisor", "ack"],
+            Description = "Acknowledge an advisor finding (--id <finding-id>)",
+            BuildPath = a => $"/api/v1/advisor/findings/{a.Required("id")}/acknowledge",
+            Verb = CliVerb.Post,
+        },
+        new CliCommand
+        {
+            // ⚠️ Partial success is normal here: one binding failing does not stop its siblings,
+            // so the endpoint answers 207 with per-binding outcomes rather than a bare ok. The
+            // table shows each binding, because "it worked" is not a truthful summary of a sync
+            // where two of nine secrets did not reach their cluster.
+            Path = ["secrets", "sync"],
+            Description = "Re-sync an app's bound credentials into its clusters "
+                          + "(--app <id> [--environment <id>])",
+            BuildPath = a => $"/api/v1/apps/{a.Required("app")}/secrets/sync"
+                             + Query(("environmentId", a.Optional("environment"))),
+            Verb = CliVerb.Post,
+            Columns = [("KIND", "kind"), ("SECRET", "secret"), ("ERROR", "error")],
+            RowsProperty = "bindings",
         },
     ];
 
