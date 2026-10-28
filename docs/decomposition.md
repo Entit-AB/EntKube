@@ -1949,6 +1949,69 @@ is already in the file, and are not worth a programme.
 so an operation written inline inside a method that also sets a loading flag is invisible to it. The
 extracted one was only found because its inner method was already separate. A page with 200 lines of
 orchestration in one `OnClick` would score zero.
+
+### 6.5 The self-description shipped broken, and a source scan could never have said so (measured 2026-10-28)
+
+Plan item 8 wants `EntKube.ApiClient`, the CLI and the MCP server generated from an OpenAPI
+document instead of hand-maintained three times. The document was wired, built, and asserted by
+`OpenApiDocumentTests` — which scanned the *source* and stated honestly that it did not generate
+the document. Generating it found two defects.
+
+#### 1. It threw on every request
+
+The document transformer indexed into `Components.SecuritySchemes`. In OpenAPI.NET v2 that
+property is **null, not an empty dictionary**, so every generation threw a
+`NullReferenceException` and `GET /api/v1/openapi.json` answered a **bare 500 with an empty
+body**.
+
+⚠️ **That empty 500 is the whole lesson.** An earlier attempt at this test was abandoned on the
+theory that serving the document needed a host, that resolving the provider hit keyed-service
+details, and that the machine was busy — all plausible, all wrong. The feature's failure mode is
+*indistinguishable from the harness's* failure mode: both present as a request that returns
+nothing useful. The way through was to stop going over HTTP and resolve
+`IOpenApiDocumentProvider` in-process, which lets the exception out with a stack trace naming
+the offending line. **When a diagnosis has to explain away an empty response, reach for the path
+that cannot swallow an exception.**
+
+#### 2. It described sixteen routes that are not this API
+
+`AddOpenApi` documents *every* endpoint with an API description, not the ones you had in mind.
+The document titled "EntKube API" carried 46 operations: the 30 real ones, plus Identity's
+`/Account/*` form posts, OTLP and RUM ingest, the git and ticket webhooks, and admin
+backup/restore. Each of the sixteen was stamped `⚠️ UNAUTHENTICATED`, because each is guarded by
+a signature, a cookie or antiforgery rather than by an API scope.
+
+Both halves of that matter. A generated client would have grown a `LogoutAsync`; and the warning
+that exists to flag a genuinely unguarded API route was **crying wolf sixteen times**, which is
+how a real one goes unnoticed.
+
+`PublicApiOpenApi.ApiPathPrefixes` now bounds the document to `api/v1/` and `scim/v2/`.
+
+⚠️ **Filtering by path, not by "has a scope", is deliberate.** Selecting on the scope metadata
+would be self-maintaining — and would make an API route that forgot `RequireApiScope` *vanish
+from the document silently*, which is the opposite of what the UNAUTHENTICATED marker is for. The
+cost of the path list is that it can go stale, so the test asserts that **nothing carrying
+`ApiScopeMetadata` falls outside the prefixes**: a new scoped surface at a new prefix fails the
+suite rather than quietly going undocumented.
+
+#### What the test compares, and the one thing it must exempt
+
+`GeneratedOpenApiDocumentTests` boots the real application, generates the real document, and reads
+the real route table out of `EndpointDataSource` — then compares the two **as sets, in both
+directions**. Nothing scoped may be missing; nothing documented may be unscoped.
+
+One exemption, by exact path: **the document does not describe itself.** `MapOpenApi`'s route
+carries `ApiScopeMetadata` — it is served behind the same token as everything else — but it has no
+API description, so its absence is by design. Matching on the exact path rather than a prefix
+keeps that exemption from widening.
+
+#### What this changes about Phase 1
+
+Item 8 was blocked and did not look blocked. A generated client is only as good as the document,
+and the document was a 500. It now generates 24 paths / 30 operations, every one of them stating
+the scope it needs — so client generation is reachable, and is the next thing in this thread
+rather than a later one.
+
 ## 7. What not to do
 
 - **Don't split the database** beyond Support and Telemetry. 287 cross-entity navigations
