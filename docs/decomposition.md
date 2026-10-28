@@ -1892,6 +1892,63 @@ done as "resolve the effective values" alone than as "move the 191 lines".
 So the honest ranking of what to do next is by *sub-operation*, and this list stops being a work queue at
 that point — each candidate needs the same ten minutes of reading that this one did before it earns a PR.
 
+### 6.4 The page-extraction thread is nearly done, and §6.1 overstated it by about thirty to one (measured 2026-10-27)
+
+§6.3 ranked components by "uses ≥2 services, or loops with its own error handling". **Checked against
+the tree, its top four candidates were all false positives**, and reading them is the only reason that
+is known:
+
+| candidate | what it actually is |
+|---|---|
+| `PortalDatabasesPanel.CreateDatabase` | guard → **one** service → toast → reload |
+| `CustomerStatusDashboard.LoadData` | already contract-adopted; reads only its own module's tables |
+| `IdentityTab.SwitchRealmTab` | lazy-load per tab: 9 catches around 9 **single** service calls |
+| `DatabaseTab.ExecuteBackupRestore` | a form submit handler reading `selected*` fields |
+
+⚠️ **The nine catches were read as evidence OF orchestration when they are the opposite.** Repetitive
+per-field error handling is the signature of a page. That is the third metric in this exercise to
+flatter a target — line count, then operation names, then service count — and each failed the same
+way: it saw the *shape* of the code and never what the code was *for*.
+
+#### The signal that does discriminate
+
+From the one true positive, `PortalSecretsDetail.SyncDeploymentBindingsAsync`:
+
+> an **operation** accumulates into a result and touches no UI state;
+> **page code** assigns to loading flags, `*Error` strings and `selected*` fields.
+
+So: ≥2 domain services **and no writes to UI state**. `scripts/razor-orchestration-yield.py`
+implements it, and — unlike its predecessor — **it was validated against the known answer**: run over
+the pre-extraction tree it puts `SyncDeploymentBindingsAsync` at the top, 95 lines across 7 services.
+A metric that cannot find the one case you already know is real should not be used to find new ones.
+
+#### What is actually left
+
+| | raw `@code` | §6.3's metric | **validated metric** |
+|---|---|---|---|
+| Portal | 5,245 | 602 | **163** across 6 components |
+| Tenants | 36,026 | 2,728 | **855** across 12 |
+
+The largest single candidate anywhere is now **45 lines**. There is no second
+`SyncDeploymentBindingsAsync`.
+
+⚠️ **So "operations trapped in pages" was essentially ONE 126-line block, and it is extracted.**
+§6.1 framed Portal as ~5.2k lines of behaviour to move against Tenants' ~36k; the real figures are
+~163 and ~855, in pieces of 17–45 lines. That is roughly a **thirty-fold** overstatement, and it came
+from counting lines that mostly measure render state.
+
+#### What this changes about Phase 1
+
+The bottleneck is **not** extraction. Six module contracts now exist, and the one genuinely large
+operation that was unreachable is reachable. What stands between here and "the CLI can do everything
+the Tenants UI can" is plan item 5 — **promoting the existing contracts to HTTP** — not another
+season of page surgery. The remaining ~1,000 lines are worth taking opportunistically, when someone
+is already in the file, and are not worth a programme.
+
+⚠️ **One limitation, stated so it is not discovered later:** the metric requires *no* UI-state writes,
+so an operation written inline inside a method that also sets a loading flag is invisible to it. The
+extracted one was only found because its inner method was already separate. A page with 200 lines of
+orchestration in one `OnClick` would score zero.
 ## 7. What not to do
 
 - **Don't split the database** beyond Support and Telemetry. 287 cross-entity navigations
