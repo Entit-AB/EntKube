@@ -65,9 +65,12 @@ public static class Program
 
         using EntKubeApiClient api = new(baseUrl, token);
 
-        ApiResult result = command.IsPost
-            ? await api.PostAsync(path)
-            : await api.GetAsync(path);
+        ApiResult result = command.Verb switch
+        {
+            CliVerb.Post => await api.PostAsync(path),
+            CliVerb.Delete => await api.DeleteAsync(path),
+            _ => await api.GetAsync(path),
+        };
 
         if (!result.Success)
         {
