@@ -670,10 +670,18 @@ public class CatalogContractAdoptionTests
     ///   <item><c>SupportMailboxService</c>'s <c>r.Component</c> — the <em>contract's</em>
     ///   <c>InstalledComponent</c>, which is the point of the contract. It is recognisable in the
     ///   code by <c>.ClusterName</c>, which the entity does not have.</item>
+    ///   <item><c>document.Components</c> — <c>OpenApiDocument.Components</c>, the OpenAPI
+    ///   schema/securityScheme bag. ⚠️ Nothing to do with Catalog: this scan takes its names from
+    ///   the EF entities (<c>Components</c> is a navigation on <c>KubernetesCluster</c>) and then
+    ///   counts <c>.Components</c> anywhere under <c>src</c>, so an unrelated type with a
+    ///   same-named property reads as a navigation. It is scoped to the one file that builds the
+    ///   document rather than exempting the receiver globally, because <c>document</c> is a
+    ///   plausible variable name for something that really is a Catalog read.</item>
     /// </list>
     /// </summary>
     private static bool NotTheNavigation(string file, string receiver)
         => receiver is "BlueprintStepType" or "report" or "notice" or "Source"
+           || (file == "PublicApiOpenApi.cs" && receiver == "document")
            // `Data.ClusterComponent` is a TYPE reference, not a navigation — the entity namespace
            // ends in `.Data`, so a qualified mention reads identically to a property access. No
            // such line exists outside Catalog today; this was found by injecting one, which is the
