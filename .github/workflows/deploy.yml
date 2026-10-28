@@ -90,7 +90,7 @@ jobs:
     # The job bound below is deliberately ABOVE the step bound so it can never be the thing that
     # fires. If it ever does, something outside the suite is wrong — read the log rather than
     # raising the number.
-    timeout-minutes: 70
+    timeout-minutes: 35
 
     steps:
       - uses: actions/checkout@v4
@@ -126,52 +126,47 @@ jobs:
           echo "memory: $(free -h | awk '/^Mem:/ {print $2" total, "$7" available"}')"
           echo "os:     $(. /etc/os-release && echo "$PRETTY_NAME")"
 
-      # ⚠️ --blame-hang WAS REMOVED, having been added by me to diagnose this and then having
-      # plausibly made it worse. It never tripped at 5 minutes on any run, so it answered nothing;
-      # it attaches a data collector that changes how VSTest hosts the tests; and when the job was
-      # torn down the process tree did not die for ten minutes, which is the behaviour a collector
-      # makes more likely. A diagnostic that may be part of the symptom is not a diagnostic.
+      # ⚠️ THE SUITE NOW FINISHES, AND THE NUMBERS BELOW ARE SIZED FOR THAT. It takes 18m29s
+      # here (4743 tests, exit 0) since #409, which removed the real cause: a new EF singleton
+      # interceptor per test rooted ~740 EF internal service providers in a static cache with no
+      # eviction, each holding a full 165-entity model — 7.82 GB peak against this box's 7.8 GB.
+      # Before that it had never completed a run, in any configuration.
       #
-      # `console;verbosity=normal` replaces what it was meant to provide, and it is the one that
-      # survives a bounded run: the .trx is written only at the END of a run, so a run cut short
-      # leaves none — but the job is no longer cancelled, so its LOG is kept, and the log now
-      # carries per-test names as they execute. That is what identifies a slow or stuck test.
+      # So these bounds are no longer "generous enough that it might finish"; they are a regression
+      # alarm. 25 minutes is ~35% headroom over the measured 18m29s — enough for a slow runner,
+      # tight enough that a return of the leak shows up as a bounded run the same day rather than
+      # as a job nobody reads. If this starts tripping, the question is what grew, not what number
+      # to raise.
       #
-      # Two bounds, innermost first. `timeout --signal=INT` asks dotnet to stop and lets it flush,
-      # which can still produce a .trx; the step's own bound is the backstop if it ignores that.
-      # `set +e` plus the explicit exit keeps the real code visible in the summary below.
+      # --blame-hang at 15 minutes stays: no single test comes near it (the whole suite is 18),
+      # and it is what names a genuine stall rather than leaving 20 minutes of silence. It was
+      # briefly removed on the grounds that it had never tripped, which was exactly backwards —
+      # the symptom it names appeared on the next run.
       #
-      # ⚠️ 38 MINUTES WAS ABOUT TWO MINUTES SHORT, which the first bounded run finally showed —
-      # it exited 124 having very nearly finished. Measured from that run's log:
+      # `console;verbosity=normal` carries per-test names and timings in the log, which is what
+      # made the stall legible; the .trx is written only at the END of a run, so a bounded run
+      # leaves none and the log is the diagnostic that survives.
       #
-      #     build + startup   11.5 min   (10.8 of it compiling 14 assemblies)
-      #     test phase        26.8 min   (killed here, not finished)
-      #
-      # and the machine it ran on: 2 cores, 7.8 GB. That is the whole explanation. The suite is
-      # ~12 core-minutes of work; on 2 cores that is ~6 minutes if perfectly parallel, and this
-      # runner is roughly 4-5x slower per core than a developer machine, which lands on ~28
-      # minutes of tests. There is no hang and nothing pathological — the earlier suspicion of one
-      # was wrong, and `--blame-hang` never tripping was the first evidence of that.
-      #
-      # ⚠️ A test reported as taking "3 m 18 s" is NOT a slow test. xUnit reports wall-clock, and
-      # with both cores saturated a test needing 0.86 s of CPU (measured locally) can sit minutes
-      # in the scheduler queue. Read long individual durations here as contention, not as a
-      # culprit, or you will go hunting for a bug that is not there. I did.
+      # Two bounds, innermost first: `timeout --signal=INT` asks dotnet to stop and lets it flush;
+      # the step's own bound is the backstop. `set +e` plus the explicit exit keeps the real code
+      # visible in the summary below.
       - name: Run the suite
         id: suite
-        timeout-minutes: 50
+        timeout-minutes: 28
         continue-on-error: true
         run: |
           set +e
 
-          # ⚠️ A MEMORY SAMPLER, because the stall blames no test and the machine is the suspect.
-          # One run streamed output steadily to its bound; the next went silent for 25 MINUTES
-          # after a test that took 1m16s, on the same commit. Nothing single-test explains that.
-          # This box is 2 cores and 7.8 GB, and every test class builds a fresh EF model over 165
-          # entities plus an in-memory SQLite database — if that tips into swap or GC thrash,
-          # everything stops at once and no individual test looks guilty. Thirty-second samples
-          # either show the collapse or rule the machine out; both are worth more than another
-          # round of my guessing.
+          # ⚠️ THE MEMORY SAMPLER STAYS, because it is what found the bug and it is what would
+          # find it again. This box is 2 cores and 7.8 GB; before #409 the suite peaked at 7.82 GB
+          # and these samples showed available memory going 6669 MB -> 169 MB in four minutes and
+          # then load average reaching 22.7. Nothing else in the job could see that: the stall
+          # blamed no test, because a thrashing machine makes every test look slow and none look
+          # guilty.
+          #
+          # It costs one `free -m` every thirty seconds. Keep it. If this job ever slows down
+          # again, the first question is whether memory is climbing, and the answer will already
+          # be in the log rather than three runs away.
           ( while true; do
               echo "[mem $(date -u +%H:%M:%S)] $(free -m | awk '/^Mem:/ {print "used="$3"M avail="$7"M"}') \
           load=$(cut -d" " -f1-3 /proc/loadavg)"
@@ -179,18 +174,16 @@ jobs:
             done ) &
           SAMPLER=$!
 
-          # ⚠️ --blame-hang IS BACK, AND I REMOVED IT ONE RUN AGO. The reasoning then was that it
-          # had never tripped so it answered nothing, and that its data collector might be part of
-          # the undead-process-tree problem. The first half is now obsolete: a 25-minute silence is
-          # exactly what it exists to name, and it was absent for the one run that showed one. The
-          # second half was about teardown during a JOB cancellation, which the step-level bound
-          # has since removed.
+          # ⚠️ 15 minutes, not 5, and the difference is not caution. On a saturated machine a test
+          # needing under a second of CPU can wait minutes to be SCHEDULED — one reported "3 m 18 s"
+          # in CI and runs in 0.86 s locally — so a low threshold fires on contention and names an
+          # innocent test. I spent real effort chasing one of those. 15 is above any queueing seen
+          # and below the 25-minute bound, so a genuine stall is named and contention is not.
           #
-          # 15 minutes, not 5. On two saturated cores a test needing under a second of CPU can wait
-          # minutes to be scheduled — the earlier "3 m 18 s" test measured queueing, not work — so a
-          # low threshold would fire on contention and name an innocent test. 15 is above any
-          # queueing seen and far below the 48-minute bound.
-          timeout --signal=INT --kill-after=60s 48m \
+          # It was briefly removed on the grounds that it had never tripped. That was backwards:
+          # the silence it exists to name appeared on the very next run, with no diagnostic left
+          # to catch it.
+          timeout --signal=INT --kill-after=60s 25m \
             dotnet test tests/EntKube.Web.Tests/EntKube.Web.Tests.csproj --nologo \
             --blame-hang --blame-hang-timeout 15min \
             --logger "trx;LogFileName=tests.trx" \
@@ -223,10 +216,11 @@ jobs:
             echo "### Test suite: ${{ steps.suite.outcome }} (exit ${{ steps.suite.outputs.exit-code }})"
             if [ "${{ steps.suite.outputs.exit-code }}" = "124" ]; then
               echo
-              echo "⚠️ Did not finish inside 48 minutes — bounded, not failed."
-              echo "Expected ~40 min here: ~11 min build + ~28 min tests on 2 cores."
-              echo "If this trips repeatedly the suite has grown past the runner, and the"
-              echo "options are splitting the test project, sharding, or a bigger runner."
+              echo "⚠️ Did not finish inside 25 minutes — bounded, not failed."
+              echo "It takes 18m29s when healthy (4743 tests), so this is a REGRESSION signal,"
+              echo "not a runner that needs a bigger number. Check peak memory first: this box"
+              echo "has 7.8 GB and the suite peaked at 7.82 GB before #409 removed ~740 rooted"
+              echo "EF service providers. Look for a new per-test singleton interceptor."
             fi
           } >> "$GITHUB_STEP_SUMMARY"
 
