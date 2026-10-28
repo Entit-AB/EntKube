@@ -28,7 +28,11 @@ public class DeploymentSyncService(
 
         while (!stoppingToken.IsCancellationRequested)
         {
-            await SyncAllDeploymentsAsync(stoppingToken);
+            // A cycle that throws must end the CYCLE, not the host: BackgroundServiceExceptionBehavior
+            // is StopHost, so one Postgres connect timeout used to take the whole app down.
+            try { await SyncAllDeploymentsAsync(stoppingToken); }
+            catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested) { return; }
+            catch (Exception ex) { logger.LogWarning(ex, "Deployment sync cycle failed"); }
             await Task.Delay(Interval, stoppingToken);
         }
     }
