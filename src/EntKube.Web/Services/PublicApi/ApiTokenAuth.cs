@@ -10,6 +10,17 @@ namespace EntKube.Web.Services.PublicApi;
 /// </summary>
 public sealed class ApiTokenAuthFilter(string? requiredScope) : IEndpointFilter
 {
+    /// <summary>
+    /// The scope this filter enforces, or null when any live token may call the route.
+    ///
+    /// <para>Exposed so <see cref="ApiTokenAuthExtensions.RequireApiScope"/> can build the
+    /// describing metadata FROM the enforcing filter instead of from a second copy of the same
+    /// argument. Enforcement stays here — reading the scope back out of the metadata at request
+    /// time would fail open, turning a missing <see cref="ApiScopeMetadata"/> into "any token
+    /// will do" rather than a refusal.</para>
+    /// </summary>
+    public string? RequiredScope => requiredScope;
+
     public async ValueTask<object?> InvokeAsync(
         EndpointFilterInvocationContext context, EndpointFilterDelegate next)
     {
@@ -52,9 +63,10 @@ public sealed class ApiTokenAuthFilter(string? requiredScope) : IEndpointFilter
 /// The scope a route requires, as endpoint metadata so the OpenAPI document can state it.
 ///
 /// <para>⚠️ This is a DESCRIPTION, never the enforcement. <see cref="ApiTokenAuthFilter"/> is what
-/// refuses the request; this only lets the document say so. If the two ever disagree the filter
-/// wins and the document lies — which is why <c>OpenApiDocumentTests</c> reads both and compares
-/// them rather than trusting that one call site set them together.</para>
+/// refuses the request; this only lets the document say so. The two cannot disagree, because
+/// <see cref="ApiTokenAuthExtensions.RequireApiScope"/> builds this from the filter it just
+/// constructed — and <c>GeneratedOpenApiDocumentTests</c> generates the real document and compares
+/// it, operation by operation, against the routes the router actually serves.</para>
 /// </summary>
 /// <param name="Scope">The required scope, or null when any live token may call the route.</param>
 public sealed record ApiScopeMetadata(string? Scope);
@@ -73,15 +85,23 @@ public static class ApiTokenAuthExtensions
     /// </remarks>
     public static TBuilder RequireApiScope<TBuilder>(
         this TBuilder builder, string? scope = null)
-        where TBuilder : IEndpointConventionBuilder =>
-        builder
-            .AddEndpointFilter(new ApiTokenAuthFilter(scope))
-            // ⚠️ The same fact, recorded twice on purpose. The filter ENFORCES the scope; the
-            // metadata DESCRIBES it. Nothing outside the filter could see which scope a route
-            // needed — the scope lived in a filter instance's field — so the generated OpenAPI
-            // document, and therefore any client built from it, could not tell an operator that
-            // `cost-rates` needs `config:write` until the call came back 403.
-            .WithMetadata(new ApiScopeMetadata(scope));
+        where TBuilder : IEndpointConventionBuilder
+    {
+        // ⚠️ The same fact in two places, but derived ONCE. The filter ENFORCES the scope; the
+        // metadata DESCRIBES it, and nothing outside the filter could see which scope a route
+        // needed — it lived in a filter instance's field — so the generated OpenAPI document,
+        // and any client built from it, could not tell an operator that `cost-rates` needs
+        // `config:write` until the call came back 403.
+        //
+        // The metadata reads the scope back off the filter rather than taking `scope` a second
+        // time, so the describing copy cannot drift from the enforcing one: there is no edit to
+        // this method that changes one and leaves the other.
+        ApiTokenAuthFilter filter = new(scope);
+
+        return builder
+            .AddEndpointFilter(filter)
+            .WithMetadata(new ApiScopeMetadata(filter.RequiredScope));
+    }
 
     /// <summary>The authenticated API principal. Non-null inside any route guarded by the filter.</summary>
     public static ApiTokenPrincipal? GetApiPrincipal(this HttpContext http) => ApiTokenAuthFilter.Get(http);

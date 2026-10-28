@@ -1,3 +1,4 @@
+using Microsoft.AspNetCore.Mvc.ApiExplorer;
 using Microsoft.AspNetCore.OpenApi;
 using Microsoft.OpenApi;
 
@@ -21,10 +22,38 @@ public static class PublicApiOpenApi
 {
     public const string DocumentName = "v1";
 
+    /// <summary>
+    /// The route prefixes this document describes, without a leading slash — the form
+    /// <see cref="ApiDescription.RelativePath"/> uses.
+    ///
+    /// <para>⚠️ <b>A new token-authenticated surface must be added here.</b> Without this filter the
+    /// document described every endpoint the application has an API description for: ASP.NET
+    /// Identity's own <c>/Account/*</c> form posts, the OTLP and RUM ingest endpoints, the git and
+    /// ticket webhooks, and admin backup/restore — 16 operations that are not this API, each of
+    /// them stamped "UNAUTHENTICATED" because they are guarded by signatures, cookies or
+    /// antiforgery rather than by an API scope. A generated client would have grown a
+    /// <c>LogoutAsync</c>, and the warning that is supposed to flag a genuinely unguarded API
+    /// route was crying wolf sixteen times.</para>
+    ///
+    /// <para>Filtering by path rather than by "has a scope" is deliberate: it keeps the
+    /// UNAUTHENTICATED marker able to fire. Selecting on the metadata would make an API route
+    /// that forgot <c>RequireApiScope</c> vanish from the document silently, which is the
+    /// opposite of what that marker is for. <c>OpenApiDocumentTests</c> asserts that nothing
+    /// carrying <see cref="ApiScopeMetadata"/> falls outside these prefixes.</para>
+    /// </summary>
+    public static readonly string[] ApiPathPrefixes = ["api/v1/", "scim/v2/"];
+
+    /// <summary>True when a route belongs to the documented API surface.</summary>
+    public static bool Describes(string? relativePath) =>
+        relativePath is not null
+        && ApiPathPrefixes.Any(prefix => relativePath.StartsWith(prefix, StringComparison.OrdinalIgnoreCase));
+
     /// <summary>Registers the document. Call before <c>builder.Build()</c>.</summary>
     public static IServiceCollection AddPublicApiOpenApi(this IServiceCollection services) =>
         services.AddOpenApi(DocumentName, options =>
         {
+            options.ShouldInclude = description => Describes(description.RelativePath);
+
             options.AddDocumentTransformer((document, _, _) =>
             {
                 document.Info = new OpenApiInfo
@@ -38,7 +67,14 @@ public static class PublicApiOpenApi
                         + "tab, and every call is answered in that tenant's scope only.",
                 };
 
+                // ⚠️ BOTH of these were null, and the second one is why this feature shipped
+                // broken: in OpenAPI.NET v2 `SecuritySchemes` is an unmaterialised dictionary,
+                // not an empty one, so indexing into it threw a NullReferenceException inside the
+                // transformer. The only visible symptom was GET /api/v1/openapi.json answering a
+                // bare 500 with an empty body — no stack, nothing in the response — which is
+                // precisely why it was mistaken for a hosting problem rather than a bug here.
                 document.Components ??= new OpenApiComponents();
+                document.Components.SecuritySchemes ??= new Dictionary<string, IOpenApiSecurityScheme>();
                 document.Components.SecuritySchemes[BearerScheme] = new OpenApiSecurityScheme
                 {
                     Type = SecuritySchemeType.Http,

@@ -14,13 +14,16 @@ namespace EntKube.Web.Tests;
 /// through <c>RequireApiScope</c>: it would carry no scope metadata to describe and, far worse,
 /// no authentication to describe it for.</para>
 ///
-/// <para>⚠️ <b>WHAT THIS DOES NOT DO, stated rather than implied.</b> It does not generate the
-/// document and compare it to the routes. That test was written and then withdrawn: generating
-/// it needs a host, serving it turns any generation failure into a bare 500 with an empty body —
-/// which is exactly what the first attempt produced — and resolving the provider in-process ran
-/// into keyed-service details while the machine was busy with another repository's test run. The
-/// honest state is that document generation is wired and builds, and is not yet asserted. What IS
-/// asserted below is the property that makes the document trustworthy once it is.</para>
+/// <para><b>This file scans the source; it does not generate the document.</b> That is now
+/// <see cref="GeneratedOpenApiDocumentTests"/>'s job, which boots the application and compares the
+/// real document against the real route table.</para>
+///
+/// <para>⚠️ <b>The split is worth keeping, and worth the reason.</b> These checks are instant and
+/// have no host, so they stay useful when the suite is run in a hurry. But they could not have
+/// found either of the two defects generation found — the document threw on every request, and it
+/// described sixteen routes belonging to other subsystems — and the earlier version of this
+/// comment claimed generation was "wired and builds" on the strength of exactly these scans.
+/// <b>A source scan can only ever prove the code was written; it cannot prove it runs.</b></para>
 /// </summary>
 public class OpenApiDocumentTests
 {
@@ -89,19 +92,35 @@ public class OpenApiDocumentTests
     /// <summary>
     /// The scope is enforced by a filter and described by metadata, and the document can only
     /// state what the metadata carries. If <c>RequireApiScope</c> ever stops attaching it, every
-    /// operation silently loses its stated scope while the API keeps working — the quietest
-    /// possible regression.
+    /// operation silently loses its stated scope while the API keeps working.
+    ///
+    /// <para>⚠️ <b>This test caught the change that made it necessary to rewrite it.</b> Its
+    /// earlier form looked for the two literals <c>new ApiTokenAuthFilter(scope)</c> and
+    /// <c>new ApiScopeMetadata(scope)</c> — satisfied by the same argument being passed twice,
+    /// which is precisely the arrangement that can drift. It now asserts the stronger structural
+    /// property: the metadata is constructed from the FILTER, so there is no edit to that method
+    /// which changes what is enforced and leaves what is described behind.</para>
+    ///
+    /// <para>The behavioural counterpart is
+    /// <c>GeneratedOpenApiDocumentTests.The_scope_each_operation_states_is_the_scope_the_server_enforces</c>,
+    /// which calls every documented route with a token holding exactly the stated scope and with
+    /// one holding a different scope. That is the test that actually proves the two agree; this
+    /// one states the shape that makes disagreement impossible to write.</para>
     /// </summary>
     [Fact]
-    public void RequireApiScope_records_the_scope_as_metadata_as_well_as_enforcing_it()
+    public void RequireApiScope_derives_the_described_scope_from_the_enforcing_filter()
     {
         string auth = Read("src", "EntKube.Web", "Services", "PublicApi", "ApiTokenAuth.cs");
 
-        auth.Should().Contain("new ApiTokenAuthFilter(scope)",
-            "the filter is what refuses the request");
-        auth.Should().Contain("new ApiScopeMetadata(scope)",
-            "the metadata is what lets the document say so — without it every operation in the "
-            + "document is silent about which scope it needs, and a client learns from a 403");
+        auth.Should().Contain("ApiTokenAuthFilter filter = new(scope);",
+            "the filter is what refuses the request, and it has to be named to be read back from");
+        auth.Should().Contain(".AddEndpointFilter(filter)",
+            "the named filter is the one actually installed on the route — constructing a second "
+            + "one for the metadata would reintroduce exactly the divergence this prevents");
+        auth.Should().Contain("new ApiScopeMetadata(filter.RequiredScope)",
+            "the metadata is what lets the document say which scope a route needs, and taking it "
+            + "off the filter rather than from a second copy of the argument is what stops the "
+            + "description from drifting away from the enforcement");
     }
 
     /// <summary>The document is registered, served, and behind the same token as the API.</summary>
