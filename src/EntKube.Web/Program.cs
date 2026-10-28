@@ -12,6 +12,7 @@ using EntKube.Web.Client.Pages;
 using EntKube.Web.Components;
 using EntKube.Web.Components.Account;
 using EntKube.Web.Data;
+using EntKube.Web.Services.PublicApi;
 using EntKube.Web.Modules;
 using EntKube.Web.Data.Modules;
 using EntKube.Web.Modules.Composition;
@@ -581,6 +582,9 @@ public class Program
 
         // Dedicated client for external route health probes — short timeout,
         // follows redirects, ignores SSL cert errors for internal/self-signed endpoints.
+        // The public API's OpenAPI document. See PublicApiOpenApi for why the scopes matter.
+        builder.Services.AddPublicApiOpenApi();
+
         builder.Services.AddHttpClient("RouteHealth", client =>
         {
             client.Timeout = TimeSpan.FromSeconds(15);
@@ -1086,6 +1090,17 @@ public class Program
 
         app.MapAgentEndpoint();
         EntKube.Web.Services.PublicApi.PublicApiEndpoints.MapPublicApi(app);
+
+        // ⚠️ THE DOCUMENT IS BEHIND THE SAME TOKEN AS THE API IT DESCRIBES. It is not a
+        // secret — it lists routes, not data — but an unauthenticated endpoint on a
+        // management plane is a thing to justify rather than a thing to default to, and no
+        // caller needs the document before it has a token: every route it describes requires
+        // one.
+        //
+        // RequireApiScope() with no scope means "any live token", which is the right bar: a
+        // reader allowed to call nothing in particular may still read what exists.
+        app.MapOpenApi("/api/v1/openapi.json")
+            .RequireApiScope();
         EntKube.Web.Services.Scim.ScimEndpoints.MapScim(app);
 
         app.Run();

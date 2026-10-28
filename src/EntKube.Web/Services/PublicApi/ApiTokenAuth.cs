@@ -48,15 +48,40 @@ public sealed class ApiTokenAuthFilter(string? requiredScope) : IEndpointFilter
         http.Items.TryGetValue(PrincipalKey, out object? value) ? value as ApiTokenPrincipal : null;
 }
 
+/// <summary>
+/// The scope a route requires, as endpoint metadata so the OpenAPI document can state it.
+///
+/// <para>⚠️ This is a DESCRIPTION, never the enforcement. <see cref="ApiTokenAuthFilter"/> is what
+/// refuses the request; this only lets the document say so. If the two ever disagree the filter
+/// wins and the document lies — which is why <c>OpenApiDocumentTests</c> reads both and compares
+/// them rather than trusting that one call site set them together.</para>
+/// </summary>
+/// <param name="Scope">The required scope, or null when any live token may call the route.</param>
+public sealed record ApiScopeMetadata(string? Scope);
+
 public static class ApiTokenAuthExtensions
 {
     /// <summary>
     /// Requires a valid API token, and optionally a specific scope. A route with no scope
     /// argument still requires authentication — it is readable by any live token.
     /// </summary>
-    public static RouteHandlerBuilder RequireApiScope(
-        this RouteHandlerBuilder builder, string? scope = null) =>
-        builder.AddEndpointFilter(new ApiTokenAuthFilter(scope));
+    /// <remarks>
+    /// Generic over the builder because <c>MapOpenApi</c> returns an
+    /// <see cref="IEndpointConventionBuilder"/> rather than a <see cref="RouteHandlerBuilder"/>,
+    /// and the document deserves the same guard as the routes it describes. Route call sites are
+    /// unchanged — they still get their own builder type back and still chain.
+    /// </remarks>
+    public static TBuilder RequireApiScope<TBuilder>(
+        this TBuilder builder, string? scope = null)
+        where TBuilder : IEndpointConventionBuilder =>
+        builder
+            .AddEndpointFilter(new ApiTokenAuthFilter(scope))
+            // ⚠️ The same fact, recorded twice on purpose. The filter ENFORCES the scope; the
+            // metadata DESCRIBES it. Nothing outside the filter could see which scope a route
+            // needed — the scope lived in a filter instance's field — so the generated OpenAPI
+            // document, and therefore any client built from it, could not tell an operator that
+            // `cost-rates` needs `config:write` until the call came back 403.
+            .WithMetadata(new ApiScopeMetadata(scope));
 
     /// <summary>The authenticated API principal. Non-null inside any route guarded by the filter.</summary>
     public static ApiTokenPrincipal? GetApiPrincipal(this HttpContext http) => ApiTokenAuthFilter.Get(http);
