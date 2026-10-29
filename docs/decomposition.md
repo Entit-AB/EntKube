@@ -2012,6 +2012,88 @@ and the document was a 500. It now generates 24 paths / 30 operations, every one
 the scope it needs — so client generation is reachable, and is the next thing in this thread
 rather than a later one.
 
+### 6.6 Item 5 is a ceiling, and the leverage is the clients (measured 2026-10-28)
+
+§6.4 concluded that the bottleneck was plan item 5 — promoting the existing module contracts to
+HTTP. Five independent surveys, each adversarially re-checked, say that is only half true, and the
+half that is false is the half the plan was steering by.
+
+#### Item 5 is smaller than it looks
+
+| | count |
+|---|---|
+| contract methods across the 9 `I<Module>Api` interfaces | **41** |
+| reachable through an HTTP route today | **18** |
+| not reachable | **23** |
+| public API routes those 18 buy | **23** |
+
+Three modules are already complete — Cost 4/4, Secrets 1/1, Telemetry 1/1 — and the remaining 23
+methods are a **ceiling of 23 more routes**, not an open-ended programme. Several of the 23 should
+never be routes: six contract methods have **no caller anywhere**, five of those not even in a
+test, and one (`IAdvisorApi.AssignAsync`) is dead all the way down to the service behind it.
+
+So "promote the contracts" is a finite, partly-pointless backlog. It is not the thing standing
+between here and a usable product API.
+
+#### What is actually in the way: the routes that exist have no clients
+
+| client | reaches | measured by |
+|---|---|---|
+| CLI | 22 of 23 `/api/v1` routes | `CliEndpointParityTests` |
+| **MCP server** | **17 of 23** routes, 17 of 30 operations | **nothing** |
+
+The MCP server was in precisely the state `CliEndpointParityTests` was written to end — six silent
+gaps (`GET /cost/months`, `GET /cost-rates`, `GET /cost-rates/{id}`, `PUT` and `DELETE` on that
+path, `POST /apps/{appId}/secrets/sync`) and nobody measuring. That test's own header already
+contains the argument: *an endpoint with no client is indistinguishable, from an operator's seat,
+from an endpoint that does not exist — and worse, because it looks like progress.*
+
+Three reads were added as tools. The three writes are exempted with a reason each, because the
+caller here is a language model: deleting a price sheet re-prices a customer, and syncing secrets
+applies credentials to live clusters. **Symmetry is not a reason to hand a model a capability.**
+
+#### The regex was blind in five ways, and one of them hid seven operations
+
+Both parity ratchets derived the API side by matching `api.MapGet("...")` in one source file. That
+cannot see a route behind a sub-group, a route registered through a receiver not named `api`, a
+template held in a const, a `MapPatch`, or a `MapMethods` — and because it pointed at
+`PublicApiEndpoints.cs` alone it could not see `/scim/v2` **at all**. Seven operations sat outside
+the ratchet while it reported itself healthy.
+
+Both now read the **router** (`EndpointDataSource`, filtered to `ApiScopeMetadata`), through the
+fixture built for the OpenAPI work in section 6.5. Asking the thing that serves requests is immune
+to all five at once. A mutation proves it: a route added behind `api.MapGroup("/probe")` is named
+by both ratchets, and the old regex could not have matched it.
+
+An MCP tool's route lives inside its handler delegate, so the ratchet **runs** each tool against a
+recording transport and asks what it requested. A declarative path template beside the handler
+would have been the same fact written twice — the arrangement this codebase has already had to
+undo once, for the scope a route requires.
+
+**One host, shared.** The three suites use an xUnit *collection* fixture, not `IClassFixture` —
+which is constructed once per test *class*, so three consumers would boot three
+`WebApplicationFactory` hosts and hold them all alive. This suite has already exhausted a 7.8 GB CI
+runner on rooted service providers; a host is far heavier than one of those.
+
+#### An exemption now has to prove its own reason
+
+The `PUT /cost-rates` exemption said a bodyless PUT would be read as "no fields supplied" and
+quietly do nothing. **That was wrong, in the reassuring direction.** `CostRateInput` is a
+non-nullable body parameter whose first four members are non-nullable `decimal`s, so binding
+refuses the request — a 400, loud and safe. The dangerous shape is next door: a body of `{}` binds,
+and every price takes `default(decimal)`.
+
+A ratchet asserts its number and never its explanation, so a wrong reason stays green forever.
+`A_bodyless_put_is_refused_rather_than_silently_accepted` now sends the request and asserts the
+400 — the first exemption here whose **rationale** is executable.
+
+#### What this changes about Phase 1
+
+Stop treating item 5 as the gate. The sequence is: **measure each client against the router, close
+or name every gap, then generate the clients from the document** (item 8, unblocked by section
+6.5). Three hand-maintained clients against a 30-operation API is three chances to fall behind, and
+two of the three had already fallen behind without anyone noticing.
+
 ## 7. What not to do
 
 - **Don't split the database** beyond Support and Telemetry. 287 cross-entity navigations

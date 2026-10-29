@@ -238,6 +238,49 @@ public static class EntKubeTools
             Handler = (api, _, ct) => api.GetAsync("/api/v1/disaster-recovery", ct),
         },
 
+        // ── The price sheets. Added because McpEndpointParityTests measured the gap: the
+        //    MCP server reached 17 of the API's 23 routes, and nobody had noticed — the same
+        //    shape as the defect CliEndpointParityTests was written after.
+        //
+        //    Reads only. The three writes on this surface are named in that test's exemption
+        //    list with a reason each, because "a model may change what a customer is billed"
+        //    is a decision to make deliberately, not a gap to close for symmetry.
+
+        new McpTool
+        {
+            Name = "entkube_cost_months",
+            Description = "List the months that have a cost ledger, with the number of clusters "
+                        + "billed and the total for each. Use this to find out which periods "
+                        + "entkube_cost_history can be asked about before asking for one.",
+            InputSchema = NoArgs(),
+            Handler = (api, _, ct) => api.GetAsync("/api/v1/cost/months", ct),
+        },
+
+        new McpTool
+        {
+            Name = "entkube_list_cost_rates",
+            Description = "List the per-cluster price sheets: CPU, memory and storage prices, the "
+                        + "monthly cluster overhead, and whether idle capacity is charged. These "
+                        + "are the inputs to every figure entkube_cost and entkube_cost_history "
+                        + "report, so read them before explaining why a cost looks wrong.",
+            InputSchema = NoArgs(),
+            Handler = (api, _, ct) => api.GetAsync("/api/v1/cost-rates", ct),
+        },
+
+        new McpTool
+        {
+            Name = "entkube_cost_rate",
+            Description = "Show one cluster's price sheet. Answers 404 when the cluster has no "
+                        + "sheet of its own, which means it is priced by the installation-wide "
+                        + "defaults rather than that nothing is billed.",
+            InputSchema = ObjectSchema(
+                new JsonObject { ["clusterId"] = StringProp("Cluster id (GUID) from entkube_list_clusters.") },
+                "clusterId"),
+            Handler = (api, args, ct) => api.GetAsync(
+                "/api/v1/cost-rates/"
+                + Uri.EscapeDataString(EntKubeApiClient.RequireString(args, "clusterId")), ct),
+        },
+
         new McpTool
         {
             Name = "entkube_acknowledge_finding",
