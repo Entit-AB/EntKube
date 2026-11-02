@@ -389,6 +389,49 @@ public static class PublicApiEndpoints
                 .ToList());
         }).RequireApiScope(ApiScopes.OpsRead);
 
+        // ⚠️ The API could not answer "are we meeting the SLAs". A grep for budget, availability,
+        //    uptime, sla and maintenance across this entire file returned nothing — the figure a
+        //    support agreement is invoiced against was readable in a browser and nowhere else.
+        api.MapGet("/error-budgets", async (
+            HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry,
+            CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+
+            IReadOnlyList<EntKube.Contracts.Telemetry.ErrorBudgetSummary> budgets =
+                await telemetry.GetErrorBudgetsAsync(tenantId, ct);
+
+            return Results.Ok(new
+            {
+                deployments = budgets.Count,
+                withData = budgets.Count(b => b.HasData),
+                breached = budgets.Count(b => b.IsBreached),
+                // Burning faster than sustainable while still in credit — the set that answers
+                // "will we breach" rather than "have we". Reported separately because a caller
+                // polling for trouble wants it before the breach, not after.
+                atRisk = budgets.Count(b => !b.IsBreached && b.BurnRateRecent > 1.0),
+                budgets = budgets.Select(b => new
+                {
+                    deploymentId = b.DeploymentId,
+                    deployment = b.DeploymentName,
+                    app = b.AppName,
+                    customerId = b.CustomerId,
+                    customer = b.CustomerName,
+                    clusterId = b.ClusterId,
+                    targetPercent = b.TargetPercent,
+                    windowDays = b.WindowDays,
+                    // ⚠️ Left null rather than defaulted to 0. A deployment with no samples in
+                    // the window has unknown availability, and 0 would read as a total outage.
+                    achievedPercent = b.AchievedPercent,
+                    budgetConsumedFraction = b.BudgetConsumedFraction,
+                    burnRateRecent = b.BurnRateRecent,
+                    hoursToExhaustion = b.HoursToExhaustion,
+                    hasData = b.HasData,
+                    isBreached = b.IsBreached,
+                }),
+            });
+        }).RequireApiScope(ApiScopes.OpsRead);
+
         api.MapGet("/upgrades", async (
             HttpContext ctx, EntKube.Contracts.Catalog.ICatalogApi catalog, CancellationToken ct) =>
         {

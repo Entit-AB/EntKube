@@ -146,6 +146,22 @@ public static class EntKubeTools
 
         new McpTool
         {
+            Name = "entkube_error_budgets",
+            Description = "Every managed deployment's standing against its SLA: the objective, the "
+                        + "availability actually achieved over the objective's window, how much of "
+                        + "the error budget is spent, and the recent burn rate. "
+                        + "Read burnRateRecent, not just isBreached: above 1.0 means the budget is "
+                        + "being spent faster than the window allows, which is the deployment about "
+                        + "to breach rather than the one that already has. "
+                        + "achievedPercent is null when there are no health samples in the window "
+                        + "— that is unknown availability, NOT zero, so check hasData before "
+                        + "reporting a deployment as down.",
+            InputSchema = NoArgs(),
+            Handler = (api, _, ct) => api.GetAsync("/api/v1/error-budgets", ct),
+        },
+
+        new McpTool
+        {
             Name = "entkube_upgrades",
             Description = "Which installed components are behind the versions their Helm "
                         + "repositories publish, and by how much (patch/minor/major).",
