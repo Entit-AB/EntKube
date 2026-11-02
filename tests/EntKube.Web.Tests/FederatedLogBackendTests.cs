@@ -309,29 +309,74 @@ public class FederatedLogBackendTests
     /// that are already running, so "both halves were entered" is true whether the budgets overlap
     /// or queue. A sequential-budget mutant passed it.</para>
     ///
-    /// <para>So the clock stays, and the margin gets wider instead. With 1s budgets, overlapping
-    /// costs ~1s and queueing ~2s, and the 1.5s ceiling sits 500ms clear of both. The previous
-    /// version used 300ms budgets against a 550ms ceiling — 250ms of headroom over the concurrent
-    /// case — which scheduling jitter under a full test run crossed twice, and a flaky test about
-    /// concurrency is worse than none because it teaches you to disbelieve a red run.</para>
+    /// <para>So the clock stays. ⚠️ But a FIXED ceiling had already been widened once and was
+    /// still a guess: 300ms budgets against a 550ms ceiling — 250ms of headroom — were crossed
+    /// twice by scheduling jitter, and the replacement 1s/1.5s pair is 500ms of headroom, only
+    /// double a margin already known to be crossable on this machine. The jitter here is
+    /// ADDITIVE, not proportional — one late timer plus a few threadpool hops — so quoting the
+    /// ratio (1.5x) flatters it, and the contention is in-process: xUnit runs classes in
+    /// parallel and <c>SegmentLogEngineTests</c> indexes 50,000 rows into Lucene in this same
+    /// assembly, starving the pool that every continuation here needs.</para>
+    ///
+    /// <para>So the ceiling is now RELATIVE, following the pattern
+    /// <c>SegmentLogEngineTests</c> already uses: the same pair of waits is timed on this host,
+    /// in this run, immediately before the exercise, and the ceiling is derived from that. Jitter
+    /// then inflates the yardstick and the measurement together instead of eating a fixed
+    /// allowance. A bound that measures the host rather than the code teaches a team to re-run
+    /// rather than to read.</para>
+    ///
+    /// <para><b>The budgets are also different from each other now — sealed 1s, hot 2s — for the
+    /// margin, not for extra detection.</b> Overlapping costs the LARGER (~2s) and queueing costs
+    /// the SUM (~3s), so the gap the ceiling has to sit inside is ~1000ms rather than the ~500ms
+    /// an equal 1s/1s pair left. Same 1.5 ratio, twice the absolute room, which is what the
+    /// relative ceiling needs in order to absorb additive jitter.</para>
+    ///
+    /// <para>⚠️ <b>What this test does NOT catch, measured rather than assumed.</b> Applying ONE
+    /// budget value to both halves passes it: using <c>_hotBudget</c> for the sealed half costs
+    /// ~2s and using <c>_sealedBudget</c> for the hot half costs ~1s, and both are under the
+    /// ceiling. I had written that distinct budgets closed that hole; mutating the production code
+    /// showed they do not. Those two mutants are caught by
+    /// <see cref="The_sealed_tier_is_given_longer_than_the_hot_one"/> and
+    /// <see cref="A_half_that_stops_answering_costs_the_budget_not_its_own_timeout"/>
+    /// respectively, which is where a per-half budget belongs. This test owns exactly one claim —
+    /// the two waits overlap — and dropping either budget outright (~30s) also fails it.</para>
     /// </summary>
     [Fact]
     public async Task The_two_budgets_run_concurrently_not_one_after_the_other()
     {
         using CancellationTokenSource cts = new();
 
+        TimeSpan sealedBudget = TimeSpan.FromSeconds(1);
+        TimeSpan hotBudget = TimeSpan.FromSeconds(2);
+
+        // The yardstick: what these two waits cost on THIS host, in THIS run, when they genuinely
+        // overlap. Measured before the exercise so the two readings face the same load.
+        var yardstickWatch = System.Diagnostics.Stopwatch.StartNew();
+        await Task.WhenAll(Task.Delay(sealedBudget), Task.Delay(hotBudget));
+        yardstickWatch.Stop();
+
         FederatedLogBackend sut = Federated(
             new FakeLogBackend { Streams = [Stream("api-1", (T0, "sealed"))], Delay = TimeSpan.FromSeconds(30) },
             new FakeLogBackend { Streams = [Stream("api-2", (T0, "hot"))], Delay = TimeSpan.FromSeconds(30) },
-            halfBudget: TimeSpan.FromSeconds(1),
-            sealedBudget: TimeSpan.FromSeconds(1));
+            halfBudget: hotBudget,
+            sealedBudget: sealedBudget);
 
         var sw = System.Diagnostics.Stopwatch.StartNew();
         await sut.QueryAsync(Cluster, Filter, T0.AddHours(-1), T0.AddHours(1), ct: cts.Token);
         sw.Stop();
 
-        sw.Elapsed.Should().BeLessThan(TimeSpan.FromMilliseconds(1500),
-            "both halves are already in flight; the budgets must overlap, not queue");
+        // Overlapping costs the larger budget, which is what the yardstick just measured.
+        // Queueing costs the sum — 1.5x the yardstick — so the ceiling goes between them. A
+        // quarter of the yardstick is the margin, and it grows with the yardstick under load.
+        long ceilingMs = yardstickWatch.ElapsedMilliseconds * 5 / 4;
+
+        sw.ElapsedMilliseconds.Should().BeLessThan(
+            ceilingMs,
+            "both halves are already in flight, so the budgets must overlap and cost the larger "
+            + "of them, not queue and cost the sum (the same two waits, overlapped, took {0}ms on "
+            + "this host just now; queueing them would cost about {1}ms)",
+            yardstickWatch.ElapsedMilliseconds,
+            yardstickWatch.ElapsedMilliseconds * 3 / 2);
 
         // Neither half ever answers; stop their delays rather than leaving them running.
         await cts.CancelAsync();
