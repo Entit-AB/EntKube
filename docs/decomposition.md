@@ -2094,6 +2094,68 @@ or name every gap, then generate the clients from the document** (item 8, unbloc
 6.5). Three hand-maintained clients against a 30-operation API is three chances to fall behind, and
 two of the three had already fallen behind without anyone noticing.
 
+### 6.7 The first route the measurement asked for: can we answer the SLA question? (2026-11-02)
+
+§6.6 said to stop treating "promote the contracts" as the gate and instead work from what the API
+cannot answer. The highest-value confirmed gap was blunt: **nothing on the public API could say
+whether the SLAs were being met.** A search for `budget`, `availability`, `uptime`, `sla` and
+`maintenance` across all 936 lines of the endpoint file returned **nothing**.
+
+That is a zero worth distrusting, so it was proven capable of being non-zero — the same search
+finds plenty once the route exists. The figure a support agreement is **invoiced against** was
+readable in a browser and nowhere else: no CI gate, status page or ticketing system could ask.
+
+`GET /api/v1/error-budgets` (`ops:read`) now answers it, with `deployments`, `withData`,
+`breached` and `atRisk` counts over per-deployment rows.
+
+#### ⚠️ A ratchet chose the design before a line was written
+
+The obvious implementation injects `ErrorBudgetService` into the route handler. That would have
+turned `PublicApiContractAdoptionTests` red, because `ModuleServiceMap` places that service in
+`Module.Telemetry`, and **reaching past a contract into a module's own services is the same
+boundary break as reading its tables, one layer further in** — a break the table count cannot see.
+
+So the route asks `ITelemetryApi.GetErrorBudgetsAsync`, and Telemetry's implementation delegates to
+its own service. `BaselineModuleServices` stayed at 4. Worth recording as a case where the ratchet
+was not an obstacle to route around but the thing that produced the right shape.
+
+Error budgets sit on **Telemetry's** contract although the objectives are Support's and the health
+samples are Delivery's, because `ErrorBudgetService` owns no table and the repo had already placed
+it there. The contract carries its own `ErrorBudgetSummary`, mapped from the service's
+`ErrorBudgetStatus`.
+
+#### ⚠️ A name test cannot see a transposition
+
+The new surface is a hand-written 14-field mapping, and the arithmetic behind it was already
+covered by `ErrorBudgetWindowTests` and `ErrorBudgetRoundingTests`. A test comparing the two
+records' field **names** would pass happily while `BurnRateRecent` and `BudgetConsumedFraction`
+were swapped — and this repo's defects are overwhelmingly **wrong numbers in untested
+customer-facing figures**, not wrong structure.
+
+`ErrorBudgetContractTests` therefore asserts values, through a scenario built so every number is
+distinct — 99.0, 30, 99.5, 0.5, 2.0, 180.0 — so any transposition changes one. The transposition
+mutation is caught.
+
+Two further properties are asserted because a client cannot recover them:
+
+- **`achievedPercent` is null, never 0, when nothing was sampled.** Unknown availability is not a
+  total outage, and a client that renders a missing number as zero would page someone for a
+  deployment registered yesterday.
+- **`HasData` and `IsBreached` are carried, not left to the caller.** Both are computed on the
+  source record, and a rounded percentage cannot reproduce the `>` versus `>=` distinction that
+  once reported a *met* objective as a breach.
+
+#### The loop from §6.6 closed on its own
+
+The route needed no new ratchet entry. It arrived already described in the OpenAPI document with
+its scope stated, already behaviourally verified (an `ops:read` token gets past, another scope is
+refused), and already demanded of both clients — because §6.6's parity ratchets read the router,
+so a new route is in scope the moment it is served.
+
+Pointing the new CLI command or the new MCP tool at a different path fails the parity ratchets by
+name. **That is what the previous unit bought: the cost of adding a route now includes its
+clients, automatically, rather than by remembering.**
+
 ## 7. What not to do
 
 - **Don't split the database** beyond Support and Telemetry. 287 cross-entity navigations

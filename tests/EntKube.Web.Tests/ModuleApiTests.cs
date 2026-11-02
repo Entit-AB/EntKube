@@ -102,7 +102,12 @@ public class ModuleApiTests : IDisposable
     private IFleetApi Fleet => new FleetApi(factory);
     private IDeliveryApi Delivery => new DeliveryApi(factory);
     private IDataServicesApi DataServices => new DataServicesApi(factory);
-    private ITelemetryApi Telemetry => new TelemetryApi(factory);
+    // ErrorBudgetService composes Support's objectives with Delivery's health samples, so
+    // Telemetry's implementation is built here from the real pieces rather than a stand-in: the
+    // whole point of the contract is that the composition happens behind it.
+    private ITelemetryApi Telemetry => new TelemetryApi(
+        factory,
+        new EntKube.Web.Services.ErrorBudgetService(Delivery, new SupportApi(factory)));
 
     [Fact]
     public async Task Catalog_answers_for_the_asking_tenant_and_refuses_the_neighbour()
