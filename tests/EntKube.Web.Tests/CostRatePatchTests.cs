@@ -2,6 +2,7 @@ using System.Text.RegularExpressions;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.Cost;
+using EntKube.Web.Services.PublicApi;
 using FluentAssertions;
 using Microsoft.Data.Sqlite;
 using Microsoft.EntityFrameworkCore;
@@ -301,16 +302,54 @@ public class CostRatePatchTests : IDisposable
             "and must not take the whole-row replace that the settings page correctly uses");
     }
 
+    /// <summary>
+    /// ⚠️ <b>This was a source scan, and the source moved.</b> It asserted the literal
+    /// <c>chargeIdleCapacity = rate.ChargeIdleCapacity</c>, which was the anonymous-object
+    /// spelling of the read-back mapping. That mapping is now
+    /// <see cref="ClusterRateResponse.From"/> — named arguments, in another file — so the scan
+    /// broke while the fact it guards stayed true.
+    ///
+    /// <para>Rewritten to assert the property rather than its spelling, and deliberately made
+    /// STRONGER in the process: it now round-trips the flag in BOTH states. A mapping that
+    /// hard-coded the field would have satisfied a text search for an assignment; it cannot
+    /// satisfy a true that stays true and a false that stays false.</para>
+    /// </summary>
     [Fact]
     public void The_cost_rate_response_exposes_the_idle_capacity_flag()
     {
-        string source = EndpointSource();
+        ClusterRateResponse charged = ClusterRateResponse.From(RateWithIdleCharging(true));
+        ClusterRateResponse notCharged = ClusterRateResponse.From(RateWithIdleCharging(false));
 
-        source.Should().Contain("chargeIdleCapacity = rate.ChargeIdleCapacity",
+        charged.ChargeIdleCapacity.Should().BeTrue(
             "a client that cannot read a field back cannot detect drift on it, which is the whole "
             + "reason these four routes are full CRUD");
 
-        source.Should().Contain("bool? ChargeIdleCapacity",
-            "and it must be nullable in the request, or absent and false are the same value again");
+        notCharged.ChargeIdleCapacity.Should().BeFalse(
+            "and it must carry the stored value rather than a constant — a tenant who turned idle "
+            + "charging off must see it off, which is the defect this whole file was written for");
+
+        // The request half: nullable by its TYPE, not by a string match on the declaration.
+        typeof(PublicApiEndpoints.CostRateInput)
+            .GetProperty(nameof(PublicApiEndpoints.CostRateInput.ChargeIdleCapacity))!
+            .PropertyType.Should().Be(
+                typeof(bool?),
+                "or absent and false are the same value again, and an omitted field silently "
+                + "re-enables charging");
     }
+
+    /// <summary>A price sheet that differs only in the flag under test.</summary>
+    private static EntKube.Contracts.Cost.ClusterRate RateWithIdleCharging(bool charge) =>
+        new(
+            ClusterId: Guid.NewGuid(),
+            CpuCoreHourCost: 1m,
+            MemoryGiBHourCost: 2m,
+            StorageGiBMonthCost: 3m,
+            LoadBalancerMonthlyCost: 4m,
+            PublicIpMonthlyCost: 5m,
+            ClusterMonthlyOverhead: 6m,
+            Currency: "SEK",
+            ChargeOnRequests: true,
+            ChargeIdleCapacity: charge,
+            UpdatedAt: new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc),
+            UpdatedBy: "test");
 }
