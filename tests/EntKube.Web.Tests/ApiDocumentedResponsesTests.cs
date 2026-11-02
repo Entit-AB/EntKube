@@ -10,7 +10,7 @@ namespace EntKube.Web.Tests;
 /// (<c>CliEndpointParityTests</c>, <c>McpEndpointParityTests</c>), but whether the described
 /// response set matches the responses the server actually produces.
 ///
-/// <para><b>What was wrong.</b> Every one of the API's operations was documented as answering
+/// <para><b>What was wrong.</b> Every one of the API's 31 operations was documented as answering
 /// exactly one status: <c>200</c>, with no body schema. Meanwhile <c>ApiTokenAuthFilter</c>
 /// answers <c>401</c> for a token that is missing, malformed, unknown, expired or revoked, and
 /// <c>403</c> for one short a scope. A client generated from that document would model both
@@ -27,6 +27,15 @@ namespace EntKube.Web.Tests;
 [Collection(ApiSurfaceCollection.Name)]
 public class ApiDocumentedResponsesTests(GeneratedOpenApiDocumentFixture fixture)
 {
+    /// <summary>
+    /// Operations answering a 2xx with no schema for it. Lower this as handlers are typed; it
+    /// reaching 0 is the precondition for generating the clients.
+    /// </summary>
+    private const int UndescribedSuccessBodies = 26;
+
+    /// <summary>Operations whose success is a 204 and so has nothing to describe.</summary>
+    private const int BodylessSuccesses = 1;
+
     /// <param name="StatedScope">
     /// Null when the document says any live token suffices — the case where the filter has
     /// nothing to refuse the caller for, so 403 is unreachable.
@@ -36,7 +45,8 @@ public class ApiDocumentedResponsesTests(GeneratedOpenApiDocumentFixture fixture
         string Path,
         string? StatedScope,
         IReadOnlyList<string> Statuses,
-        bool HasSuccessBodySchema)
+        bool HasSuccessBodySchema,
+        bool SuccessIsBodylessByDesign)
     {
         public override string ToString() => $"{Method} {Path} -> [{string.Join(",", Statuses)}]";
     }
@@ -72,12 +82,20 @@ public class ApiDocumentedResponsesTests(GeneratedOpenApiDocumentFixture fixture
                     r.Key.StartsWith("2", StringComparison.Ordinal)
                     && r.Value.Content?.Any(c => c.Value.Schema is not null) == true) == true;
 
+                // A 204 is not an undescribed body; it is the absence of one, declared. Before
+                // the handlers returned typed results the document said these answered 200 —
+                // because a bare IResult tells it nothing and 200 is the assumption — so this
+                // distinction could not even be drawn.
+                bool bodyless = operation.Responses?.Keys.Any(k => k == "204") == true
+                    && operation.Responses.Keys.All(k => !k.StartsWith("2", StringComparison.Ordinal) || k == "204");
+
                 described.Add(new Described(
                     method,
                     path,
                     scopeByOperation.TryGetValue((method, path), out string? scope) ? scope : null,
                     operation.Responses is null ? [] : [.. operation.Responses.Keys],
-                    body));
+                    body,
+                    bodyless));
             }
         }
 
@@ -157,32 +175,135 @@ public class ApiDocumentedResponsesTests(GeneratedOpenApiDocumentFixture fixture
     }
 
     /// <summary>
-    /// ⚠️ <b>This is a PIN on a known gap, not a ratchet — and saying so is the point.</b>
+    /// ⚠️ <b>The debt, banked.</b> This replaces the pin that said NO operation described its
+    /// success body — a pin written to fail the day the first response type was declared, which
+    /// is what has now happened. It is a counting ratchet from here: the number may only go DOWN,
+    /// and it going UP means a route shipped without a response type.
     ///
-    /// <para>No operation describes the shape of its success body. Every handler returns
-    /// <c>Results.Ok(new { … })</c>, which produces a bare <c>IResult</c> carrying no type, so
-    /// ASP.NET Core has nothing to infer a schema from and emits a 200 with no content.</para>
+    /// <para><b>Why the number matters.</b> A generator fed an operation with no response schema
+    /// emits a method returning <c>object</c>. Until this reaches zero, generating the clients
+    /// (<c>docs/decomposition.md</c> item 8) produces something strictly worse than the
+    /// hand-written clients it would replace. This count IS the remaining distance to item 8.</para>
     ///
-    /// <para><b>This is what blocks generating the clients</b> (<c>docs/decomposition.md</c> item
-    /// 8): a generator fed this document emits a method per route whose return type is
-    /// <c>object</c>, which is strictly worse than the hand-written clients it would replace.
-    /// Item 8 is not blocked on choosing a generator; it is blocked on this.</para>
-    ///
-    /// <para><b>What this test does and does not do.</b> It fails the day the first response type
-    /// is declared — deliberately, because that is the moment this pin should become a count that
-    /// only goes up. It does NOT stop a new route being added without a response type; expressing
-    /// that needs an absolute number, and banking one here while another branch adds a route would
-    /// put two changes on one constant and lose a decrement.</para>
+    /// <para>The fix is per-route and cannot be centralised: <c>Produces&lt;T&gt;</c> has no
+    /// <c>IEndpointConventionBuilder</c> overload, unlike the <c>ProducesProblem</c> calls that
+    /// gave every route its 401 and 403 from one place. Each handler must return
+    /// <c>TypedResults.Ok(record)</c> so its own return type carries the schema.</para>
     /// </summary>
     [Fact]
-    public void No_operation_yet_describes_its_success_body()
+    public void The_operations_with_no_described_success_body_are_the_ones_still_banked()
     {
-        List<Described> typed = [.. Describe().Where(d => d.HasSuccessBodySchema)];
+        List<Described> undescribed =
+            [.. Describe().Where(d => !d.HasSuccessBodySchema && !d.SuccessIsBodylessByDesign)];
 
-        typed.Should().BeEmpty(
-            "a response type has been declared, which is good and means this test has done its "
-            + "job: replace it with a count of operations that DO describe a body, asserted to be "
-            + "at least as high as today's, so the number can only rise. Newly typed: "
-            + string.Join("; ", typed.Select(d => d.ToString())));
+        // ⚠️ And they document NO success status at all, which is a regression this ratchet
+        // exists to retire. Declaring the 401 and 403 in RequireApiScope gave ASP.NET Core
+        // explicit response metadata for these endpoints, and that SUPPRESSES the 200 it
+        // otherwise infers — so an operation with no typed success now documents only its two
+        // ways of failing. It does answer 200. The fix is not to re-declare a bodyless 200, which
+        // would be the same uninformative entry the document carried before; it is to give the
+        // handler a return type, which produces a 200 WITH a schema. Each route this is done for
+        // leaves this set, so this assertion retires itself.
+        undescribed.Should().OnlyContain(
+            d => !d.Statuses.Any(s => s.StartsWith("2", StringComparison.Ordinal)),
+            "an operation with no typed success currently documents no 2xx whatsoever — if one of "
+            + "these has gained a success status without gaining a schema, say which and why");
+
+        undescribed.Should().HaveCount(
+            UndescribedSuccessBodies,
+            "this number is the remaining distance to a usable generated client. If you have just "
+            + "typed a handler's response, LOWER it. If it has risen, a route shipped answering a "
+            + "shape nothing can describe — give its handler a named record and return it through "
+            + "TypedResults.Ok. Still undescribed: {0}",
+            string.Join("; ", undescribed.Select(d => d.ToString())));
     }
+
+    /// <summary>
+    /// ⚠️ A described body must be a NAMED schema, not an inline one.
+    ///
+    /// <para>There is a shortcut that would retire the ratchet above without delivering what it
+    /// is for: <c>TypedResults.Ok(new { … })</c> also gives the handler a return type, so the
+    /// document gains a schema — but the type is a compiler-generated anonymous one, and a
+    /// generator emits it as an unnamed or mangled class. The point of the exercise is a client
+    /// whose methods return <c>ClusterRateResponse</c>, not
+    /// <c>&lt;&gt;f__AnonymousType3_12</c>.</para>
+    ///
+    /// <para>So each described body must be a <c>$ref</c> to a component the document actually
+    /// defines. That also catches a schema referencing a component that was never emitted, which
+    /// would make the document unusable rather than merely ugly.</para>
+    /// </summary>
+    [Fact]
+    public void A_described_success_body_is_a_named_schema_the_document_defines()
+    {
+        OpenApiDocument document = fixture.Document!;
+        IReadOnlyList<Described> described = [.. Describe().Where(d => d.HasSuccessBodySchema)];
+
+        described.Should().NotBeEmpty("otherwise this says nothing");
+
+        List<string> problems = [];
+
+        foreach ((string path, IOpenApiPathItem item) in document.Paths ?? [])
+        {
+            foreach ((HttpMethod verb, OpenApiOperation operation) in item.Operations ?? [])
+            {
+                string method = verb.Method.ToUpperInvariant();
+                if (!described.Any(d => d.Method == method && d.Path == path)) continue;
+
+                foreach ((string code, IOpenApiResponse response) in operation.Responses!)
+                {
+                    if (!code.StartsWith("2", StringComparison.Ordinal)) continue;
+
+                    if (response.Content is null) continue;
+
+                    foreach ((string media, OpenApiMediaType content) in response.Content)
+                    {
+                        // An array response names its component one level in, on `items`.
+                        IOpenApiSchema? schema = content.Schema;
+                        if (schema?.Type == JsonSchemaType.Array) schema = schema.Items;
+
+                        if (schema is not OpenApiSchemaReference { Reference.Id: { Length: > 0 } id })
+                        {
+                            problems.Add($"{method} {path} {code} {media}: inline, not a $ref");
+                            continue;
+                        }
+
+                        if (document.Components?.Schemas?.ContainsKey(id) != true)
+                            problems.Add($"{method} {path} {code} {media}: $ref to undefined '{id}'");
+                    }
+                }
+            }
+        }
+
+        problems.Should().BeEmpty(
+            "a generated client needs a named type per response, and an anonymous object produces "
+            + "a mangled one: " + string.Join("; ", problems));
+    }
+
+    /// <summary>
+    /// ⚠️ The measure for the count above. A scan that classified an operation into none of the
+    /// three buckets — or into two — would make the banked number mean nothing, and it would
+    /// drift silently because only one of the three is asserted.
+    /// </summary>
+    [Fact]
+    public void Every_operation_falls_into_exactly_one_of_the_three_buckets()
+    {
+        IReadOnlyList<Described> all = Describe();
+
+        all.Where(d => d.HasSuccessBodySchema && d.SuccessIsBodylessByDesign).Should().BeEmpty(
+            "an operation cannot both describe a body and have none by design");
+
+        int described = all.Count(d => d.HasSuccessBodySchema);
+        int bodyless = all.Count(d => d.SuccessIsBodylessByDesign);
+        int undescribed = all.Count(d => !d.HasSuccessBodySchema && !d.SuccessIsBodylessByDesign);
+
+        (described + bodyless + undescribed).Should().Be(
+            all.Count, "every operation must land in exactly one bucket");
+
+        bodyless.Should().Be(
+            BodylessSuccesses,
+            "a 204 route is the only kind excused from describing a body, so the number of them "
+            + "is pinned too — otherwise the excuse could be used to retire the debt without "
+            + "describing anything");
+    }
+
 }

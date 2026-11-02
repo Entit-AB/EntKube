@@ -3,6 +3,7 @@ using EntKube.Web.Services.Cost;
 using EntKube.Web.Services.Dr;
 using EntKube.Web.Services.SupplyChain;
 using EntKube.Web.Services.Upgrades;
+using Microsoft.AspNetCore.Http.HttpResults;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Services.PublicApi;
@@ -29,15 +30,16 @@ public static class PublicApiEndpoints
 
         // ── Identity ──
 
-        api.MapGet("/whoami", (HttpContext ctx) =>
+        api.MapGet("/whoami", Ok<WhoAmIResponse> (HttpContext ctx) =>
         {
             ApiTokenPrincipal principal = ctx.GetApiPrincipal()!;
-            return Results.Ok(new
-            {
-                tenantId = principal.TenantId,
-                token = principal.TokenName,
-                scopes = principal.Scopes.OrderBy(s => s),
-            });
+
+            // TypedResults, not Results: the handler's return type is the only thing the document
+            // can read a response schema from, and `Results.Ok` erases it to a bare IResult.
+            return TypedResults.Ok(new WhoAmIResponse(
+                TenantId: principal.TenantId,
+                Token: principal.TokenName,
+                Scopes: principal.Scopes.OrderBy(s => s)));
         }).RequireApiScope();
 
         // ── Fleet ──
@@ -819,15 +821,17 @@ public static class PublicApiEndpoints
         // Terraform provider has to be able to create, read back for drift detection,
         // update in place and destroy. A read-only surface cannot be managed declaratively.
 
-        api.MapGet("/cost-rates", async (
+        api.MapGet("/cost-rates", async Task<Ok<IEnumerable<ClusterRateResponse>>> (
             HttpContext ctx, EntKube.Contracts.Cost.ICostApi cost, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
 
-            return Results.Ok((await cost.ListRatesAsync(tenantId, ct)).Select(ToCostRateDto));
+            return TypedResults.Ok(
+                (await cost.ListRatesAsync(tenantId, ct)).Select(ToCostRateDto));
         }).RequireApiScope(ApiScopes.ConfigRead);
 
-        api.MapGet("/cost-rates/{clusterId:guid}", async (
+        api.MapGet("/cost-rates/{clusterId:guid}",
+            async Task<Results<Ok<ClusterRateResponse>, NotFound>> (
             Guid clusterId, HttpContext ctx, EntKube.Contracts.Cost.ICostApi cost,
             CancellationToken ct) =>
         {
@@ -841,10 +845,13 @@ public static class PublicApiEndpoints
             // 404 rather than an empty object: a provider reading back a resource that no
             // longer exists must be able to tell, so it can plan a re-create instead of
             // reporting a zero-priced cluster as configured.
-            return rate is null ? Results.NotFound() : Results.Ok(ToCostRateDto(rate));
+            return rate is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(ToCostRateDto(rate));
         }).RequireApiScope(ApiScopes.ConfigRead);
 
-        api.MapPut("/cost-rates/{clusterId:guid}", async (
+        api.MapPut("/cost-rates/{clusterId:guid}",
+            async Task<Results<Ok<ClusterRateResponse>, NotFound>> (
             Guid clusterId, CostRateInput input, HttpContext ctx,
             EntKube.Contracts.Cost.ICostApi cost, CancellationToken ct) =>
         {
@@ -872,17 +879,25 @@ public static class PublicApiEndpoints
 
             // SaveAsync returns null when the cluster is not this tenant's, so a crafted
             // cluster id cannot price another tenant's cluster.
-            return saved is null ? Results.NotFound() : Results.Ok(ToCostRateDto(saved));
+            return saved is null
+                ? TypedResults.NotFound()
+                : TypedResults.Ok(ToCostRateDto(saved));
         }).RequireApiScope(ApiScopes.ConfigWrite);
 
-        api.MapDelete("/cost-rates/{clusterId:guid}", async (
+        api.MapDelete("/cost-rates/{clusterId:guid}",
+            async Task<Results<NoContent, NotFound>> (
             Guid clusterId, HttpContext ctx, EntKube.Contracts.Cost.ICostApi cost,
             CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
             bool deleted = await cost.DeleteRateAsync(tenantId, clusterId, ct);
 
-            return deleted ? Results.NoContent() : Results.NotFound();
+            // ⚠️ This route has no success BODY and never had one, and the document used to say
+            // it answered 200 — because a bare IResult tells the document nothing, so 200 is what
+            // it assumes. It answers 204. An operation whose success is bodyless is not missing a
+            // schema; it has nothing to describe, which is why the ratchet counts it apart from
+            // the genuinely undescribed ones.
+            return deleted ? TypedResults.NoContent() : TypedResults.NotFound();
         }).RequireApiScope(ApiScopes.ConfigWrite);
 
         // IAdvisorApi.AcknowledgeAsync has always existed; this route reached past it to the
@@ -936,21 +951,14 @@ public static class PublicApiEndpoints
     /// must be provably unchanged by moving the data behind a contract — and a record serialised
     /// by convention would tie these field names to whatever the JSON options happen to say.
     /// </summary>
-    private static object ToCostRateDto(EntKube.Contracts.Cost.ClusterRate rate) => new
-    {
-        clusterId = rate.ClusterId,
-        cpuCoreHourCost = rate.CpuCoreHourCost,
-        memoryGiBHourCost = rate.MemoryGiBHourCost,
-        storageGiBMonthCost = rate.StorageGiBMonthCost,
-        loadBalancerMonthlyCost = rate.LoadBalancerMonthlyCost,
-        publicIpMonthlyCost = rate.PublicIpMonthlyCost,
-        clusterMonthlyOverhead = rate.ClusterMonthlyOverhead,
-        currency = rate.Currency,
-        chargeOnRequests = rate.ChargeOnRequests,
-        chargeIdleCapacity = rate.ChargeIdleCapacity,
-        updatedAt = rate.UpdatedAt,
-        updatedBy = rate.UpdatedBy,
-    };
+    /// <summary>
+    /// Three operations answer through here — <c>GET /cost-rates</c>,
+    /// <c>GET /cost-rates/{clusterId}</c> and <c>PUT /cost-rates/{clusterId}</c> — so typing this
+    /// one funnel typed all three from a single transcription. The mapping itself lives on
+    /// <see cref="ClusterRateResponse.From"/> so it can be asserted; see its remarks.
+    /// </summary>
+    private static ClusterRateResponse ToCostRateDto(EntKube.Contracts.Cost.ClusterRate rate) =>
+        ClusterRateResponse.From(rate);
 
     /// <summary>
     /// Request body for a price sheet. Currency and ChargeOnRequests are nullable so an
