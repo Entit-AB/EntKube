@@ -113,6 +113,19 @@ public static class CliCommands
         },
         new CliCommand
         {
+            // ⚠️ BURN is the column an operator acts on, so it is in the default view. A budget
+            // in credit with a burn rate above 1 is the deployment that will breach this week,
+            // and the breach column cannot show it yet.
+            Path = ["error-budgets"],
+            Description = "Every managed deployment's standing against its SLA",
+            BuildPath = _ => "/api/v1/error-budgets",
+            RowsProperty = "budgets",
+            Columns = [("APP", "app"), ("DEPLOYMENT", "deployment"), ("TARGET", "targetPercent"),
+                       ("ACHIEVED", "achievedPercent"), ("SPENT", "budgetConsumedFraction"),
+                       ("BURN", "burnRateRecent"), ("BREACHED", "isBreached")],
+        },
+        new CliCommand
+        {
             Path = ["incidents"],
             Description = "Alert incidents (--open for unresolved only)",
             BuildPath = a => "/api/v1/incidents" + Query(("open", a.Flag("open") ? "true" : null)),
