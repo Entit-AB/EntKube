@@ -49,6 +49,24 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
     /// </summary>
     public IReadOnlyDictionary<string, string> TokenPerScope { get; } = new Dictionary<string, string>();
 
+    /// <summary>
+    /// Every scoped route as <c>"VERB /full/path"</c> with route parameters flattened to
+    /// <c>{}</c> — the comparison key the client-parity ratchets use.
+    ///
+    /// <para>⚠️ <b>Read out of the ROUTER, which is the point.</b> Both parity ratchets previously
+    /// regexed <c>api.Map(Get|Post|Put|Delete)("…")</c> out of one source file. That cannot see a
+    /// route behind a sub-group, a route registered through a receiver not named <c>api</c>, a
+    /// template held in a const, a <c>MapPatch</c> or a <c>MapMethods</c> — and it could not see
+    /// <c>/scim/v2</c> at all, because that is a different file. Asking the thing that serves
+    /// requests is immune to all of those at once.</para>
+    ///
+    /// <para>The parameter NAME is deliberately discarded. A route's parameter is called
+    /// <c>{clusterId}</c> and a client's variable is called whatever its author liked; requiring
+    /// the two files to agree character for character would make this ratchet fail on a rename
+    /// that changes nothing an operator can observe.</para>
+    /// </summary>
+    public IReadOnlyList<string> ApiSurface { get; } = [];
+
     /// <summary>Sends a request to a documented operation as the holder of <paramref name="scope"/>.</summary>
     public async Task<HttpStatusCode> CallAsync(DocumentedOperation operation, string scope)
     {
@@ -77,6 +95,26 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
             // body fails to bind answers 400 without the scope check ever running — and the whole
             // request would prove nothing. An empty JSON object binds to these DTOs.
             request.Content = new StringContent("{}", Encoding.UTF8, "application/json");
+        }
+
+        using HttpResponseMessage response = await _client.SendAsync(request);
+        return response.StatusCode;
+    }
+
+    /// <summary>
+    /// Sends one request exactly as given, with no stub body and no parameter filling, as the
+    /// holder of <paramref name="scope"/>. For asserting what the server does with a request a
+    /// client could not make — see <c>McpEndpointParityTests</c>'s bodyless-PUT check.
+    /// </summary>
+    public async Task<HttpStatusCode> SendRawAsync(
+        string method, string url, string scope, string? body)
+    {
+        using HttpRequestMessage request = new(new HttpMethod(method), url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TokenPerScope[scope]);
+
+        if (body is not null)
+        {
+            request.Content = new StringContent(body, Encoding.UTF8, "application/json");
         }
 
         using HttpResponseMessage response = await _client.SendAsync(request);
@@ -149,6 +187,14 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
                from method in endpoint.Metadata.GetMetadata<HttpMethodMetadata>()?.HttpMethods ?? []
                select (method.ToUpperInvariant(), StripConstraints(template))
         ];
+
+        ApiSurface =
+        [
+            .. ScopedRoutes
+                .Select(r => $"{r.Method} {Regex.Replace(r.Path, @"\{[^}]+\}", "{}")}")
+                .Distinct(StringComparer.Ordinal)
+                .OrderBy(r => r, StringComparer.Ordinal)
+        ];
     }
 
     /// <summary>
@@ -214,6 +260,26 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
 /// How many security requirements the operation declares. Zero means the document tells a caller
 /// the route needs no credential.
 /// </param>
+/// <summary>
+/// The xUnit collection that shares ONE booted application between every suite which needs to ask
+/// the running system what its API surface is.
+///
+/// <para>⚠️ <b>A collection fixture, not three class fixtures, and the reason is measured.</b>
+/// <c>IClassFixture</c> is constructed once per test CLASS, so three suites consuming it would
+/// boot three <c>WebApplicationFactory</c> hosts and hold them all alive at once. This suite has
+/// already exhausted a 7.8 GB CI runner by rooting internal service providers that nothing could
+/// evict; a host is far heavier than one of those. One boot, shared.</para>
+///
+/// <para>The cost is that these suites no longer run in parallel with each other. That is the
+/// trade: a few seconds of wall clock against a class of failure that took four wrong diagnoses
+/// to find last time.</para>
+/// </summary>
+[CollectionDefinition(Name)]
+public sealed class ApiSurfaceCollection : ICollectionFixture<GeneratedOpenApiDocumentFixture>
+{
+    public const string Name = "api-surface";
+}
+
 /// <param name="RequiredQueryParameters">
 /// Query parameters the document marks required. A request that omits one is rejected by
 /// parameter binding before the scope check runs, so a probe must supply them.
@@ -262,8 +328,8 @@ public sealed record DocumentedOperation(
 /// bounds the document, and <see cref="Nothing_that_requires_a_scope_is_left_out_of_the_document"/>
 /// is what stops that list from going stale.</para>
 /// </summary>
+[Collection(ApiSurfaceCollection.Name)]
 public class GeneratedOpenApiDocumentTests(GeneratedOpenApiDocumentFixture fixture)
-    : IClassFixture<GeneratedOpenApiDocumentFixture>
 {
     /// <summary>
     /// ⚠️ THE MEASURE. Every other test here reads <c>fixture.Operations</c>, and an empty list
