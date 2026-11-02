@@ -13,7 +13,9 @@ namespace EntKube.Web.Modules.Api;
 /// schema, so every query goes <c>i.Cluster.TenantId</c> rather than taking a column at face
 /// value — the same shape as <c>CatalogApi</c>, for the same reason.</para>
 /// </summary>
-public sealed class TelemetryApi(IDbContextFactory<TelemetryDbContext> dbFactory) : ITelemetryApi
+public sealed class TelemetryApi(
+    IDbContextFactory<TelemetryDbContext> dbFactory,
+    EntKube.Web.Services.ErrorBudgetService errorBudgets) : ITelemetryApi
 {
     public async Task<IReadOnlyList<IncidentSummary>> GetIncidentsAsync(
         Guid tenantId, bool openOnly = false, int limit = 200, CancellationToken ct = default)
@@ -40,6 +42,46 @@ public sealed class TelemetryApi(IDbContextFactory<TelemetryDbContext> dbFactory
             .ToListAsync(ct);
 
         return [.. rows.Select(ToContract)];
+    }
+
+    /// <summary>
+    /// Delegates to Telemetry's own <c>ErrorBudgetService</c>, which composes Support's objectives
+    /// with Delivery's health samples.
+    ///
+    /// <para>⚠️ <b>The delegation is the point, not a shortcut.</b> A public API route could have
+    /// injected that service directly and saved this method — and
+    /// <c>PublicApiContractAdoptionTests</c> would have gone red for it, because
+    /// <c>ModuleServiceMap</c> places <c>ErrorBudgetService</c> in this module and reaching past a
+    /// contract into a module's services is the same boundary break as reading its tables, one
+    /// layer further in. The ratchet is what chose this shape.</para>
+    /// </summary>
+    public async Task<IReadOnlyList<ErrorBudgetSummary>> GetErrorBudgetsAsync(
+        Guid tenantId, CancellationToken ct = default)
+    {
+        List<Services.ErrorBudgetStatus> statuses =
+            await errorBudgets.GetTenantErrorBudgetsAsync(tenantId, ct);
+
+        return
+        [
+            .. statuses.Select(s => new ErrorBudgetSummary(
+                s.DeploymentId,
+                s.DeploymentName,
+                s.AppName,
+                s.CustomerId,
+                s.CustomerName,
+                s.ClusterId,
+                s.TargetPercent,
+                s.WindowDays,
+                s.AchievedPercent,
+                s.BudgetConsumedFraction,
+                s.BurnRateRecent,
+                s.HoursToExhaustion,
+                // Both are computed properties on the source record rather than stored fields, so
+                // they are carried across explicitly. A client cannot re-derive IsBreached from a
+                // rounded percentage, and the > vs >= distinction is exactly where it would differ.
+                s.HasData,
+                s.IsBreached))
+        ];
     }
 
     private static IQueryable<Data.AlertIncident> Scoped(TelemetryDbContext db, Guid tenantId)

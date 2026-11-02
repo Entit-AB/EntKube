@@ -63,6 +63,54 @@ public sealed record IncidentSummary(
 /// <c>Fleet.ClusterSummary</c> omits the kubeconfig. That read stays inside the service that needs
 /// it until there is somewhere credential-shaped for it to go.</para>
 /// </summary>
+/// <summary>
+/// One deployment's standing against its SLA over the objective's own window.
+///
+/// <para><b>Why the API needed this.</b> Nothing on the public API could answer "are we meeting
+/// the SLAs" — a grep for budget, availability, uptime, sla and maintenance across all 936 lines
+/// of the endpoint file returned nothing at all. An operator could read it in the browser and a
+/// support agreement could be invoiced against it, but no CI pipeline, status page or ticketing
+/// system could ask.</para>
+///
+/// <para>⚠️ <b><paramref name="AchievedPercent"/> is nullable and that is the interesting
+/// case.</b> It is null when the deployment has no health samples in the window — which is not
+/// 0% availability, and a client that renders a missing number as zero will report a total outage
+/// for a deployment that was merely registered yesterday. <paramref name="HasData"/> is the
+/// question to ask first.</para>
+/// </summary>
+/// <param name="BudgetConsumedFraction">
+/// Fraction of the error budget spent: 0 is pristine, 1.0 is exactly exhausted, above 1.0 is
+/// breached. Null when there is no data.
+/// </param>
+/// <param name="BurnRateRecent">
+/// The last day's error rate divided by the sustainable rate. Above 1.0 means burning faster than
+/// the window allows, even when the budget is still in credit — this is the field that answers
+/// "will we breach" rather than "have we breached".
+/// </param>
+/// <param name="HoursToExhaustion">
+/// At the recent burn rate, hours until the remaining budget is gone. Null when not on track to
+/// exhaust — which includes a budget already breached, so it is not an ordering key.
+/// </param>
+/// <param name="IsBreached">
+/// ⚠️ Strictly greater than 1.0. A budget exactly spent MEETS the objective; this was once
+/// <c>&gt;=</c> and reported a breach for availability exactly equal to its target.
+/// </param>
+public sealed record ErrorBudgetSummary(
+    Guid DeploymentId,
+    string DeploymentName,
+    string AppName,
+    Guid? CustomerId,
+    string? CustomerName,
+    Guid ClusterId,
+    double TargetPercent,
+    int WindowDays,
+    double? AchievedPercent,
+    double? BudgetConsumedFraction,
+    double? BurnRateRecent,
+    double? HoursToExhaustion,
+    bool HasData,
+    bool IsBreached);
+
 public interface ITelemetryApi
 {
     /// <summary>
@@ -75,4 +123,19 @@ public interface ITelemetryApi
     /// </param>
     Task<IReadOnlyList<IncidentSummary>> GetIncidentsAsync(
         Guid tenantId, bool openOnly = false, int limit = 200, CancellationToken ct = default);
+
+    /// <summary>
+    /// Every managed deployment's standing against its SLA, computed on read.
+    ///
+    /// <para>Composed from two other modules' contracts — the objectives are Support's and the
+    /// health samples are Delivery's — because error budgets own no table of their own. That is
+    /// why this sits on Telemetry's contract rather than on either of theirs: it is the module
+    /// that already owns the question, and <c>ModuleServiceMap</c> places the service that answers
+    /// it here.</para>
+    ///
+    /// <para>Deployments that are not managed are omitted rather than reported with a null target:
+    /// an unmanaged deployment has no objective to miss.</para>
+    /// </summary>
+    Task<IReadOnlyList<ErrorBudgetSummary>> GetErrorBudgetsAsync(
+        Guid tenantId, CancellationToken ct = default);
 }
