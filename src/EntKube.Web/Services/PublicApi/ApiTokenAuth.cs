@@ -98,9 +98,32 @@ public static class ApiTokenAuthExtensions
         // this method that changes one and leaves the other.
         ApiTokenAuthFilter filter = new(scope);
 
-        return builder
+        builder = builder
             .AddEndpointFilter(filter)
             .WithMetadata(new ApiScopeMetadata(filter.RequiredScope));
+
+        // ⚠️ And the document must admit the route can REFUSE. Every operation was described as
+        // answering exactly one status — 200 — while this filter returns 401 for a token that is
+        // missing, malformed, unknown, expired or revoked, and 403 for one short a scope. A
+        // generated client built from that document would model both refusals as success and
+        // deserialise a ProblemDetails into whatever the 200 was meant to be.
+        //
+        // Declared HERE, for the same reason the scope metadata is: this method already holds the
+        // filter that produces these two responses, so there is no second place to forget. Thirty
+        // routes do not each have to remember, and a route added tomorrow cannot be added without
+        // them — the refusals arrive with the guard.
+        builder = builder.ProducesProblem(StatusCodes.Status401Unauthorized);
+
+        // 403 is derived, not assumed. A route called with no scope argument is readable by any
+        // live token, so this filter has nothing to refuse it for and the document must not claim
+        // otherwise — an operation that advertises a status it cannot return is as wrong as one
+        // that hides a status it can, and sends a client writing dead error handling.
+        if (filter.RequiredScope is not null)
+        {
+            builder = builder.ProducesProblem(StatusCodes.Status403Forbidden);
+        }
+
+        return builder;
     }
 
     /// <summary>The authenticated API principal. Non-null inside any route guarded by the filter.</summary>
