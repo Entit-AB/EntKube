@@ -182,7 +182,10 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
             b.UseSetting("DataProtection:KeyPath", Path.Combine(_tempDir, "keys"));
             b.UseSetting("Seed:AdminEmail", "");
 
-            // ⚠️ Measured, not precautionary. HostedWork.RunsSingletonWork defaults to TRUE
+            // ⚠️ A precaution, and deliberately not described as more than that: a mutation
+            // switching this back to true leaves every test in this collection passing, so
+            // nothing here DEMONSTRATES the need. What is measured is the exposure.
+            // HostedWork.RunsSingletonWork defaults to TRUE
             // (deliberately — an existing install must keep sweeping after an upgrade), so this
             // host was running every AddSingletonWork registration across all twelve module
             // compositions for the life of the collection. They found nothing only because the
@@ -201,22 +204,18 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
 
         // A redirect to the login page would be reported as a 302 rather than the status the API
         // chose, and nothing here should ever redirect.
-        _client = _factory.CreateClient(new WebApplicationFactoryClientOptions
-        {
-            AllowAutoRedirect = false,
-
-            // ⚠️ https, and it is load-bearing for every non-GET probe in this collection.
-            // Measured: with the default http://localhost base address, a POST to
-            // /api/v1/apps/{id}/secrets/sync answers 500 with "AntiforgeryOptions.Cookie
-            // .SecurePolicy = Always, but the current request is not an SSL request", and a PUT or
-            // DELETE to /api/v1/cost-rates/{id} answers 405. So those requests were being answered
-            // by infrastructure, never reaching the handler — the exact shape
-            // RouteTenantScopingTests warns about, where a test cannot tell a correct
-            // implementation from a deleted one. The app sets the antiforgery cookie Secure
-            // deliberately (docs: security headers), so the client has to speak https, not the app
-            // relax.
-            BaseAddress = new Uri("https://localhost"),
-        });
+        // ⚠️ http, deliberately, and an earlier version of this changed it to https with a
+        // comment calling that "load-bearing for every non-GET probe in this collection". A
+        // mutation refuted it: with the API's status-code re-execution exemption in place, every
+        // probe passes over plain http. What produced the 500 ("AntiforgeryOptions.Cookie
+        // .SecurePolicy = Always, but the current request is not an SSL request") was the
+        // RE-EXECUTION of a bodyless API 404 against the /not-found Razor page, not the API call
+        // itself. Fixing the cause removed the need for the workaround, and a precaution with a
+        // false justification is worse than no precaution.
+        //
+        // A test that posts to a cookie-authenticated form endpoint here WILL meet that 500 and
+        // should set BaseAddress to https for itself rather than changing it for all seven suites.
+        _client = _factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
 
         Services = services;
         TokenPerScope = MintOneTokenPerScope(services, out Guid tokenTenantId);
