@@ -124,16 +124,41 @@ public static class ScimEndpoints
 
         if (result.Error is not null)
         {
-            JsonObject error = new()
-            {
-                ["schemas"] = new JsonArray(ScimUserService.ErrorSchema),
-                ["status"] = result.Status.ToString(),
-                ["detail"] = result.Error,
-            };
-
-            return Results.Content(error.ToJsonString(), ScimContentType, statusCode: result.Status);
+            return Results.Content(
+                ErrorBody(result).ToJsonString(), ScimContentType, statusCode: result.Status);
         }
 
         return Results.Content(result.Body?.ToJsonString() ?? "{}", ScimContentType, statusCode: result.Status);
+    }
+
+    /// <summary>
+    /// SCIM's error envelope (RFC 7644 s3.12).
+    ///
+    /// <para>Public so it can be asserted. It was inline in <see cref="Respond"/>, which is
+    /// private, so the one thing a connector parses on every failure had no test — and
+    /// <c>scimType</c> could have been added, or later dropped, without anything noticing.</para>
+    ///
+    /// <para><c>status</c> is a STRING, which the spec is explicit about and which is easy to
+    /// "tidy" into a number.</para>
+    /// </summary>
+    public static JsonObject ErrorBody(ScimResult result)
+    {
+        JsonObject error = new()
+        {
+            ["schemas"] = new JsonArray(ScimUserService.ErrorSchema),
+            ["status"] = result.Status.ToString(),
+            ["detail"] = result.Error,
+        };
+
+        // The error keyword. OPTIONAL in the spec, and emitted because the status code alone
+        // cannot tell a directory administrator whether a 400 was a malformed filter or a value
+        // we refused to guess at — and the portal shows them whatever the connector could make
+        // of this body.
+        if (result.ScimType is not null)
+        {
+            error["scimType"] = result.ScimType;
+        }
+
+        return error;
     }
 }
