@@ -13,12 +13,61 @@ public sealed record ScimResult
     public JsonNode? Body { get; init; }
     public string? Error { get; init; }
 
+    /// <summary>
+    /// SCIM's own error keyword (RFC 7644 s3.12) — <c>uniqueness</c>, <c>invalidValue</c> and so
+    /// on. OPTIONAL in the spec, and worth emitting anyway: the HTTP status alone cannot tell a
+    /// directory administrator whether a 400 was a malformed filter or a bad value, and what they
+    /// see in the portal is whatever the connector could make of our answer.
+    /// </summary>
+    public string? ScimType { get; init; }
+
     public static ScimResult Ok(JsonNode body) => new() { Status = 200, Body = body };
     public static ScimResult Created(JsonNode body) => new() { Status = 201, Body = body };
     public static ScimResult NoContent() => new() { Status = 204 };
     public static ScimResult NotFound(string detail) => new() { Status = 404, Error = detail };
-    public static ScimResult BadRequest(string detail) => new() { Status = 400, Error = detail };
-    public static ScimResult Conflict(string detail) => new() { Status = 409, Error = detail };
+
+    public static ScimResult BadRequest(string detail, string? scimType = null) =>
+        new() { Status = 400, Error = detail, ScimType = scimType };
+
+    public static ScimResult Conflict(string detail, string? scimType = ScimTypes.Uniqueness) =>
+        new() { Status = 409, Error = detail, ScimType = scimType };
+}
+
+/// <summary>The RFC 7644 s3.12 error keywords this service emits.</summary>
+public static class ScimTypes
+{
+    public const string InvalidFilter = "invalidFilter";
+    public const string InvalidValue = "invalidValue";
+    public const string InvalidSyntax = "invalidSyntax";
+    public const string Uniqueness = "uniqueness";
+}
+
+/// <summary>What one PATCH operation was understood to mean.</summary>
+public enum ScimPatchAction
+{
+    /// <summary>An attribute this service does not store. Tolerated — see <see cref="ScimUserService.Plan"/>.</summary>
+    Ignore,
+    SetActive,
+    SetUserName,
+}
+
+/// <summary>One understood operation, ready to execute.</summary>
+public readonly record struct ScimPatchStep(ScimPatchAction Action, bool Enabled, string? UserName);
+
+/// <summary>
+/// The whole PatchOp body, understood. Either a refusal or a list of steps.
+///
+/// <para>⚠️ Separated from execution so the DECISIONS can be tested. PATCH is the operation a
+/// directory deprovisions with, and it had no test of any kind — which is how a valueless
+/// <c>replace active</c> came to default to ENABLED.</para>
+/// </summary>
+public readonly record struct ScimPatchPlan(
+    IReadOnlyList<ScimPatchStep> Steps, string? Error, string? ScimType)
+{
+    public bool IsRefused => Error is not null;
+
+    public static ScimPatchPlan Refuse(string error, string scimType) => new([], error, scimType);
+    public static ScimPatchPlan Of(IReadOnlyList<ScimPatchStep> steps) => new(steps, null, null);
 }
 
 /// <summary>
@@ -82,7 +131,7 @@ public class ScimUserService(
         {
             // Refused rather than ignored — see ScimFilter for why returning everything
             // when a filter could not be honoured is the dangerous option.
-            return ScimResult.BadRequest(parsed.Error!);
+            return ScimResult.BadRequest(parsed.Error!, ScimTypes.InvalidFilter);
         }
 
         await using IdentityDbContext db = await dbFactory.CreateDbContextAsync(ct);
@@ -224,12 +273,80 @@ public class ScimUserService(
             return ScimResult.NotFound($"No user with id '{id}'.");
         }
 
-        if (patch["Operations"] is not JsonArray operations)
+        ScimPatchPlan plan = Plan(patch);
+        if (plan.IsRefused)
         {
-            return ScimResult.BadRequest("A PatchOp requires an 'Operations' array.");
+            return ScimResult.BadRequest(plan.Error!, plan.ScimType);
         }
 
         bool changed = false;
+
+        foreach (ScimPatchStep step in plan.Steps)
+        {
+            switch (step.Action)
+            {
+                case ScimPatchAction.SetActive:
+                    await SetEnabledAsync(user, step.Enabled, ct);
+                    changed = true;
+                    break;
+
+                case ScimPatchAction.SetUserName:
+                    user.UserName = step.UserName;
+                    changed = true;
+                    break;
+            }
+        }
+
+        if (changed)
+        {
+            // ⚠️ The result was discarded here, so a rename Identity rejected — a duplicate
+            // userName, a validator — answered 200 OK with the OLD name in the body. The
+            // directory recorded a successful update that never happened and would not retry.
+            IdentityResult updated = await userManager.UpdateAsync(user);
+            if (!updated.Succeeded)
+            {
+                bool duplicate = updated.Errors.Any(
+                    e => e.Code.Contains("Duplicate", StringComparison.OrdinalIgnoreCase));
+
+                string detail = string.Join("; ", updated.Errors.Select(e => e.Description));
+
+                return duplicate
+                    ? ScimResult.Conflict(detail)
+                    : ScimResult.BadRequest(detail, ScimTypes.InvalidValue);
+            }
+        }
+
+        ApplicationUser? refreshed = await userManager.FindByIdAsync(id);
+        return ScimResult.Ok(ToScim(refreshed ?? user));
+    }
+
+    /// <summary>
+    /// Understands a PatchOp body without touching the database, so every decision below is
+    /// testable. Returns a refusal, or the steps to apply.
+    ///
+    /// <para><b>What a directory actually sends.</b> Entra deprovisions with
+    /// <c>replace active=false</c>, sometimes with <c>path</c>, sometimes with no path and the
+    /// field inside <c>value</c>, and sometimes with the attribute fully qualified as
+    /// <c>urn:ietf:params:scim:schemas:core:2.0:User:active</c>. All three mean the same thing and
+    /// all three must work, because the one that silently does nothing leaves a removed employee
+    /// with working access while the portal reports success.</para>
+    ///
+    /// <para>⚠️ <b>An attribute this service does not store is IGNORED, deliberately, and that is
+    /// not the same as the bug above.</b> Entra sends PATCH for <c>name.givenName</c> and
+    /// <c>displayName</c> on ordinary profile edits. Refusing those with the 400 <c>invalidPath</c>
+    /// the RFC would allow makes Entra mark the user as failed and retry forever, so tolerance
+    /// here is the correct behaviour rather than laziness. What is NOT tolerated is guessing a
+    /// value we were not given.</para>
+    /// </summary>
+    public static ScimPatchPlan Plan(JsonObject patch)
+    {
+        if (ReadMember(patch, "Operations") is not JsonArray operations)
+        {
+            return ScimPatchPlan.Refuse(
+                "A PatchOp requires an 'Operations' array.", ScimTypes.InvalidSyntax);
+        }
+
+        List<ScimPatchStep> steps = [];
 
         foreach (JsonNode? operation in operations)
         {
@@ -238,30 +355,43 @@ public class ScimUserService(
                 continue;
             }
 
-            string verb = op["op"]?.GetValue<string>()?.ToLowerInvariant() ?? "";
-            // Directories disagree on capitalisation ("active" vs "Active") and some send
-            // no path at all, putting the field inside the value object instead.
-            string path = op["path"]?.GetValue<string>()?.Trim().ToLowerInvariant() ?? "";
-            JsonNode? value = op["value"];
+            string verb = AsString(ReadMember(op, "op"))?.Trim().ToLowerInvariant() ?? "";
+            string path = NormalisePatchPath(AsString(ReadMember(op, "path")));
+            JsonNode? value = ReadMember(op, "value");
 
             if (verb is not ("replace" or "add"))
             {
-                // "remove" on a user attribute has no meaning here, and silently accepting
-                // it would report success for something that did not happen.
+                // "remove" on a single-valued user attribute has no meaning here.
                 continue;
             }
 
             if (path == "active")
             {
-                await SetEnabledAsync(user, ReadBool(value, true), ct);
-                changed = true;
+                // ⚠️ No value, no guess. This read `ReadBool(value, true)`, so a
+                // `replace active` that arrived without a value ENABLED the account — turning a
+                // deprovision into a reactivation. Defaulting the other way would be just as
+                // wrong, deactivating someone the directory never asked to remove, so the only
+                // safe answer is to refuse. RFC 7644 s3.5.2 requires a value for replace anyway.
+                if (value is null)
+                {
+                    return ScimPatchPlan.Refuse(
+                        "A replace of 'active' requires a value.", ScimTypes.InvalidValue);
+                }
+
+                steps.Add(new ScimPatchStep(ScimPatchAction.SetActive, ReadBool(value, true), null));
                 continue;
             }
 
-            if (path == "username" && value is not null)
+            if (path == "username")
             {
-                user.UserName = value.GetValue<string>();
-                changed = true;
+                string? userName = AsString(value);
+                if (string.IsNullOrWhiteSpace(userName))
+                {
+                    return ScimPatchPlan.Refuse(
+                        "A replace of 'userName' requires a string value.", ScimTypes.InvalidValue);
+                }
+
+                steps.Add(new ScimPatchStep(ScimPatchAction.SetUserName, false, userName));
                 continue;
             }
 
@@ -272,26 +402,92 @@ public class ScimUserService(
                 {
                     if (string.Equals(field.Key, "active", StringComparison.OrdinalIgnoreCase))
                     {
-                        await SetEnabledAsync(user, ReadBool(field.Value, true), ct);
-                        changed = true;
+                        if (field.Value is null)
+                        {
+                            return ScimPatchPlan.Refuse(
+                                "A replace of 'active' requires a value.", ScimTypes.InvalidValue);
+                        }
+
+                        steps.Add(new ScimPatchStep(
+                            ScimPatchAction.SetActive, ReadBool(field.Value, true), null));
                     }
-                    else if (string.Equals(field.Key, "userName", StringComparison.OrdinalIgnoreCase)
-                             && field.Value is not null)
+                    else if (string.Equals(field.Key, "userName", StringComparison.OrdinalIgnoreCase))
                     {
-                        user.UserName = field.Value.GetValue<string>();
-                        changed = true;
+                        string? userName = AsString(field.Value);
+                        if (string.IsNullOrWhiteSpace(userName))
+                        {
+                            return ScimPatchPlan.Refuse(
+                                "A replace of 'userName' requires a string value.",
+                                ScimTypes.InvalidValue);
+                        }
+
+                        steps.Add(new ScimPatchStep(ScimPatchAction.SetUserName, false, userName));
                     }
                 }
             }
         }
 
-        if (changed)
+        return ScimPatchPlan.Of(steps);
+    }
+
+    /// <summary>
+    /// A PATCH path, reduced to the bare attribute name.
+    ///
+    /// <para>⚠️ A fully qualified <c>urn:ietf:params:scim:schemas:core:2.0:User:active</c> was not
+    /// recognised, so that form of deprovision matched nothing and answered 200 OK. Only the CORE
+    /// user prefix is stripped: doing the same to the enterprise extension URN would map
+    /// <c>...:enterprise:2.0:User:manager</c> onto a core attribute name and conflate two
+    /// different attributes.</para>
+    /// </summary>
+    public static string NormalisePatchPath(string? raw)
+    {
+        string path = raw?.Trim().ToLowerInvariant() ?? "";
+        const string corePrefix = "urn:ietf:params:scim:schemas:core:2.0:user:";
+
+        return path.StartsWith(corePrefix, StringComparison.Ordinal)
+            ? path[corePrefix.Length..]
+            : path;
+    }
+
+    /// <summary>
+    /// Reads a member by name, ignoring case.
+    ///
+    /// <para>⚠️ SCIM attribute names are case-insensitive (RFC 7643 s2.1), and this file already
+    /// went to trouble over that for paths and field keys — but <c>patch["Operations"]</c> and
+    /// <c>op["op"]</c> were exact lookups, so a connector sending <c>operations</c> got
+    /// "A PatchOp requires an 'Operations' array" and could never deprovision anyone.</para>
+    /// </summary>
+    private static JsonNode? ReadMember(JsonObject obj, string name)
+    {
+        foreach (KeyValuePair<string, JsonNode?> member in obj)
         {
-            await userManager.UpdateAsync(user);
+            if (string.Equals(member.Key, name, StringComparison.OrdinalIgnoreCase))
+            {
+                return member.Value;
+            }
         }
 
-        ApplicationUser? refreshed = await userManager.FindByIdAsync(id);
-        return ScimResult.Ok(ToScim(refreshed ?? user));
+        return null;
+    }
+
+    /// <summary>
+    /// A string, or null if the node is not one.
+    ///
+    /// <para>⚠️ <c>GetValue&lt;string&gt;()</c> THROWS on a JSON number or boolean, and the
+    /// exception escaped the handler — so a malformed <c>"op": 1</c> produced the application's
+    /// HTML error page rather than a SCIM error envelope, which is the one thing
+    /// <c>Respond</c> exists to prevent.</para>
+    /// </summary>
+    private static string? AsString(JsonNode? node)
+    {
+        try
+        {
+            return node?.GetValue<string>();
+        }
+        catch (Exception)
+        {
+            return null;
+        }
     }
 
     /// <summary>
