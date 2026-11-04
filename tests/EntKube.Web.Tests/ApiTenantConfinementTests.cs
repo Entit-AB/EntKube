@@ -205,30 +205,110 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
     }
 
     /// <summary>
+    /// Every name by which a caller could supply a tenant, across every operation: path, query,
+    /// header and cookie parameters, and the properties of a request body.
+    ///
+    /// <para>⚠️ The request body half is not decoration. An earlier version of this read only
+    /// <c>operation.Parameters</c>, and a body property named <c>tenantId</c> is not a parameter —
+    /// it lives under <c>requestBody.content[*].schema</c>. So the assertion's name claimed "from
+    /// the caller" while checking only some of the ways a caller supplies things, which is the
+    /// same overclaim this file exists to stop. <c>PUT /api/v1/cost-rates/{clusterId}</c> takes a
+    /// body, so the gap was reachable rather than theoretical.</para>
+    /// </summary>
+    private IReadOnlyList<(string Operation, string Source, string Name)> CallerSuppliedNames()
+    {
+        fixture.GenerationFailure.Should().BeNull();
+
+        OpenApiDocument document = fixture.Document!;
+        List<(string, string, string)> names = [];
+
+        foreach ((string path, IOpenApiPathItem item) in document.Paths ?? [])
+        {
+            foreach ((HttpMethod verb, OpenApiOperation operation) in item.Operations ?? [])
+            {
+                string where = $"{verb.Method.ToUpperInvariant()} {path}";
+
+                foreach (IOpenApiParameter parameter in operation.Parameters ?? [])
+                {
+                    names.Add((where, parameter.In?.ToString() ?? "parameter", parameter.Name ?? ""));
+                }
+
+                foreach ((string media, OpenApiMediaType content) in
+                         operation.RequestBody?.Content ?? new Dictionary<string, OpenApiMediaType>())
+                {
+                    foreach (string property in PropertyNames(document, content.Schema))
+                    {
+                        names.Add((where, $"body({media})", property));
+                    }
+                }
+            }
+        }
+
+        return names;
+    }
+
+    /// <summary>
+    /// A schema's property names, following a component reference.
+    ///
+    /// <para>⚠️ A body schema generated for a record parameter is a <c>$ref</c> to a named
+    /// component, not an inline object, so reading <c>.Properties</c> off the reference would
+    /// return nothing and the body check would silently inspect air.
+    /// <see cref="The_body_inspection_actually_reaches_a_body"/> is what stops that passing as
+    /// a clean result.</para>
+    /// </summary>
+    private static IEnumerable<string> PropertyNames(OpenApiDocument document, IOpenApiSchema? schema)
+    {
+        if (schema is null)
+        {
+            return [];
+        }
+
+        if (schema is OpenApiSchemaReference reference
+            && document.Components?.Schemas?.TryGetValue(reference.Reference.Id ?? "", out IOpenApiSchema? target) == true)
+        {
+            return target.Properties?.Keys ?? (IEnumerable<string>)[];
+        }
+
+        return schema.Properties?.Keys ?? (IEnumerable<string>)[];
+    }
+
+    /// <summary>
     /// ⭐ The property the file claims about itself, asserted literally: no operation accepts a
-    /// tenant id from the caller. This is the mechanical half — it reads every path, query, header
-    /// and cookie parameter the document declares.
+    /// tenant from the caller — by parameter or by request body.
     /// </summary>
     [Fact]
     public void No_operation_accepts_a_tenant_from_the_caller()
     {
-        fixture.GenerationFailure.Should().BeNull();
-
-        foreach ((string path, IOpenApiPathItem item) in fixture.Document!.Paths ?? [])
+        foreach ((string operation, string source, string name) in CallerSuppliedNames())
         {
-            foreach ((HttpMethod verb, OpenApiOperation operation) in item.Operations ?? [])
-            {
-                foreach (IOpenApiParameter parameter in operation.Parameters ?? [])
-                {
-                    TenantParameterNames.Should().NotContain(
-                        n => (parameter.Name ?? "").Contains(n, StringComparison.OrdinalIgnoreCase),
-                        "{0} {1} takes a parameter named '{2}', so a caller can point it at a "
-                        + "tenant of their choosing — which is the one thing the API promises "
-                        + "cannot happen",
-                        verb.Method, path, parameter.Name);
-                }
-            }
+            TenantParameterNames.Should().NotContain(
+                n => name.Contains(n, StringComparison.OrdinalIgnoreCase),
+                "{0} accepts '{1}' as {2}, so a caller can point it at a tenant of their "
+                + "choosing — which is the one thing the API promises cannot happen",
+                operation, name, source);
         }
+    }
+
+    /// <summary>
+    /// ⚠️ The measure for the body half. A <c>$ref</c> that failed to resolve, or a document that
+    /// stopped describing request bodies, would make the check above inspect nothing and report a
+    /// clean bill of health. This fails if no body property is found anywhere.
+    /// </summary>
+    [Fact]
+    public void The_body_inspection_actually_reaches_a_body()
+    {
+        IReadOnlyList<(string Operation, string Source, string Name)> supplied = CallerSuppliedNames();
+
+        supplied.Should().Contain(
+            n => n.Source.StartsWith("body(", StringComparison.Ordinal),
+            "PUT /api/v1/cost-rates/{clusterId} takes a CostRateInput body, so at least one body "
+            + "property must be visible — otherwise the tenant check above is reading air");
+
+        supplied.Should().Contain(
+            n => n.Source.StartsWith("body(", StringComparison.Ordinal)
+                 && n.Name.Equals("chargeIdleCapacity", StringComparison.OrdinalIgnoreCase),
+            "naming one property the body is known to carry keeps this from passing on a body "
+            + "schema that resolved to some other type's properties");
     }
 
     /// <summary>
