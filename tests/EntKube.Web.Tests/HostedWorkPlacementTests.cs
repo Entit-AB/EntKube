@@ -109,6 +109,9 @@ public class HostedWorkPlacementTests
     [InlineData("SegmentSealService")]
     [InlineData("VolumeGuardService")]
     [InlineData("PresenceHeartbeatService")]
+    // Its subject is THIS process's configuration: a single leader could not report that the
+    // other instances were misconfigured, which is the only thing it exists to do.
+    [InlineData("SingletonWorkWitness")]
     public void Work_about_this_process_runs_on_every_instance(string service)
     {
         string program = Path.GetFullPath(Path.Combine(AppContext.BaseDirectory, Web, "Program.cs"));

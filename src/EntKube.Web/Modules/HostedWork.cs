@@ -27,10 +27,18 @@ namespace EntKube.Web.Modules;
 /// distinction is in the API rather than in a config flag.</para>
 ///
 /// <para>⚠️ This is a placement switch, NOT a lease. With
-/// <c>Workers:RunSingletonWork</c> left true on two instances, the duplication in §9.3 is exactly
-/// as bad as before; this is what makes <em>N web + 1 worker</em> expressible, and it is the
-/// cheapest form of the <c>entkube-worker</c> extraction in §4.2. Claims on the four dangerous
-/// services are separate work and still needed.</para>
+/// <c>Workers:RunSingletonWork</c> left true on two instances, every sweep still runs twice; this
+/// is what makes <em>N web + 1 worker</em> expressible, and it is the cheapest form of the
+/// <c>entkube-worker</c> extraction in §4.2.</para>
+///
+/// <para><b>Updated 2026-11-04.</b> This used to end "Claims on the four dangerous services are
+/// separate work and still needed" — they are done. All four of §9.3 now take a per-row claim
+/// (<c>RolloutJudgementClaimTests</c>, <c>BootstrapRunClaimTests</c>,
+/// <c>ObservedSecretRefreshClaimTests</c>, <c>TelemetryIncidentClaimTests</c>), so duplication
+/// from a mis-set flag is wasteful rather than destructive. <b>And nothing used to notice the
+/// flag was wrong at all</b> — in either direction, including the worse one where it is false
+/// everywhere and no background work happens anywhere. <see cref="T:EntKube.Web.Services.SingletonWorkWitness"/>
+/// reports that now.</para>
 /// </summary>
 public static class HostedWork
 {
