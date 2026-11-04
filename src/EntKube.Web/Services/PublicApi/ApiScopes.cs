@@ -187,8 +187,6 @@ public static class ApiScopes
         [AppsWrite] = new("Trigger", [
             new("a deployment sync or a restart",
                 ["POST /deployments/{}/sync", "POST /deployments/{}/restart"]),
-            new("delivery of an app's vaulted secrets into its cluster",
-                ["POST /apps/{}/secrets/sync"]),
         ]),
 
         [OpsRead] = new("Read", [

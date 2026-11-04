@@ -132,3 +132,55 @@ installation, including users of other tenants". `ApiScopeAdvertisementTests` pi
 
 Correcting `PublicApiEndpoints.cs:15-18`'s "every route" paragraph is held for the same reason:
 that file is owned by open PR #422.
+
+## How far the API is from being the product
+
+`docs/decomposition.md` says "the API is the product": a separate frontend, in-cluster agents and
+the compose deployment are all blocked on an API complete enough to drive the platform without a
+browser. That blocker had never been measured. It is now.
+
+Five agents, one per domain, read the Blazor pages and services for their area and compared them
+against the verified 31-operation inventory:
+
+| domain | capabilities found | no API route at all | would block a separate frontend |
+|---|---|---|---|
+| fleet — clusters, nodes, catalog, blueprints, workloads | 22 | 21 | 22 |
+| identity — tenants, users, tokens, SCIM, tickets, agreements | 21 | 21 | 21 |
+| apps — apps, environments, deployments, vault, routes, policy | 20 | 19 | 20 |
+| ops — advisor, incidents, SLA, drift, supply chain, backups | 20 | 12 | 20 |
+| cost — run rate, ledger, rate sheets, idle capacity | 11 | 4 | 5 |
+| **total** | **94** | **77** | **88** |
+
+So the API exposes roughly a quarter of what the product does, and 88 of 94 measured capabilities
+could not be offered by a separate frontend without a new route. **Cost is the best-covered
+domain by a wide margin** — unsurprisingly, since `/cost`, `/cost/history`, `/cost/months` and the
+rate sheets were built out deliberately. Fleet and identity are the least covered: 43 capabilities
+between them, none of which has a route.
+
+The gaps are weighted towards reads, which is the useful direction: a read-only frontend is the
+first milestone, and most of what is missing is a detail view of something the API can already
+list. Representative examples, each cited in the agents' output:
+
+- **fleet** — node inventory and capacity; live cluster health (ready/total nodes, pod states,
+  CPU and memory pressure); the read-only workload browser; the component catalog an operator
+  picks from; a tracked component's configuration and failure state; bootstrap run progress.
+- **identity** — the customer registry; the support-ticket queue with its SLA clocks; a ticket's
+  event timeline; a customer's timebank statement; a user's effective access; the tenant's own
+  API token list.
+- **apps** — one app with its environments; the environment list (every per-environment view in
+  the UI starts from ids the API never returns); a deployment's definition and desired state; a
+  Helm deployment's values; the live resource tree; pod logs.
+- **ops** — the drift diff itself (the API returns a changed-line count, not the diff); the CVEs
+  behind a vulnerable image; per-cluster Kubernetes support status; one incident in full with its
+  timeline; Velero backup schedules.
+- **cost** — one customer's run rate scoped server-side (the customer portal's own view); accrued
+  spend per month for one customer; what drives a namespace's bill (CPU/memory/storage/network
+  split).
+
+⚠️ **Verification status, because the two halves differ.** The route side is solid: the
+31-operation inventory was enumerated three times independently — by hand, by an agent, and by the
+assertion in `ApiScopeAdvertisementTests` that each scope declares exactly what it grants — and all
+three agree, so "no route serves X" is reliable. The capability side is one agent per domain
+reading the UI, and the individual capability descriptions are **not** independently verified. Treat
+the counts as a measurement of the shape and size of the gap, not as a specification. Each entry
+needs its own reading before it becomes a route.
