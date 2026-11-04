@@ -41,6 +41,20 @@ namespace EntKube.Web.Tests;
 /// so each test seeds its own rows under a unique suffix and deletes them in
 /// <see cref="Dispose"/>. Names carry that suffix because clusters, environments, apps and
 /// deployments all have uniqueness constraints that would otherwise collide between tests.</para>
+///
+/// <para>⚠️ <b>What is NOT probed here, named rather than left to look like coverage.</b> Eight
+/// operations take an entity id from the caller; five are probed below. The three that are not:</para>
+///
+/// <list type="bullet">
+/// <item><c>POST /deployments/{id}/sync</c> and <c>POST /deployments/{id}/restart</c> — the
+/// stranger arm would refuse correctly at the ownership check, but the OWNER arm reaches a real
+/// cluster through a fake <c>ApiServerUrl</c> and cannot succeed in a test host. A probe whose
+/// positive control fails is the vacuous shape this file exists to avoid, so these are left to
+/// <c>ApiTenantConfinementTests</c>' declaration and to a reader of the handler.</item>
+/// <item>The six <c>/scim/v2/Users</c> routes are not probed because they are <b>known not to be
+/// confined</b> — banked as <c>TenantReach.InstallationWide</c>. A probe there would assert the
+/// defect rather than the invariant, and would have to be rewritten the moment it is fixed.</item>
+/// </list>
 /// </summary>
 [Collection(ApiSurfaceCollection.Name)]
 public sealed class CrossTenantProbeTests : IDisposable
