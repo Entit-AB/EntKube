@@ -635,7 +635,8 @@ public static class PublicApiEndpoints
         // Cost history — what was actually incurred, as opposed to /cost, which is a
         // projection of what today would cost over a month. This is the endpoint a
         // billing system reads; the run rate is the one a dashboard reads.
-        api.MapGet("/cost/history", async (
+        api.MapGet("/cost/history",
+            async Task<Results<Ok<CostHistoryResponse>, ProblemHttpResult>> (
             HttpContext ctx, CostLedgerService ledger,
             string? from, string? to, string? groupBy, Guid? customerId, Guid? appId, Guid? clusterId,
             CancellationToken ct) =>
@@ -648,7 +649,7 @@ public static class PublicApiEndpoints
 
             if ((toDay - fromDay).TotalDays > 400)
             {
-                return Results.Problem(
+                return TypedResults.Problem(
                     "The window is limited to 400 days.", statusCode: StatusCodes.Status400BadRequest);
             }
 
@@ -662,7 +663,7 @@ public static class PublicApiEndpoints
             // contract as /drift and /supply-chain.
             if (!await ledger.HasAnyAsync(tenantId, ct))
             {
-                return Results.Problem(
+                return TypedResults.Problem(
                     "The cost ledger has not recorded anything yet for this tenant. It accrues "
                     + "hourly once a cluster has a price sheet.",
                     statusCode: StatusCodes.Status503ServiceUnavailable);
@@ -671,67 +672,20 @@ public static class PublicApiEndpoints
             CostHistoryReport report = await ledger.GetHistoryAsync(
                 tenantId, fromDay, toDay, grouping, now, customerId, appId, clusterId, ct);
 
-            return Results.Ok(new
-            {
-                from = report.From,
-                to = report.To,
-                currency = report.Currency,
-                groupBy = report.GroupBy.ToString().ToLowerInvariant(),
-                totalCost = report.TotalCost,
-                previousTotalCost = report.PreviousTotalCost,
-                change = report.Change,
-                changeFraction = report.ChangeFraction,
-                unattributedCost = report.UnattributedCost,
-                multiAppCost = report.MultiAppCost,
-                platformCost = report.PlatformCost,
-                sharedChargedOutCost = report.SharedChargedOutCost,
-                dailyAverage = report.DailyAverage,
-                // Coverage travels with every figure: an under-measured window
-                // under-states cost, and a caller that cannot see that will read the
-                // shortfall as a saving.
-                coverage = new
-                {
-                    coveredHours = report.CoveredHours,
-                    expectedHours = report.ExpectedHours,
-                    gapHours = report.GapHours,
-                    completeness = report.Completeness,
-                    complete = report.IsComplete,
-                },
-                warnings = report.Warnings,
-                daily = report.Daily.Select(d => new
-                {
-                    day = d.Day,
-                    cost = d.Cost,
-                    coveredHours = d.CoveredHours,
-                    expectedHours = d.ExpectedHours,
-                    complete = d.IsComplete,
-                }),
-                groups = report.Groups.Select(g => new
-                {
-                    id = g.Id,
-                    label = g.Label,
-                    cost = g.Cost,
-                    previousCost = g.PreviousCost,
-                    change = g.Change,
-                    changeFraction = g.ChangeFraction,
-                    isNew = g.IsNew,
-                    isGone = g.IsGone,
-                    cpuCoreHours = g.CpuCoreHours,
-                    memoryGiBHours = g.MemoryGiBHours,
-                    storageGiBHours = g.StorageGiBHours,
-                    unattributed = g.IsUnattributed,
-                }),
-            });
+            // The shape, and the renames it carries, now live on CostHistoryResponse so the
+            // mapping can be asserted against the anonymous object it replaced.
+            return TypedResults.Ok(CostHistoryResponse.FromReport(report));
         }).RequireApiScope(ApiScopes.OpsRead);
 
-        api.MapGet("/cost/months", async (
+        api.MapGet("/cost/months",
+            async Task<Results<Ok<IEnumerable<CostMonthResponse>>, ProblemHttpResult>> (
             HttpContext ctx, CostLedgerService ledger, int? months, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
 
             if (!await ledger.HasAnyAsync(tenantId, ct))
             {
-                return Results.Problem(
+                return TypedResults.Problem(
                     "The cost ledger has not recorded anything yet for this tenant.",
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
@@ -740,16 +694,7 @@ public static class PublicApiEndpoints
                 await ledger.GetMonthlyAsync(
                     tenantId, Math.Clamp(months ?? 12, 1, 36), DateTime.UtcNow, customerId: null, ct);
 
-            return Results.Ok(all.Select(m => new
-            {
-                year = m.Year,
-                month = m.Month,
-                label = m.Label,
-                cost = m.Cost,
-                currency = m.Currency,
-                completeness = m.Completeness,
-                complete = m.IsComplete,
-            }));
+            return TypedResults.Ok(all.Select(CostMonthResponse.From));
         }).RequireApiScope(ApiScopes.OpsRead);
 
         api.MapGet("/rollouts", async (
