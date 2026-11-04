@@ -525,6 +525,10 @@ public class Program
         // the tenant's object storage, and only on a plane with no bucket configured does it fall back to
         // dropping the oldest. Telemetry is held here again (docs/telemetry-central-again.md), so this is
         // the management plane's own disk — and a full one fails ingest for every cluster at once.
+        // Per-instance, because the question it answers is about THIS process's configuration:
+        // a single leader could not report that the other instances were misconfigured.
+        builder.Services.AddPerInstanceWork<SingletonWorkWitness>();
+
         builder.Services.AddPerInstanceWork(sp => new VolumeGuardService(
             [
                 sp.GetRequiredService<SegmentManagerRegistry<LogSegmentManager>>(),

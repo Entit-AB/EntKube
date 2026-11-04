@@ -17,9 +17,21 @@
         </button>
     </div>
     <div class="card-body pt-3">
+        @* ⚠️ This used to end "it can never reach another tenant's data", flatly, directly above
+           the scope checkboxes. True of every /api/v1 route — none of them accepts a tenant id,
+           so none can be pointed elsewhere — and FALSE of scim:provision, which is offered on
+           this same form and reaches every user account in the installation. A promise a form
+           makes while offering the exception to it is worse than no promise. *@
         <p class="text-muted small mb-3">
-            Bearer tokens for <code>/api/v1</code>. Each token is scoped to this tenant and to the
-            permissions you grant — it can never reach another tenant's data.
+            Bearer tokens for <code>/api/v1</code>. Each token is scoped to the permissions you
+            grant, and no <code>/api/v1</code> route accepts a tenant id — so those routes can
+            never be pointed at another tenant's data.
+            <span class="d-block mt-1">
+                <i class="bi bi-exclamation-triangle-fill text-warning me-1"></i>
+                <code>scim:provision</code> is the exception: user accounts are installation-wide,
+                so that scope reaches users of every tenant. Grant it only to a directory
+                connector you would trust with the whole installation.
+            </span>
         </p>
 
         @if (justCreated is not null)

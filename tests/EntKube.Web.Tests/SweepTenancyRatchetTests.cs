@@ -100,6 +100,12 @@ public class SweepTenancyRatchetTests
         ["SegmentSealService"] =
             "iterates the live per-tenant segment managers for one signal and seals or expires that "
             + "tenant's own segments — per-tenant by construction, with no cross-tenant decision to make",
+        ["SingletonWorkWitness"] =
+            "asks ONE installation-wide question — which instance holds the claim on the work that "
+            + "must run on exactly one — and a tenant cannot be an input to it. It reads no rows and "
+            + "writes none: the whole probe is an advisory-lock acquire whose answer is a boolean "
+            + "about this process. There is one claim and one answer about it, the same shape as "
+            + "VolumeGuardService's shared disk below",
         ["VolumeGuardService"] =
             "measures ONE disk that every tenant shares, then acts through the same live per-tenant "
             + "managers, so the tenant is an input to every write exactly as for SegmentSealService. "

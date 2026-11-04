@@ -2264,7 +2264,13 @@ The reason so many of the above are read-then-write:
 
 - **No optimistic concurrency anywhere.** `IsRowVersion`, `IsConcurrencyToken`, `[Timestamp]`
   and `ConcurrencyCheck` appear nowhere in `src/EntKube.Web/Data` outside migrations.
-- **No lease primitive.** No leader election, no advisory lock, no distributed lock.
+- ~~**No lease primitive.** No leader election, no advisory lock, no distributed lock.~~
+  **Corrected 2026-11-04: there is one, and there has been since the two-instance work.**
+  `MigrationLock` takes a real advisory lock — `pg_try_advisory_lock` on Postgres,
+  `sp_getapplock` with `@LockOwner = 'Session'` on SQL Server, none on SQLite because two
+  processes sharing one file is not a supported deployment. It was hardcoded to one key, which is
+  the only reason it read as absent. `AdvisoryLock` now takes the key as a parameter and
+  `SingletonWorkWitness` holds a second one.
 - **Exactly one claim exists**: `CostLedgerWriter`'s hand-written `ExecuteUpdateAsync` CAS
   (`Cost/CostLedgerWriter.cs:112-124`), written to stop double-billing. It is the pattern the
   others need and the proof it is affordable.
@@ -2289,10 +2295,23 @@ So the order is:
    Redis is already an optional dependency. The worked deployment that steps 1 and 2 add up to —
    compose, Caddy, the environment matrix, how to verify it, and what it still does not make safe
    — is [running-two-instances.md](running-two-instances.md).
-3. **Fix `planCache`.** A TTL at minimum; cross-instance invalidation properly. This is the
-   one that is silent *and* security-relevant.
-4. **Claims on the four dangerous services**, following `CostLedgerWriter`'s CAS. Rollout
-   watching and bootstrap runs are the two that touch customer clusters.
+3. **Fix `planCache`.** ~~A TTL at minimum;~~ **the TTL is in — 30 seconds, pinned by
+   `KubeconfigResolver.DefaultFreshness` so a production value left at zero or at a day would
+   fail a test.** Cross-instance invalidation is still outstanding: a TTL *bounds* the window in
+   which a revoked credential still works on another instance, it does not coordinate. The Redis
+   connection `Presence:Provider` already optionally registers is the place for the bus.
+4. ~~**Claims on the four dangerous services**, following `CostLedgerWriter`'s CAS.~~ **Done.**
+   All four take a per-row claim, each with its own test — `RolloutJudgementClaimTests`,
+   `BootstrapRunClaimTests`, `ObservedSecretRefreshClaimTests`, `TelemetryIncidentClaimTests`.
+   So a mis-set placement flag is now wasteful rather than destructive.
+
+   ⚠️ **What was still missing is that nothing noticed the flag was wrong**, in either
+   direction — and the worse direction is `false` everywhere, where no background work happens
+   anywhere and the symptom is the absence of events rather than an error. `SingletonWorkWitness`
+   holds a second advisory lock and reports *contended* (two sweepers) and *unclaimed* (none).
+   It reports rather than enforces: standing down on a lost race would let a database hiccup stop
+   all background work, which is the direction `RunsSingletonWork` deliberately refuses to fail
+   in.
 5. **Telemetry last, and as its own process.** The active tier cannot be shared by
    configuration: one RWX volume fails on Lucene's `write.lock`, separate volumes split the
    data. `SegmentSealService`'s own docstring says "single-replica by deployment, so no leader

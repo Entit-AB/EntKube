@@ -95,3 +95,154 @@ public sealed record ClusterRateResponse(
             UpdatedAt: rate.UpdatedAt,
             UpdatedBy: rate.UpdatedBy);
 }
+
+/// <summary>
+/// What the cost ledger recorded over a window — the endpoint a billing system reads.
+///
+/// <para>⚠️ <b>The factory is <c>FromReport</c>, not <c>From</c>, because this record HAS a
+/// property called <c>From</c>.</b> Renaming the property was not an option: <c>from</c> is the
+/// wire name a client already reads.</para>
+///
+/// <para>Unlike <see cref="ClusterRateResponse"/>, this is NOT an identity projection — the
+/// handler renamed as it went (<c>complete</c> from <c>IsComplete</c>, <c>unattributed</c> from
+/// <c>IsUnattributed</c>) and flattened the grouping enum to a lowercase string. Those renames are
+/// the wire contract, so they are reproduced exactly and proved by
+/// <c>CostWireShapeTests</c>.</para>
+/// </summary>
+public sealed record CostHistoryResponse(
+    DateTime From,
+    DateTime To,
+    string Currency,
+    string GroupBy,
+    decimal TotalCost,
+    decimal PreviousTotalCost,
+    decimal Change,
+    double? ChangeFraction,
+    decimal UnattributedCost,
+    decimal MultiAppCost,
+    decimal PlatformCost,
+    decimal SharedChargedOutCost,
+    decimal DailyAverage,
+    CostCoverageResponse Coverage,
+    IReadOnlyList<string> Warnings,
+    IEnumerable<CostHistoryDayResponse> Daily,
+    IEnumerable<CostHistoryGroupResponse> Groups)
+{
+    public static CostHistoryResponse FromReport(EntKube.Web.Services.Cost.CostHistoryReport report) =>
+        new(
+            From: report.From,
+            To: report.To,
+            Currency: report.Currency,
+            // ⚠️ The enum is flattened to a lowercase string, not serialised as an enum. A client
+            // reads "customer", not 0 and not "Customer".
+            GroupBy: report.GroupBy.ToString().ToLowerInvariant(),
+            TotalCost: report.TotalCost,
+            PreviousTotalCost: report.PreviousTotalCost,
+            Change: report.Change,
+            ChangeFraction: report.ChangeFraction,
+            UnattributedCost: report.UnattributedCost,
+            MultiAppCost: report.MultiAppCost,
+            PlatformCost: report.PlatformCost,
+            SharedChargedOutCost: report.SharedChargedOutCost,
+            DailyAverage: report.DailyAverage,
+            Coverage: CostCoverageResponse.From(report),
+            Warnings: report.Warnings,
+            Daily: report.Daily.Select(CostHistoryDayResponse.From),
+            Groups: report.Groups.Select(CostHistoryGroupResponse.From));
+}
+
+/// <summary>
+/// How much of the window the ledger actually accounts for.
+///
+/// <para>Carried beside every total deliberately: an under-measured window under-states cost, and
+/// a caller that cannot see the shortfall reads it as a saving.</para>
+/// </summary>
+public sealed record CostCoverageResponse(
+    decimal CoveredHours,
+    decimal ExpectedHours,
+    decimal GapHours,
+    double Completeness,
+    bool Complete)
+{
+    public static CostCoverageResponse From(EntKube.Web.Services.Cost.CostHistoryReport report) =>
+        new(
+            CoveredHours: report.CoveredHours,
+            ExpectedHours: report.ExpectedHours,
+            GapHours: report.GapHours,
+            Completeness: report.Completeness,
+            Complete: report.IsComplete);
+}
+
+/// <summary>One day of the window.</summary>
+public sealed record CostHistoryDayResponse(
+    DateTime Day,
+    decimal Cost,
+    decimal CoveredHours,
+    decimal ExpectedHours,
+    bool Complete)
+{
+    public static CostHistoryDayResponse From(EntKube.Web.Services.Cost.CostHistoryPoint point) =>
+        new(
+            Day: point.Day,
+            Cost: point.Cost,
+            CoveredHours: point.CoveredHours,
+            ExpectedHours: point.ExpectedHours,
+            Complete: point.IsComplete);
+}
+
+/// <summary>
+/// One line of the breakdown, with the same line in the preceding window beside it.
+///
+/// <para><c>ChangeFraction</c> stays nullable: a line that did not exist last window has no
+/// percentage, and reporting +100% would invent a trend out of an appearance.</para>
+/// </summary>
+public sealed record CostHistoryGroupResponse(
+    Guid? Id,
+    string Label,
+    decimal Cost,
+    decimal PreviousCost,
+    decimal Change,
+    double? ChangeFraction,
+    bool IsNew,
+    bool IsGone,
+    double CpuCoreHours,
+    double MemoryGiBHours,
+    double StorageGiBHours,
+    bool Unattributed)
+{
+    public static CostHistoryGroupResponse From(EntKube.Web.Services.Cost.CostHistoryGroup group) =>
+        new(
+            Id: group.Id,
+            Label: group.Label,
+            Cost: group.Cost,
+            PreviousCost: group.PreviousCost,
+            Change: group.Change,
+            ChangeFraction: group.ChangeFraction,
+            IsNew: group.IsNew,
+            IsGone: group.IsGone,
+            CpuCoreHours: group.CpuCoreHours,
+            MemoryGiBHours: group.MemoryGiBHours,
+            StorageGiBHours: group.StorageGiBHours,
+            Unattributed: group.IsUnattributed);
+}
+
+/// <summary>One calendar month of recorded cost.</summary>
+public sealed record CostMonthResponse(
+    int Year,
+    int Month,
+    string Label,
+    decimal Cost,
+    string Currency,
+    double Completeness,
+    bool Complete)
+{
+    public static CostMonthResponse From(EntKube.Web.Services.Cost.CostMonth month) =>
+        new(
+            Year: month.Year,
+            Month: month.Month,
+            Label: month.Label,
+            Cost: month.Cost,
+            Currency: month.Currency,
+            Completeness: month.Completeness,
+            Complete: month.IsComplete);
+}
