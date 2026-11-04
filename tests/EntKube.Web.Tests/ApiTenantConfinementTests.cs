@@ -88,22 +88,39 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
             ["POST /api/v1/deployments/{deploymentId}/sync"] =
                 (TenantReach.ConfinedToTheTokenTenant, "The deployment is resolved tenant-first before the sync runs."),
             ["POST /api/v1/deployments/{deploymentId}/restart"] =
-                (TenantReach.ConfinedToTheTokenTenant, "As above."),
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "The deployment is resolved through the tenant-scoped delivery query before the "
+                 + "restart, and the workload name is passed as an SDK argument rather than "
+                 + "interpolated into a command."),
             ["POST /api/v1/apps/{appId}/secrets/sync"] =
                 (TenantReach.ConfinedToTheTokenTenant, "The app is resolved tenant-first before any secret is read or pushed."),
 
             ["GET /api/v1/advisor/findings"] =
                 (TenantReach.ConfinedToTheTokenTenant, "Findings are computed for the token's tenant."),
+            // The handler's own comment says why the predicate is indirect: an incident carries
+            // no TenantId, it belongs to a cluster and the cluster belongs to the tenant.
             ["GET /api/v1/incidents"] =
-                (TenantReach.ConfinedToTheTokenTenant, "Tenant predicate."),
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "Filtered through the cluster, because an incident has no tenant column of its "
+                 + "own; the contract applies that once rather than each route repeating it."),
+            // ⚠️ The reason first written here was wrong, and the verdict was right for a
+            // different reason than the one given. AdvisorStateService.MutateAsync looks up
+            // (TenantId == tenantId && FindingKey == key) and INSERTS a row stamped with the
+            // caller's tenant when nothing matches — so the id is never joined to the tenant's
+            // computed finding set, and an arbitrary key creates a junk row rather than a 404.
+            // Confined because the row carries the caller's own tenant either way.
             ["POST /api/v1/advisor/findings/{findingId}/acknowledge"] =
-                (TenantReach.ConfinedToTheTokenTenant, "The finding id is only ever used within the tenant's own computed set."),
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "The state row is written with the caller's own tenant id; an unknown finding "
+                 + "key inserts a row for that tenant rather than reaching another's."),
             ["GET /api/v1/error-budgets"] =
                 (TenantReach.ConfinedToTheTokenTenant, "Tenant predicate; no caller-supplied id."),
             ["GET /api/v1/upgrades"] =
                 (TenantReach.ConfinedToTheTokenTenant, "Tenant predicate; no route, query or body parameter at all."),
             ["GET /api/v1/rollouts"] =
-                (TenantReach.ConfinedToTheTokenTenant, "Tenant predicate."),
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "Rollout judgements are read under a tenant predicate; the route accepts no "
+                 + "parameter a caller could redirect."),
 
             // ⚠️ These three read a process-wide *ScanCache singleton rather than the database,
             // which is the shape that would leak across tenants if the cache were keyed wrongly.
@@ -117,19 +134,31 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
 
             ["GET /api/v1/cost"] =
                 (TenantReach.ConfinedToTheTokenTenant, "CostScanCache is read by the principal's tenant id."),
+            // ⚠️ Three caller-supplied ids, not one. The reason first written here named only
+            // customerId; the route also takes appId and clusterId, and all three are ANDed onto
+            // a query already carrying e.TenantId == tenantId. A reason that names one of three
+            // filters is how the fourth gets added unchecked.
             ["GET /api/v1/cost/history"] =
-                (TenantReach.ConfinedToTheTokenTenant, "Tenant predicate; the optional customerId filter is ANDed with it."),
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "Tenant predicate in SQL; the optional customerId, appId and clusterId filters "
+                 + "are each ANDed onto it, and the side queries clusterId reaches keep their own."),
             ["GET /api/v1/cost/months"] =
-                (TenantReach.ConfinedToTheTokenTenant, "Tenant predicate."),
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "Ledger rows are summed under e.TenantId == tenantId, and the route passes "
+                 + "customerId: null rather than accepting one."),
 
             ["GET /api/v1/cost-rates"] =
                 (TenantReach.ConfinedToTheTokenTenant, "Rates are selected through the tenant's own clusters."),
             ["GET /api/v1/cost-rates/{clusterId}"] =
                 (TenantReach.ConfinedToTheTokenTenant, "Ownership of clusterId is established against the token's tenant first."),
             ["PUT /api/v1/cost-rates/{clusterId}"] =
-                (TenantReach.ConfinedToTheTokenTenant, "As above, before the write."),
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "PatchAsync refuses on AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId) "
+                 + "before it touches the row, so the write cannot reach a foreign cluster."),
             ["DELETE /api/v1/cost-rates/{clusterId}"] =
-                (TenantReach.ConfinedToTheTokenTenant, "As above, before the delete."),
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "The delete is scoped through Cluster.TenantId, so a foreign cluster id matches "
+                 + "no row rather than deleting one."),
 
             ["GET /scim/v2/ServiceProviderConfig"] =
                 (TenantReach.NoTenantData, "A static SCIM capability document; no data of any tenant's."),
@@ -138,7 +167,9 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
             // ScimUserService queries IdentityDbContext.ApplicationUsers with no tenant predicate
             // and no SCIM method accepts a tenant id — it cannot, because ApplicationUser has no
             // tenant column; tenancy lives in TenantMembership. ScimEndpoints never calls
-            // GetApiPrincipal at all. See docs/api-scope-coverage.md.
+            // GetApiPrincipal at all. (An earlier draft cited docs/api-scope-coverage.md here;
+            // that file lands with a different branch, so the reason is stated in full above
+            // rather than pointed at. A dangling pointer is how an exemption loses its reason.)
             ["GET /scim/v2/Users"] =
                 (TenantReach.InstallationWide,
                  "Enumerates every account in the installation — sign-in name, email, enabled "
@@ -163,6 +194,12 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
     /// are all caught.
     /// </summary>
     private static readonly string[] TenantParameterNames = ["tenant"];
+
+    /// <summary>
+    /// How many times <c>PublicApiEndpoints.cs</c> reads the API principal: once per /api/v1
+    /// operation. Measured, not bounded — see the assertion for why a bound was not enough.
+    /// </summary>
+    private const int ApiV1PrincipalReads = 24;
 
     private IReadOnlyList<string> DocumentedOperations()
     {
@@ -189,6 +226,71 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
 
         Reaches.Values.Select(v => v.Reach).Distinct().Should().HaveCountGreaterThan(1,
             "a table where every operation carries the same verdict is not a measurement");
+
+        // ⚠️ The parameter collection itself, not just the operations. If generation stopped
+        // emitting parameters, No_operation_accepts_a_tenant_from_the_caller would iterate
+        // nothing and pass on an API with eight route-parameterised operations.
+        IReadOnlyList<(string Operation, string Source, string Name)> supplied = CallerSuppliedNames();
+
+        supplied.Should().Contain(n => n.Source == "Path",
+            "eight operations take a route parameter, so none being visible means the check is "
+            + "passing because it inspected nothing");
+
+        supplied.Should().Contain(n => n.Source == "Query", "several take a query parameter; same reason");
+    }
+
+    /// <summary>
+    /// The composition of the table, pinned.
+    ///
+    /// <para>⚠️ <b>Review found this file's weakest point by replay, and it was here.</b> The
+    /// assertions pinned the <see cref="TenantReach.InstallationWide"/> set and the key set and
+    /// nothing else, so 25 of 31 verdicts could be changed to a wrong value with every test green.
+    /// <see cref="TenantReach.NoTenantData"/> was the escape hatch: all 23 confined rows could be
+    /// relabelled as touching no tenant data, and
+    /// <see cref="Both_sides_of_the_comparison_were_actually_found"/> would still see two distinct
+    /// verdicts and pass. Two is small enough to name, so it is named.</para>
+    /// </summary>
+    [Fact]
+    public void The_two_operations_that_touch_no_tenant_data_are_named()
+    {
+        string[] noTenantData =
+        [
+            .. from entry in Reaches
+               where entry.Value.Reach == TenantReach.NoTenantData
+               orderby entry.Key
+               select entry.Key
+        ];
+
+        noTenantData.Should().BeEquivalentTo([
+            "GET /api/v1/whoami",
+            "GET /scim/v2/ServiceProviderConfig",
+        ], "relabelling a confined operation as touching no tenant data would otherwise hide it "
+         + "from every assertion in this file");
+
+        Reaches.Values.Count(v => v.Reach == TenantReach.ConfinedToTheTokenTenant)
+            .Should().Be(23, "the three counts have to add up to the operation count, or a row "
+                + "has gone missing from the arithmetic");
+    }
+
+    /// <summary>
+    /// Every row says why — not only the ones that leave the tenant.
+    ///
+    /// <para>⚠️ The first version checked a reason's length only for
+    /// <see cref="TenantReach.InstallationWide"/> rows and <c>continue</c>d past the other 25, so
+    /// a confined row could carry the empty string. The reason is the only part of a confined row
+    /// a reader can check against the code, which makes it the only part worth having.</para>
+    /// </summary>
+    [Fact]
+    public void Every_operation_says_why_it_reaches_what_it_reaches()
+    {
+        foreach ((string operation, (TenantReach _, string why)) in Reaches)
+        {
+            why.Should().NotBeNullOrWhiteSpace("{0} has no stated reason", operation);
+            why.Length.Should().BeGreaterThan(25,
+                "{0}'s reason has to name the mechanism — a predicate, a cache key, a guard — "
+                + "because a verdict with no mechanism cannot be checked against the code by the "
+                + "next person to read it", operation);
+        }
     }
 
     /// <summary>
@@ -228,7 +330,11 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
             {
                 string where = $"{verb.Method.ToUpperInvariant()} {path}";
 
-                foreach (IOpenApiParameter parameter in operation.Parameters ?? [])
+                // Operation-level AND path-item-level: a parameter declared on the path item
+                // applies to every operation under it and is a legal OpenAPI location, so reading
+                // only the operation's own list would leave a place for one to hide.
+                foreach (IOpenApiParameter parameter in
+                         (operation.Parameters ?? []).Concat(item.Parameters ?? []))
                 {
                     names.Add((where, parameter.In?.ToString() ?? "parameter", parameter.Name ?? ""));
                 }
@@ -236,7 +342,7 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
                 foreach ((string media, OpenApiMediaType content) in
                          operation.RequestBody?.Content ?? new Dictionary<string, OpenApiMediaType>())
                 {
-                    foreach (string property in PropertyNames(document, content.Schema))
+                    foreach (string property in PropertyNames(content.Schema))
                     {
                         names.Add((where, $"body({media})", property));
                     }
@@ -248,29 +354,22 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
     }
 
     /// <summary>
-    /// A schema's property names, following a component reference.
+    /// A schema's property names.
     ///
-    /// <para>⚠️ A body schema generated for a record parameter is a <c>$ref</c> to a named
-    /// component, not an inline object, so reading <c>.Properties</c> off the reference would
-    /// return nothing and the body check would silently inspect air.
-    /// <see cref="The_body_inspection_actually_reaches_a_body"/> is what stops that passing as
-    /// a clean result.</para>
+    /// <para>⚠️ <b>Measured, because the obvious guess was wrong.</b> The body schema for a record
+    /// parameter IS an <c>OpenApiSchemaReference</c> rather than an inline object — probed, and it
+    /// is — so this first resolved the reference through <c>Components.Schemas</c> by hand, with a
+    /// comment saying that was what stopped the check inspecting air. Removing that branch changed
+    /// nothing: in OpenAPI.NET v2 a reference proxies to its target, so <c>.Properties</c> on the
+    /// reference returns the target's nine properties directly. The branch was dead code carrying
+    /// a false rationale, which is worse than no branch.</para>
+    ///
+    /// <para>So the protection is <see cref="The_body_inspection_actually_reaches_a_body"/>, which
+    /// names a property the body is known to carry. If a future version stops proxying, that test
+    /// fails rather than this one quietly returning nothing.</para>
     /// </summary>
-    private static IEnumerable<string> PropertyNames(OpenApiDocument document, IOpenApiSchema? schema)
-    {
-        if (schema is null)
-        {
-            return [];
-        }
-
-        if (schema is OpenApiSchemaReference reference
-            && document.Components?.Schemas?.TryGetValue(reference.Reference.Id ?? "", out IOpenApiSchema? target) == true)
-        {
-            return target.Properties?.Keys ?? (IEnumerable<string>)[];
-        }
-
-        return schema.Properties?.Keys ?? (IEnumerable<string>)[];
-    }
+    private static IEnumerable<string> PropertyNames(IOpenApiSchema? schema) =>
+        schema?.Properties?.Keys ?? (IEnumerable<string>)[];
 
     /// <summary>
     /// ⭐ The property the file claims about itself, asserted literally: no operation accepts a
@@ -321,7 +420,7 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
         [
             .. from entry in Reaches
                where entry.Value.Reach == TenantReach.InstallationWide
-               orderby entry.Key, StringComparer.Ordinal
+               orderby entry.Key
                select entry.Key
         ];
 
@@ -375,8 +474,13 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
         static int PrincipalReads(string relativePath)
         {
             string source = File.ReadAllText(Path.Combine(RepoRoot(), relativePath));
-            string withoutLineComments = Regex.Replace(source, @"//[^\n]*", "");
-            return Regex.Matches(withoutLineComments, @"\.GetApiPrincipal\(\)").Count;
+            // Block comments as well as line comments. With only `//` stripped, one
+            // `/* ... */` naming .GetApiPrincipal() four times would buy four routes' worth of
+            // headroom under the count below — review found exactly that.
+            string stripped = Regex.Replace(source, @"/\*.*?\*/", "", RegexOptions.Singleline);
+            stripped = Regex.Replace(stripped, @"//[^\n]*", "");
+
+            return Regex.Matches(stripped, @"\.GetApiPrincipal\(\)").Count;
         }
 
         PrincipalReads(Path.Combine("src", "EntKube.Web", "Services", "Scim", "ScimEndpoints.cs"))
@@ -386,9 +490,14 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
                 + "defect that may have been fixed, and has to be re-measured rather than trusted");
 
         PrincipalReads(Path.Combine("src", "EntKube.Web", "Services", "PublicApi", "PublicApiEndpoints.cs"))
-            .Should().BeGreaterThan(20,
-                "every /api/v1 route derives its tenant from the principal, so this file reads it "
-                + "about once per route; a sharp drop means routes stopped scoping themselves");
+            .Should().Be(ApiV1PrincipalReads,
+                "the 24 /api/v1 operations read the principal exactly once each — measured, not "
+                + "assumed. This was BeGreaterThan(20), which left three routes free to stop "
+                + "scoping themselves with nothing noticing, and the doc never stated the real "
+                + "number so a reader could not see the slack was 12.5%. ⚠️ A legitimate "
+                + "refactor — extracting a Tenant(ctx) funnel, or splitting this 987-line file — "
+                + "fails here with confinement perfect. That is a prompt to re-measure, not a "
+                + "defect to work around");
     }
 
     private static string RepoRoot()
