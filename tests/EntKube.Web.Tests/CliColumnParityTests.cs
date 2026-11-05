@@ -154,14 +154,7 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
                 // dictionary" decides what the columns are checked against. Two DIFFERENT 2xx
                 // bodies mean the question has no single answer, so that is reported rather than
                 // resolved by picking one.
-                List<IOpenApiSchema> bodies =
-                    [.. (operation.Responses ?? [])
-                        .Where(r => r.Key.StartsWith("2", StringComparison.Ordinal))
-                        .SelectMany(r => r.Value.Content?.Values ?? [])
-                        .Select(c => c.Schema)
-                        .Where(schema => schema is not null)
-                        .Select(schema => schema!)
-                        .Distinct()];
+                List<IOpenApiSchema> bodies = SuccessBodies(operation);
 
                 if (bodies.Count > 1)
                 {
@@ -231,6 +224,49 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
         }
 
         return new(command, route, rows.Items, null);
+    }
+
+    /// <summary>
+    /// The distinct shapes an operation says it can answer with a 2xx.
+    ///
+    /// <para>⚠️ <b>Deduplicated by schema REFERENCE, not by object identity.</b> An operation that
+    /// answers the same record under two statuses — which <c>POST /apps/{appId}/secrets/sync</c>
+    /// does, 200 when every binding succeeded and 207 when one did not — produces two separate
+    /// <c>OpenApiSchemaReference</c> instances pointing at one component. <c>Distinct()</c> over
+    /// those compares references and calls them two bodies, so the caller would report "describes
+    /// 2 different 2xx bodies" about an operation that describes one shape twice. That is a FALSE
+    /// failure on the first route to use the pattern, and a reviewer clearing it would reach for
+    /// the assertion rather than for this line.</para>
+    ///
+    /// <para>An inline schema has no reference to compare, so each stays distinct — two inline
+    /// 2xx bodies genuinely are two shapes as far as anything here can tell, and
+    /// <c>A_described_success_body_is_a_named_schema_the_document_defines</c> already refuses
+    /// inline bodies outright.</para>
+    /// </summary>
+    private static List<IOpenApiSchema> SuccessBodies(OpenApiOperation operation)
+    {
+        List<IOpenApiSchema> bodies = [];
+        HashSet<string> seen = new(StringComparer.Ordinal);
+
+        foreach ((string code, IOpenApiResponse response) in operation.Responses ?? [])
+        {
+            if (!code.StartsWith("2", StringComparison.Ordinal)) continue;
+
+            foreach (OpenApiMediaType content in response.Content?.Values ?? [])
+            {
+                if (content.Schema is not IOpenApiSchema schema) continue;
+
+                if (schema is OpenApiSchemaReference { Reference.Id: { Length: > 0 } id }
+                    && !seen.Add(id))
+                {
+                    continue;
+                }
+
+                bodies.Add(schema);
+            }
+        }
+
+        return bodies;
     }
 
     /// <summary>
@@ -357,6 +393,66 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
     /// <para><c>JsonSchemaType</c> is <c>[Flags]</c>: Array is 64 and Null is 1, so OpenAPI 3.1's
     /// <c>type: ["array","null"]</c> is 65. An exact comparison against Array is false for it.</para>
     /// </summary>
+    private static IOpenApiResponse JsonResponse(IOpenApiSchema schema) =>
+        new OpenApiResponse
+        {
+            Content = new Dictionary<string, OpenApiMediaType>
+            {
+                ["application/json"] = new() { Schema = schema },
+            },
+        };
+
+    /// <summary>
+    /// ⚠️ The same record under two statuses is ONE shape.
+    ///
+    /// <para>No route declares two 2xx bodies today, so nothing else in the suite would catch
+    /// <see cref="SuccessBodies"/> regressing to <c>Distinct()</c> — and the first route to use the
+    /// pattern is already known: <c>POST /apps/{appId}/secrets/sync</c> answers the same body under
+    /// 200 and 207. Reference equality would call that two bodies and refuse to check a correct
+    /// command's columns.</para>
+    /// </summary>
+    [Fact]
+    public void The_same_schema_under_two_statuses_is_one_body()
+    {
+        OpenApiOperation twoStatusesOneShape = new()
+        {
+            Responses = new OpenApiResponses
+            {
+                ["200"] = JsonResponse(new OpenApiSchemaReference("AppSecretSyncResponse")),
+                ["207"] = JsonResponse(new OpenApiSchemaReference("AppSecretSyncResponse")),
+            },
+        };
+
+        SuccessBodies(twoStatusesOneShape).Should().HaveCount(
+            1,
+            "two references to one component are two objects and one shape, and the caller reports "
+            + "a count greater than 1 as 'no single shape its columns can be checked against'");
+
+        OpenApiOperation genuinelyTwoShapes = new()
+        {
+            Responses = new OpenApiResponses
+            {
+                ["200"] = JsonResponse(new OpenApiSchemaReference("AppSecretSyncResponse")),
+                ["202"] = JsonResponse(new OpenApiSchemaReference("OkResponse")),
+            },
+        };
+
+        SuccessBodies(genuinelyTwoShapes).Should().HaveCount(
+            2, "different components are different shapes and the question has no single answer");
+
+        // A 4xx carries a body too, and it is not what the columns render.
+        OpenApiOperation successPlusProblem = new()
+        {
+            Responses = new OpenApiResponses
+            {
+                ["200"] = JsonResponse(new OpenApiSchemaReference("OkResponse")),
+                ["404"] = JsonResponse(new OpenApiSchemaReference("ProblemDetails")),
+            },
+        };
+
+        SuccessBodies(successPlusProblem).Should().HaveCount(1, "only 2xx answers carry rows");
+    }
+
     [Fact]
     public void A_nullable_array_is_still_an_array()
     {
