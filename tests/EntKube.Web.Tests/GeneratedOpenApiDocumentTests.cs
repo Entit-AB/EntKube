@@ -3,6 +3,7 @@ using System.Net.Http.Headers;
 using System.Text;
 using System.Text.RegularExpressions;
 using EntKube.Web.Data;
+using EntKube.Web.Modules;
 using EntKube.Web.Services.PublicApi;
 using FluentAssertions;
 using Microsoft.AspNetCore.Hosting;
@@ -48,6 +49,27 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
     /// as a caller who holds precisely what the document claims is needed, and as one who does not.
     /// </summary>
     public IReadOnlyDictionary<string, string> TokenPerScope { get; } = new Dictionary<string, string>();
+
+    /// <summary>
+    /// The booted host's services, for a suite that has to seed a row before it can ask a
+    /// question. Resolve an <c>IDbContextFactory</c> from it rather than holding a context.
+    /// </summary>
+    /// <remarks>
+    /// ⚠️ The database behind this is SHARED by every suite in the collection and is already
+    /// mutated by one of them: the scope probe below calls
+    /// <c>POST /advisor/findings/{id}/acknowledge</c>, which inserts an <c>AdvisorFindingState</c>
+    /// row for <see cref="TokenTenantId"/> keyed by a random GUID on every run. Classes within a
+    /// collection run sequentially but in an unspecified order, so a seeding suite must assume
+    /// something ran before it and something will run after. Never assert a count or an emptiness
+    /// over this tenant that a sibling suite could change.
+    /// </remarks>
+    public IServiceProvider Services { get; } = null!;
+
+    /// <summary>
+    /// The tenant every token in <see cref="TokenPerScope"/> belongs to — so a suite can seed a
+    /// row that those tokens legitimately own, and a second tenant's row that they must not reach.
+    /// </summary>
+    public Guid TokenTenantId { get; }
 
     /// <summary>
     /// Every scoped route as <c>"VERB /full/path"</c> with route parameters flattened to
@@ -121,6 +143,27 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
         return response.StatusCode;
     }
 
+    /// <summary>
+    /// As <see cref="SendRawAsync"/>, returning the response body as well as the status.
+    ///
+    /// <para>Needed because one operation's confinement cannot be seen in a status at all:
+    /// <c>GET /deployments?appId=</c> takes the id as a FILTER, and a filter that matches nothing
+    /// is an empty 200, not a refusal.</para>
+    /// </summary>
+    public async Task<string> SendForBodyAsync(string method, string url, string scope, string? body)
+    {
+        using HttpRequestMessage request = new(new HttpMethod(method), url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TokenPerScope[scope]);
+
+        if (body is not null)
+        {
+            request.Content = new StringContent(body, Encoding.UTF8, "application/json");
+        }
+
+        using HttpResponseMessage response = await _client.SendAsync(request);
+        return await response.Content.ReadAsStringAsync();
+    }
+
     private readonly HttpClient _client;
 
     public GeneratedOpenApiDocumentFixture()
@@ -138,15 +181,45 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
             b.UseSetting("Vault:RootKey", "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
             b.UseSetting("DataProtection:KeyPath", Path.Combine(_tempDir, "keys"));
             b.UseSetting("Seed:AdminEmail", "");
+
+            // ⚠️ A precaution, and deliberately not described as more than that: a mutation
+            // switching this back to true leaves every test in this collection passing, so
+            // nothing here DEMONSTRATES the need. What is measured is the exposure.
+            // HostedWork.RunsSingletonWork defaults to TRUE
+            // (deliberately — an existing install must keep sweeping after an upgrade), so this
+            // host was running every AddSingletonWork registration across all twelve module
+            // compositions for the life of the collection. They found nothing only because the
+            // database held one tenant and some tokens.
+            //
+            // That stops being true the moment a suite seeds a cluster. DriftScanService waits
+            // 5 minutes and SupplyChainScanService 8 (DriftScanService.cs:82) and this project's
+            // CI run has reached 18m29s, so those delays ARE crossed — and the sweep would then
+            // dial the fake ApiServerUrl of a seeded cluster and fail somewhere unrelated to
+            // whatever test was running. Switching the flag off is what it exists for, and it
+            // makes the shared host cheaper and more deterministic for every suite here.
+            b.UseSetting(HostedWork.RunSingletonWorkKey, "false");
         });
 
         IServiceProvider services = _factory.Services; // builds the host
 
         // A redirect to the login page would be reported as a 302 rather than the status the API
         // chose, and nothing here should ever redirect.
+        // ⚠️ http, deliberately, and an earlier version of this changed it to https with a
+        // comment calling that "load-bearing for every non-GET probe in this collection". A
+        // mutation refuted it: with the API's status-code re-execution exemption in place, every
+        // probe passes over plain http. What produced the 500 ("AntiforgeryOptions.Cookie
+        // .SecurePolicy = Always, but the current request is not an SSL request") was the
+        // RE-EXECUTION of a bodyless API 404 against the /not-found Razor page, not the API call
+        // itself. Fixing the cause removed the need for the workaround, and a precaution with a
+        // false justification is worse than no precaution.
+        //
+        // A test that posts to a cookie-authenticated form endpoint here WILL meet that 500 and
+        // should set BaseAddress to https for itself rather than changing it for all seven suites.
         _client = _factory.CreateClient(new WebApplicationFactoryClientOptions { AllowAutoRedirect = false });
 
-        TokenPerScope = MintOneTokenPerScope(services);
+        Services = services;
+        TokenPerScope = MintOneTokenPerScope(services, out Guid tokenTenantId);
+        TokenTenantId = tokenTenantId;
 
         try
         {
@@ -205,10 +278,11 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
     /// nothing while looking like working access. A token holding exactly one *other* scope is
     /// the same test and uses the supported path.</para>
     /// </summary>
-    private static Dictionary<string, string> MintOneTokenPerScope(IServiceProvider services)
+    private static Dictionary<string, string> MintOneTokenPerScope(
+        IServiceProvider services, out Guid tenantId)
     {
         var dbFactory = services.GetRequiredService<IDbContextFactory<ApplicationDbContext>>();
-        Guid tenantId = Guid.NewGuid();
+        tenantId = Guid.NewGuid();
         using (ApplicationDbContext db = dbFactory.CreateDbContext())
         {
             db.Tenants.Add(new Tenant

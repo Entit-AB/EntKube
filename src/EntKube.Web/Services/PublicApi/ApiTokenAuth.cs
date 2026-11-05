@@ -1,3 +1,5 @@
+using Microsoft.AspNetCore.Http.Metadata;
+
 namespace EntKube.Web.Services.PublicApi;
 
 /// <summary>
@@ -71,6 +73,28 @@ public sealed class ApiTokenAuthFilter(string? requiredScope) : IEndpointFilter
 /// <param name="Scope">The required scope, or null when any live token may call the route.</param>
 public sealed record ApiScopeMetadata(string? Scope);
 
+/// <summary>
+/// Marks an endpoint whose chosen status code must reach the caller unaltered.
+///
+/// <para><c>UseStatusCodePagesWithReExecute</c> re-runs the pipeline against <c>/not-found</c> for
+/// any bodyless error response, keeping the original HTTP method — so an API handler's 404 arrived
+/// as a 405 on <c>DELETE</c> (that page is a <c>@page</c> and accepts only <c>GET</c>) and as a
+/// 400 antiforgery failure on <c>POST</c>. A friendly page is right for a browser and wrong for a
+/// client that was told, in the generated document, to expect a 404.</para>
+///
+/// <para>⚠️ A marker interface with no members, so there is nothing to assert about an instance of
+/// it; what can be asserted is the behaviour, and <c>ApiStatusIsFinalTests</c> does that over HTTP
+/// for all four methods rather than checking the metadata is present.</para>
+/// </summary>
+public sealed class ApiStatusIsFinal : ISkipStatusCodePagesMetadata
+{
+    public static readonly ApiStatusIsFinal Instance = new();
+
+    private ApiStatusIsFinal()
+    {
+    }
+}
+
 public static class ApiTokenAuthExtensions
 {
     /// <summary>
@@ -100,7 +124,22 @@ public static class ApiTokenAuthExtensions
 
         builder = builder
             .AddEndpointFilter(filter)
-            .WithMetadata(new ApiScopeMetadata(filter.RequiredScope));
+            .WithMetadata(new ApiScopeMetadata(filter.RequiredScope))
+            // ⚠️ And the status this route chooses must survive to the caller. Program.cs installs
+            // UseStatusCodePagesWithReExecute("/not-found") for the whole app, which re-executes
+            // any BODYLESS error response against that Razor page KEEPING THE ORIGINAL METHOD. So
+            // a 404 from an API handler was delivered as:
+            //   DELETE -> 405, because /not-found is a @page and accepts only GET
+            //   POST   -> 400 "A valid antiforgery token was not provided with the request"
+            //   GET    -> 404, correct by luck rather than by design
+            // Measured, not deduced: DELETE /cost-rates/{id} returned 204 for an owned cluster and
+            // 405 for anything else — including the SAME cluster once its row was gone, which is
+            // what gave it away as a status rewrite rather than a tenancy or routing effect.
+            //
+            // Declared here, beside the 401 and 403, for the same reason they are: this is the one
+            // place every one of the 31 operations already passes through, so no route has to
+            // remember and a route added tomorrow cannot forget.
+            .WithMetadata(ApiStatusIsFinal.Instance);
 
         // ⚠️ And the document must admit the route can REFUSE. Every operation was described as
         // answering exactly one status — 200 — while this filter returns 401 for a token that is
