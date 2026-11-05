@@ -51,7 +51,7 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
     /// ratchet already solved this — <c>CliEndpointParityTests.NoCommandYet</c> is a named set
     /// with a staleness assertion beside it — and this started life as a count anyway.</para>
     ///
-    /// <para>⚠️ All thirteen were read by hand on 2026-11-05 and their columns matched the
+    /// <para>⚠️ The thirteen this list began with were read by hand on 2026-11-05 and their columns matched the
     /// anonymous objects their handlers return. That is an observation on one day, <b>not an
     /// assertion</b>, and it stops being true the moment one of those handlers is edited. It is
     /// recorded against the names rather than against a number so a later reader can tell which
@@ -59,8 +59,6 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
     /// </summary>
     private static readonly HashSet<string> Unverifiable = new(StringComparer.Ordinal)
     {
-        "clusters list",
-        "components list",
         "apps list",
         "deployments list",
         "advisor",
