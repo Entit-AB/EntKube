@@ -534,102 +534,24 @@ public static class PublicApiEndpoints
             });
         }).RequireApiScope(ApiScopes.OpsRead);
 
-        api.MapGet("/cost", (HttpContext ctx, CostScanCache cache) =>
+        api.MapGet("/cost",
+            Results<Ok<CostRunRateResponse>, ProblemHttpResult> (
+            HttpContext ctx, CostScanCache cache) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
             CostReport? report = cache.Get(tenantId);
 
             if (report is null)
             {
-                return Results.Problem(
+                return TypedResults.Problem(
                     "No cost calculation has completed yet for this tenant.",
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
-            return Results.Ok(new
-            {
-                generatedAt = report.GeneratedAt,
-                currency = report.Currency,
-                totalMonthlyCost = report.TotalMonthlyCost,
-                totalHourlyCost = report.TotalHourlyCost,
-                unattributedMonthlyCost = report.UnattributedMonthlyCost,
-                sharedPoolMonthlyCost = report.SharedPoolMonthlyCost,
-                // Node capacity nothing holds, priced. Inside the shared pool and the
-                // total; reported apart because it is what makes the total approach
-                // the invoice rather than the sum of what was requested.
-                idleMonthlyCost = report.IdleMonthlyCost,
-                multiAppMonthlyCost = report.MultiAppMonthlyCost,
-                warnings = report.Warnings,
-                capacity = report.Capacity.Select(c => new
-                {
-                    clusterId = c.ClusterId,
-                    cluster = c.ClusterName,
-                    hasCapacity = c.HasCapacity,
-                    nodes = c.Nodes,
-                    cpuCapacity = c.CpuCapacity,
-                    cpuAllocated = c.CpuAllocated,
-                    memoryCapacityGiB = c.MemoryCapacityGiB,
-                    memoryAllocatedGiB = c.MemoryAllocatedGiB,
-                    // What the nodes cost at the compute rates whatever runs on them —
-                    // the figure to hold up against the provider's invoice.
-                    nodeMonthlyCost = c.NodeMonthlyCost,
-                    idleMonthlyCost = c.IdleMonthlyCost,
-                    idleCharged = c.IdleCharged,
-                    monthlyCost = c.TotalMonthlyCost,
-                }),
-                byCustomer = report.ByCustomer.Select(c => new
-                {
-                    customerId = c.CustomerId,
-                    customer = c.CustomerName,
-                    monthlyCost = c.MonthlyCost,
-                }),
-                byApp = report.ByApp.Select(a => new
-                {
-                    appId = a.AppId,
-                    app = a.AppName,
-                    customerId = a.CustomerId,
-                    customer = a.CustomerName,
-                    environments = a.Environments,
-                    namespaces = a.Namespaces,
-                    cpuCores = a.CpuCores,
-                    memoryGiB = a.MemoryGiB,
-                    storageGiB = a.StorageGiB,
-                    directMonthlyCost = a.DirectMonthlyCost,
-                    sharedMonthlyCost = a.SharedMonthlyCost,
-                    monthlyCost = a.TotalMonthlyCost,
-                    shareOfBillable = a.ShareOfBillable,
-                }),
-                byEnvironment = report.ByEnvironment.Select(e => new
-                {
-                    environment = e.Environment,
-                    monthlyCost = e.MonthlyCost,
-                }),
-                namespaces = report.Namespaces.Select(n => new
-                {
-                    ns = n.Namespace,
-                    cluster = n.ClusterName,
-                    customer = n.CustomerName,
-                    app = n.AppName,
-                    appId = n.AppId,
-                    environment = n.EnvironmentName,
-                    cpuCores = n.CpuCores,
-                    memoryGiB = n.MemoryGiB,
-                    storageGiB = n.StorageGiB,
-                    loadBalancers = n.LoadBalancers,
-                    publicIps = n.PublicIps,
-                    directMonthlyCost = n.DirectMonthlyCost,
-                    sharedMonthlyCost = n.SharedMonthlyCost,
-                    shareOfCluster = n.ShareOfCluster,
-                    monthlyCost = n.TotalMonthlyCost,
-                    unattributed = n.IsUnattributed,
-                    // Its cost was pooled onto the billable namespaces; it is reported so
-                    // the pool can be audited, but it is not part of any total.
-                    redistributed = n.IsRedistributed,
-                    // Not a namespace: the cluster's unallocated node capacity, carried
-                    // as a line so it can be pooled and audited like one.
-                    idle = n.IsIdle,
-                }),
-            });
+            // The shape — fourteen envelope fields over five nested collections, and the
+            // renames each one carries — lives on CostRunRateResponse so the mapping can be
+            // asserted against the anonymous object it replaced.
+            return TypedResults.Ok(CostRunRateResponse.From(report));
         }).RequireApiScope(ApiScopes.OpsRead);
 
         // Cost history — what was actually incurred, as opposed to /cost, which is a
