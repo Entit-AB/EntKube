@@ -104,9 +104,15 @@ public static class Program
         {
             output.WriteLine(result.Body);
 
-            // ⚠️ --json must not launder a partial failure. It changes the OUTPUT format; it is
-            // not a request to be told less about what happened.
-            return PartialFailure(result, error);
+            // ⚠️ --json changes the output FORMAT. It is not a request to be told less about what
+            // happened, and it used to be exactly that: this returned ExitOk before either check
+            // below ran, so --json laundered BOTH a partial failure and the --fail-on-results
+            // gate. A pipeline passes --json precisely because it is the form you can archive or
+            // pipe to jq, so the one invocation most likely to be gating was the one that never
+            // failed.
+            return PartialFailure(result, error) == ExitFailure
+                ? ExitFailure
+                : ResultsGate(result.Body, parsed, command);
         }
 
         // A 204 has no body by design — `cost rates clear` is the one that answers it. Before
@@ -143,6 +149,31 @@ public static class Program
         // Lets a pipeline gate on "is anything wrong": `entkube drift --fail-on-results`
         // exits non-zero when a deployment has drifted, without parsing the output.
         return parsed.Flag("fail-on-results") && rows > 0 ? ExitResults : ExitOk;
+    }
+
+    /// <summary>
+    /// The <c>--fail-on-results</c> gate for a body that has been printed rather than rendered.
+    /// Counting is <see cref="TableWriter.RowCount"/> so the gate cannot mean one thing in a table
+    /// and another in <c>--json</c>.
+    /// </summary>
+    private static int ResultsGate(string body, CliArgs parsed, CliCommand command)
+    {
+        if (!parsed.Flag("fail-on-results")) return ExitOk;
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(body);
+            return TableWriter.RowCount(doc.RootElement, command.RowsProperty) > 0
+                ? ExitResults
+                : ExitOk;
+        }
+        catch (JsonException)
+        {
+            // Nothing countable. The gate asks "did rows come back", and the honest answer for a
+            // body that is not JSON is no — failing here would turn an unparseable success into a
+            // CI failure that says "results found".
+            return ExitOk;
+        }
     }
 
     /// <summary>

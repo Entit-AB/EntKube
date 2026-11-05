@@ -1,5 +1,6 @@
 using System.Net;
 using System.Text;
+using System.Text.Json;
 using EntKube.ApiClient;
 using EntKube.Cli;
 using FluentAssertions;
@@ -147,6 +148,82 @@ public class CliPartialFailureTests
         r.Exit.Should().Be(0);
         r.Out.Should().BeEmpty("a blank line is what the accidental path produced");
         r.Err.Should().BeEmpty();
+    }
+
+    // ── --json must not launder the CI gate either ──
+
+    /// <summary>
+    /// ⚠️ <c>entkube drift --json --fail-on-results</c> exited <b>0 with deployments drifted</b>.
+    /// The json branch returned as soon as it had printed the body, before the gate was read —
+    /// and <c>--json</c> is what a pipeline passes, because it is the form you can archive or
+    /// hand to jq. The flag exists so CI can gate without parsing the output; one that silently
+    /// stops gating is worse than no flag.
+    ///
+    /// <para>Found by an adversarial read of the column ratchet, not by this change — but it is
+    /// the same early return, so fixing one and leaving the other would have been arbitrary.</para>
+    /// </summary>
+    [Fact]
+    public void Json_mode_still_honours_the_fail_on_results_gate()
+    {
+        CliCommand drift = CliCommands.All.Single(c => c.Path.SequenceEqual(new[] { "drift" }));
+
+        const string drifted =
+            """
+            {"generatedAt":"2026-11-05T09:00:00Z","driftedCount":1,"unknownCount":0,"inSyncCount":4,
+            "results":[{"deploymentId":"11111111-1111-1111-1111-111111111111","app":"Billing",
+            "deployment":"billing-api","cluster":"prod-north","ns":"billing","state":"Drifted",
+            "changedLines":12,"note":null}]}
+            """;
+
+        StringWriter output = new();
+        StringWriter error = new();
+
+        int exit = EntKube.Cli.Program.Render(
+            new ApiResult(true, drifted, 200),
+            CliArgs.Parse(["--json", "--fail-on-results"]), drift, output, error);
+
+        exit.Should().Be(3, "rows came back, which is what the flag asks to be told");
+        output.ToString().Trim().Should().Be(drifted.Trim(), "and --json still prints it verbatim");
+    }
+
+    [Fact]
+    public void Json_mode_with_no_rows_still_exits_zero()
+    {
+        CliCommand drift = CliCommands.All.Single(c => c.Path.SequenceEqual(new[] { "drift" }));
+
+        const string clean =
+            """{"generatedAt":"2026-11-05T09:00:00Z","driftedCount":0,"unknownCount":0,"inSyncCount":4,"results":[]}""";
+
+        StringWriter output = new();
+        StringWriter error = new();
+
+        EntKube.Cli.Program.Render(
+            new ApiResult(true, clean, 200),
+            CliArgs.Parse(["--json", "--fail-on-results"]), drift, output, error)
+            .Should().Be(0, "an empty rows array is the gate's pass case");
+    }
+
+    /// <summary>
+    /// ⚠️ The measure for the gate above. <c>RowCount</c> states the counting rule a second time,
+    /// beside the one in <c>Write</c>, so the two are asserted to agree on every body shape the
+    /// API actually produces — a wrapped list, a bare array, an empty array, a single object, and
+    /// an envelope that does not carry the named property at all.
+    /// </summary>
+    [Theory]
+    [InlineData("""{"results":[{"a":1},{"a":2}]}""", "results")]
+    [InlineData("""{"results":[]}""", "results")]
+    [InlineData("""{"currency":"SEK"}""", "results")]
+    [InlineData("""{"currency":"SEK"}""", null)]
+    [InlineData("""[{"a":1},{"a":2},{"a":3}]""", null)]
+    [InlineData("""[]""", null)]
+    public void RowCount_reports_what_the_renderer_reports(string body, string? rowsProperty)
+    {
+        using JsonDocument doc = JsonDocument.Parse(body);
+
+        int rendered = TableWriter.Write(new StringWriter(), doc.RootElement, [("A", "a")], rowsProperty);
+
+        TableWriter.RowCount(doc.RootElement, rowsProperty).Should().Be(
+            rendered, "the gate must not count differently from the table");
     }
 
     // ── The client, through its own transport ──
