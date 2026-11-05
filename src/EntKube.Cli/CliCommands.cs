@@ -212,16 +212,40 @@ public static class CliCommands
             Path = ["cost", "months"],
             Description = "List the months that have a cost ledger",
             BuildPath = _ => "/api/v1/cost/months",
-            Columns = [("MONTH", "month"), ("CLUSTERS", "clusters"), ("TOTAL", "total")],
+
+            // ⚠️ Was MONTH/`month`, CLUSTERS/`clusters`, TOTAL/`total`. The endpoint sends
+            // year, month, label, cost, currency, completeness and complete — so `clusters`
+            // and `total` had never resolved and rendered as two columns of dashes.
+            // `month` did resolve, but to the integer 10 rather than "Oct 2026".
+            //
+            // `complete` is carried because an incomplete month under-states its cost, and a
+            // reader who cannot see that reads the shortfall as a saving.
+            Columns = [("MONTH", "label"), ("COST", "cost"), ("CURRENCY", "currency"),
+                       ("COMPLETE", "complete")],
         },
         new CliCommand
         {
             Path = ["cost", "rates", "list"],
             Description = "List per-cluster cost rates",
             BuildPath = _ => "/api/v1/cost-rates",
-            Columns = [("CLUSTER", "clusterName"), ("CPU", "cpuCorePerMonth"),
-                       ("MEMORY", "memoryGiBPerMonth"), ("STORAGE", "storageGiBPerMonth"),
-                       ("IDLE", "chargeIdleCapacity"), ("CLUSTER ID", "clusterId")],
+
+            // ⚠️ Four of the six columns here named fields the endpoint has never sent:
+            // `clusterName`, `cpuCorePerMonth`, `memoryGiBPerMonth`, `storageGiBPerMonth`.
+            // Only `clusterId` and `chargeIdleCapacity` resolved, so an operator checking
+            // prices across the fleet saw four columns of dashes and two real ones.
+            //
+            // The three price columns are a UNIT error as well as a name error: the price
+            // sheet charges CPU and memory per resource-HOUR and storage per GiB-MONTH, so a
+            // "PerMonth" column for cpu would have been wrong even if it had resolved. The
+            // headers now carry the unit.
+            //
+            // ⚠️ There is no cluster NAME to show. `ClusterRate` is keyed by id alone and the
+            // Cost module exposes nothing else, so naming the clusters here needs a lookup
+            // the endpoint does not do — a change to the response worth making on its own
+            // rather than smuggling in behind a column fix.
+            Columns = [("CLUSTER ID", "clusterId"), ("CPU/CORE-H", "cpuCoreHourCost"),
+                       ("MEM/GiB-H", "memoryGiBHourCost"), ("STORAGE/GiB-MO", "storageGiBMonthCost"),
+                       ("CURRENCY", "currency"), ("IDLE", "chargeIdleCapacity")],
         },
         new CliCommand
         {

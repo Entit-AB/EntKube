@@ -246,3 +246,217 @@ public sealed record CostMonthResponse(
             Completeness: month.Completeness,
             Complete: month.IsComplete);
 }
+
+/// <summary>
+/// The tenant's current run rate — what today's fleet would cost over a month, as opposed to
+/// <see cref="CostHistoryResponse"/>, which is what was actually incurred.
+///
+/// <para>⚠️ <b>Every figure on this envelope is COMPUTED from the namespace list.</b>
+/// <c>TotalMonthlyCost</c> sums the billable namespaces, <c>IdleMonthlyCost</c> the idle ones,
+/// <c>SharedPoolMonthlyCost</c> every namespace's share of the pool, and the three breakdowns are
+/// groupings of the same list. None of them can be set independently, which is why the wire-shape
+/// fixture builds a namespace list that makes each one land on a distinct non-zero value rather
+/// than assigning the totals directly: a fixture that set them by hand would prove the mapping
+/// reads SOMETHING, not that it reads the right thing.</para>
+///
+/// <para>⚠️ <b>Six nested shapes, and the renames are the contract.</b> <c>ns</c> from
+/// <c>Namespace</c>, <c>cluster</c> from <c>ClusterName</c>, <c>app</c> from <c>AppName</c>,
+/// <c>monthlyCost</c> from <c>TotalMonthlyCost</c>, and <c>unattributed</c> /
+/// <c>redistributed</c> / <c>idle</c> from the <c>Is…</c> members. Those names are what the
+/// existing clients read, so reproducing them exactly is the whole job —
+/// <c>CostRunRateWireShapeTests</c> compares against the anonymous objects taken out of the
+/// handler verbatim.</para>
+/// </summary>
+public sealed record CostRunRateResponse(
+    DateTime GeneratedAt,
+    string Currency,
+    decimal TotalMonthlyCost,
+    decimal TotalHourlyCost,
+    decimal UnattributedMonthlyCost,
+    decimal SharedPoolMonthlyCost,
+    decimal IdleMonthlyCost,
+    decimal MultiAppMonthlyCost,
+    IReadOnlyList<string> Warnings,
+    IEnumerable<CostCapacityResponse> Capacity,
+    IEnumerable<CostCustomerResponse> ByCustomer,
+    IEnumerable<CostAppResponse> ByApp,
+    IEnumerable<CostEnvironmentResponse> ByEnvironment,
+    IEnumerable<CostNamespaceResponse> Namespaces)
+{
+    public static CostRunRateResponse From(EntKube.Web.Services.Cost.CostReport report) =>
+        new(
+            GeneratedAt: report.GeneratedAt,
+            Currency: report.Currency,
+            TotalMonthlyCost: report.TotalMonthlyCost,
+            TotalHourlyCost: report.TotalHourlyCost,
+            UnattributedMonthlyCost: report.UnattributedMonthlyCost,
+            SharedPoolMonthlyCost: report.SharedPoolMonthlyCost,
+            // Node capacity nothing holds, priced. Inside the shared pool and the total;
+            // reported apart because it is what makes the total approach the invoice rather
+            // than the sum of what was requested.
+            IdleMonthlyCost: report.IdleMonthlyCost,
+            MultiAppMonthlyCost: report.MultiAppMonthlyCost,
+            Warnings: report.Warnings,
+            Capacity: report.Capacity.Select(CostCapacityResponse.From),
+            ByCustomer: report.ByCustomer.Select(CostCustomerResponse.From),
+            ByApp: report.ByApp.Select(CostAppResponse.From),
+            ByEnvironment: report.ByEnvironment.Select(CostEnvironmentResponse.From),
+            Namespaces: report.Namespaces.Select(CostNamespaceResponse.From));
+}
+
+/// <summary>
+/// One cluster's nodes against what is scheduled on them.
+///
+/// <para><c>NodeMonthlyCost</c> is what the nodes cost at the compute rates whatever runs on
+/// them — the figure to hold up against the provider's invoice. <c>MonthlyCost</c> is what the
+/// report attributes to the cluster. The distance between them is the idle capacity.</para>
+///
+/// <para>⚠️ <b>Named arguments.</b> Four adjacent <c>double</c>s (<c>CpuCapacity</c>,
+/// <c>CpuAllocated</c>, <c>MemoryCapacityGiB</c>, <c>MemoryAllocatedGiB</c>) and two adjacent
+/// <c>decimal</c>s, where a positional swap would compile and would report a cluster as fully
+/// utilised or as entirely idle.</para>
+/// </summary>
+public sealed record CostCapacityResponse(
+    Guid ClusterId,
+    string Cluster,
+    bool HasCapacity,
+    double Nodes,
+    double CpuCapacity,
+    double CpuAllocated,
+    double MemoryCapacityGiB,
+    double MemoryAllocatedGiB,
+    decimal NodeMonthlyCost,
+    decimal IdleMonthlyCost,
+    bool IdleCharged,
+    decimal MonthlyCost)
+{
+    public static CostCapacityResponse From(EntKube.Web.Services.Cost.ClusterCapacityCost cost) =>
+        new(
+            ClusterId: cost.ClusterId,
+            Cluster: cost.ClusterName,
+            HasCapacity: cost.HasCapacity,
+            Nodes: cost.Nodes,
+            CpuCapacity: cost.CpuCapacity,
+            CpuAllocated: cost.CpuAllocated,
+            MemoryCapacityGiB: cost.MemoryCapacityGiB,
+            MemoryAllocatedGiB: cost.MemoryAllocatedGiB,
+            NodeMonthlyCost: cost.NodeMonthlyCost,
+            IdleMonthlyCost: cost.IdleMonthlyCost,
+            IdleCharged: cost.IdleCharged,
+            MonthlyCost: cost.TotalMonthlyCost);
+}
+
+/// <summary>
+/// One customer's share of the run rate — the chargeback line.
+///
+/// <para>The source is a tuple, so the mapping has no member names to lean on and a transposition
+/// between <c>CustomerId</c> and the name would not even be a type error if both were strings.
+/// They are not, but the tuple's <c>Item3</c> money field is why this is a named record.</para>
+/// </summary>
+public sealed record CostCustomerResponse(Guid CustomerId, string Customer, decimal MonthlyCost)
+{
+    public static CostCustomerResponse From(
+        (Guid CustomerId, string CustomerName, decimal MonthlyCost) line) =>
+        new(
+            CustomerId: line.CustomerId,
+            Customer: line.CustomerName,
+            MonthlyCost: line.MonthlyCost);
+}
+
+/// <summary>
+/// What one app costs: its own consumption plus its share of the platform it runs on.
+///
+/// <para><c>CustomerId</c> and <c>Customer</c> stay nullable — an app whose namespaces are not
+/// attributed to a customer has none, and inventing one would put cost on a customer who does not
+/// owe it.</para>
+/// </summary>
+public sealed record CostAppResponse(
+    Guid AppId,
+    string App,
+    Guid? CustomerId,
+    string? Customer,
+    IReadOnlyList<string> Environments,
+    IReadOnlyList<string> Namespaces,
+    double CpuCores,
+    double MemoryGiB,
+    double StorageGiB,
+    decimal DirectMonthlyCost,
+    decimal SharedMonthlyCost,
+    decimal MonthlyCost,
+    double ShareOfBillable)
+{
+    public static CostAppResponse From(EntKube.Web.Services.Cost.AppCost cost) =>
+        new(
+            AppId: cost.AppId,
+            App: cost.AppName,
+            CustomerId: cost.CustomerId,
+            Customer: cost.CustomerName,
+            Environments: cost.Environments,
+            Namespaces: cost.Namespaces,
+            CpuCores: cost.CpuCores,
+            MemoryGiB: cost.MemoryGiB,
+            StorageGiB: cost.StorageGiB,
+            DirectMonthlyCost: cost.DirectMonthlyCost,
+            SharedMonthlyCost: cost.SharedMonthlyCost,
+            MonthlyCost: cost.TotalMonthlyCost,
+            ShareOfBillable: cost.ShareOfBillable);
+}
+
+/// <summary>One environment's share of the run rate.</summary>
+public sealed record CostEnvironmentResponse(string Environment, decimal MonthlyCost)
+{
+    public static CostEnvironmentResponse From((string Environment, decimal MonthlyCost) line) =>
+        new(Environment: line.Environment, MonthlyCost: line.MonthlyCost);
+}
+
+/// <summary>
+/// What one namespace costs — the measurement every figure above is derived from.
+///
+/// <para>⚠️ <b>Three booleans a caller must not confuse.</b> <c>Unattributed</c> means no
+/// customer could be found for it, so its cost reached nobody; <c>Redistributed</c> means its cost
+/// was pooled onto the billable namespaces and must therefore be left OUT of any total a caller
+/// computes, or the money is counted twice; <c>Idle</c> means the row is not a namespace at all
+/// but the cluster's unallocated node capacity, carried as a line so it can be pooled and audited
+/// like one. All three are reported precisely so the pool can be audited.</para>
+/// </summary>
+public sealed record CostNamespaceResponse(
+    string Ns,
+    string Cluster,
+    string? Customer,
+    string? App,
+    Guid? AppId,
+    string? Environment,
+    double CpuCores,
+    double MemoryGiB,
+    double StorageGiB,
+    int LoadBalancers,
+    int PublicIps,
+    decimal DirectMonthlyCost,
+    decimal SharedMonthlyCost,
+    double ShareOfCluster,
+    decimal MonthlyCost,
+    bool Unattributed,
+    bool Redistributed,
+    bool Idle)
+{
+    public static CostNamespaceResponse From(EntKube.Web.Services.Cost.NamespaceCost cost) =>
+        new(
+            Ns: cost.Namespace,
+            Cluster: cost.ClusterName,
+            Customer: cost.CustomerName,
+            App: cost.AppName,
+            AppId: cost.AppId,
+            Environment: cost.EnvironmentName,
+            CpuCores: cost.CpuCores,
+            MemoryGiB: cost.MemoryGiB,
+            StorageGiB: cost.StorageGiB,
+            LoadBalancers: cost.LoadBalancers,
+            PublicIps: cost.PublicIps,
+            DirectMonthlyCost: cost.DirectMonthlyCost,
+            SharedMonthlyCost: cost.SharedMonthlyCost,
+            ShareOfCluster: cost.ShareOfCluster,
+            MonthlyCost: cost.TotalMonthlyCost,
+            Unattributed: cost.IsUnattributed,
+            Redistributed: cost.IsRedistributed,
+            Idle: cost.IsIdle);
+}

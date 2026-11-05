@@ -2156,6 +2156,71 @@ Pointing the new CLI command or the new MCP tool at a different path fails the p
 name. **That is what the previous unit bought: the cost of adding a route now includes its
 clients, automatically, rather than by remembering.**
 
+### 6.8 The clients were measured for reach, never for what they render (measured 2026-11-05)
+
+§6.6 set the sequence: measure each client against the router, close or name every gap, then
+generate the clients from the document. Both parity ratchets do the first part — they ask whether
+a client can *reach* each route. **Nothing asked what the client does with the answer**, and six
+columns across two commands named fields the API has never sent.
+
+`TableWriter.Cell` resolves a column's dotted path against the row and renders `-` for anything
+absent. That is right for a table — a null and a missing field mean the same thing to a reader —
+and it means a column naming a field the server never sends is a column of dashes, forever, with
+nothing failing.
+
+| command | columns | of which dead |
+|---|---|---|
+| `entkube cost rates list` | 6 | **4** — `clusterName`, `cpuCorePerMonth`, `memoryGiBPerMonth`, `storageGiBPerMonth` |
+| `entkube cost months` | 3 | **2** — `clusters`, `total` |
+
+Two of the six are unit errors as well as name errors: the price sheet charges CPU and memory per
+resource-**hour**, so a `cpuCorePerMonth` column would have been wrong even had it resolved. One
+cannot be fixed by renaming at all — `ClusterRate` is keyed by cluster id and carries **no name**,
+so a price-sheet listing cannot show which cluster each sheet belongs to without a change to the
+response.
+
+#### Why the reachability ratchets could not see it
+
+Both commands reach their route correctly, send a valid request and get a 200 back. The defect is
+entirely downstream of that, and a command that renders nothing is as useless to an operator as a
+route with no command — but harder to notice, because dashes read as an empty fleet rather than as
+a broken client.
+
+⚠️ It is also invisible to the exit code. `TableWriter` reports **zero rows** when the rows
+property itself does not resolve, and `--fail-on-results` reads that count for its exit code 3 —
+so a CI gate built on a broken command passes rather than failing.
+
+#### What the ratchet checks against, and what it cannot
+
+`CliColumnParityTests` resolves every column against the schema the framework derives from the
+**handler's own return type**, read out of the generated document. A list of expected field names
+written in the test would have been a third copy of the contract, free to drift from both others.
+
+The cost of that choice is a hard boundary: a route whose success body is not described has no
+schema, so its command's columns cannot be checked at all.
+
+| | count |
+|---|---|
+| CLI commands | 23 |
+| commands rendering a table | 17 |
+| whose route describes its success body — checked on every run | **4** |
+| banked in `Uncheckable` | **13** |
+
+⚠️ All thirteen were read by hand on this date and their columns matched the anonymous objects
+their handlers return. That is an observation on one day, **not an assertion** — it stops being
+true the moment one of those handlers is edited, which is exactly why the number is banked rather
+than dismissed.
+
+#### What this changes about item 8
+
+`UndescribedSuccessBodies` was the remaining distance to a usable generated client, and that was
+already a reason to drive it to zero. It is now also the share of the CLI's rendering that nothing
+can verify. The two ratchets point the same way and move together: typing `GET /cost` took the
+response-typing count 24 → 23 and moved one command out of `Uncheckable` in the same commit.
+
+So the §6.6 sequence gains a middle step. Measure each client against the **router** (can it reach
+the route), then against the **document** (does it read what the route sends), then generate.
+
 ## 7. What not to do
 
 - **Don't split the database** beyond Support and Telemetry. 287 cross-entity navigations
