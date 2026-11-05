@@ -460,3 +460,141 @@ public sealed record CostNamespaceResponse(
             Redistributed: cost.IsRedistributed,
             Idle: cost.IsIdle);
 }
+
+/// <summary>
+/// One registered cluster, as <c>GET /clusters</c> lists it.
+///
+/// <para>⚠️ <b><c>ProvisioningStatus</c> is a published string and it is NOT the enum's name.</b>
+/// Fleet's entity calls the initial state <c>None</c>; the contract calls the same state
+/// <c>Registered</c>. This API publishes the entity's spelling, and both declarations are live —
+/// the translation is not legacy. It lives in
+/// <c>PublicApiEndpoints.PublishedProvisioningStatus</c> and the handler passes the result in, so
+/// this parameter must be fed that helper's output and never <c>status.ToString()</c>, which would
+/// silently publish <c>"Registered"</c> to the CLI (<c>clusters list</c> prints this column) and to
+/// the MCP server. Changing the published value is a deliberate API decision, not a side effect of
+/// typing a handler.</para>
+///
+/// <para>⚠️ <b><c>ComponentCount</c> is not Fleet's to know, so the factory cannot compute it.</b>
+/// It is Catalog's count, obtained by one query for the whole tenant and grouped by cluster, then
+/// looked up per row with <c>GetValueOrDefault</c> — a cluster with nothing installed reports
+/// <c>0</c> rather than being absent. Handing it to the factory as a parameter keeps that second
+/// query where it can be bounded instead of becoming one query per cluster.</para>
+///
+/// <para><c>Environment</c> is a rename of <c>EnvironmentName</c>, and is the wire name clients
+/// already read. Two source fields are deliberately not here, for two different reasons:
+/// <c>TenantId</c> is off the wire because the token fixes the tenant and no route accepts a tenant
+/// id from the caller; <c>EnvironmentId</c> is simply not something this list has published —
+/// clients read the environment's name instead — and it is <b>not</b> withheld for tenancy reasons
+/// (<c>POST /apps/{appId}/secrets/sync</c> does take an environment id from the caller).</para>
+/// </summary>
+public sealed record ClusterResponse(
+    Guid Id,
+    string Name,
+    string ApiServerUrl,
+    string Environment,
+    string ProvisioningStatus,
+    int ComponentCount)
+{
+    /// <summary>
+    /// The one place a cluster summary becomes a response.
+    ///
+    /// <para>⚠️ <b>Named arguments, not positional.</b> Four of the six parameters are adjacent
+    /// <c>string</c>s — <c>Name</c>, <c>ApiServerUrl</c>, <c>Environment</c> and
+    /// <c>ProvisioningStatus</c> — so a positional call that transposed two would compile and
+    /// would publish a cluster's environment as its name, or its name as its provisioning
+    /// status, to every client reading those fields.</para>
+    ///
+    /// <para>⚠️ <b><c>provisioningStatus</c> and <c>componentCount</c> are the handler's, not the
+    /// summary's.</b> Neither can be read off <paramref name="cluster"/>: the first is the
+    /// published spelling of an enum member, the second comes from a second query against Catalog.
+    /// Recomputing either here would duplicate the rename or put a per-cluster query inside a
+    /// projection.</para>
+    /// </summary>
+    public static ClusterResponse From(
+        EntKube.Contracts.Fleet.ClusterSummary cluster,
+        string provisioningStatus,
+        int componentCount) =>
+        new(
+            Id: cluster.Id,
+            Name: cluster.Name,
+            ApiServerUrl: cluster.ApiServerUrl,
+            Environment: cluster.EnvironmentName,
+            ProvisioningStatus: provisioningStatus,
+            ComponentCount: componentCount);
+}
+
+/// <summary>
+/// One component installed on a cluster, as <c>GET /clusters/{clusterId}/components</c> lists it.
+///
+/// <para>⚠️ <b><c>Type</c> and <c>Status</c> sit side by side and are NOT the same kind of
+/// thing.</b> <c>ComponentType</c> is a <c>string</c> on the contract, stored as a 50-character
+/// column, and it is <b>not a closed set</b>: the entity's own doc says it "will be refined later
+/// with a proper enum/value set" and lists <c>"Deployment"</c>, <c>"StatefulSet"</c> and
+/// <c>"Operator"</c> among its examples, while the live write paths only ever store
+/// <c>"HelmChart"</c>, <c>"Manifest"</c> or <c>"ManifestUrl"</c> today. So it stays a
+/// <c>string</c> here for the reason that survives either way: the published value is whatever the
+/// row holds, and typing it as an enum would turn an unrecognised stored value into an
+/// unserialisable response rather than a passed-through string.
+/// <c>Status</c>, beside it, is the <c>ComponentStatus</c> enum published BY NAME in the
+/// contract's own case — <c>"NotInstalled"</c>, <c>"Installing"</c>, <c>"Installed"</c>,
+/// <c>"Failed"</c>, <c>"Uninstalling"</c>. It is <b>not</b> lowercased, unlike
+/// <see cref="CostHistoryResponse.GroupBy"/> further up this same file, which IS lowercased;
+/// pattern-matching on that neighbour would break this wire format. <c>ApiComponentStatusTests</c> holds the contract's enum and the
+/// entity's together precisely because this route turns the name into JSON.</para>
+///
+/// <para>⚠️ <b>Four nullable fields, and null is PUBLISHED, not omitted.</b> <c>Ns</c>,
+/// <c>Chart</c>, <c>Version</c> and <c>InstalledAt</c> are all optional on the contract, and the
+/// reason is <em>not</em> that a component which has not been installed yet lacks them:
+/// <c>ComponentLifecycleService.RegisterComponentAsync</c> copies the namespace, chart name and
+/// version off the catalog entry at creation, while setting <c>Status</c> to
+/// <c>NotInstalled</c> — so a never-installed component normally has all three, and only
+/// <c>InstalledAt</c> is null. They are nullable because a <c>Manifest</c> or <c>ManifestUrl</c>
+/// component has no Helm chart at all, and because <c>VaultService.CreateComponentAsync</c> creates
+/// a row carrying nothing but a name and a type. The anonymous object emitted <c>"ns": null</c> for
+/// those, so they stay nullable rather than being defaulted to an empty string, which a client
+/// would read as a namespace called "".</para>
+///
+/// <para>The renames are the contract: <c>ns</c> from <c>Namespace</c> (the CLI prints it as its
+/// NAMESPACE column), <c>chart</c> from <c>HelmChartName</c>, <c>version</c> from
+/// <c>HelmChartVersion</c>. <c>TenantId</c>, <c>ClusterId</c>, <c>ClusterName</c>,
+/// <c>EnvironmentId</c>, <c>ReleaseName</c>, <c>HelmValues</c>, <c>Configuration</c> and
+/// <c>LastError</c> are on the source record and not on this one. <c>TenantId</c> is off the wire
+/// because the token fixes the tenant; <c>ClusterId</c>, <c>ClusterName</c> and
+/// <c>EnvironmentId</c> because the cluster is already in the path; <c>HelmValues</c>,
+/// <c>Configuration</c> and <c>LastError</c> because a values blob and an error string are not
+/// this list's to publish. <c>ReleaseName</c> has no stated reason beyond never having been
+/// published — it is an implementation detail of the Helm install, not a property of the
+/// component.</para>
+/// </summary>
+public sealed record ComponentResponse(
+    Guid Id,
+    string Name,
+    string Type,
+    string Status,
+    string? Ns,
+    string? Chart,
+    string? Version,
+    DateTime? InstalledAt)
+{
+    /// <summary>
+    /// The one place an installed component becomes a response.
+    ///
+    /// <para>⚠️ <b>Named arguments, not positional.</b> Six of the eight parameters are
+    /// <c>string</c> or <c>string?</c>, and <c>Type</c>/<c>Status</c> and <c>Chart</c>/<c>Version</c>
+    /// are adjacent same-typed pairs: a positional call transposing either would compile and would
+    /// report every component's chart as its version.</para>
+    /// </summary>
+    public static ComponentResponse From(EntKube.Contracts.Catalog.InstalledComponent component) =>
+        new(
+            Id: component.Id,
+            Name: component.Name,
+            // ⚠️ Already a string on the contract. No ToString(), no enum.
+            Type: component.ComponentType,
+            // ⚠️ The enum published by NAME and in its own case — "Installed", not 2 and not
+            // "installed". Editing either copy of ComponentStatus changes this wire format.
+            Status: component.Status.ToString(),
+            Ns: component.Namespace,
+            Chart: component.HelmChartName,
+            Version: component.HelmChartVersion,
+            InstalledAt: component.InstalledAt);
+}

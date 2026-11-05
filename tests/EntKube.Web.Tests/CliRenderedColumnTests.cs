@@ -195,8 +195,66 @@ public class CliRenderedColumnTests
             JsonSerializer.Serialize(new[] { ClusterRateResponse.From(rate) }, AsTheApiSerialises));
     }
 
+    [Fact]
+    public void The_clusters_list_renders_every_column()
+    {
+        EntKube.Contracts.Fleet.ClusterSummary cluster = new(
+            Id: Guid.NewGuid(),
+            TenantId: Guid.NewGuid(),
+            Name: "prod-north",
+            ApiServerUrl: "https://prod-north.example.com:6443",
+            EnvironmentId: Guid.NewGuid(),
+            EnvironmentName: "Production",
+            ProvisioningStatus: EntKube.Contracts.Fleet.ClusterProvisioningStatus.Provisioned);
+
+        EveryColumnRenders(
+            Command("clusters", "list"),
+            JsonSerializer.Serialize(
+                new[]
+                {
+                    ClusterResponse.From(
+                        cluster: cluster,
+                        provisioningStatus: "Provisioned",
+                        componentCount: 7),
+                },
+                AsTheApiSerialises));
+    }
+
     /// <summary>
-    /// ⚠️ The measure. The four facts above are exactly the commands
+    /// ⚠️ The fixture's <c>Type</c> is a real <c>ComponentType</c> — how a component is installed
+    /// — rather than a catalog key. A fixture whose Type looked like a component NAME
+    /// would make a Name/Type transposition read as plausible data rather than as an obvious
+    /// defect, and would teach the next reader the wrong meaning of the field.
+    /// </summary>
+    [Fact]
+    public void The_components_list_renders_every_column()
+    {
+        EntKube.Contracts.Catalog.InstalledComponent component = new(
+            Id: Guid.NewGuid(),
+            TenantId: Guid.NewGuid(),
+            ClusterId: Guid.NewGuid(),
+            ClusterName: "prod-north",
+            EnvironmentId: Guid.NewGuid(),
+            Name: "kube-prometheus-stack",
+            ComponentType: "HelmChart",
+            Status: EntKube.Contracts.Catalog.ComponentStatus.Installed,
+            Namespace: "monitoring",
+            ReleaseName: "kps",
+            HelmChartName: "kube-prometheus-stack",
+            HelmChartVersion: "62.3.0",
+            HelmValues: null,
+            Configuration: null,
+            InstalledAt: new DateTime(2026, 10, 1, 9, 0, 0, DateTimeKind.Utc),
+            LastError: null);
+
+        EveryColumnRenders(
+            Command("components", "list"),
+            JsonSerializer.Serialize(
+                new[] { ComponentResponse.From(component) }, AsTheApiSerialises));
+    }
+
+    /// <summary>
+    /// ⚠️ The measure. The facts above are exactly the commands
     /// <see cref="CliColumnParityTests"/> can check against a schema, and they must stay in step:
     /// if a route gains a response type and no rendering fact is added for its command, this fails
     /// rather than letting the rendered coverage quietly fall behind the schema coverage.
@@ -204,7 +262,11 @@ public class CliRenderedColumnTests
     [Fact]
     public void A_rendering_fact_exists_for_every_command_whose_body_is_described()
     {
-        string[] rendered = ["cost", "cost history", "cost months", "cost rates list"];
+        string[] rendered =
+        [
+            "cost", "cost history", "cost months", "cost rates list",
+            "clusters list", "components list",
+        ];
 
         IEnumerable<string> describable =
             CliCommands.All

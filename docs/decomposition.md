@@ -2203,8 +2203,8 @@ schema, so its command's columns cannot be checked at all.
 |---|---|
 | CLI commands | 23 |
 | commands rendering a table | 17 |
-| whose route describes its success body — checked on every run | **4** |
-| banked in `Uncheckable` | **13** |
+| whose route describes its success body — checked on every run | **6** |
+| banked (named, not counted) | **11** |
 
 ⚠️ All thirteen were read by hand on this date and their columns matched the anonymous objects
 their handlers return. That is an observation on one day, **not an assertion** — it stops being
@@ -2235,9 +2235,9 @@ Counted by generating the real document and walking it, not by reading the const
 |---|---|
 | paths | 25 |
 | operations | 31 |
-| success body described | 7 |
+| success body described | 9 |
 | bodyless by design (one 204) | 1 |
-| **undescribed** | **23** — 16 handlers in `PublicApiEndpoints.cs`, **7 SCIM** |
+| **undescribed** | **21** — 14 handlers in `PublicApiEndpoints.cs`, **7 SCIM** |
 
 ⚠️ Only the last two of those are pinned by a test (`UndescribedSuccessBodies` and
 `BodylessSuccesses`). The operation total is asserted merely as "more than fifteen", so 31 is a

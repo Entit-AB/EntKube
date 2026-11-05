@@ -44,7 +44,7 @@ public static class PublicApiEndpoints
 
         // ── Fleet ──
 
-        api.MapGet("/clusters", async (
+        api.MapGet("/clusters", async Task<Ok<IEnumerable<ClusterResponse>>> (
             HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
             EntKube.Contracts.Catalog.ICatalogApi catalog, CancellationToken ct) =>
         {
@@ -61,21 +61,22 @@ public static class PublicApiEndpoints
                 .GroupBy(c => c.ClusterId)
                 .ToDictionary(g => g.Key, g => g.Count());
 
-            return Results.Ok(clusters
+            // The shape and the rename of EnvironmentName now live on ClusterResponse so the
+            // mapping can be asserted against the anonymous object it replaced. The published
+            // provisioning-status string and the component count stay the HANDLER's — the record
+            // is handed both and translates neither, because it can read neither off a
+            // ClusterSummary.
+            return TypedResults.Ok<IEnumerable<ClusterResponse>>(clusters
                 .OrderBy(c => c.Name, StringComparer.Ordinal)
-                .Select(c => new
-                {
-                    id = c.Id,
-                    name = c.Name,
-                    apiServerUrl = c.ApiServerUrl,
-                    environment = c.EnvironmentName,
-                    provisioningStatus = PublishedProvisioningStatus(c.ProvisioningStatus),
-                    componentCount = componentCounts.GetValueOrDefault(c.Id),
-                })
+                .Select(c => ClusterResponse.From(
+                    cluster: c,
+                    provisioningStatus: PublishedProvisioningStatus(c.ProvisioningStatus),
+                    componentCount: componentCounts.GetValueOrDefault(c.Id)))
                 .ToList());
         }).RequireApiScope(ApiScopes.FleetRead);
 
-        api.MapGet("/clusters/{clusterId:guid}/components", async (
+        api.MapGet("/clusters/{clusterId:guid}/components",
+            async Task<Results<Ok<IEnumerable<ComponentResponse>>, NotFound>> (
             Guid clusterId, HttpContext ctx,
             EntKube.Contracts.Fleet.IFleetApi fleet,
             EntKube.Contracts.Catalog.ICatalogApi catalog, CancellationToken ct) =>
@@ -90,29 +91,19 @@ public static class PublicApiEndpoints
             // a 404 rather than a leak.
             if (await fleet.GetClusterAsync(tenantId, clusterId, ct) is null)
             {
-                return Results.NotFound();
+                return TypedResults.NotFound();
             }
 
-            // Asked of Catalog. The projection is unchanged field for field, including
-            // Status.ToString() — the contract's enum is a copy with the same member names in the
-            // same order, which ApiComponentStatusTests now asserts, because this route's JSON
-            // would otherwise change if either enum were edited alone.
-            var components = (await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct))
-                .OrderBy(c => c.Name, StringComparer.Ordinal)
-                .Select(c => new
-                {
-                    id = c.Id,
-                    name = c.Name,
-                    type = c.ComponentType,
-                    status = c.Status.ToString(),
-                    ns = c.Namespace,
-                    chart = c.HelmChartName,
-                    version = c.HelmChartVersion,
-                    installedAt = c.InstalledAt,
-                })
-                .ToList();
+            // Asked of Catalog. The shape and the Status.ToString() now live on
+            // ComponentResponse.From so the mapping can be asserted against the anonymous object
+            // it replaced; ApiComponentStatusTests still holds the contract's enum and the
+            // entity's together, because this route's JSON is the enum's member names.
+            List<ComponentResponse> components =
+                [.. (await catalog.GetComponentsForClusterAsync(tenantId, clusterId, ct))
+                    .OrderBy(c => c.Name, StringComparer.Ordinal)
+                    .Select(ComponentResponse.From)];
 
-            return Results.Ok(components);
+            return TypedResults.Ok<IEnumerable<ComponentResponse>>(components);
         }).RequireApiScope(ApiScopes.FleetRead);
 
         // ── Apps and deployments ──
