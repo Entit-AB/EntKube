@@ -222,6 +222,22 @@ public sealed record CostReport
 /// everyone else. Billing on usage would let an over-requesting team push the cost of
 /// their own waste onto their neighbours.
 /// </summary>
+/// <summary>
+/// One deployment's contribution to who owns a namespace — the input to
+/// <see cref="CostReportService.OwnersByNamespace"/>.
+///
+/// <para>The customer comes from the deployment's APP rather than the deployment, because that is
+/// where the entity carries it: tenancy reaches an app through its customer.</para>
+/// </summary>
+public sealed record NamespacePlacement(
+    Guid ClusterId,
+    string Namespace,
+    Guid AppId,
+    string AppName,
+    Guid? CustomerId,
+    string CustomerName,
+    string? EnvironmentName);
+
 public class CostReportService(
     IDbContextFactory<CostDbContext> dbFactory,
     EntKube.Contracts.Delivery.IDeliveryApi delivery,
@@ -234,6 +250,67 @@ public class CostReportService(
     /// mid-rollout does not double-count a workload that is briefly running two replica sets.
     /// </summary>
     private static readonly TimeSpan SampleWindow = TimeSpan.FromMinutes(15);
+
+    /// <summary>
+    /// Who owns each <c>(cluster, namespace)</c>, given every deployment that targets one.
+    ///
+    /// <para>⚠️ <b>Public, and extracted from the middle of <c>GetReportAsync</c>, so that it can
+    /// be asserted.</b> It was an inline grouping over an anonymous type inside a method that needs
+    /// a database, Delivery, Prometheus and a cluster client — so the decision below could not be
+    /// tested at all, and it was wrong. <c>ClusterRateResponse.From</c> was promoted for the same
+    /// reason: a mapping nothing can assert is a mapping nobody has checked.</para>
+    ///
+    /// <para><b>The rule: a cost that cannot be split honestly is attributed to nobody.</b> Three
+    /// fields follow it. <c>Apps</c> keeps every app, because billing a shared namespace entirely
+    /// to whichever app was enumerated first would put a made-up number on an invoice.
+    /// <c>EnvironmentName</c> is null when a namespace serves two, because it belongs to
+    /// neither.</para>
+    ///
+    /// <para>⚠️ <b>And now the customer, which used to be taken from the first row.</b> The stated
+    /// reason was that "any of them identifies it, and billing needs only that" — true only while
+    /// every app in the group belongs to one customer, and nothing enforces that. An app is unique
+    /// by <c>(CustomerId, Name)</c> and a deployment by <c>(AppId, Name)</c>, while the namespace
+    /// is free text, so two apps under two different customers can target one
+    /// <c>(cluster, namespace)</c>. When they did, the whole namespace's cost was billed to
+    /// whichever row <c>Enumerable.First()</c> returned and the other customer was charged
+    /// nothing — with the per-customer panel rendering it in that customer's own table. The
+    /// enumeration order, which nothing pins, decided who paid.</para>
+    ///
+    /// <para>Such a namespace is now unattributed, so its cost is reported through
+    /// <c>UnattributedMonthlyCost</c>: a figure an operator can act on, rather than a wrong name on
+    /// an invoice.</para>
+    /// </summary>
+    public static Dictionary<(Guid ClusterId, string Namespace), NamespaceOwner> OwnersByNamespace(
+        IEnumerable<NamespacePlacement> placements)
+    {
+        Dictionary<(Guid, string), NamespaceOwner> owners = [];
+
+        foreach (IGrouping<(Guid ClusterId, string Namespace), NamespacePlacement> group in
+                 placements.GroupBy(p => (p.ClusterId, p.Namespace)))
+        {
+            NamespacePlacement first = group.First();
+
+            bool oneCustomer = group.Select(p => p.CustomerId).Distinct().Count() == 1;
+
+            List<AppRef> apps =
+                [.. group
+                    .Select(p => new AppRef(p.AppId, p.AppName))
+                    .Distinct()
+                    .OrderBy(a => a.AppName)];
+
+            List<string?> environments = [.. group.Select(p => p.EnvironmentName).Distinct()];
+
+            owners[group.Key] = new NamespaceOwner
+            {
+                CustomerId = oneCustomer ? first.CustomerId : null,
+                CustomerName = oneCustomer ? first.CustomerName : null,
+                Apps = apps,
+                EnvironmentName = environments.Count == 1 ? environments[0] : null,
+            };
+        }
+
+        return owners;
+    }
 
     // Standard kube-state-metrics series. Requests and usage are both available so the
     // charging basis is a configuration choice, not a code change.
@@ -287,47 +364,17 @@ public class CostReportService(
         Dictionary<Guid, AppSummary> appsById =
             (await delivery.GetAppsAsync(tenantId, ct)).ToDictionary(a => a.Id);
 
-        var ownership = deployments
-            .Select(d => new
-            {
-                d.ClusterId,
-                d.Namespace,
-                d.AppId,
-                CustomerId = appsById.TryGetValue(d.AppId, out AppSummary? app) ? (Guid?)app.CustomerId : null,
-                CustomerName = appsById.TryGetValue(d.AppId, out AppSummary? named) ? named.CustomerName : "",
-                AppName = d.AppName,
-                EnvironmentName = (string?)d.EnvironmentName,
-            })
-            .ToList();
+        List<NamespacePlacement> placements =
+            [.. deployments.Select(d => new NamespacePlacement(
+                ClusterId: d.ClusterId,
+                Namespace: d.Namespace ?? "",
+                AppId: d.AppId,
+                AppName: d.AppName,
+                CustomerId: appsById.TryGetValue(d.AppId, out AppSummary? app) ? app.CustomerId : null,
+                CustomerName: appsById.TryGetValue(d.AppId, out AppSummary? named) ? named.CustomerName : "",
+                EnvironmentName: d.EnvironmentName))];
 
-        // Several deployments can target one namespace. The customer is taken from the
-        // first — any of them identifies it, and billing needs only that — but every
-        // distinct app is kept, because assigning a shared namespace's whole cost to
-        // whichever app was enumerated first would put a made-up number on an invoice.
-        Dictionary<(Guid, string), NamespaceOwner> owners = [];
-        foreach (var group in ownership.GroupBy(r => (r.ClusterId, r.Namespace)))
-        {
-            var first = group.First();
-
-            List<AppRef> apps =
-                [.. group
-                    .Select(r => new AppRef(r.AppId, r.AppName))
-                    .Distinct()
-                    .OrderBy(a => a.AppName)];
-
-            // Only name an environment when the namespace has exactly one. A namespace
-            // serving two environments belongs to neither for reporting purposes.
-            List<string> environments =
-                [.. group.Select(r => r.EnvironmentName).Distinct()];
-
-            owners[group.Key] = new NamespaceOwner
-            {
-                CustomerId = first.CustomerId,
-                CustomerName = first.CustomerName,
-                Apps = apps,
-                EnvironmentName = environments.Count == 1 ? environments[0] : null,
-            };
-        }
+        Dictionary<(Guid, string), NamespaceOwner> owners = OwnersByNamespace(placements);
 
         List<NamespaceCost> allCosts = [];
         List<ClusterCapacityCost> capacities = [];
