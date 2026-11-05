@@ -1,4 +1,5 @@
 using Microsoft.AspNetCore.Components.Authorization;
+using Microsoft.AspNetCore.Diagnostics;
 using Microsoft.AspNetCore.Components.Server.Circuits;
 using Microsoft.AspNetCore.DataProtection;
 using Microsoft.AspNetCore.HttpOverrides;
@@ -715,6 +716,41 @@ public class Program
         }
 
         app.UseStatusCodePagesWithReExecute("/not-found", createScopeForStatusCodePages: true);
+
+        // ⚠️ …but only for GET and HEAD, and the numbers below are measured, not reasoned.
+        //
+        // The middleware above re-runs the pipeline against /not-found while KEEPING THE ORIGINAL
+        // METHOD, and /not-found is a Razor @page that serves GET. Blazor's catch-all matches any
+        // path for GET, so routing answers 405 for every other verb — and that 405 was then
+        // re-executed as a POST, reached antiforgery, and surfaced as a 500:
+        //
+        //     before            after
+        //     GET    404 (22kB page)   404 (22kB page)   ← unchanged, and that is the point
+        //     POST   500 (1.5kB)       405 (bodyless)
+        //     PUT    405               405
+        //     DELETE 405               405
+        //
+        // A 500 tells a client that mistyped a URL that this server is broken — retry, escalate,
+        // page someone — and every scanner POSTing at /wp-login.php put one in the error rate,
+        // which is how a real one gets missed. 405 is what routing actually determined.
+        //
+        // ⚠️ The obvious fix does NOT work: wrapping the line above in `UseWhen(ctx => IsGet…)`
+        // removes the 500 and ALSO removes the friendly page, because the re-execute middleware
+        // inside a branch does not wrap the main pipeline — measured, GET's body went from 22794
+        // bytes to 0. Disabling the feature per request is the documented opt-out and is what
+        // ISkipStatusCodePagesMetadata does for an endpoint; this is the same thing for a request
+        // that reached no endpoint, which metadata cannot reach by construction.
+        app.Use(async (context, next) =>
+        {
+            if (!HttpMethods.IsGet(context.Request.Method)
+                && !HttpMethods.IsHead(context.Request.Method))
+            {
+                IStatusCodePagesFeature? feature = context.Features.Get<IStatusCodePagesFeature>();
+                if (feature is not null) feature.Enabled = false;
+            }
+
+            await next(context);
+        });
         app.UseHttpsRedirection();
 
         // Required for the egress agent endpoint to accept its upgrade request;
