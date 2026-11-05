@@ -31,29 +31,58 @@ namespace EntKube.Web.Tests;
 /// third copy of the contract, free to drift from both of the other two. The cost is that this
 /// ratchet can only see routes whose success body IS described — which is exactly the debt
 /// <c>ApiDocumentedResponsesTests.UndescribedSuccessBodies</c> counts, and
-/// <see cref="Uncheckable"/> below is the same debt seen from the client's side.</para>
+/// <see cref="Unverifiable"/> below is the same debt seen from the client's side.</para>
 /// </summary>
 [Collection(ApiSurfaceCollection.Name)]
 public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
 {
     /// <summary>
     /// Commands whose route does not describe its success body, so there is no schema to check
-    /// their columns against.
+    /// their columns against. Named, not counted.
     ///
-    /// <para>This is a ratchet in the same direction as the response-typing one: it may only go
-    /// DOWN, and every route that gains a response type moves a command from here into the checked
-    /// set. It going UP means a command was added against a route nothing can describe.</para>
+    /// <para>This is debt in the same direction as the response-typing ratchet: every route that
+    /// gains a response type removes a name from here. A name that is still listed once its route
+    /// is typed fails <see cref="The_banked_list_names_only_commands_that_are_still_unverifiable"/>
+    /// rather than sitting here being trusted.</para>
     ///
-    /// <para>⚠️ <b>All thirteen were read by hand on 2026-11-05 and their columns matched the
-    /// anonymous objects their handlers return.</b> That is an observation on one day, not an
-    /// assertion — it is recorded here so this number is not mistaken for thirteen suspected
-    /// defects, and it stops being true the moment one of those handlers is edited. Only the
-    /// routes counted by the test below are actually checked on every run.</para>
+    /// <para>⚠️ <b>This was an integer, and an integer was the wrong shape.</b> Two changes in
+    /// opposite directions net to zero: type one route in the same change that reverts another,
+    /// and the count stays 13 while a command's columns silently stop being checked. The sibling
+    /// ratchet already solved this — <c>CliEndpointParityTests.NoCommandYet</c> is a named set
+    /// with a staleness assertion beside it — and this started life as a count anyway.</para>
+    ///
+    /// <para>⚠️ All thirteen were read by hand on 2026-11-05 and their columns matched the
+    /// anonymous objects their handlers return. That is an observation on one day, <b>not an
+    /// assertion</b>, and it stops being true the moment one of those handlers is edited. It is
+    /// recorded against the names rather than against a number so a later reader can tell which
+    /// commands it was about.</para>
     /// </summary>
-    private const int Uncheckable = 13;
+    private static readonly HashSet<string> Unverifiable = new(StringComparer.Ordinal)
+    {
+        "clusters list",
+        "components list",
+        "apps list",
+        "deployments list",
+        "advisor",
+        "error-budgets",
+        "incidents",
+        "upgrades",
+        "drift",
+        "supply-chain",
+        "rollouts",
+        "dr",
+        "secrets sync",
+    };
 
     /// <summary>Commands that render a table — the only ones with a column list to check.</summary>
     private const int CommandsWithColumns = 17;
+
+    /// <summary>
+    /// Whether this command is banked as unverifiable. Exposed so
+    /// <see cref="CliRenderedColumnTests"/> can assert that its rendered coverage keeps step with
+    /// this class's schema coverage, rather than the two drifting apart silently.
+    /// </summary>
+    internal static bool BankedAsUnverifiable(string commandName) => Unverifiable.Contains(commandName);
 
     private sealed record Checked(
         CliCommand Command,
@@ -104,7 +133,12 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
         string? route = RouteOf(command);
         if (route is null) return new(command, "", null, "its stub arguments are not enough to build a path");
 
-        IOpenApiSchema? body = null;
+        // ⚠️ Collected rather than assigned, because the loop below cannot assume one match.
+        // Flattening {clusterId} and a future {slug} to the same "{}" makes two document paths
+        // one key, and an unconditional assignment would take the LAST match — silently checking
+        // the columns against another operation, or resetting a found body to null and reporting
+        // the command as debt.
+        List<IOpenApiSchema?> matched = [];
 
         foreach ((string path, IOpenApiPathItem item) in fixture.Document!.Paths ?? [])
         {
@@ -114,12 +148,40 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
             {
                 if ($"{verb.Method.ToUpperInvariant()} {flat}" != route) continue;
 
-                body = operation.Responses?
-                    .Where(r => r.Key.StartsWith("2", StringComparison.Ordinal))
-                    .Select(r => r.Value.Content?.Values.Select(c => c.Schema).FirstOrDefault(s => s is not null))
-                    .FirstOrDefault(s => s is not null);
+                // ⚠️ Every 2xx that carries a body, not the first one. POST
+                // /apps/{appId}/secrets/sync answers the SAME body under 200 and 207, and once it
+                // is typed it will declare both — at which point "whichever came first in the
+                // dictionary" decides what the columns are checked against. Two DIFFERENT 2xx
+                // bodies mean the question has no single answer, so that is reported rather than
+                // resolved by picking one.
+                List<IOpenApiSchema> bodies =
+                    [.. (operation.Responses ?? [])
+                        .Where(r => r.Key.StartsWith("2", StringComparison.Ordinal))
+                        .SelectMany(r => r.Value.Content?.Values ?? [])
+                        .Select(c => c.Schema)
+                        .Where(schema => schema is not null)
+                        .Select(schema => schema!)
+                        .Distinct()];
+
+                if (bodies.Count > 1)
+                {
+                    return new(command, route, null,
+                        $"its route describes {bodies.Count} different 2xx bodies, so there is no "
+                        + "single shape its columns can be checked against");
+                }
+
+                matched.Add(bodies.FirstOrDefault());
             }
         }
+
+        if (matched.Count > 1)
+        {
+            return new(command, route, null,
+                $"{matched.Count} documented operations flatten to '{route}', so which one this "
+                + "command reaches is ambiguous");
+        }
+
+        IOpenApiSchema? body = matched.FirstOrDefault();
 
         if (body is null) return new(command, route, null, "its success body is not described");
 
@@ -130,7 +192,7 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
         // takes --fail-on-results' exit code 3 off the table.
         if (command.RowsProperty is not null)
         {
-            if (body.Type == JsonSchemaType.Array)
+            if (IsArray(body))
             {
                 return new(command, route, null,
                     $"it names rows property '{command.RowsProperty}' but the body is an array");
@@ -142,13 +204,45 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
                     $"it names rows property '{command.RowsProperty}', which the body does not have");
             }
 
+            // ⚠️ And it must BE an array. The assertion below is named after the array and did
+            // not check for one: a rows property pointed at a scalar — `RowsProperty = "currency"`
+            // — resolved, so nothing complained, while TableWriter found a string, fell through to
+            // its key/value path, printed `SEK` and reported one row.
+            if (!IsArray(wrapped))
+            {
+                return new(command, route, null,
+                    $"its rows property '{command.RowsProperty}' is not an array, so TableWriter "
+                    + "prints the value as a single row instead of a table");
+            }
+
             rows = wrapped!;
         }
 
-        // The rows may be the array itself or, for a single-object endpoint like whoami, the
-        // object — TableWriter renders both.
-        return new(command, route, rows.Type == JsonSchemaType.Array ? rows.Items : rows, null);
+        // ⚠️ The comment here used to say "TableWriter renders both", which is true of the BODY
+        // and false of the columns: for anything that is not an array TableWriter calls
+        // WriteObject and never consults the column list at all. So a column list against an
+        // object body is inert — printed nowhere, checked by nothing — which is the same defect
+        // as a dashed column wearing a different hat.
+        if (!IsArray(rows))
+        {
+            return new(command, route, null,
+                "its route answers a single object, and TableWriter renders those as key/value "
+                + "pairs without consulting the columns — so this column list is never used");
+        }
+
+        return new(command, route, rows.Items, null);
     }
+
+    /// <summary>
+    /// ⚠️ <c>HasFlag</c>, not <c>==</c>. <c>JsonSchemaType</c> is a <c>[Flags]</c> enum — Array is
+    /// 64, Null is 1 — and OpenAPI 3.1 writes a nullable array as <c>type: ["array","null"]</c>,
+    /// which is 65 and does not equal Array. With an exact comparison a nullable collection
+    /// response would be handed to the column walk as the ARRAY schema rather than its element,
+    /// and every column of a perfectly correct command would be reported missing. A ratchet's
+    /// false failures are as expensive as its blind spots: the next reader loosens it.
+    /// </summary>
+    private static bool IsArray(IOpenApiSchema? schema) =>
+        schema?.Type?.HasFlag(JsonSchemaType.Array) == true;
 
     private static string? Missing(IOpenApiSchema row, string columnPath)
     {
@@ -199,7 +293,7 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
     /// <summary>
     /// ⚠️ The debt, banked and pointed the same way as the response-typing ratchet. A command
     /// whose route has no described success body cannot have its columns checked at all, so this
-    /// number is how much of the CLI's rendering is still unverifiable.
+    /// list is how much of the CLI's rendering is still unverifiable.
     /// </summary>
     [Fact]
     public void The_commands_whose_columns_cannot_be_checked_are_the_ones_still_banked()
@@ -215,12 +309,65 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
             "a command that cannot be checked for any OTHER reason is a defect, not debt: "
             + string.Join("; ", unverifiable.Select(c => $"{c.Name}: {c.Problem}")));
 
-        unverifiable.Should().HaveCount(
-            Uncheckable,
-            "LOWER this when a route gains a response type — that is the point of typing them. If "
-            + "it has risen, a command was added against a route whose answer nothing can "
-            + "describe. Still unverifiable: {0}",
-            string.Join("; ", unverifiable.Select(c => c.Name)));
+        // ⚠️ Set equality, both directions, not a count. A count is satisfied by a change that
+        // types one route and reverts another, and the command that stopped being checked is
+        // invisible in the arithmetic.
+        unverifiable.Select(c => c.Name).Should().BeEquivalentTo(
+            Unverifiable,
+            "REMOVE a name from Unverifiable when its route gains a response type — that is the "
+            + "point of typing them. A name appearing here that is not in the set means a command "
+            + "was added against a route whose answer nothing can describe.");
+    }
+
+    /// <summary>
+    /// The banked list must not outlive its entries — the failure mode of every allow-list in this
+    /// repo. A name left here after its route is typed is a command nobody checks, sitting in a
+    /// list that says it cannot be checked.
+    ///
+    /// <para>This is the half a bare count could not express at all, and it is why the sibling
+    /// ratchet's <c>NoCommandYet</c> has always been a named set.</para>
+    /// </summary>
+    [Fact]
+    public void The_banked_list_names_only_commands_that_are_still_unverifiable()
+    {
+        List<string> nowCheckable =
+            [.. CliCommands.All
+                .Where(c => c.Columns.Length > 0 && Unverifiable.Contains(string.Join(' ', c.Path)))
+                .Select(Resolve)
+                .Where(c => c.Row is not null)
+                .Select(c => c.Name)];
+
+        nowCheckable.Should().BeEmpty(
+            "these routes now describe their success body, so their columns ARE checked — delete "
+            + "them from Unverifiable rather than leaving a list that lies about its own coverage: "
+            + string.Join(", ", nowCheckable));
+
+        List<string> notCommands =
+            [.. Unverifiable.Except(CliCommands.All.Select(c => string.Join(' ', c.Path)))];
+
+        notCommands.Should().BeEmpty(
+            "and these are not commands at all any more: " + string.Join(", ", notCommands));
+    }
+
+    /// <summary>
+    /// ⚠️ Pins the flag arithmetic <see cref="IsArray"/> exists for, because no route answers a
+    /// nullable collection today — so nothing else in the suite would notice the predicate going
+    /// back to <c>==</c>, and the damage would be a FALSE failure on the first route that does.
+    ///
+    /// <para><c>JsonSchemaType</c> is <c>[Flags]</c>: Array is 64 and Null is 1, so OpenAPI 3.1's
+    /// <c>type: ["array","null"]</c> is 65. An exact comparison against Array is false for it.</para>
+    /// </summary>
+    [Fact]
+    public void A_nullable_array_is_still_an_array()
+    {
+        IsArray(new OpenApiSchema { Type = JsonSchemaType.Array }).Should().BeTrue();
+
+        IsArray(new OpenApiSchema { Type = JsonSchemaType.Array | JsonSchemaType.Null })
+            .Should().BeTrue("a nullable array is the shape an exact == comparison misses");
+
+        IsArray(new OpenApiSchema { Type = JsonSchemaType.Object }).Should().BeFalse();
+        IsArray(new OpenApiSchema { Type = null }).Should().BeFalse("an untyped schema is not an array");
+        IsArray(null).Should().BeFalse();
     }
 
     [Fact]

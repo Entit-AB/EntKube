@@ -258,8 +258,16 @@ public class ApiDocumentedResponsesTests(GeneratedOpenApiDocumentFixture fixture
                     foreach ((string media, OpenApiMediaType content) in response.Content)
                     {
                         // An array response names its component one level in, on `items`.
+                        //
+                        // ⚠️ HasFlag, not ==. JsonSchemaType is a [Flags] enum: Array is 64, Null
+                        // is 1, and OpenAPI 3.1 writes a nullable array as type ["array","null"]
+                        // — which is 65 and does NOT equal Array. An exact comparison would skip
+                        // the descent for a nullable collection response, find the array schema
+                        // where it expected a $ref, and report a correct handler as "inline, not
+                        // a $ref". A false failure, and the next reader would have loosened the
+                        // assertion to clear it.
                         IOpenApiSchema? schema = content.Schema;
-                        if (schema?.Type == JsonSchemaType.Array) schema = schema.Items;
+                        if (schema?.Type?.HasFlag(JsonSchemaType.Array) == true) schema = schema.Items;
 
                         if (schema is not OpenApiSchemaReference { Reference.Id: { Length: > 0 } id })
                         {
