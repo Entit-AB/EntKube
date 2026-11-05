@@ -46,7 +46,20 @@
     <ProjectReference Include="..\EntKube.Contracts\EntKube.Contracts.csproj" />
     <ProjectReference Include="..\EntKube.Web.Client\EntKube.Web.Client.csproj" />
     <ProjectReference Include="..\EntKube.Agents.Protocol\EntKube.Agents.Protocol.csproj" />
-    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" Version="10.0.13" />
+    <!--
+      ⚠️ 10.0.14, not 10.0.13, because of CVE-2026-102870 (GHSA-g27p-qf6j-c96c, high): the
+      Blazor WebAssembly debug proxy compiles generated C# to evaluate debugger
+      expressions, and embeds values from the app being debugged — ToString() results,
+      descriptions, class names — without consistent escaping. A value that escapes the
+      generated string literal runs code on the DEVELOPER's machine when they evaluate an
+      expression. Fixed in 10.0.14; every 10.0.x before it is in range.
+
+      It fires as an error rather than a warning because Directory.Build.props puts NU1903
+      in WarningsAsErrors, and it started firing on 2026-11-03 — the day the advisory's
+      affected range was updated, not the day anything here changed. A fresh restore of
+      main could not complete from then until this bump.
+    -->
+    <PackageReference Include="Microsoft.AspNetCore.Components.WebAssembly.Server" Version="10.0.14" />
     <PackageReference Include="Microsoft.AspNetCore.Diagnostics.EntityFrameworkCore" Version="10.0.13" />
     <PackageReference Include="Microsoft.AspNetCore.Identity.EntityFrameworkCore" Version="10.0.13" />
     <PackageReference Include="Microsoft.EntityFrameworkCore.Sqlite" Version="10.0.1" />
