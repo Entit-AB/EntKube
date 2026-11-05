@@ -12,7 +12,8 @@ namespace EntKube.Cli;
 ///
 /// Exit codes are chosen for CI:
 ///   0  success
-///   1  the request failed, or the token is not permitted
+///   1  the request failed, the token is not permitted, or the API answered that PART of the
+///      work failed (HTTP 207) — see <see cref="Render"/>
 ///   2  the command was invoked wrongly
 ///   3  --fail-on-results was given and rows came back
 /// </summary>
@@ -72,15 +73,54 @@ public static class Program
             _ => await api.GetAsync(path),
         };
 
+        return Render(result, parsed, command, Console.Out, Console.Error);
+    }
+
+    /// <summary>
+    /// Turns one API answer into what the operator sees and the exit code CI reads.
+    ///
+    /// <para>⚠️ <b>Separated from <see cref="Main"/> so it can be tested.</b> <c>Main</c> reads
+    /// environment variables and opens a real <c>HttpClient</c>; this method takes the answer and
+    /// two writers, so every decision below can be asserted with a string. What is left in
+    /// <c>Main</c> is one line of wiring, and that line is not covered.</para>
+    ///
+    /// <para>⚠️ <b>A 207 used to exit 0.</b> <c>POST /apps/{appId}/secrets/sync</c> answers
+    /// 207 when any binding failed — the status exists to say so — and 207 is a 2xx, so the
+    /// request counted as a success all the way out to the exit code. `entkube secrets sync` in a
+    /// pipeline reported success while some of an app's credentials had not reached its cluster.
+    /// The table showed the per-binding errors, so a person watching would see it; a pipeline
+    /// cannot read a table.</para>
+    /// </summary>
+    internal static int Render(
+        ApiResult result, CliArgs parsed, CliCommand command, TextWriter output, TextWriter error)
+    {
         if (!result.Success)
         {
-            Console.Error.WriteLine($"entkube: {result.Body}");
+            error.WriteLine($"entkube: {result.Body}");
             return ExitFailure;
         }
 
         if (parsed.Flag("json"))
         {
-            Console.Out.WriteLine(result.Body);
+            output.WriteLine(result.Body);
+
+            // ⚠️ --json changes the output FORMAT. It is not a request to be told less about what
+            // happened, and it used to be exactly that: this returned ExitOk before either check
+            // below ran, so --json laundered BOTH a partial failure and the --fail-on-results
+            // gate. A pipeline passes --json precisely because it is the form you can archive or
+            // pipe to jq, so the one invocation most likely to be gating was the one that never
+            // failed.
+            return PartialFailure(result, error) == ExitFailure
+                ? ExitFailure
+                : ResultsGate(result.Body, parsed, command);
+        }
+
+        // A 204 has no body by design — `cost rates clear` is the one that answers it. Before
+        // this was explicit it reached JsonDocument.Parse(""), threw, and was rescued by the
+        // catch below, which printed an empty line and called it a success. Right outcome,
+        // entirely by accident, and the comment in that catch said the body was "unexpected".
+        if (string.IsNullOrWhiteSpace(result.Body))
+        {
             return ExitOk;
         }
 
@@ -88,19 +128,67 @@ public static class Program
         try
         {
             using JsonDocument doc = JsonDocument.Parse(result.Body);
-            rows = TableWriter.Write(Console.Out, doc.RootElement, command.Columns, command.RowsProperty);
+            rows = TableWriter.Write(output, doc.RootElement, command.Columns, command.RowsProperty);
         }
         catch (JsonException)
         {
-            // A non-JSON success body is unexpected but not worth failing over — print
-            // it rather than hiding a response the operator might need to see.
-            Console.Out.WriteLine(result.Body);
-            return ExitOk;
+            // A non-empty, non-JSON success body is genuinely unexpected but not worth failing
+            // over — print it rather than hiding a response the operator might need to see.
+            output.WriteLine(result.Body);
+            return PartialFailure(result, error);
+        }
+
+        if (PartialFailure(result, error) == ExitFailure)
+        {
+            // Reported before the gate below, because "part of this did not happen" outranks
+            // "rows came back". The table has already been printed, so the operator sees which
+            // part.
+            return ExitFailure;
         }
 
         // Lets a pipeline gate on "is anything wrong": `entkube drift --fail-on-results`
         // exits non-zero when a deployment has drifted, without parsing the output.
         return parsed.Flag("fail-on-results") && rows > 0 ? ExitResults : ExitOk;
+    }
+
+    /// <summary>
+    /// The <c>--fail-on-results</c> gate for a body that has been printed rather than rendered.
+    /// Counting is <see cref="TableWriter.RowCount"/> so the gate cannot mean one thing in a table
+    /// and another in <c>--json</c>.
+    /// </summary>
+    private static int ResultsGate(string body, CliArgs parsed, CliCommand command)
+    {
+        if (!parsed.Flag("fail-on-results")) return ExitOk;
+
+        try
+        {
+            using JsonDocument doc = JsonDocument.Parse(body);
+            return TableWriter.RowCount(doc.RootElement, command.RowsProperty) > 0
+                ? ExitResults
+                : ExitOk;
+        }
+        catch (JsonException)
+        {
+            // Nothing countable. The gate asks "did rows come back", and the honest answer for a
+            // body that is not JSON is no — failing here would turn an unparseable success into a
+            // CI failure that says "results found".
+            return ExitOk;
+        }
+    }
+
+    /// <summary>
+    /// Exit 1 and a line on stderr when the API said part of the work failed; exit 0 otherwise.
+    /// The advice names the body, because the body is where WHICH part failed is written.
+    /// </summary>
+    private static int PartialFailure(ApiResult result, TextWriter error)
+    {
+        if (!result.Partial) return ExitOk;
+
+        error.WriteLine(
+            "entkube: the API reported that part of this operation failed (HTTP 207). "
+            + "The response above lists what did and did not succeed.");
+
+        return ExitFailure;
     }
 
     private static void PrintUsage(TextWriter output)
@@ -121,7 +209,8 @@ public static class Program
               --help               Show this message
 
             Exit codes:
-              0 success · 1 request failed · 2 bad usage · 3 rows returned with --fail-on-results
+              0 success · 1 request failed or partly failed · 2 bad usage
+              3 rows returned with --fail-on-results
 
             Commands:
             """);

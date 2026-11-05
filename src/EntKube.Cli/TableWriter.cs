@@ -21,16 +21,10 @@ public static class TableWriter
     public static int Write(TextWriter output, JsonElement root,
         (string Header, string Path)[] columns, string? rowsProperty)
     {
-        JsonElement rows = root;
-
-        if (rowsProperty is not null)
+        if (!TryResolveRows(root, rowsProperty, out JsonElement rows))
         {
-            if (root.ValueKind != JsonValueKind.Object
-                || !root.TryGetProperty(rowsProperty, out rows))
-            {
-                output.WriteLine("(no rows in response)");
-                return 0;
-            }
+            output.WriteLine("(no rows in response)");
+            return 0;
         }
 
         if (rows.ValueKind != JsonValueKind.Array)
@@ -85,6 +79,53 @@ public static class TableWriter
         }
 
         return items.Count;
+    }
+
+    /// <summary>
+    /// Finds the element the rows live in: the named property, or the whole body when the
+    /// response is already the list. False when the body does not carry that property at all.
+    /// </summary>
+    private static bool TryResolveRows(JsonElement root, string? rowsProperty, out JsonElement rows)
+    {
+        if (rowsProperty is null)
+        {
+            rows = root;
+            return true;
+        }
+
+        if (root.ValueKind != JsonValueKind.Object)
+        {
+            rows = default;
+            return false;
+        }
+
+        return root.TryGetProperty(rowsProperty, out rows);
+    }
+
+    /// <summary>
+    /// What <see cref="Write"/> would return for this body, without rendering it.
+    ///
+    /// <para>⚠️ <b>This exists so <c>--fail-on-results</c> means the same thing in
+    /// <c>--json</c> mode as it does in table mode.</b> The CLI used to return as soon as it had
+    /// printed the raw body, so <c>entkube drift --json --fail-on-results</c> exited 0 with
+    /// deployments drifted — and <c>--json</c> is exactly what a pipeline passes, because it is
+    /// the form you can archive or hand to jq. The flag's whole purpose is to let CI gate without
+    /// parsing the output; a flag that silently stops gating is worse than no flag.</para>
+    ///
+    /// <para>The resolution is shared with <see cref="Write"/> through
+    /// <c>TryResolveRows</c> so the two cannot disagree about where the rows are;
+    /// <c>CliPartialFailureTests</c> asserts the two agree on every shape the API produces,
+    /// because the counting rule itself is stated twice.</para>
+    /// </summary>
+    public static int RowCount(JsonElement root, string? rowsProperty)
+    {
+        if (!TryResolveRows(root, rowsProperty, out JsonElement rows)) return 0;
+
+        // A single object counts as one row — that is what Write reports for whoami and for
+        // `cost rates show`, which it prints as key/value pairs rather than as a table.
+        if (rows.ValueKind != JsonValueKind.Array) return 1;
+
+        return rows.GetArrayLength();
     }
 
     private static void WriteObject(TextWriter output, JsonElement element)

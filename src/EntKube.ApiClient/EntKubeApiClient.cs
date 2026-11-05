@@ -7,6 +7,30 @@ namespace EntKube.ApiClient;
 /// handlers can hand a readable failure back to the model instead of crashing the server.</summary>
 public sealed record ApiResult(bool Success, string Body, int StatusCode)
 {
+    /// <summary>
+    /// The status the API uses to say <em>some of it worked</em>.
+    ///
+    /// <para><c>POST /apps/{appId}/secrets/sync</c> answers 207 when any binding failed, carrying
+    /// <c>failed: true</c> and a per-binding <c>error</c>. ⚠️ 207 is a 2xx, so
+    /// <c>HttpResponseMessage.IsSuccessStatusCode</c> is true for it and
+    /// <see cref="Success"/> is too — which is right: the request was answered and the body is
+    /// the answer. What is NOT right is a client stopping there, because the answer says part of
+    /// the work did not happen.</para>
+    /// </summary>
+    public const int MultiStatus = 207;
+
+    /// <summary>
+    /// True when the API answered that part of the work failed. Derived from the status rather
+    /// than stored beside it, so the two cannot disagree.
+    ///
+    /// <para>⚠️ <b>Deliberately separate from <see cref="Success"/> rather than folded into
+    /// it.</b> Flipping <c>Success</c> to false for a 207 would make the MCP server report the
+    /// whole call as an error and hide a body the model needs to read — the body is where the
+    /// partial result lives. A caller that cares (the CLI, which has an exit code to set) asks
+    /// this; a caller that hands the body to a reader (the MCP server) does not have to.</para>
+    /// </summary>
+    public bool Partial => StatusCode == MultiStatus;
+
     public static ApiResult Failed(string message, int status = 0) => new(false, message, status);
 }
 

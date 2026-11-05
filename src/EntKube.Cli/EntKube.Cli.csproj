@@ -11,6 +11,15 @@
   </PropertyGroup>
 
   <ItemGroup>
+    <!-- Program.Render is internal — it is how Main decides what to print and what to exit with,
+         not API for anyone to call — but the exit code is the only thing a pipeline can read, and
+         a 207 reaching it as a success is exactly the defect this seam exists to keep tested.
+         Main itself stays untested: it reads environment variables and opens a real HttpClient,
+         and what is left in it after Render is one line of wiring. -->
+    <InternalsVisibleTo Include="EntKube.Web.Tests" />
+  </ItemGroup>
+
+  <ItemGroup>
     <ProjectReference Include="../EntKube.ApiClient/EntKube.ApiClient.csproj" />
   </ItemGroup>
 
