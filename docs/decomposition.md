@@ -2221,6 +2221,92 @@ response-typing count 24 → 23 and moved one command out of `Uncheckable` in th
 So the §6.6 sequence gains a middle step. Measure each client against the **router** (can it reach
 the route), then against the **document** (does it read what the route sends), then generate.
 
+### 6.9 Item 8's remaining distance, measured — and the two things that make it not just typing (2026-11-05)
+
+`ApiDocumentedResponsesTests.UndescribedSuccessBodies` is item 8's distance in a single number: a
+generator fed an operation with no response schema emits a method returning `object`, so the count
+IS how far the generated clients are from being usable. It stood at 23 after `GET /cost` — the last
+and hardest of the cost routes, because every figure on its envelope is computed from the namespace
+list and cannot be set directly by a fixture.
+
+Counted by generating the real document and walking it, not by reading the constant:
+
+| | count |
+|---|---|
+| paths | 25 |
+| operations | 31 |
+| success body described | 7 |
+| bodyless by design (one 204) | 1 |
+| **undescribed** | **23** — 16 handlers in `PublicApiEndpoints.cs`, **7 SCIM** |
+
+⚠️ Only the last two of those are pinned by a test (`UndescribedSuccessBodies` and
+`BodylessSuccesses`). The operation total is asserted merely as "more than fifteen", so 31 is a
+measurement taken today rather than a number the suite defends — if it matters to a later reader,
+pin it.
+
+#### The 16 are transcribed and adversarially verified
+
+One agent per route group produced the record in house style, the handler's replacement signature
+and return, and the **anonymous-object oracle cut verbatim from the handler**; a second agent then
+attacked each transcription field by field against the source. All six groups came back with key
+order and field coverage correct and **zero wire-breaking defects**, which is the useful part of
+the result: the mechanical half of this work is sound and can be applied in a few sittings.
+
+#### ⚠️ What the verification actually earned: a typing PR is never just the records
+
+None of the six transcriptions mentioned the three companion edits, and each one turns the suite
+red:
+
+| file | why typing touches it |
+|---|---|
+| `ApiDocumentedResponsesTests.cs` | the constant is asserted with **exact equality**, not a ceiling, so it must drop by precisely the number of operations typed |
+| `CliColumnParityTests.cs` | the typed route's command must leave `Unverifiable`, or the staleness assertion fires |
+| `CliRenderedColumnTests.cs` | removing that name grows the described set, so a rendering fact must be added for it |
+
+That coupling is deliberate — it is what §6.8 built — but it has a scheduling consequence worth
+writing down: **all three are ratchet state, so a typing branch cannot be based on `main` while
+another pull request is editing them.** A ratchet constant has no correct merge; git will resolve
+one silently and wrongly. The sequence is merge, then type, not type in parallel.
+
+#### ⚠️ And SCIM must be pinned BEFORE it is typed
+
+The seven SCIM operations are the only part of the API that never serialises an object: every
+payload is a hand-built `JsonObject` with literal keys, flattened with `ToJsonString()` and written
+through `Results.Content(json, "application/scim+json", …)`. That is why they carry no response
+schema, and it is also why they are the most dangerous routes on the list — transcribing those keys
+into records breaks them **in ways that answer `200 OK`**:
+
+| what typing would do | how it looks to an operator |
+|---|---|
+| `Resources` → `resources` | an empty page, 200 OK, nothing fails |
+| `int Status` in the error envelope | `"status": 404` where RFC 7644 §3.12 requires `"404"` |
+| a record without `WhenWritingNull` | `"scimType": null` where the member must be **absent** |
+| `TypedResults.Ok(body)` | `application/json`, which some connectors reject outright |
+
+RFC 7644 §3.4.2 spells the ListResponse member `Resources` with a capital R — the one member in the
+specification that is not lowerCamelCase. Under `JsonSerializerDefaults.Web` a record property
+`Resources` serialises as `resources`, and **nothing in this repository asserted it**: the SCIM
+tests pinned the user resource and the error envelope, but there was no test of the list envelope
+at all, so the rename turned nothing red while every connector read an empty directory.
+
+`ScimWireShapeTests` pins it now, over real HTTP for the media type, the capital-R member and the
+error envelope, and over its own database for the populated envelope. ⚠️ It deliberately does not
+rebuild a `JsonObject` with the same literals in the test, which would have stayed green through
+exactly that rename — and an earlier draft that asserted SOURCE TEXT was replaced, because §6.5's
+lesson applies here too: a source scan passes on a call that never runs.
+
+#### What this changes about the sequence
+
+Item 8 is no longer blocked on a question, only on work, and the work has an order:
+
+1. **Pin SCIM** (done) — so the seven most dangerous routes cannot be typed into silence.
+2. **Merge the ratchet changes**, then type the 16 in groups, each group carrying its three
+   companion edits and a wire-shape test against the verbatim oracle.
+3. **Type SCIM last**, deliberately, carrying the media type and the capital-R member rather than
+   letting `TypedResults.Ok` decide them.
+4. Then generate the clients — at which point the two ratchets that count this debt both read 0,
+   and the CLI's rendering is verifiable for every command rather than four of seventeen.
+
 ## 7. What not to do
 
 - **Don't split the database** beyond Support and Telemetry. 287 cross-entity navigations
