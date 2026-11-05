@@ -164,6 +164,32 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
         return await response.Content.ReadAsStringAsync();
     }
 
+    /// <summary>
+    /// The whole answer — status, media type and body — for a route called as the holder of
+    /// <paramref name="scope"/>.
+    ///
+    /// <para>⚠️ <b>The media type is why this exists.</b> <see cref="SendForBodyAsync"/> returns
+    /// only the body, and the SCIM routes' most fragile property is their
+    /// <c>application/scim+json</c> content type: some connectors reject
+    /// <c>application/json</c> outright, and <c>TypedResults.Ok</c> — the shape the
+    /// response-typing work applies everywhere else — would switch it silently while leaving the
+    /// body correct. A source scan for the literal would pass on a call that never runs, which is
+    /// how the self-description shipped as a 500 with a green source test beside it.</para>
+    /// </summary>
+    public async Task<(HttpStatusCode Status, string? MediaType, string Body)> SendForResponseAsync(
+        string method, string url, string scope)
+    {
+        using HttpRequestMessage request = new(new HttpMethod(method), url);
+        request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TokenPerScope[scope]);
+
+        using HttpResponseMessage response = await _client.SendAsync(request);
+
+        return (
+            response.StatusCode,
+            response.Content.Headers.ContentType?.MediaType,
+            await response.Content.ReadAsStringAsync());
+    }
+
     private readonly HttpClient _client;
 
     public GeneratedOpenApiDocumentFixture()
