@@ -775,10 +775,45 @@ public static class PublicApiEndpoints
             EntKube.Contracts.Advisor.IAdvisorApi advisor, CancellationToken ct) =>
         {
             ApiTokenPrincipal principal = ctx.GetApiPrincipal()!;
+
+            // ⚠️ Asked before writing, because without this the route answered `200 {"ok":true}`
+            // to ANY id at all — a positive claim about an action that did not happen. Both
+            // shipped clients act on it: the CLI exits 0 and the MCP server hands the body to a
+            // model as the result of the operation.
+            //
+            // ⚠️ And it was not merely a lie, it was a lie that left a row behind.
+            // AdvisorStateService.MutateAsync inserts when the key is absent, stamping
+            // FirstSeenAt and LastSeenAt with "now" — so the prune, which removes a row only once
+            // its key has been missing for three days, keeps it. If that key then surfaces as a
+            // REAL finding inside the window, MergeStateAsync attaches the row: the finding
+            // arrives already Acknowledged, aged from the blind acknowledgment's timestamp, and
+            // with escalation suppressed because Acknowledged is excluded from it. A blind
+            // acknowledgment could pre-acknowledge a future finding — defeating the property the
+            // prune's own comment claims, that "a recurrence is treated as new".
+            //
+            // ⚠️ The cost is a read path on a write route: GetFindingsAsync computes the whole
+            // report. That is deliberate. An acknowledgment is a rare, human-initiated action,
+            // and if the advisor cannot produce the finding then reporting success for
+            // acknowledging it is the wrong answer rather than the fast one. There is no advisor
+            // scan cache to ask instead — unlike /drift and /supply-chain, this report is
+            // computed on read.
+            IReadOnlyList<EntKube.Contracts.Advisor.FindingSummary> findings =
+                await advisor.GetFindingsAsync(principal.TenantId, ct);
+
+            if (!findings.Any(f => f.Id == findingId))
+            {
+                return Results.NotFound();
+            }
+
             await advisor.AcknowledgeAsync(
                 principal.TenantId, findingId, $"api-token:{principal.TokenName}", ct);
             return Results.Ok(new { ok = true });
-        }).RequireApiScope(ApiScopes.OpsWrite);
+        }).RequireApiScope(ApiScopes.OpsWrite)
+          // ⚠️ The 404 only. Typing the 200 would move UndescribedSuccessBodies and force the
+          // three companion ratchet edits that come with it (docs/decomposition.md §6.9), which
+          // belongs to the typing programme rather than to this fix. `.Produces` for a status
+          // with no body adds no 2xx entry, so every banked count stays where it is.
+          .Produces(StatusCodes.Status404NotFound);
     }
 
     /// <summary>
