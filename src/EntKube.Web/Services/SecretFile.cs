@@ -45,6 +45,35 @@ public static class SecretFile
     }
 
     /// <summary>
+    /// Creates a directory only its owner can enter, and returns the path.
+    ///
+    /// <para>⚠️ <b>This is the part the note above says actually decides exposure.</b>
+    /// <c>Directory.CreateDirectory</c> under <see cref="Path.GetTempPath"/> yields 0755 at the
+    /// usual umask, and a file written into it then lands 0644 — so restricting individual files
+    /// is not enough when a directory holds several, and it is no help at all for the files a
+    /// CHILD PROCESS writes there. <c>clusterctl</c> and <c>kubectl</c> both drop kubeconfigs into
+    /// a working directory, and nothing in this process chooses their mode.</para>
+    ///
+    /// <para>Restricting the directory covers every one of them at once, including the ones added
+    /// later by someone who does not know this rule exists. Owner-only means read, write and
+    /// EXECUTE: a directory without execute cannot be traversed, so its contents cannot be opened
+    /// even by name.</para>
+    /// </summary>
+    public static string CreateDirectory(string path)
+    {
+        Directory.CreateDirectory(path);
+
+        if (!OperatingSystem.IsWindows())
+        {
+            File.SetUnixFileMode(
+                path,
+                UnixFileMode.UserRead | UnixFileMode.UserWrite | UnixFileMode.UserExecute);
+        }
+
+        return path;
+    }
+
+    /// <summary>
     /// Restricts an existing file to its owner. A no-op on Windows, where the equivalent is an
     /// ACL rather than a Unix mode and <see cref="File.SetUnixFileMode"/> is unsupported — the
     /// guard is what stops this throwing there rather than an oversight.

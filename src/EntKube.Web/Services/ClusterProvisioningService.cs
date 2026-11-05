@@ -78,8 +78,7 @@ public class ClusterProvisioningService(
             return new ProvisioningResult { Success = false, Log = joined, Error = joined };
         }
 
-        string workDir = Path.Combine(Path.GetTempPath(), "entkube-provision", clusterId.ToString("N"));
-        Directory.CreateDirectory(workDir);
+        string workDir = CreateWorkDirectory(clusterId);
 
         BootstrapVm? bootstrapVm = null;
         KeystoneSession? session = null;
@@ -141,7 +140,7 @@ public class ClusterProvisioningService(
                 $"--worker-machine-count {config.TotalWorkerCount}";
             CliResult generated = await RunAsync("clusterctl", generateArgs, workDir, capiEnv, Log, ct);
             if (!generated.Success) throw new InvalidOperationException("clusterctl generate cluster failed — see log.");
-            await File.WriteAllTextAsync(clusterYamlPath, generated.Stdout, ct);
+            await SecretFile.WriteAsync(clusterYamlPath, generated.Stdout, ct);
 
             await RunAsync("kubectl", $"apply -f {clusterYamlPath}", workDir, EnvFor(bootstrapKubeconfigPath), Log, ct);
             Log("Target Cluster manifests applied; waiting for the control plane to come up…");
@@ -234,15 +233,47 @@ public class ClusterProvisioningService(
         return (privatePem, publicOpenSsh);
     }
 
-    private static async Task WritePrivateKeyFileAsync(string path, string pem, CancellationToken ct)
-    {
-        await File.WriteAllTextAsync(path, pem, ct);
-        // ssh refuses world-readable private keys.
-        if (!OperatingSystem.IsWindows())
-        {
-            File.SetUnixFileMode(path, UnixFileMode.UserRead | UnixFileMode.UserWrite);
-        }
-    }
+    /// <summary>
+    /// The per-cluster working directory a provisioning run writes into — owner-only.
+    ///
+    /// <para>⚠️ <b>Owner-only because of what ends up in here:</b> an SSH private key, two cluster
+    /// kubeconfigs, the OpenStack application credential as <c>cloud.conf</c>, and that credential
+    /// again as a rendered Secret manifest. <c>Directory.CreateDirectory</c> under
+    /// <see cref="Path.GetTempPath"/> gives 0755 at the usual umask and files written into it land
+    /// 0644, so this sat world-readable in <c>/tmp</c> for the length of a run.</para>
+    ///
+    /// <para>⚠️ <b>Restricting the DIRECTORY rather than each file is the part that matters</b>, and
+    /// not merely for brevity: <c>clusterctl</c> and <c>kubectl</c> write
+    /// <c>bootstrap.kubeconfig</c> and other artefacts in here themselves, and nothing in this
+    /// process chooses the mode of a file another process creates. A directory without the execute
+    /// bit cannot be traversed, so its contents cannot be opened even by name — which also covers
+    /// whatever a later change drops in here without reading this.</para>
+    ///
+    /// <para>⚠️ <b>Extracted so the wiring is tested, not just the helper.</b> Inline, reverting
+    /// this one call to <c>Directory.CreateDirectory</c> would have been caught by nothing:
+    /// <c>SecretFileTests</c> proves the helper restricts, and proves nothing about whether this
+    /// service calls it. The rest of this method needs a real cloud and cannot be tested at all,
+    /// which is exactly why the one decision that can be was lifted out of it.</para>
+    /// </summary>
+    /// <remarks>
+    /// Public rather than internal because <c>EntKube.Web</c> exposes no internals to the test
+    /// project — the same reason <c>CostReportService.OwnersByNamespace</c> and
+    /// <c>ClusterRateResponse.From</c> are public. A decision nothing can assert is a decision
+    /// nobody has checked.
+    /// </remarks>
+    public static string CreateWorkDirectory(Guid clusterId) =>
+        SecretFile.CreateDirectory(
+            Path.Combine(Path.GetTempPath(), "entkube-provision", clusterId.ToString("N")));
+
+    /// <summary>
+    /// ⚠️ Through <see cref="SecretFile"/>, which creates the file empty, restricts it, and only
+    /// then writes. This wrote the key and restricted it AFTERWARDS, which leaves a window in
+    /// which a private key is on disk at 0644 — small, and entirely avoidable. The comment this
+    /// replaces was right about why the mode matters (ssh refuses a world-readable private key)
+    /// and silent about the ordering.
+    /// </summary>
+    private static Task WritePrivateKeyFileAsync(string path, string pem, CancellationToken ct) =>
+        SecretFile.WriteAsync(path, pem, ct);
 
     // ──────── Bootstrap VM cloud-init & SSH ────────
 
@@ -275,7 +306,7 @@ public class ClusterProvisioningService(
                 string rewritten = r.Stdout
                     .Replace("127.0.0.1", floatingIp)
                     .Replace("localhost", floatingIp);
-                await File.WriteAllTextAsync(outPath, rewritten, ct);
+                await SecretFile.WriteAsync(outPath, rewritten, ct);
                 return;
             }
 
@@ -297,7 +328,7 @@ public class ClusterProvisioningService(
 
             if (r.Success && r.Stdout.Contains("apiVersion", StringComparison.Ordinal))
             {
-                await File.WriteAllTextAsync(outPath, r.Stdout, ct);
+                await SecretFile.WriteAsync(outPath, r.Stdout, ct);
 
                 // Confirm the target API actually answers before proceeding to the pivot.
                 CliResult ping = await RunAsync("kubectl", "get --raw=/readyz", workDir, EnvFor(outPath), _ => { }, ct,
@@ -346,7 +377,7 @@ public class ClusterProvisioningService(
         ApplicationCredential appCred = new() { Id = credId, Name = "entkube", Secret = credSecret };
         string cloudConf = CapiTemplateInputs.BuildCloudConf(connection, appCred, config);
         string cloudConfPath = Path.Combine(workDir, "cloud.conf");
-        await File.WriteAllTextAsync(cloudConfPath, cloudConf, ct);
+        await SecretFile.WriteAsync(cloudConfPath, cloudConf, ct);
 
         // Render the Secret then apply it, so this is idempotent across retries.
         string secretYamlPath = Path.Combine(workDir, "cloud-config-secret.yaml");
@@ -355,7 +386,7 @@ public class ClusterProvisioningService(
             $"create secret generic cloud-config -n kube-system --from-file=cloud.conf={cloudConfPath} --dry-run=client -o yaml",
             workDir, EnvFor(targetKubeconfigPath), _ => { }, ct, quiet: true);
         if (!rendered.Success) throw new InvalidOperationException("Failed to render cloud-config secret — see log.");
-        await File.WriteAllTextAsync(secretYamlPath, rendered.Stdout, ct);
+        await SecretFile.WriteAsync(secretYamlPath, rendered.Stdout, ct);
 
         await RunAsync("kubectl", $"apply -f {secretYamlPath}", workDir, EnvFor(targetKubeconfigPath), _ => { }, ct);
     }
