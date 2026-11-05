@@ -51,9 +51,19 @@ namespace EntKube.Web.Tests;
 /// cluster through a fake <c>ApiServerUrl</c> and cannot succeed in a test host. A probe whose
 /// positive control fails is the vacuous shape this file exists to avoid, so these are left to
 /// <c>ApiTenantConfinementTests</c>' declaration and to a reader of the handler.</item>
+/// <item>⚠️ <c>POST /advisor/findings/{findingId}/acknowledge</c> — <b>and this list used to say
+/// "the three that are not" and then name two.</b> The arithmetic was right and the enumeration
+/// was one short, which is the exact failure an exclusion list exists to prevent: it reads as
+/// completeness. The route was unprobeable for a reason, and it was a worse reason than the two
+/// above — it answered <c>200 {"ok":true}</c> to every id, so the stranger arm and the owner arm
+/// were indistinguishable and the only honest probe was of a defect. It is confined now, by
+/// construction: the handler checks the id against the findings the advisor reports for the
+/// token's tenant, so another tenant's finding key is simply absent.
+/// <c>AcknowledgeAFindingThatExistsTests</c> covers it with a seeded positive control.</item>
 /// <item>The six <c>/scim/v2/Users</c> routes are not probed because they are <b>known not to be
 /// confined</b> — banked as <c>TenantReach.InstallationWide</c>. A probe there would assert the
-/// defect rather than the invariant, and would have to be rewritten the moment it is fixed.</item>
+/// defect rather than the invariant, and would have to be rewritten the moment it is fixed. They
+/// are not part of the eight above, which are <c>/api/v1</c> routes.</item>
 /// </list>
 /// </summary>
 [Collection(ApiSurfaceCollection.Name)]
