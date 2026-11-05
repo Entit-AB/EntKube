@@ -26,7 +26,9 @@ namespace EntKube.Web.Tests;
 /// <para>The report below gives every settable figure a DISTINCT value, so a swap between two
 /// same-typed fields changes the JSON. The derived ones follow from them deterministically:
 /// <c>Change</c> is 1000-800, <c>ChangeFraction</c> is 0.25, coverage completeness is 700/900, and
-/// <c>DailyAverage</c> is 1000 divided by the single day's 20/24 of coverage.</para>
+/// <c>DailyAverage</c> is 1000 divided by the single day's 20/24 of a whole day — which is now
+/// <c>MeasuredDayFraction</c> rather than <c>Completeness</c>, and the two agree here only because
+/// this fixture's day is neither today nor a cluster's opening day.</para>
 /// </summary>
 public class CostWireShapeTests
 {
@@ -56,6 +58,13 @@ public class CostWireShapeTests
                 Cost = 7m,
                 CoveredHours = 20m,
                 ExpectedHours = 24m,
+
+                // ⚠️ Set, not defaulted, or the statement in this class's remarks about
+                // DailyAverage becomes false while every assertion stays green. The denominator
+                // is now MeasuredDayFraction — covered over a whole day's hours — and this
+                // comparison builds both sides from the same report object, so a zero here would
+                // make DailyAverage 0 on both sides and the test could not notice.
+                FullDayHours = 24m,
             },
         ],
         Groups =
