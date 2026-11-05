@@ -26,6 +26,35 @@ public sealed record CostHistoryPoint
     /// <summary>Cluster-hours that elapsed and were expected to be measured.</summary>
     public decimal ExpectedHours { get; init; }
 
+    /// <summary>
+    /// 24 hours for every cluster with a record on this day — a whole day, with no exemption.
+    ///
+    /// <para>⚠️ <b>This is deliberately NOT <see cref="ExpectedHours"/>, and the difference is the
+    /// defect this member exists to fix.</b> <c>ExpectedHours</c> answers "of the hours we could
+    /// have watched, how many should we have?", so it is correctly reduced on a cluster's opening
+    /// day and on today. <c>FullDayHours</c> answers a different question — "how much of a whole
+    /// day is this?" — which a figure dividing money by days needs and which
+    /// <c>Completeness</c> cannot give, because it saturates at 1 for a part day.</para>
+    /// </summary>
+    public decimal FullDayHours { get; init; }
+
+    /// <summary>
+    /// How much of a whole day's money this day holds, 0–1: measured cluster-hours over a whole
+    /// day's worth. A day the ledger ran end to end is 1; today at noon is about 0.5; a day it
+    /// never ran on is 0.
+    ///
+    /// <para>Measured hours rather than elapsed ones, deliberately. The sweep is hourly, so at
+    /// noon the ledger holds roughly eleven hours of money, not twelve — and an hour not yet swept
+    /// is missing from the numerator too, so this cancels instead of over-reporting.</para>
+    ///
+    /// <para>Clamped, because a day holding more than a whole day's hours is indefensible on its
+    /// face — it means a double-booked hour or a clock that moved, and in that case the money is
+    /// inflated as well, so letting the denominator follow it would hide the error rather than
+    /// halve it.</para>
+    /// </summary>
+    public decimal MeasuredDayFraction =>
+        FullDayHours > 0m ? Math.Min(1m, CoveredHours / FullDayHours) : 0m;
+
     /// <summary>0–1. Below 1 the day is cheap partly because it was not fully watched.</summary>
     public double Completeness =>
         ExpectedHours > 0m ? Math.Min(1d, (double)(CoveredHours / ExpectedHours)) : 1d;
@@ -172,16 +201,56 @@ public sealed record CostHistoryReport
     /// fraction of it that was. A day with no coverage record contributes <b>0</b>: it is not a
     /// cheap day, it is an absent one — which is this file's own rule, that an hour never
     /// measured must be reported as unmeasured rather than as free.</para>
+    ///
+    /// <para>⚠️ <b>And that correction was itself wrong, through <see cref="Completeness"/>, for
+    /// the same reason one level down.</b> It weighted each day by its completeness, and
+    /// completeness answers "of the hours we COULD have watched, how many did we?" — a question
+    /// whose answer is 1.0 for two kinds of part day, because
+    /// <c>ExpectedCoverage</c> deliberately reduces the expectation for both:</para>
+    ///
+    /// <list type="bullet">
+    /// <item><b>today</b>, expected against the hours elapsed so far, so at noon it is 12/12 = 1.0
+    /// while holding half a day's money. Every Cost tab render hits this, because the window
+    /// always ends today: six full days at 100 plus today's 50 gave 650 over a denominator of
+    /// <b>7.0</b> — 92.86 reported where 100.00 is right;</item>
+    /// <item>a cluster's <b>opening day</b>, expected against the hours since the ledger started
+    /// watching, which is 1.0 whenever it ran cleanly from then. A cluster added at 18:00
+    /// contributes six hours of money and a whole day to the divisor. This one is in windows
+    /// <em>entirely in the past</em>, so it is not the same bug wearing a hat — three past days
+    /// with a cluster opened at 18:00 on the first reported 75.00 against a true 100.00.</item>
+    /// </list>
+    ///
+    /// <para>So the weight is <see cref="CostHistoryPoint.MeasuredDayFraction"/> — measured hours
+    /// over a whole day's 24 per cluster, with no exemption — and the exemptions stay exactly where
+    /// they belong, on completeness and the warnings. ⚠️ A fix scoped to today would not have been
+    /// enough and could not have been written here anyway: this record carries no clock, and
+    /// <see cref="CostHistoryPoint"/> carries no cluster identity or opening date, so the second
+    /// case is not detectable from the data a day arrives with.</para>
+    ///
+    /// <para>⚠️ <b>The assumption this rests on, stated.</b> Weighting by hours assumes cost per
+    /// cluster-hour is roughly uniform across the clusters in the window. It is exact for one
+    /// cluster and biased for a fleet of very unlike ones. The error it replaces was
+    /// one-directional — always understating whenever any day was partial, whatever the fleet —
+    /// and the honest alternative needs per-cluster day weights, which is a larger change than
+    /// this.</para>
     /// </summary>
-    public decimal DailyAverage
-    {
-        get
-        {
-            decimal days = Daily.Sum(d => d.ExpectedHours > 0m ? (decimal)d.Completeness : 0m);
+    public decimal DailyAverage => MeasuredDays > 0m ? TotalCost / MeasuredDays : 0m;
 
-            return days > 0m ? TotalCost / days : 0m;
-        }
-    }
+    /// <summary>
+    /// The denominator <see cref="DailyAverage"/> divides by: whole days' worth of measurement in
+    /// this window, where a part day counts as its fraction.
+    ///
+    /// <para>⚠️ Exposed because <see cref="UnmeasuredDays"/>' own doc says it exists "so the
+    /// denominator <c>DailyAverage</c> uses is checkable rather than implied" — and once the
+    /// weighting stopped being the day count, it no longer was. This is the number itself, so a
+    /// reader can divide by hand.</para>
+    ///
+    /// <para>Below 1 the daily rate is an extrapolation from less than a day, which needs a
+    /// ledger younger than the window rather than merely a window ending today. The figure is
+    /// still returned rather than suppressed — a caller can see the denominator and decide — but
+    /// it is not a projection anyone should lean on.</para>
+    /// </summary>
+    public decimal MeasuredDays => Daily.Sum(d => d.MeasuredDayFraction);
 }
 
 /// <summary>One calendar month of accrued cost.</summary>
@@ -332,13 +401,13 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
         List<LedgerRow> current = [.. rows.Where(r => r.Day >= start)];
         List<LedgerRow> previous = [.. rows.Where(r => r.Day < start)];
 
-        Dictionary<DateTime, (decimal Covered, decimal Expected)> byDay =
+        Dictionary<DateTime, (decimal Covered, decimal Expected, decimal Nominal)> byDay =
             ExpectedCoverage(coverage, openedOn, now);
 
         List<CostHistoryPoint> daily = [];
         for (DateTime day = start; day <= end; day = day.AddDays(1))
         {
-            (decimal covered, decimal expected) = byDay.GetValueOrDefault(day);
+            (decimal covered, decimal expected, decimal nominal) = byDay.GetValueOrDefault(day);
 
             daily.Add(new CostHistoryPoint
             {
@@ -346,6 +415,7 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
                 Cost = current.Where(r => r.Day == day).Sum(r => r.Cost),
                 CoveredHours = covered,
                 ExpectedHours = expected,
+                FullDayHours = nominal,
             });
         }
 
@@ -446,7 +516,7 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
 
         Dictionary<Guid, DateTime> openedOn = await OpeningDaysAsync(db, tenantId, ct);
 
-        Dictionary<DateTime, (decimal Covered, decimal Expected)> byDay =
+        Dictionary<DateTime, (decimal Covered, decimal Expected, decimal Nominal)> byDay =
             ExpectedCoverage(coverage, openedOn, now);
 
         HashSet<string> currencies = [.. await db.CostLedgerEntries
@@ -508,10 +578,10 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
     /// measuring it against the whole of today elapsed would report a hole where there
     /// is none.</para>
     /// </summary>
-    private static Dictionary<DateTime, (decimal Covered, decimal Expected)> ExpectedCoverage(
+    private static Dictionary<DateTime, (decimal Covered, decimal Expected, decimal Nominal)> ExpectedCoverage(
         IReadOnlyList<CoverageRow> coverage, IReadOnlyDictionary<Guid, DateTime> openedOn, DateTime now)
     {
-        Dictionary<DateTime, (decimal, decimal)> byDay = [];
+        Dictionary<DateTime, (decimal, decimal, decimal)> byDay = [];
 
         DateTime today = CostAccrual.DayOf(now);
 
@@ -532,8 +602,17 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
                 expected = 24m;
             }
 
-            (decimal covered, decimal existingExpected) = byDay.GetValueOrDefault(row.Day);
-            byDay[row.Day] = (covered + row.CoveredHours, existingExpected + expected);
+            (decimal covered, decimal existingExpected, decimal nominal) =
+                byDay.GetValueOrDefault(row.Day);
+
+            // ⚠️ Outside every branch above, and that is the point. The two exemptions are right
+            // for completeness and wrong for a denominator: both reduce `expected`, so a part day
+            // reports Completeness 1.0 while holding part of a day's money. A whole day is 24
+            // hours per cluster whatever the ledger managed to watch of it.
+            byDay[row.Day] = (
+                covered + row.CoveredHours,
+                existingExpected + expected,
+                nominal + 24m);
         }
 
         return byDay;
