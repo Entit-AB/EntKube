@@ -542,12 +542,143 @@ public class CostLedgerTests : IDisposable
         (await history.HasAnyAsync(tenantId)).Should().BeTrue();
     }
 
+    // ═══════════════════════════════════════════════════════════════════
+    // Repricing a cluster into a different currency part-way through a day
+    // ═══════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// ⚠️ <b>The row used to hold two currencies added together under one label.</b>
+    ///
+    /// <para>Every cost field on the entry is <c>+=</c>, and the currency was assigned
+    /// unconditionally from the rate on every sweep. So repricing a cluster from EUR to SEK at
+    /// midday added SEK to hours already accrued in EUR and stamped the sum SEK — an amount wrong
+    /// by whatever share of the day preceded the change, with nothing on the row to show it. There
+    /// is no rate versioning to recover from it: <c>ClusterCostRate</c> is one mutable row per
+    /// cluster, and the ledger's key is (cluster, namespace, day), so the earlier hours cannot be
+    /// moved to a row of their own.</para>
+    ///
+    /// <para>Those hours are now booked as a coverage GAP instead, which is the convention this
+    /// writer already states for an hour it cannot account for: the day goes short, which is the
+    /// visible under-billing failure rather than the invisible wrong-number one.</para>
+    /// </summary>
+    [Fact]
+    public async Task Repricing_into_another_currency_does_not_add_to_what_is_already_booked()
+    {
+        await RecordInAsync("EUR", Noon, Report(cpuCost: 730m));
+        await RecordInAsync("EUR", Noon.AddHours(1), Report(cpuCost: 730m));
+
+        // The operator reprices the cluster. The next sweep must not add SEK onto EUR.
+        await RecordInAsync("SEK", Noon.AddHours(2), Report(cpuCost: 730m));
+
+        CostLedgerEntry entry = await db.CostLedgerEntries.SingleAsync();
+
+        entry.CpuCost.Should().Be(
+            1m, "the hour accrued after the change is not added to the euro already booked");
+        entry.Hours.Should().Be(1m);
+        entry.Currency.Should().Be(
+            "EUR", "and the money keeps the unit it was actually priced in");
+    }
+
+    /// <summary>
+    /// ⚠️ The shortfall is VISIBLE, which is the whole justification for refusing the hour. A fix
+    /// that silently dropped it would satisfy the assertions above and leave the day claiming full
+    /// coverage, so the ledger would under-bill without saying so.
+    /// </summary>
+    [Fact]
+    public async Task The_hours_refused_for_a_currency_change_are_reported_as_a_gap()
+    {
+        // ⚠️ Three sweeps, not two, and the first one is why. A cluster seen for the first time
+        // sets its cursor and books NOTHING, so no row exists yet — my first attempt at this test
+        // repriced against a day that had nothing booked in the old currency, the guard correctly
+        // did not fire, and the test failed for the right reason.
+        await RecordInAsync("EUR", Noon, Report(cpuCost: 730m));
+        await RecordInAsync("EUR", Noon.AddHours(1), Report(cpuCost: 730m));
+
+        CostLedgerWriteResult reprice =
+            await RecordInAsync("SEK", Noon.AddHours(3), Report(cpuCost: 730m));
+
+        reprice.GapHours.Should().Be(
+            2m, "the two hours since the last sweep cannot be added to the euro already booked");
+        reprice.BilledHours.Should().Be(0m);
+
+        CostHistoryReport report = await history.GetHistoryAsync(
+            tenantId, Noon.Date, Noon.Date, CostGroupBy.Customer, Noon.AddHours(3));
+
+        report.GapHours.Should().Be(2m, "and the gap reaches the report a reader sees");
+        report.IsComplete.Should().BeFalse(
+            "which is the point: the shortfall is visible rather than silently absorbed");
+    }
+
+    /// <summary>
+    /// ⚠️ <b>THE POSITIVE CONTROL.</b> Without it, "never accumulate at all" would pass both facts
+    /// above — and that is a far worse defect than the one being fixed, because it would stop the
+    /// ledger billing anything after the first sweep of each day.
+    ///
+    /// <para>This is the same two-sweep shape, in ONE currency, asserting the accumulation still
+    /// happens.</para>
+    /// </summary>
+    [Fact]
+    public async Task Two_sweeps_in_the_same_currency_still_accumulate()
+    {
+        await RecordInAsync("SEK", Noon, Report(cpuCost: 730m));
+        await RecordInAsync("SEK", Noon.AddHours(2), Report(cpuCost: 730m));
+
+        CostLedgerEntry entry = await db.CostLedgerEntries.SingleAsync();
+
+        entry.CpuCost.Should().Be(2m, "two hours at 730/month is 2");
+        entry.Hours.Should().Be(2m);
+        entry.Currency.Should().Be("SEK");
+    }
+
+    /// <summary>
+    /// The day after a repricing starts clean: there is nothing booked in the old currency, so the
+    /// new one accrues normally. Without this, the guard could plausibly be read as "a cluster can
+    /// never be repriced again".
+    /// </summary>
+    [Fact]
+    public async Task The_day_after_a_repricing_accrues_in_the_new_currency()
+    {
+        await RecordInAsync("EUR", Noon, Report(cpuCost: 730m));
+        await RecordInAsync("EUR", Noon.AddHours(1), Report(cpuCost: 730m));
+
+        // ⚠️ A sweep bills at most CostAccrual.MaxSpan — three hours — and books the rest of the
+        // elapsed time as a gap. So the sweep a day later bills the three hours before it, all of
+        // them on the new day, and the hour after that adds one more. Four, not one: my first
+        // attempt asserted one and the test told me the cap existed.
+        DateTime nextDay = Noon.AddDays(1);
+        await RecordInAsync("SEK", nextDay, Report(cpuCost: 730m));
+        await RecordInAsync("SEK", nextDay.AddHours(1), Report(cpuCost: 730m));
+
+        CostLedgerEntry fresh = await db.CostLedgerEntries.SingleAsync(e => e.Day == nextDay.Date);
+
+        fresh.Currency.Should().Be("SEK", "a day with nothing booked in the old currency is clean");
+        fresh.CpuCost.Should().Be(4m, "three capped hours plus the hour after them");
+
+        CostLedgerEntry before = await db.CostLedgerEntries.SingleAsync(e => e.Day == Noon.Date);
+
+        before.Currency.Should().Be("EUR", "and the earlier day is left in the unit it was priced in");
+        before.CpuCost.Should().Be(1m);
+    }
+
     // ── Helpers ──
 
     private Task<CostLedgerWriteResult> RecordAsync(DateTime now, CostReport report) =>
+        RecordInAsync("EUR", now, report);
+
+    /// <summary>
+    /// As <see cref="RecordAsync"/>, with the cluster's price sheet in a chosen currency — so a
+    /// test can reprice the cluster between sweeps, which is the one thing the fixed currency
+    /// above made unexpressible.
+    /// </summary>
+    private Task<CostLedgerWriteResult> RecordInAsync(string currency, DateTime now, CostReport report) =>
         writer.RecordAsync(tenantId, report, new Dictionary<Guid, ClusterCostRate>
         {
-            [clusterId] = new ClusterCostRate { ClusterId = clusterId, Currency = "EUR", ChargeOnRequests = true },
+            [clusterId] = new ClusterCostRate
+            {
+                ClusterId = clusterId,
+                Currency = currency,
+                ChargeOnRequests = true,
+            },
         }, now);
 
     private CostReport Report(decimal cpuCost, string appName = "checkout") => new()

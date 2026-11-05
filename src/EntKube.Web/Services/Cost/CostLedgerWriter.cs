@@ -166,6 +166,51 @@ public class CostLedgerWriter(
 
             foreach (DaySlice slice in billable)
             {
+                // ⚠️ A day already booked in another currency is not accumulated into.
+                //
+                // Every cost field below is `+=`, and the currency used to be assigned
+                // unconditionally — so repricing a cluster from USD to SEK part-way through a day
+                // added SEK to hours already accrued in USD and stamped the sum SEK. The row then
+                // held two currencies added together under one label, and the amount was wrong by
+                // whatever share of the day preceded the change: in one worked example a row of
+                // 45.60 "SEK" was 40.00 SEK plus 5.60 USD, so roughly half of it was a number in
+                // the wrong unit. There is no rate versioning to recover from it — ClusterCostRate
+                // is one mutable row per cluster — and the row key is (ClusterId, Namespace, Day),
+                // so the earlier hours cannot be given a row of their own.
+                //
+                // ⚠️ So those hours are booked as a GAP, which is the convention this writer
+                // already states a few lines down for an hour it cannot account for: coverage for
+                // the day goes short, which is "the visible, under-billing failure, not the
+                // invisible, over-billing one". The money already in the row keeps the currency it
+                // was actually priced in, and the next day starts clean in the new one.
+                //
+                // ⚠️ The cost of this choice, stated rather than hidden: an operator merely
+                // CORRECTING a mislabelled currency — where the prices were always SEK and only
+                // the string was wrong — also loses the rest of that day's coverage. Nothing in
+                // the data distinguishes that from a genuine re-denomination, and guessing wrong
+                // in the other direction puts a wrong number on an invoice.
+                string? booked = namespaces
+                    .Select(ns => existing.TryGetValue((ns.Namespace, slice.Day), out CostLedgerEntry? e) ? e.Currency : null)
+                    .FirstOrDefault(c => !string.IsNullOrEmpty(c)
+                                         && !string.Equals(c, rate.Currency, StringComparison.Ordinal));
+
+                if (booked is not null)
+                {
+                    CostLedgerCoverage mixed =
+                        await GetOrCreateCoverageAsync(db, tenantId, clusterId, clusterName, slice.Day, now, ct);
+                    mixed.GapHours += slice.Hours;
+                    mixed.UpdatedAt = now;
+                    gapHours += slice.Hours;
+
+                    logger.LogWarning(
+                        "Cluster {ClusterId} is now priced in {Now} but {Day:yyyy-MM-dd} is already "
+                        + "booked in {Booked}; {Hours:F2} h are recorded as a coverage gap rather "
+                        + "than added in a different currency",
+                        clusterId, rate.Currency, slice.Day, booked, slice.Hours);
+
+                    continue;
+                }
+
                 foreach (NamespaceCost ns in namespaces)
                 {
                     if (!existing.TryGetValue((ns.Namespace, slice.Day), out CostLedgerEntry? entry))
