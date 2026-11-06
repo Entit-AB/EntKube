@@ -2203,8 +2203,8 @@ schema, so its command's columns cannot be checked at all.
 |---|---|
 | CLI commands | 23 |
 | commands rendering a table | 17 |
-| whose route describes its success body — checked on every run | **6** |
-| banked (named, not counted) | **11** |
+| whose route describes its success body — checked on every run | **8** |
+| banked (named, not counted) | **9** |
 
 ⚠️ All thirteen were read by hand on this date and their columns matched the anonymous objects
 their handlers return. That is an observation on one day, **not an assertion** — it stops being
@@ -2216,7 +2216,8 @@ than dismissed.
 `UndescribedSuccessBodies` was the remaining distance to a usable generated client, and that was
 already a reason to drive it to zero. It is now also the share of the CLI's rendering that nothing
 can verify. The two ratchets point the same way and move together: typing `GET /cost` took the
-response-typing count 24 → 23 and moved one command out of `Uncheckable` in the same commit.
+response-typing count 24 → 23 and moved one command out of `Unverifiable` in the same commit.
+The fleet pair took it 23 → 21 and moved two; `apps` and `deployments` 21 → 19 and two more.
 
 So the §6.6 sequence gains a middle step. Measure each client against the **router** (can it reach
 the route), then against the **document** (does it read what the route sends), then generate.
@@ -2235,16 +2236,16 @@ Counted by generating the real document and walking it, not by reading the const
 |---|---|
 | paths | 25 |
 | operations | 31 |
-| success body described | 9 |
+| success body described | 11 |
 | bodyless by design (one 204) | 1 |
-| **undescribed** | **21** — 14 handlers in `PublicApiEndpoints.cs`, **7 SCIM** |
+| **undescribed** | **19** — 12 handlers in `PublicApiEndpoints.cs`, **7 SCIM** |
 
 ⚠️ Only the last two of those are pinned by a test (`UndescribedSuccessBodies` and
 `BodylessSuccesses`). The operation total is asserted merely as "more than fifteen", so 31 is a
 measurement taken today rather than a number the suite defends — if it matters to a later reader,
 pin it.
 
-#### The 16 are transcribed and adversarially verified
+#### The 16 are transcribed and adversarially verified — 4 applied, 12 banked
 
 One agent per route group produced the record in house style, the handler's replacement signature
 and return, and the **anonymous-object oracle cut verbatim from the handler**; a second agent then
@@ -2295,6 +2296,76 @@ rebuild a `JsonObject` with the same literals in the test, which would have stay
 exactly that rename — and an earlier draft that asserted SOURCE TEXT was replaced, because §6.5's
 lesson applies here too: a source scan passes on a call that never runs.
 
+#### ⚠️ A list route's ORDER is verifiable or not depending on the fixture, not the table
+
+Typing a list route raises the same three questions every time: does the handler's `OrderBy`
+survive, does a derived count come from the right key, does a filter filter. The first one took
+two wrong theories, fifteen mutations and a rewritten fixture, and the answer is more useful than
+"it cannot be tested here".
+
+**The fleet group concluded that `GET /clusters` could not pin its sort** because
+`KubernetesClusters` has a unique index on `(TenantId, Name)` and SQLite collates TEXT as BINARY,
+so rows already arrive in ordinal name order. True — but recorded as a fact about *that table*,
+and that framing produced a wrong prediction for the next group. `Apps` and `AppDeployments` have
+no index declared in `ApplicationDbContext`, so a scan should return insertion order, so a seed
+inserted against the expected order should catch a deleted sort. **Both mutations passed.**
+
+`DeliveryModel.cs:122,175` declares the indexes — `(CustomerId, Name)` on `Apps` and
+`(AppId, Name)` on `AppDeployments`, both unique — in `Data/Modules/`, which is why grepping the
+context for `HasIndex` finds nothing. The fixture put every app under one customer and every
+deployment under one app, so the index's **leading column was constant** and an index scan walked
+exactly the rows under test, in `Name` order. The host was answering the question on the handler's
+behalf.
+
+**The fix is in the fixture, not the test.** Split the rows across two parents chosen so the
+natural walk disagrees with the answer: the customer named `aaa-…` owns the `apple-…` app and
+`zzz-…` owns `Zebra-…`, so walking customers by `(TenantId, Name)` and then each one's apps by
+name yields `apple` before `Zebra` — the opposite of ordinal order. Insertion order is arranged to
+agree with that, so a plain table scan is wrong too. Both plausible query plans now disagree with
+the correct answer, and the handler's sort is the only thing that can produce it.
+
+| mutation (per route, one at a time) | before the split | after |
+|---|---|---|
+| `GET /apps` sort deleted | passed — not caught | **failed ✓** |
+| `GET /deployments` sort deleted | passed — not caught | **failed ✓** |
+| `GET /apps` comparer weakened to the default overload | — | failed ✓ |
+| `GET /deployments` comparer weakened | — | failed ✓ |
+| count made tenant-wide | — | failed ✓ |
+| grouping key changed to the deployment's own id | failed ✓ | failed ✓ |
+| `appId` filter dropped | failed ✓ | failed ✓ |
+| an enum published as its number | failed ✓ | failed ✓ |
+
+⚠️ **Attribution matters here.** The first round weakened both comparers in one mutation, so the
+single failure it produced could not say which route's half of the assertion did the work. The
+second round changes one route at a time, which is the only reason the table above can claim
+anything per route.
+
+#### Which makes `GET /clusters` the genuinely unverifiable one, for a reason worth naming
+
+The same trick cannot rescue the fleet route, and it is not a matter of effort. The index there is
+`(TenantId, Name)`, so its **leading column is the tenant** — and a request carries one API token,
+which fixes one tenant. There is no second parent to split across: every row the route can return
+shares the leading column by construction, so the index always supplies ordinal name order. The
+fleet note's conclusion stands; its stated reason ("this table has an index") was the wrong one,
+and the right one is that the index's leading column is the thing the request holds constant.
+
+That is the general test, and it is cheap to apply to the remaining groups:
+
+> Is there a unique index whose trailing column is the sort column, and can the fixture make the
+> leading columns **vary** across the rows under test? If it can, the sort is verifiable. If the
+> request itself pins them, it is not — and the test must say so, because a reader who deletes the
+> sort will otherwise see a green suite.
+
+⚠️ On Postgres a query without `ORDER BY` has undefined row order, so every one of these sorts is
+load-bearing in production whatever this host can see.
+
+⚠️ **The habit this is the third instance of:** a test can be vacuous for a reason its author did
+not consider even having chosen the discriminator deliberately and written a comment defending it.
+Here the defending comment was wrong twice over — once about which tables carry indexes, once
+about what the mutations had shown — and both drafts would have shipped reading as measurement.
+The rule that keeps surviving: **write the claim, then run the mutation, then write the claim
+again.**
+
 #### What this changes about the sequence
 
 Item 8 is no longer blocked on a question, only on work, and the work has an order:
@@ -2305,7 +2376,7 @@ Item 8 is no longer blocked on a question, only on work, and the work has an ord
 3. **Type SCIM last**, deliberately, carrying the media type and the capital-R member rather than
    letting `TypedResults.Ok` decide them.
 4. Then generate the clients — at which point the two ratchets that count this debt both read 0,
-   and the CLI's rendering is verifiable for every command rather than four of seventeen.
+   and the CLI's rendering is verifiable for every command rather than eight of seventeen.
 
 ## 7. What not to do
 
