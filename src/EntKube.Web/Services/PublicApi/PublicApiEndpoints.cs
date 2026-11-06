@@ -22,6 +22,9 @@ namespace EntKube.Web.Services.PublicApi;
 /// </summary>
 public static class PublicApiEndpoints
 {
+    /// <summary>The widest window a log query may ask for: seven days.</summary>
+    private const int MaxLogQueryMinutes = 10_080;
+
     private const string BasePath = "/api/v1";
 
     public static void MapPublicApi(this WebApplication app)
@@ -402,6 +405,59 @@ public static class PublicApiEndpoints
                 .Select(e => new FeedbackResponse(
                     e.Id, e.Kind, e.Status, e.Rating, e.Message, e.ContactEmail, e.Site, e.PagePath,
                     e.HasScreenshot, e.TicketId, e.CreatedAt))
+                .ToList());
+        }).RequireApiScope(ApiScopes.OpsRead);
+
+        // A GET, because a query changes nothing. The cluster is asked of Fleet first: the log layer
+        // takes a tenant but does not refuse a cluster outside it, so this is the tenant check.
+        api.MapGet("/logs/query",
+            async Task<Results<Ok<LogQueryResponse>, BadRequest<string>, NotFound, StatusCodeHttpResult>> (
+            HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
+            EntKube.Contracts.Telemetry.ITelemetryApi telemetry,
+            Guid clusterId, string query, int? minutes, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+
+            int window = minutes ?? 60;
+            if (window is < 1 or > MaxLogQueryMinutes)
+            {
+                return TypedResults.BadRequest($"minutes must be from 1 to {MaxLogQueryMinutes}.");
+            }
+
+            if (await fleet.GetClusterAsync(tenantId, clusterId, ct) is null)
+            {
+                return TypedResults.NotFound();
+            }
+
+            DateTime to = DateTime.UtcNow;
+
+            EntKube.Contracts.Telemetry.LogQueryOutcome outcome = await telemetry.QueryLogsAsync(
+                tenantId, clusterId, query, to.AddMinutes(-window), to, ct);
+
+            if (outcome.SyntaxError is not null)
+            {
+                return TypedResults.BadRequest(outcome.SyntaxError);
+            }
+
+            // A valid query the store could not answer is not a 200 with no rows: an empty table
+            // from a failed read would read as "nothing happened".
+            return outcome.Table is { } table
+                ? TypedResults.Ok(new LogQueryResponse(table.Columns, table.Rows, table.LinesScanned, table.Partial))
+                : TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
+        }).RequireApiScope(ApiScopes.LogsRead);
+
+        api.MapGet("/synthetic-checks", async Task<Ok<IEnumerable<SyntheticCheckResponse>>> (
+            HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+
+            IReadOnlyList<EntKube.Contracts.Telemetry.SyntheticCheckSummary> checks =
+                await telemetry.GetSyntheticChecksAsync(tenantId, ct);
+
+            return TypedResults.Ok<IEnumerable<SyntheticCheckResponse>>(checks
+                .Select(c => new SyntheticCheckResponse(
+                    c.Id, c.Name, c.Url, c.IsEnabled, c.State, c.ConsecutiveFailures, c.UptimePercent,
+                    c.LastStatusCode, c.LastDurationMs, c.LastFailure, c.LastRunAt))
                 .ToList());
         }).RequireApiScope(ApiScopes.OpsRead);
 

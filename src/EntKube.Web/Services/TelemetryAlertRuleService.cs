@@ -63,6 +63,7 @@ public class TelemetryAlertRuleService(IDbContextFactory<TelemetryDbContext> dbF
             existing.Service = rule.Service;
             existing.Namespace = rule.Namespace;
             existing.MatchText = rule.MatchText;
+            existing.Query = rule.Query;
             existing.Threshold = rule.Threshold;
             existing.WindowMinutes = rule.WindowMinutes;
             existing.Severity = rule.Severity;

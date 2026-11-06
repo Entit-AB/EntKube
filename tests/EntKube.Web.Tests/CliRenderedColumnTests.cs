@@ -327,6 +327,25 @@ public class CliRenderedColumnTests
         EveryColumnRenders(Command("feedback"), JsonSerializer.Serialize(new[] { entry }, AsTheApiSerialises));
     }
 
+    [Fact]
+    public void The_synthetics_list_renders_every_column()
+    {
+        SyntheticCheckResponse check = new(
+            Id: Guid.NewGuid(),
+            Name: "Storefront",
+            Url: "https://www.example.com/health",
+            IsEnabled: true,
+            State: "Passing",
+            ConsecutiveFailures: 0,
+            UptimePercent: 99.5,
+            LastStatusCode: 200,
+            LastDurationMs: 120,
+            LastFailure: null,
+            LastRunAt: new DateTime(2026, 11, 1, 6, 30, 0, DateTimeKind.Utc));
+
+        EveryColumnRenders(Command("synthetics"), JsonSerializer.Serialize(new[] { check }, AsTheApiSerialises));
+    }
+
     /// <summary>
     /// ⚠️ The measure. The facts above are exactly the commands
     /// <see cref="CliColumnParityTests"/> can check against a schema, and they must stay in step:
@@ -339,7 +358,7 @@ public class CliRenderedColumnTests
         string[] rendered =
         [
             "cost", "cost history", "cost months", "cost rates list",
-            "clusters list", "components list", "apps list", "deployments list", "feedback",
+            "clusters list", "components list", "apps list", "deployments list", "feedback", "synthetics",
         ];
 
         IEnumerable<string> describable =

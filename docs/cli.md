@@ -34,6 +34,8 @@ deployments restart  Restart one workload (--id <id> --workload <name>)
 advisor              Operations Advisor findings
 incidents            Alert incidents (--open for unresolved only)
 feedback             In-app feedback (--status New|Triaged|Resolved|Dismissed)
+logs query           Run a log query (--cluster <id> --query <text> [--minutes <n>])
+synthetics           Synthetic checks and their uptime over 24 hours
 upgrades             Components behind their published chart versions
 drift                Deployments changed outside EntKube
 supply-chain         Running images joined to their vulnerability scans

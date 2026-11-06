@@ -168,6 +168,8 @@ public class BackupBundle
     public List<Dashboard> Dashboards { get; set; } = [];
     public List<RumSite> RumSites { get; set; } = [];
     public List<FeedbackItem> FeedbackItems { get; set; } = [];
+    public List<SavedLogQuery> SavedLogQueries { get; set; } = [];
+    public List<SyntheticCheck> SyntheticChecks { get; set; } = [];
     public List<TelemetryAlertRule> TelemetryAlertRules { get; set; } = [];
     public List<TelemetryStorageSetting> TelemetryStorageSettings { get; set; } = [];
     public List<AdvisorDigestConfig> AdvisorDigestConfigs { get; set; } = [];

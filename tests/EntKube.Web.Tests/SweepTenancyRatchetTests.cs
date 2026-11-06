@@ -75,6 +75,7 @@ public class SweepTenancyRatchetTests
         "RolloutWatcherService",
         "SecretExpiryNotificationService",
         "SupportMailPoller",
+        "SyntheticCheckRunner",
         "SupplyChainScanService",
         "TelemetryAlertEvaluator",
         "UptimeTrackingService",

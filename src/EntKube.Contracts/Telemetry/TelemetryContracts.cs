@@ -140,6 +140,46 @@ public sealed record FeedbackEntry(
     bool HasScreenshot,
     Guid? TicketId,
     DateTime CreatedAt);
+/// <summary>A log query's table. Cells are text, so one shape carries any query's columns.</summary>
+/// <param name="Columns">The output columns, in order.</param>
+/// <param name="Rows">Rows aligned with <paramref name="Columns"/>. A null cell has no value.</param>
+/// <param name="LinesScanned">How many log lines were read.</param>
+/// <param name="Partial">True when reading stopped at its limit, so counts are lower bounds.</param>
+public sealed record LogQueryTable(
+    IReadOnlyList<string> Columns,
+    IReadOnlyList<IReadOnlyList<string?>> Rows,
+    int LinesScanned,
+    bool Partial);
+
+/// <summary>What became of a log query. Exactly one of the three is set.</summary>
+/// <param name="Table">The answer.</param>
+/// <param name="SyntaxError">Why the query was refused, for the caller to correct.</param>
+/// <param name="Failure">Why a valid query could not run, which is not the caller's doing.</param>
+public sealed record LogQueryOutcome(LogQueryTable? Table, string? SyntaxError, string? Failure);
+/// <summary>A synthetic check and how it has done.</summary>
+/// <param name="Id">The check's id.</param>
+/// <param name="Name">Its name.</param>
+/// <param name="Url">The URL it requests.</param>
+/// <param name="IsEnabled">Whether it runs.</param>
+/// <param name="State">Unknown, Passing or Failing.</param>
+/// <param name="ConsecutiveFailures">Failures in a row.</param>
+/// <param name="UptimePercent">Runs passed over the last 24 hours, or null with no runs.</param>
+/// <param name="LastStatusCode">The last status received, if any.</param>
+/// <param name="LastDurationMs">How long the last run took, if it has run.</param>
+/// <param name="LastFailure">Why the last run failed, if it did.</param>
+/// <param name="LastRunAt">When it last ran.</param>
+public sealed record SyntheticCheckSummary(
+    Guid Id,
+    string Name,
+    string Url,
+    bool IsEnabled,
+    string State,
+    int ConsecutiveFailures,
+    double? UptimePercent,
+    int? LastStatusCode,
+    int? LastDurationMs,
+    string? LastFailure,
+    DateTime? LastRunAt);
 
 public interface ITelemetryApi
 {
@@ -176,4 +216,12 @@ public interface ITelemetryApi
     /// </summary>
     Task<IReadOnlyList<FeedbackEntry>> GetFeedbackAsync(
         Guid tenantId, string? status = null, int limit = 200, CancellationToken ct = default);
+    /// Runs a log query over one of the tenant's clusters. The caller has already established that
+    /// the cluster is the tenant's.
+    /// </summary>
+    Task<LogQueryOutcome> QueryLogsAsync(
+        Guid tenantId, Guid clusterId, string query, DateTime from, DateTime to, CancellationToken ct = default);
+    /// <summary>One tenant's synthetic checks and how each has done.</summary>
+    Task<IReadOnlyList<SyntheticCheckSummary>> GetSyntheticChecksAsync(
+        Guid tenantId, CancellationToken ct = default);
 }

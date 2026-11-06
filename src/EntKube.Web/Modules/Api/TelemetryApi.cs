@@ -16,7 +16,9 @@ namespace EntKube.Web.Modules.Api;
 public sealed class TelemetryApi(
     IDbContextFactory<TelemetryDbContext> dbFactory,
     EntKube.Web.Services.ErrorBudgetService errorBudgets,
-    EntKube.Web.Services.FeedbackService feedback) : ITelemetryApi
+    EntKube.Web.Services.FeedbackService feedback,
+    EntKube.Web.Services.LogPipelineService logPipelines,
+    EntKube.Web.Services.SyntheticCheckService syntheticChecks) : ITelemetryApi
 {
     public async Task<IReadOnlyList<FeedbackEntry>> GetFeedbackAsync(
         Guid tenantId, string? status = null, int limit = 200, CancellationToken ct = default)
@@ -30,6 +32,45 @@ public sealed class TelemetryApi(
                 r.Item.Id, r.Item.Kind.ToString(), r.Item.Status.ToString(), r.Item.Rating, r.Item.Message,
                 r.Item.ContactEmail, r.Item.SiteName, r.Item.PagePath, r.HasScreenshot, r.Item.TicketId,
                 r.Item.CreatedAt))
+            .ToList();
+    }
+
+    public async Task<LogQueryOutcome> QueryLogsAsync(
+        Guid tenantId, Guid clusterId, string query, DateTime from, DateTime to, CancellationToken ct = default)
+    {
+        EntKube.Web.Services.LogPipelineOutcome outcome =
+            await logPipelines.RunAsync(tenantId, clusterId, query, from, to, ct);
+
+        if (outcome.SyntaxError is { } error)
+        {
+            return new LogQueryOutcome(null, $"{error.Message} (at character {error.Position + 1})", null);
+        }
+
+        if (outcome.Result is not { } result)
+        {
+            return new LogQueryOutcome(null, null, outcome.Failure);
+        }
+
+        return new LogQueryOutcome(
+            new LogQueryTable(
+                [.. result.Columns.Select(c => c.Name)],
+                [.. result.Rows.Select(r => (IReadOnlyList<string?>)[.. r.Select(EntKube.Telemetry.LogPipelines.LogPipelineFormat.Cell)])],
+                result.LinesScanned,
+                result.Partial),
+            null,
+            null);
+    }
+
+    public async Task<IReadOnlyList<SyntheticCheckSummary>> GetSyntheticChecksAsync(
+        Guid tenantId, CancellationToken ct = default)
+    {
+        List<EntKube.Web.Services.SyntheticCheckRow> rows = await syntheticChecks.ListAsync(tenantId, ct);
+
+        return rows
+            .Select(r => new SyntheticCheckSummary(
+                r.Check.Id, r.Check.Name, r.Check.Url, r.Check.IsEnabled, r.Check.State.ToString(),
+                r.Check.ConsecutiveFailures, r.UptimePercent, r.Check.LastStatusCode, r.Check.LastDurationMs,
+                r.Check.LastFailure, r.Check.LastRunAt))
             .ToList();
     }
 

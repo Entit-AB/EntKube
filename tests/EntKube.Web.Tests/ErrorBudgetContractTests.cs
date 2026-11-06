@@ -82,7 +82,9 @@ public class ErrorBudgetContractTests
         return new TelemetryApi(
             dbFactory: null!,   // GetErrorBudgetsAsync never touches Telemetry's own context
             errorBudgets: new ErrorBudgetService(delivery.Object, support.Object),
-            feedback: null!);
+            feedback: null!,
+            logPipelines: null!,
+            syntheticChecks: null!);
     }
 
     [Fact]
@@ -158,7 +160,8 @@ public class ErrorBudgetContractTests
             .ReturnsAsync([]);
 
         ITelemetryApi subject = new TelemetryApi(
-            dbFactory: null!, errorBudgets: new ErrorBudgetService(delivery.Object, support.Object), feedback: null!);
+            dbFactory: null!, errorBudgets: new ErrorBudgetService(delivery.Object, support.Object),
+            feedback: null!, logPipelines: null!, syntheticChecks: null!);
 
         ErrorBudgetSummary b = (await subject.GetErrorBudgetsAsync(Tenant, CancellationToken.None))
             .Should().ContainSingle().Subject;
@@ -189,7 +192,8 @@ public class ErrorBudgetContractTests
                 SyncStatus.Synced, HealthStatus.Healthy, null, null, IsManaged: false)]);
 
         ITelemetryApi subject = new TelemetryApi(
-            dbFactory: null!, errorBudgets: new ErrorBudgetService(delivery.Object, support.Object), feedback: null!);
+            dbFactory: null!, errorBudgets: new ErrorBudgetService(delivery.Object, support.Object),
+            feedback: null!, logPipelines: null!, syntheticChecks: null!);
 
         (await subject.GetErrorBudgetsAsync(Tenant, CancellationToken.None)).Should().BeEmpty();
 

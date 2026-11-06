@@ -138,6 +138,9 @@ public class TenantService(
         // Feedback has no foreign key to its site, so losing the site would not take it along.
         // Screenshots go with their items by cascade.
         await db.FeedbackItems.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.SavedLogQueries.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+        // Their results go by cascade. A check holds no foreign key to its tenant or cluster.
+        await db.SyntheticChecks.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.RumSites.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.TelemetrySegments.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.TelemetryStorageSettings.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);

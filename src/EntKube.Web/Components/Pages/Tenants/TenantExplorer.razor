@@ -477,7 +477,7 @@ else
         new("Routes", "bi-signpost-split",
         [ new("ingress", "Routes & Ingress", "bi-signpost-split") ]),
         new("Monitoring", "bi-speedometer2",
-        [ new("overview", "Overview", "bi-speedometer2"), new("workloads", "Workloads", "bi-boxes"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
+        [ new("overview", "Overview", "bi-speedometer2"), new("workloads", "Workloads", "bi-boxes"), new("logs", "Logs", "bi-journal-text"), new("log-analytics", "Log analytics", "bi-terminal"), new("traces", "Traces", "bi-diagram-3"), new("synthetics", "Synthetic checks", "bi-activity"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
         new("Cost", "bi-cash-coin",
         [ new("cost", "Cost & chargeback", "bi-cash-coin") ]),
     ];
@@ -1053,6 +1053,8 @@ else
                 builder.AddComponentParameter(2, "FocusIncidentId", IncidentParam);
                 builder.CloseComponent();
                 break;
+            case "log-analytics": builder.OpenComponent<LogAnalytics>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "synthetics": builder.OpenComponent<SyntheticChecks>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "logs": builder.OpenComponent<TenantLogsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "traces":
                 builder.OpenComponent<TenantTracesTab>(0);

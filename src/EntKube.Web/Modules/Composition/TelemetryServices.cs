@@ -59,10 +59,14 @@ internal static class TelemetryServices
         services.AddSingleton<FeedbackService>();
         services.AddSingletonWork<FeedbackRetentionService>();
         services.AddScoped<TelemetryAlertRuleService>();
+        services.AddScoped<SyntheticCheckService>();
+        services.AddSingletonWork<SyntheticCheckRunner>();
         services.AddScoped<DashboardService>();
         services.AddScoped<IncidentDispatcher>();
         services.AddSingletonWork<TelemetryAlertEvaluator>();
         services.AddScoped<LogQueryService>();
+        services.AddScoped<LogPipelineService>();
+        services.AddScoped<SavedLogQueryService>();
         services.AddScoped<IncidentService>();
         services.AddScoped<NotificationService>();
         services.AddScoped<NotificationProviderConfigService>();

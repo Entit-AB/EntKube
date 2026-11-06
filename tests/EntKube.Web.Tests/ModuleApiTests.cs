@@ -109,7 +109,9 @@ public class ModuleApiTests : IDisposable
         factory,
         new EntKube.Web.Services.ErrorBudgetService(Delivery, new SupportApi(factory)),
         new EntKube.Web.Services.FeedbackService(
-            factory, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()));
+            factory, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()),
+        logPipelines: null!,
+        syntheticChecks: null!);
 
     [Fact]
     public async Task Catalog_answers_for_the_asking_tenant_and_refuses_the_neighbour()
