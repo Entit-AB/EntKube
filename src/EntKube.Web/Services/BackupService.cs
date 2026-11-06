@@ -263,6 +263,7 @@ public class BackupService(
             SupportDuties = await db.SupportDuties.AsNoTracking().ToListAsync(),
             Dashboards = await db.Dashboards.AsNoTracking().ToListAsync(),
             RumSites = await db.RumSites.AsNoTracking().ToListAsync(),
+            SyntheticChecks = await db.SyntheticChecks.AsNoTracking().ToListAsync(),
             TelemetryAlertRules = await db.TelemetryAlertRules.AsNoTracking().ToListAsync(),
             TelemetryStorageSettings = await db.TelemetryStorageSettings.AsNoTracking().ToListAsync(),
             AdvisorDigestConfigs = await db.AdvisorDigestConfigs.AsNoTracking().ToListAsync(),
@@ -456,6 +457,7 @@ public class BackupService(
             await InsertEntities(db, db.ElasticsearchIngestPipelines, bundle.ElasticsearchIngestPipelines);
             await InsertEntities(db, db.ElasticsearchDataViews, bundle.ElasticsearchDataViews);
             await InsertEntities(db, db.RumSites, bundle.RumSites);
+            await InsertEntities(db, db.SyntheticChecks, bundle.SyntheticChecks);
             await InsertEntities(db, db.TelemetryAlertRules, bundle.TelemetryAlertRules);
 
             // OpenLDAP — config attaches to a ClusterComponent (inserted above); then OUs,

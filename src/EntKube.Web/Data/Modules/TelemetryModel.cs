@@ -34,6 +34,8 @@ internal static class TelemetryModel
         builder.Entity<NotificationDelivery>().ToTable("NotificationDeliveries");
         builder.Entity<NotificationProviderConfig>().ToTable("NotificationProviderConfigs");
         builder.Entity<RumSite>().ToTable("RumSites");
+        builder.Entity<SyntheticCheck>().ToTable("SyntheticChecks");
+        builder.Entity<SyntheticCheckResult>().ToTable("SyntheticCheckResults");
         builder.Entity<TelemetryAlertRule>().ToTable("TelemetryAlertRules");
         builder.Entity<TelemetrySegment>().ToTable("TelemetrySegments");
         builder.Entity<TelemetryStorageSetting>().ToTable("TelemetryStorageSettings");
@@ -49,6 +51,31 @@ internal static class TelemetryModel
             entity.Property(s => s.Name).HasMaxLength(200).IsRequired();
             entity.Property(s => s.PublicKey).HasMaxLength(64).IsRequired();
             entity.Property(s => s.AllowedOrigins).HasMaxLength(4000);
+        });
+
+        builder.Entity<SyntheticCheck>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            // What the runner asks every tick: this tenant's enabled checks that are due.
+            entity.HasIndex(c => new { c.TenantId, c.IsEnabled, c.NextRunAt });
+            entity.Property(c => c.Name).HasMaxLength(200).IsRequired();
+            entity.Property(c => c.Url).HasMaxLength(EntKube.Web.Services.SyntheticCheckService.MaxUrlLength).IsRequired();
+            entity.Property(c => c.ExpectedText).HasMaxLength(EntKube.Web.Services.SyntheticCheckService.MaxExpectedTextLength);
+            entity.Property(c => c.Severity).HasMaxLength(20).IsRequired();
+            entity.Property(c => c.State).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.LastFailure).HasMaxLength(200);
+        });
+
+        builder.Entity<SyntheticCheckResult>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => new { r.CheckId, r.At });
+            // The retention prune deletes by age alone, across every tenant.
+            entity.HasIndex(r => r.At);
+            entity.HasOne<SyntheticCheck>()
+                .WithMany()
+                .HasForeignKey(r => r.CheckId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<TelemetrySegment>(entity =>

@@ -716,3 +716,28 @@ public sealed record DeploymentResponse(
             LastSyncedAt: deployment.LastSyncedAt,
             IsManaged: deployment.IsManaged);
 }
+
+/// <summary>A synthetic check and how it has done.</summary>
+/// <param name="Id">The check's id.</param>
+/// <param name="Name">Its name.</param>
+/// <param name="Url">The URL it requests.</param>
+/// <param name="IsEnabled">Whether it runs.</param>
+/// <param name="State">Unknown, Passing or Failing.</param>
+/// <param name="ConsecutiveFailures">Failures in a row.</param>
+/// <param name="UptimePercent">Runs passed over the last 24 hours. Null means no runs, NOT zero.</param>
+/// <param name="LastStatusCode">The last status received. Null when no response came back.</param>
+/// <param name="LastDurationMs">How long the last run took.</param>
+/// <param name="LastFailure">Why the last run failed, if it did.</param>
+/// <param name="LastRunAt">When it last ran, UTC.</param>
+public sealed record SyntheticCheckResponse(
+    Guid Id,
+    string Name,
+    string Url,
+    bool IsEnabled,
+    string State,
+    int ConsecutiveFailures,
+    double? UptimePercent,
+    int? LastStatusCode,
+    int? LastDurationMs,
+    string? LastFailure,
+    DateTime? LastRunAt);

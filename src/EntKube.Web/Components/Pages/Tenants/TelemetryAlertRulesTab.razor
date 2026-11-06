@@ -175,7 +175,9 @@ else if (rules.Count > 0)
         await Reload();
     }
 
-    private async Task Reload() => rules = await Rules.ListAsync(TenantId);
+    // A synthetic check's rule is the check's own, edited on its page, so it would only confuse here.
+    private async Task Reload() =>
+        rules = [.. (await Rules.ListAsync(TenantId)).Where(r => r.Kind != TelemetryAlertKind.SyntheticCheck)];
 
     private void StartNew() => StartEdit(new TelemetryAlertRule { Name = "", TenantId = TenantId });
 

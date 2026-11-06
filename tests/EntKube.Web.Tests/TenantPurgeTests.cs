@@ -61,12 +61,15 @@ public class TenantPurgeTests : IDisposable
         (await ctx.Dashboards.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.TelemetryAlertRules.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.RumSites.CountAsync(x => x.TenantId == t1)).Should().Be(0);
+        (await ctx.SyntheticChecks.CountAsync(x => x.TenantId == t1)).Should().Be(0);
+        (await ctx.SyntheticCheckResults.CountAsync()).Should().Be(1, "only the other tenant's is left");
 
         // ── The other tenant is completely untouched ──
         (await ctx.Tenants.CountAsync(x => x.Id == t2)).Should().Be(1);
         (await ctx.Apps.CountAsync(a => a.Customer.TenantId == t2)).Should().Be(2);
         (await ctx.KubernetesClusters.CountAsync(c => c.TenantId == t2)).Should().Be(1);
         (await ctx.Dashboards.CountAsync(x => x.TenantId == t2)).Should().Be(1);
+        (await ctx.SyntheticChecks.CountAsync(x => x.TenantId == t2)).Should().Be(1);
 
         // ── Shared (non-tenant-scoped) users survive; only their membership was removed ──
         (await ctx.Users.CountAsync()).Should().Be(2);
@@ -195,6 +198,17 @@ public class TenantPurgeTests : IDisposable
         ctx.TelemetryAlertRules.Add(alertRule);
         ctx.RumSites.Add(rumSite);
 
+        // A check holds no foreign key to its tenant, so a purge has to delete it by tenant.
+        Guid checkId = Guid.NewGuid();
+        ctx.SyntheticChecks.Add(new SyntheticCheck
+        {
+            Id = checkId, TenantId = tenant.Id, ClusterId = Guid.NewGuid(), Name = "c", Url = "https://a.example/",
+        });
+
+        await ctx.SaveChangesAsync();
+
+        // Staged: a result's foreign key needs its check in place first.
+        ctx.SyntheticCheckResults.Add(new SyntheticCheckResult { CheckId = checkId, At = DateTime.UtcNow, Passed = true });
         await ctx.SaveChangesAsync();
         return tenant.Id;
     }

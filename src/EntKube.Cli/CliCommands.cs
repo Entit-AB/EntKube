@@ -126,6 +126,14 @@ public static class CliCommands
         },
         new CliCommand
         {
+            Path = ["synthetics"],
+            Description = "Synthetic checks and their uptime over 24 hours",
+            BuildPath = _ => "/api/v1/synthetic-checks",
+            Columns = [("NAME", "name"), ("STATE", "state"), ("UPTIME", "uptimePercent"),
+                       ("MS", "lastDurationMs"), ("URL", "url")],
+        },
+        new CliCommand
+        {
             Path = ["incidents"],
             Description = "Alert incidents (--open for unresolved only)",
             BuildPath = a => "/api/v1/incidents" + Query(("open", a.Flag("open") ? "true" : null)),

@@ -162,6 +162,16 @@ public static class EntKubeTools
 
         new McpTool
         {
+            Name = "entkube_list_synthetic_checks",
+            Description = "Synthetic checks: URLs EntKube requests on a schedule, with whether each "
+                        + "is passing, its failures in a row and its uptime over 24 hours. "
+                        + "uptimePercent is null when a check has no runs yet: unknown, NOT zero.",
+            InputSchema = NoArgs(),
+            Handler = (api, _, ct) => api.GetAsync("/api/v1/synthetic-checks", ct),
+        },
+
+        new McpTool
+        {
             Name = "entkube_upgrades",
             Description = "Which installed components are behind the versions their Helm "
                         + "repositories publish, and by how much (patch/minor/major).",

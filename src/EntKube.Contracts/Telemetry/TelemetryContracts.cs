@@ -111,6 +111,31 @@ public sealed record ErrorBudgetSummary(
     bool HasData,
     bool IsBreached);
 
+/// <summary>A synthetic check and how it has done.</summary>
+/// <param name="Id">The check's id.</param>
+/// <param name="Name">Its name.</param>
+/// <param name="Url">The URL it requests.</param>
+/// <param name="IsEnabled">Whether it runs.</param>
+/// <param name="State">Unknown, Passing or Failing.</param>
+/// <param name="ConsecutiveFailures">Failures in a row.</param>
+/// <param name="UptimePercent">Runs passed over the last 24 hours, or null with no runs.</param>
+/// <param name="LastStatusCode">The last status received, if any.</param>
+/// <param name="LastDurationMs">How long the last run took, if it has run.</param>
+/// <param name="LastFailure">Why the last run failed, if it did.</param>
+/// <param name="LastRunAt">When it last ran.</param>
+public sealed record SyntheticCheckSummary(
+    Guid Id,
+    string Name,
+    string Url,
+    bool IsEnabled,
+    string State,
+    int ConsecutiveFailures,
+    double? UptimePercent,
+    int? LastStatusCode,
+    int? LastDurationMs,
+    string? LastFailure,
+    DateTime? LastRunAt);
+
 public interface ITelemetryApi
 {
     /// <summary>
@@ -137,5 +162,9 @@ public interface ITelemetryApi
     /// an unmanaged deployment has no objective to miss.</para>
     /// </summary>
     Task<IReadOnlyList<ErrorBudgetSummary>> GetErrorBudgetsAsync(
+        Guid tenantId, CancellationToken ct = default);
+
+    /// <summary>One tenant's synthetic checks and how each has done.</summary>
+    Task<IReadOnlyList<SyntheticCheckSummary>> GetSyntheticChecksAsync(
         Guid tenantId, CancellationToken ct = default);
 }

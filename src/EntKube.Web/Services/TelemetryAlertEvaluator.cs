@@ -109,7 +109,9 @@ public sealed class TelemetryAlertEvaluator(
                 {
                     if (InMaintenance(tenantId, clusterId)) continue;        // hold state during maintenance
 
-                    Evaluation ev = await EvaluateRuleAsync(rule, clusterId, now, trace, log, rum, ct);
+                    Evaluation ev = rule.Kind == TelemetryAlertKind.SyntheticCheck
+                        ? await EvaluateSyntheticCheckAsync(db, rule, clusterId, now, ct)
+                        : await EvaluateRuleAsync(rule, clusterId, now, trace, log, rum, ct);
                     if (ev.Status == EvalStatus.Indeterminate) continue;     // transient failure / no data — hold state
 
                     string fingerprint = $"telemetry:{rule.Id:N}:{clusterId:N}";
@@ -437,6 +439,31 @@ public sealed class TelemetryAlertEvaluator(
             default:
                 return Evaluation.Clear;
         }
+    }
+
+    /// <summary>
+    /// A check's state as an evaluation. The cluster is checked because a check holds only a soft
+    /// reference to it, and an incident's foreign key would otherwise fail the whole batch's save.
+    /// </summary>
+    private static async Task<Evaluation> EvaluateSyntheticCheckAsync(
+        TelemetryDbContext db, TelemetryAlertRule rule, Guid clusterId, DateTime now, CancellationToken ct)
+    {
+        SyntheticCheck? check = await db.SyntheticChecks.AsNoTracking()
+            .FirstOrDefaultAsync(c => c.Id == rule.CheckId && c.TenantId == rule.TenantId, ct);
+
+        if (check is null || !await db.KubernetesClusters.AnyAsync(c => c.Id == clusterId && c.TenantId == rule.TenantId, ct))
+        {
+            return Evaluation.Unknown;
+        }
+
+        return SyntheticCheckService.Decide(check, now) switch
+        {
+            SyntheticAlertState.Fire => Evaluation.From(true,
+                $"{check.Name} is failing: {check.LastFailure}",
+                $"{check.Url} failed {check.ConsecutiveFailures} times in a row. Last result: {check.LastFailure}"),
+            SyntheticAlertState.Clear => Evaluation.Clear,
+            _ => Evaluation.Unknown,
+        };
     }
 
     private static AlertIncident NewIncident(TelemetryAlertRule rule, Guid clusterId, string fingerprint, Evaluation ev, DateTime now)

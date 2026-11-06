@@ -57,6 +57,8 @@ internal static class TelemetryServices
         services.AddScoped<EntKube.Web.Services.Telemetry.MetricRollupWriter>();
         services.AddSingleton<RumSiteService>();
         services.AddScoped<TelemetryAlertRuleService>();
+        services.AddScoped<SyntheticCheckService>();
+        services.AddSingletonWork<SyntheticCheckRunner>();
         services.AddScoped<DashboardService>();
         services.AddScoped<IncidentDispatcher>();
         services.AddSingletonWork<TelemetryAlertEvaluator>();

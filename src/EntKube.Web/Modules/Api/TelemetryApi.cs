@@ -15,8 +15,22 @@ namespace EntKube.Web.Modules.Api;
 /// </summary>
 public sealed class TelemetryApi(
     IDbContextFactory<TelemetryDbContext> dbFactory,
-    EntKube.Web.Services.ErrorBudgetService errorBudgets) : ITelemetryApi
+    EntKube.Web.Services.ErrorBudgetService errorBudgets,
+    EntKube.Web.Services.SyntheticCheckService syntheticChecks) : ITelemetryApi
 {
+    public async Task<IReadOnlyList<SyntheticCheckSummary>> GetSyntheticChecksAsync(
+        Guid tenantId, CancellationToken ct = default)
+    {
+        List<EntKube.Web.Services.SyntheticCheckRow> rows = await syntheticChecks.ListAsync(tenantId, ct);
+
+        return rows
+            .Select(r => new SyntheticCheckSummary(
+                r.Check.Id, r.Check.Name, r.Check.Url, r.Check.IsEnabled, r.Check.State.ToString(),
+                r.Check.ConsecutiveFailures, r.UptimePercent, r.Check.LastStatusCode, r.Check.LastDurationMs,
+                r.Check.LastFailure, r.Check.LastRunAt))
+            .ToList();
+    }
+
     public async Task<IReadOnlyList<IncidentSummary>> GetIncidentsAsync(
         Guid tenantId, bool openOnly = false, int limit = 200, CancellationToken ct = default)
     {

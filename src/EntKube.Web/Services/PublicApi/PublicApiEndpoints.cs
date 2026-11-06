@@ -381,6 +381,21 @@ public static class PublicApiEndpoints
                 .ToList());
         }).RequireApiScope(ApiScopes.OpsRead);
 
+        api.MapGet("/synthetic-checks", async Task<Ok<IEnumerable<SyntheticCheckResponse>>> (
+            HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+
+            IReadOnlyList<EntKube.Contracts.Telemetry.SyntheticCheckSummary> checks =
+                await telemetry.GetSyntheticChecksAsync(tenantId, ct);
+
+            return TypedResults.Ok<IEnumerable<SyntheticCheckResponse>>(checks
+                .Select(c => new SyntheticCheckResponse(
+                    c.Id, c.Name, c.Url, c.IsEnabled, c.State, c.ConsecutiveFailures, c.UptimePercent,
+                    c.LastStatusCode, c.LastDurationMs, c.LastFailure, c.LastRunAt))
+                .ToList());
+        }).RequireApiScope(ApiScopes.OpsRead);
+
         // ⚠️ The API could not answer "are we meeting the SLAs". A grep for budget, availability,
         //    uptime, sla and maintenance across this entire file returned nothing — the figure a
         //    support agreement is invoiced against was readable in a browser and nowhere else.

@@ -12,7 +12,9 @@ public enum TelemetryAlertKind
     /// <summary>Rate of browser JS errors per minute for a RUM site over the window.</summary>
     RumErrorRate,
     /// <summary>A RUM site's p75 Largest Contentful Paint (ms) over the window.</summary>
-    RumLcpP75
+    RumLcpP75,
+    /// <summary>A synthetic check's failure streak. Managed by its check, and never edited as a rule.</summary>
+    SyntheticCheck
 }
 
 /// <summary>
@@ -31,6 +33,9 @@ public class TelemetryAlertRule
 
     /// <summary>The RUM site to evaluate, for the RUM kinds (required for those).</summary>
     public Guid? SiteId { get; set; }
+
+    /// <summary>The check this rule belongs to, for the SyntheticCheck kind.</summary>
+    public Guid? CheckId { get; set; }
 
     public required string Name { get; set; }
     public TelemetryAlertKind Kind { get; set; }

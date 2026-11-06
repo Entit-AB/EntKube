@@ -164,6 +164,8 @@ public static partial class ModuleMap
         [typeof(TelemetrySegment)] = Module.Telemetry,
         [typeof(TelemetryStorageSetting)] = Module.Telemetry,
         [typeof(RumSite)] = Module.Telemetry,
+        [typeof(SyntheticCheck)] = Module.Telemetry,
+        [typeof(SyntheticCheckResult)] = Module.Telemetry,
         [typeof(Dashboard)] = Module.Telemetry,
         [typeof(AlertIncident)] = Module.Telemetry,
         [typeof(IncidentNote)] = Module.Telemetry,

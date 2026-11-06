@@ -194,6 +194,7 @@ public static class ApiScopes
         [OpsRead] = new("Read", [
             new("advisor findings", ["GET /advisor/findings"]),
             new("incidents", ["GET /incidents"]),
+            new("synthetic checks and their uptime", ["GET /synthetic-checks"]),
             // customerId and customer per deployment, beside achieved availability and breach
             // state — the figure a support agreement is invoiced against.
             new("per-customer SLA attainment and error budgets", ["GET /error-budgets"]),
