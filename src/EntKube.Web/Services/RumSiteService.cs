@@ -8,7 +8,8 @@ namespace EntKube.Web.Services;
 
 /// <summary>The ingest-relevant projection of a <see cref="RumSite"/>, resolved from its public key.</summary>
 public sealed record RumSiteInfo(
-    Guid SiteId, Guid TenantId, Guid? ClusterId, IReadOnlyList<string> Origins, double SampleRate, bool IsEnabled);
+    Guid SiteId, Guid TenantId, Guid? ClusterId, IReadOnlyList<string> Origins, double SampleRate, bool IsEnabled,
+    string Name = "", Guid? AppId = null, bool FeedbackEnabled = false);
 
 /// <summary>
 /// Resolves a RUM public key to its site (with a short in-memory TTL cache, including a negative cache for
@@ -36,7 +37,8 @@ public sealed class RumSiteService(IDbContextFactory<TelemetryDbContext> dbFacto
         RumSite? site = await db.RumSites.AsNoTracking().FirstOrDefaultAsync(s => s.PublicKey == publicKey, ct);
         RumSiteInfo? info = site is null
             ? null
-            : new RumSiteInfo(site.Id, site.TenantId, site.ClusterId, site.Origins, site.SampleRate, site.IsEnabled);
+            : new RumSiteInfo(site.Id, site.TenantId, site.ClusterId, site.Origins, site.SampleRate, site.IsEnabled,
+                site.Name, site.AppId, site.FeedbackEnabled);
 
         // Bound the dictionary: a spray of distinct unknown keys (each a negative-cache miss) can't grow it
         // without limit. Purge expired entries when it gets large; clear outright if still over the cap.
@@ -77,7 +79,7 @@ public sealed class RumSiteService(IDbContextFactory<TelemetryDbContext> dbFacto
 
     public async Task<RumSite> CreateAsync(
         Guid tenantId, string name, Guid? clusterId, string allowedOrigins, double sampleRate,
-        CancellationToken ct = default, Guid? appId = null)
+        CancellationToken ct = default, Guid? appId = null, bool feedbackEnabled = false)
     {
         using TelemetryDbContext db = dbFactory.CreateDbContext();
         DateTime now = DateTime.UtcNow;
@@ -92,6 +94,7 @@ public sealed class RumSiteService(IDbContextFactory<TelemetryDbContext> dbFacto
             AllowedOrigins = allowedOrigins,
             SampleRate = Math.Clamp(sampleRate, 0, 1),
             IsEnabled = true,
+            FeedbackEnabled = feedbackEnabled,
             CreatedAt = now,
             UpdatedAt = now
         };
@@ -102,7 +105,7 @@ public sealed class RumSiteService(IDbContextFactory<TelemetryDbContext> dbFacto
 
     public async Task UpdateAsync(
         Guid tenantId, Guid id, string name, Guid? clusterId, string allowedOrigins, double sampleRate, bool isEnabled,
-        CancellationToken ct = default, Guid? appId = null)
+        CancellationToken ct = default, Guid? appId = null, bool? feedbackEnabled = null)
     {
         using TelemetryDbContext db = dbFactory.CreateDbContext();
         RumSite? site = await db.RumSites.FirstOrDefaultAsync(s => s.Id == id && s.TenantId == tenantId, ct);
@@ -113,6 +116,8 @@ public sealed class RumSiteService(IDbContextFactory<TelemetryDbContext> dbFacto
         site.AllowedOrigins = allowedOrigins;
         site.SampleRate = Math.Clamp(sampleRate, 0, 1);
         site.IsEnabled = isEnabled;
+        // Null leaves it alone, so a caller that is not editing this cannot switch it off.
+        site.FeedbackEnabled = feedbackEnabled ?? site.FeedbackEnabled;
         site.UpdatedAt = DateTime.UtcNow;
         await db.SaveChangesAsync(ct);
         InvalidateCache();

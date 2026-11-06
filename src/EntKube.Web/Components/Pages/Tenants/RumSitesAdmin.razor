@@ -55,6 +55,13 @@
                           placeholder="https://app.example.com&#10;https://www.example.com"></textarea>
                 <div class="form-text">Requests whose <code>Origin</code> isn't listed are rejected. Leave empty to allow any origin (not recommended).</div>
             </div>
+            <div class="col-12">
+                <div class="form-check form-switch">
+                    <input class="form-check-input" type="checkbox" id="rum-site-feedback" @bind="editing.FeedbackEnabled" />
+                    <label class="form-check-label small" for="rum-site-feedback">Accept in-app feedback from this site</label>
+                </div>
+                <div class="form-text">Stores what visitors write and any screenshot they attach, so check your privacy notice covers it before switching this on.</div>
+            </div>
             <div class="col-12 d-flex gap-2 mt-1">
                 <button class="btn btn-sm btn-primary" @onclick="SaveAsync" disabled="@(string.IsNullOrWhiteSpace(editing.Name))">Save</button>
                 <button class="btn btn-sm btn-outline-secondary" @onclick="() => editing = null">Cancel</button>
@@ -113,6 +120,16 @@ else if (sites.Count > 0)
                                         </button>
                                     </div>
                                     <code class="d-block user-select-all text-break">@Embed(s)</code>
+                                    @if (s.FeedbackEnabled)
+                                    {
+                                        <div class="d-flex justify-content-between align-items-center mt-2 mb-1">
+                                            <span class="small text-muted">And this for the feedback widget:</span>
+                                            <button class="btn btn-sm btn-outline-secondary py-0" @onclick="() => CopyAsync(FeedbackEmbed(s))">
+                                                <span class="bi bi-clipboard me-1"></span>Copy
+                                            </button>
+                                        </div>
+                                        <code class="d-block user-select-all text-break">@FeedbackEmbed(s)</code>
+                                    }
                                     <div class="form-text mt-1">Public key <span class="font-monospace">@s.PublicKey</span> — safe to expose in client code; abuse is bounded by the origin allow-list, rate limiting, and sampling.</div>
                                 </div>
                             </td>
@@ -175,7 +192,7 @@ else if (sites.Count > 0)
         clusterIdStr = s.ClusterId?.ToString() ?? "";
         appIdStr = s.AppId?.ToString() ?? "";
         // Edit a copy so a cancelled edit doesn't mutate the rendered row.
-        editing = new RumSite { Id = s.Id, Name = s.Name, ClusterId = s.ClusterId, AppId = s.AppId, AllowedOrigins = s.AllowedOrigins, SampleRate = s.SampleRate, IsEnabled = s.IsEnabled };
+        editing = new RumSite { Id = s.Id, Name = s.Name, ClusterId = s.ClusterId, AppId = s.AppId, AllowedOrigins = s.AllowedOrigins, SampleRate = s.SampleRate, IsEnabled = s.IsEnabled, FeedbackEnabled = s.FeedbackEnabled };
     }
 
     private async Task SaveAsync()
@@ -184,9 +201,9 @@ else if (sites.Count > 0)
         Guid? clusterId = string.IsNullOrEmpty(clusterIdStr) ? null : Guid.Parse(clusterIdStr);
         Guid? appId = string.IsNullOrEmpty(appIdStr) ? null : Guid.Parse(appIdStr);
         if (editingIsNew)
-            await Sites.CreateAsync(TenantId, editing.Name, clusterId, editing.AllowedOrigins, editing.SampleRate, appId: appId);
+            await Sites.CreateAsync(TenantId, editing.Name, clusterId, editing.AllowedOrigins, editing.SampleRate, appId: appId, feedbackEnabled: editing.FeedbackEnabled);
         else
-            await Sites.UpdateAsync(TenantId, editing.Id, editing.Name, clusterId, editing.AllowedOrigins, editing.SampleRate, editing.IsEnabled, appId: appId);
+            await Sites.UpdateAsync(TenantId, editing.Id, editing.Name, clusterId, editing.AllowedOrigins, editing.SampleRate, editing.IsEnabled, appId: appId, feedbackEnabled: editing.FeedbackEnabled);
         editing = null;
         await ReloadAndNotify();
     }
@@ -220,6 +237,8 @@ else if (sites.Count > 0)
     }
 
     private string Embed(RumSite s) => $"<script src=\"{Origin()}/rum/v1/rum.js\" data-key=\"{s.PublicKey}\" defer></script>";
+
+    private string FeedbackEmbed(RumSite s) => $"<script src=\"{Origin()}/feedback/v1/widget.js\" data-key=\"{s.PublicKey}\" defer></script>";
 
     private string Origin()
     {

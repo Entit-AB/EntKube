@@ -381,6 +381,30 @@ public static class PublicApiEndpoints
                 .ToList());
         }).RequireApiScope(ApiScopes.OpsRead);
 
+        // A status the enum does not name answers 400 here rather than reaching Enum.Parse in the
+        // contract. Numeric spellings are refused too, because TryParse would accept "2".
+        api.MapGet("/feedback", async Task<Results<Ok<IEnumerable<FeedbackResponse>>, BadRequest<string>>> (
+            HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry,
+            string? status, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+
+            if (status is not null
+                && !Enum.GetNames<EntKube.Web.Data.FeedbackStatus>().Contains(status, StringComparer.OrdinalIgnoreCase))
+            {
+                return TypedResults.BadRequest($"Unknown status '{status}'.");
+            }
+
+            IReadOnlyList<EntKube.Contracts.Telemetry.FeedbackEntry> entries =
+                await telemetry.GetFeedbackAsync(tenantId, status, limit: 200, ct);
+
+            return TypedResults.Ok<IEnumerable<FeedbackResponse>>(entries
+                .Select(e => new FeedbackResponse(
+                    e.Id, e.Kind, e.Status, e.Rating, e.Message, e.ContactEmail, e.Site, e.PagePath,
+                    e.HasScreenshot, e.TicketId, e.CreatedAt))
+                .ToList());
+        }).RequireApiScope(ApiScopes.OpsRead);
+
         // ⚠️ The API could not answer "are we meeting the SLAs". A grep for budget, availability,
         //    uptime, sla and maintenance across this entire file returned nothing — the figure a
         //    support agreement is invoiced against was readable in a browser and nowhere else.

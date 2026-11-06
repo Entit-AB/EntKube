@@ -4113,6 +4113,122 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("ExternalTicketLinks", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.FeedbackItem", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("Browser")
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
+
+                    b.Property<string>("ContactEmail")
+                        .HasMaxLength(254)
+                        .HasColumnType("nvarchar(254)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("Device")
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("nvarchar(4000)");
+
+                    b.Property<string>("Os")
+                        .HasMaxLength(40)
+                        .HasColumnType("nvarchar(40)");
+
+                    b.Property<string>("PagePath")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("nvarchar(1024)");
+
+                    b.Property<int?>("Rating")
+                        .HasColumnType("int");
+
+                    b.Property<string>("RecentErrors")
+                        .HasMaxLength(1505)
+                        .HasColumnType("nvarchar(1505)");
+
+                    b.Property<string>("RumSessionId")
+                        .HasMaxLength(64)
+                        .HasColumnType("nvarchar(64)");
+
+                    b.Property<Guid>("RumSiteId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("SiteName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<string>("TriagedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<int?>("ViewportHeight")
+                        .HasColumnType("int");
+
+                    b.Property<int?>("ViewportWidth")
+                        .HasColumnType("int");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt");
+
+                    b.HasIndex("RumSiteId", "CreatedAt");
+
+                    b.HasIndex("TenantId", "Status", "CreatedAt");
+
+                    b.ToTable("FeedbackItems", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.FeedbackScreenshot", b =>
+                {
+                    b.Property<Guid>("FeedbackItemId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<byte[]>("Bytes")
+                        .IsRequired()
+                        .HasColumnType("varbinary(max)");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("nvarchar(20)");
+
+                    b.HasKey("FeedbackItemId");
+
+                    b.ToTable("FeedbackScreenshots", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.GitKnownHost", b =>
                 {
                     b.Property<Guid>("Id")
@@ -6931,6 +7047,9 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("datetime2");
+
+                    b.Property<bool>("FeedbackEnabled")
+                        .HasColumnType("bit");
 
                     b.Property<bool>("IsEnabled")
                         .HasColumnType("bit");
@@ -10077,6 +10196,15 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.Navigation("Tenant");
 
                     b.Navigation("Ticket");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.FeedbackScreenshot", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.FeedbackItem", null)
+                        .WithOne()
+                        .HasForeignKey("EntKube.Web.Data.FeedbackScreenshot", "FeedbackItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.GitKnownHost", b =>

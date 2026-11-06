@@ -716,3 +716,28 @@ public sealed record DeploymentResponse(
             LastSyncedAt: deployment.LastSyncedAt,
             IsManaged: deployment.IsManaged);
 }
+
+/// <summary>One submission from the in-app feedback widget.</summary>
+/// <param name="Id">The item's id.</param>
+/// <param name="Kind">Bug, Idea, Question or Praise.</param>
+/// <param name="Status">New, Triaged, Resolved or Dismissed.</param>
+/// <param name="Rating">1 to 5, or null when the reporter did not rate. Never 0.</param>
+/// <param name="Message">What the reporter wrote. Untrusted text from an anonymous browser.</param>
+/// <param name="ContactEmail">An address the reporter typed. Unverified.</param>
+/// <param name="Site">The RUM site's name when this arrived.</param>
+/// <param name="PagePath">The page's path, without query string or fragment.</param>
+/// <param name="HasScreenshot">Whether a screenshot is still held; they age out before the item.</param>
+/// <param name="TicketId">The ticket this was promoted to, if any.</param>
+/// <param name="CreatedAt">When it arrived, UTC.</param>
+public sealed record FeedbackResponse(
+    Guid Id,
+    string Kind,
+    string Status,
+    int? Rating,
+    string Message,
+    string? ContactEmail,
+    string Site,
+    string PagePath,
+    bool HasScreenshot,
+    Guid? TicketId,
+    DateTime CreatedAt);

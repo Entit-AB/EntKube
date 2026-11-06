@@ -56,6 +56,8 @@ internal static class TelemetryServices
         // batch, as the rest of the ingest path does.
         services.AddScoped<EntKube.Web.Services.Telemetry.MetricRollupWriter>();
         services.AddSingleton<RumSiteService>();
+        services.AddSingleton<FeedbackService>();
+        services.AddSingletonWork<FeedbackRetentionService>();
         services.AddScoped<TelemetryAlertRuleService>();
         services.AddScoped<DashboardService>();
         services.AddScoped<IncidentDispatcher>();
@@ -72,6 +74,7 @@ internal static class TelemetryServices
         services.AddScoped<StormSuppressionService>();
         services.AddScoped<ErrorBudgetService>();
         services.AddScoped<EntKube.Web.Services.Tickets.AlertTicketBridge>();
+        services.AddScoped<EntKube.Web.Services.Tickets.FeedbackTicketBridge>();
         services.AddScoped<CustomerNotificationService>();
         services.AddSingletonWork<AlertSyncService>();
         services.AddSingletonWork<AlertEscalationService>();

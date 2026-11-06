@@ -111,6 +111,36 @@ public sealed record ErrorBudgetSummary(
     bool HasData,
     bool IsBreached);
 
+/// <summary>
+/// One submission from the in-app feedback widget.
+///
+/// <para>⚠️ Everything but the ids, dates and status was typed or supplied by an anonymous browser.
+/// A consumer must treat it as untrusted text, and the contact address as an unverified claim.</para>
+/// </summary>
+/// <param name="Id">The item's id.</param>
+/// <param name="Kind">Bug, Idea, Question or Praise.</param>
+/// <param name="Status">New, Triaged, Resolved or Dismissed.</param>
+/// <param name="Rating">1 to 5, or null when the reporter did not rate.</param>
+/// <param name="Message">What they wrote.</param>
+/// <param name="ContactEmail">An address they typed, unverified.</param>
+/// <param name="Site">The RUM site's name when it arrived.</param>
+/// <param name="PagePath">The page's path, without query or fragment.</param>
+/// <param name="HasScreenshot">Whether a screenshot is still held.</param>
+/// <param name="TicketId">The ticket this became, if any.</param>
+/// <param name="CreatedAt">When it arrived.</param>
+public sealed record FeedbackEntry(
+    Guid Id,
+    string Kind,
+    string Status,
+    int? Rating,
+    string Message,
+    string? ContactEmail,
+    string Site,
+    string PagePath,
+    bool HasScreenshot,
+    Guid? TicketId,
+    DateTime CreatedAt);
+
 public interface ITelemetryApi
 {
     /// <summary>
@@ -138,4 +168,12 @@ public interface ITelemetryApi
     /// </summary>
     Task<IReadOnlyList<ErrorBudgetSummary>> GetErrorBudgetsAsync(
         Guid tenantId, CancellationToken ct = default);
+
+    /// <summary>
+    /// One tenant's feedback from the in-app widget, newest first. <paramref name="status"/> is a
+    /// status name, or null for all of them. The route validates it, so an unknown name here is a
+    /// programming error rather than a caller's.
+    /// </summary>
+    Task<IReadOnlyList<FeedbackEntry>> GetFeedbackAsync(
+        Guid tenantId, string? status = null, int limit = 200, CancellationToken ct = default);
 }

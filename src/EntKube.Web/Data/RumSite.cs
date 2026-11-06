@@ -35,6 +35,11 @@ public class RumSite
     public double SampleRate { get; set; } = 1.0;
 
     public bool IsEnabled { get; set; } = true;
+
+    /// <summary>Whether the in-app feedback widget may submit for this site. Off unless asked for:
+    /// unlike a RUM beacon, a submission stores free text and an image from an anonymous browser.</summary>
+    public bool FeedbackEnabled { get; set; }
+
     public DateTime CreatedAt { get; set; }
     public DateTime UpdatedAt { get; set; }
 

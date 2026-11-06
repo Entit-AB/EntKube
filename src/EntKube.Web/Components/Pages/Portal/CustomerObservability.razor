@@ -117,6 +117,7 @@ else
                 @if (SelectedSite is Guid siteId)
                 {
                     <RumOverview @key="@($"{siteId}:{rumRangeHours}")" TenantId="Customer.TenantId" SiteId="siteId" From="RumFrom" To="RumTo" />
+                    <FeedbackInbox @key="@($"feedback:{siteId}")" TenantId="Customer.TenantId" SiteId="siteId" ReadOnly="true" />
                     <RumSessions @key="@($"sess:{siteId}:{rumRangeHours}")" TenantId="Customer.TenantId" SiteId="siteId"
                                  ClusterId="selectedClusterId" From="RumFrom" To="RumTo" />
                 }

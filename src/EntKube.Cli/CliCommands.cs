@@ -126,6 +126,14 @@ public static class CliCommands
         },
         new CliCommand
         {
+            Path = ["feedback"],
+            Description = "In-app feedback (--status New|Triaged|Resolved|Dismissed)",
+            BuildPath = a => "/api/v1/feedback" + Query(("status", a.Optional("status"))),
+            Columns = [("RECEIVED", "createdAt"), ("KIND", "kind"), ("STATUS", "status"), ("RATING", "rating"),
+                       ("SITE", "site"), ("PAGE", "pagePath"), ("MESSAGE", "message")],
+        },
+        new CliCommand
+        {
             Path = ["incidents"],
             Description = "Alert incidents (--open for unresolved only)",
             BuildPath = a => "/api/v1/incidents" + Query(("open", a.Flag("open") ? "true" : null)),

@@ -15,8 +15,24 @@ namespace EntKube.Web.Modules.Api;
 /// </summary>
 public sealed class TelemetryApi(
     IDbContextFactory<TelemetryDbContext> dbFactory,
-    EntKube.Web.Services.ErrorBudgetService errorBudgets) : ITelemetryApi
+    EntKube.Web.Services.ErrorBudgetService errorBudgets,
+    EntKube.Web.Services.FeedbackService feedback) : ITelemetryApi
 {
+    public async Task<IReadOnlyList<FeedbackEntry>> GetFeedbackAsync(
+        Guid tenantId, string? status = null, int limit = 200, CancellationToken ct = default)
+    {
+        Data.FeedbackStatus? wanted = status is null ? null : Enum.Parse<Data.FeedbackStatus>(status, ignoreCase: true);
+
+        List<EntKube.Web.Services.FeedbackRow> rows = await feedback.ListAsync(tenantId, null, wanted, limit, ct);
+
+        return rows
+            .Select(r => new FeedbackEntry(
+                r.Item.Id, r.Item.Kind.ToString(), r.Item.Status.ToString(), r.Item.Rating, r.Item.Message,
+                r.Item.ContactEmail, r.Item.SiteName, r.Item.PagePath, r.HasScreenshot, r.Item.TicketId,
+                r.Item.CreatedAt))
+            .ToList();
+    }
+
     public async Task<IReadOnlyList<IncidentSummary>> GetIncidentsAsync(
         Guid tenantId, bool openOnly = false, int limit = 200, CancellationToken ct = default)
     {

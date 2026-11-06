@@ -46,6 +46,14 @@ public enum TicketChannel
     /// about.</para>
     /// </summary>
     Integration = 4,
+
+    /// <summary>
+    /// Promoted by a person from the in-app feedback widget's inbox.
+    ///
+    /// <para>The widget is not a §14.3 channel: it is anonymous and public. So the reporting time
+    /// is when somebody accepted it as a ticket, not when the browser sent it.</para>
+    /// </summary>
+    Feedback = 5,
 }
 
 /// <summary>Where a ticket stands.</summary>

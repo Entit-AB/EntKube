@@ -33,6 +33,7 @@ deployments sync     Apply a deployment's manifests (--id <id>)
 deployments restart  Restart one workload (--id <id> --workload <name>)
 advisor              Operations Advisor findings
 incidents            Alert incidents (--open for unresolved only)
+feedback             In-app feedback (--status New|Triaged|Resolved|Dismissed)
 upgrades             Components behind their published chart versions
 drift                Deployments changed outside EntKube
 supply-chain         Running images joined to their vulnerability scans

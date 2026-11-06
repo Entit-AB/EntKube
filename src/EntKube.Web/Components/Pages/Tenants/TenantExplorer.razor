@@ -512,7 +512,10 @@ else
           // Beside the queue because it is the question the queue raises: whose is this
           // one. A rota nobody can find is a rota nobody is on, and an empty rota means
           // every ticket opens unassigned.
-          new("support-roster", "Support roster", "bi-person-check") ]),
+          new("support-roster", "Support roster", "bi-person-check"),
+          // Beside the queue because it is what feeds it: what people said through the widget,
+          // waiting for somebody to decide which of it is a ticket.
+          new("feedback", "Customer feedback", "bi-chat-square-text") ]),
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast"), new("notification-providers", "Notification providers", "bi-bell-fill") ]),
         new("Incidents", "bi-exclamation-octagon",
@@ -1041,6 +1044,7 @@ else
             case "support-inbox": builder.OpenComponent<SupportInbox>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-mailbox": builder.OpenComponent<SupportMailboxTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "mail-triage": builder.OpenComponent<MailTriageRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "feedback": builder.OpenComponent<FeedbackInbox>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "tickets": builder.OpenComponent<TicketQueue>(0); builder.AddComponentParameter(1, "TenantId", (Guid?)tid); builder.CloseComponent(); break;
             case "ticket-bridge": builder.OpenComponent<TicketBridgeTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "incidents":
