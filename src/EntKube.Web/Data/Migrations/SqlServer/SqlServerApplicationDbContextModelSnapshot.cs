@@ -6966,6 +6966,43 @@ namespace EntKube.Web.Data.Migrations.SqlServer
                     b.ToTable("RumSites", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.SavedLogQuery", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("nvarchar(256)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("nvarchar(200)");
+
+                    b.Property<string>("Query")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uniqueidentifier");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("datetime2");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("SavedLogQueries", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.SecretExpiryNotification", b =>
                 {
                     b.Property<Guid>("Id")
@@ -7764,6 +7801,10 @@ namespace EntKube.Web.Data.Migrations.SqlServer
 
                     b.Property<string>("Namespace")
                         .HasColumnType("nvarchar(max)");
+
+                    b.Property<string>("Query")
+                        .HasMaxLength(2000)
+                        .HasColumnType("nvarchar(2000)");
 
                     b.Property<string>("RunbookUrl")
                         .HasColumnType("nvarchar(max)");

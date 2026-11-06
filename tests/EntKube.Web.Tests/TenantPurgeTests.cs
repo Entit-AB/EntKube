@@ -61,12 +61,14 @@ public class TenantPurgeTests : IDisposable
         (await ctx.Dashboards.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.TelemetryAlertRules.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.RumSites.CountAsync(x => x.TenantId == t1)).Should().Be(0);
+        (await ctx.SavedLogQueries.CountAsync(x => x.TenantId == t1)).Should().Be(0);
 
         // ── The other tenant is completely untouched ──
         (await ctx.Tenants.CountAsync(x => x.Id == t2)).Should().Be(1);
         (await ctx.Apps.CountAsync(a => a.Customer.TenantId == t2)).Should().Be(2);
         (await ctx.KubernetesClusters.CountAsync(c => c.TenantId == t2)).Should().Be(1);
         (await ctx.Dashboards.CountAsync(x => x.TenantId == t2)).Should().Be(1);
+        (await ctx.SavedLogQueries.CountAsync(x => x.TenantId == t2)).Should().Be(1);
 
         // ── Shared (non-tenant-scoped) users survive; only their membership was removed ──
         (await ctx.Users.CountAsync()).Should().Be(2);
@@ -194,6 +196,11 @@ public class TenantPurgeTests : IDisposable
         ctx.Dashboards.Add(dashboard);
         ctx.TelemetryAlertRules.Add(alertRule);
         ctx.RumSites.Add(rumSite);
+        ctx.SavedLogQueries.Add(new SavedLogQuery
+        {
+            Id = Guid.NewGuid(), TenantId = tenant.Id, Name = "errors", Query = "logs",
+            CreatedAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        });
 
         await ctx.SaveChangesAsync();
         return tenant.Id;

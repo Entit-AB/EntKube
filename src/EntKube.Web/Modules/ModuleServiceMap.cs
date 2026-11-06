@@ -204,6 +204,8 @@ public static partial class ModuleMap
         [typeof(PromMetricsService)] = Module.Telemetry,
         [typeof(PrometheusService)] = Module.Telemetry,
         [typeof(RumSiteService)] = Module.Telemetry,
+        [typeof(LogPipelineService)] = Module.Telemetry,
+        [typeof(SavedLogQueryService)] = Module.Telemetry,
         [typeof(SegmentLogService)] = Module.Telemetry,
         [typeof(SegmentRumService)] = Module.Telemetry,
         [typeof(SegmentTelemetryStore)] = Module.Telemetry,

@@ -15,8 +15,35 @@ namespace EntKube.Web.Modules.Api;
 /// </summary>
 public sealed class TelemetryApi(
     IDbContextFactory<TelemetryDbContext> dbFactory,
-    EntKube.Web.Services.ErrorBudgetService errorBudgets) : ITelemetryApi
+    EntKube.Web.Services.ErrorBudgetService errorBudgets,
+    EntKube.Web.Services.LogPipelineService logPipelines) : ITelemetryApi
 {
+    public async Task<LogQueryOutcome> QueryLogsAsync(
+        Guid tenantId, Guid clusterId, string query, DateTime from, DateTime to, CancellationToken ct = default)
+    {
+        EntKube.Web.Services.LogPipelineOutcome outcome =
+            await logPipelines.RunAsync(tenantId, clusterId, query, from, to, ct);
+
+        if (outcome.SyntaxError is { } error)
+        {
+            return new LogQueryOutcome(null, $"{error.Message} (at character {error.Position + 1})", null);
+        }
+
+        if (outcome.Result is not { } result)
+        {
+            return new LogQueryOutcome(null, null, outcome.Failure);
+        }
+
+        return new LogQueryOutcome(
+            new LogQueryTable(
+                [.. result.Columns.Select(c => c.Name)],
+                [.. result.Rows.Select(r => (IReadOnlyList<string?>)[.. r.Select(EntKube.Telemetry.LogPipelines.LogPipelineFormat.Cell)])],
+                result.LinesScanned,
+                result.Partial),
+            null,
+            null);
+    }
+
     public async Task<IReadOnlyList<IncidentSummary>> GetIncidentsAsync(
         Guid tenantId, bool openOnly = false, int limit = 200, CancellationToken ct = default)
     {

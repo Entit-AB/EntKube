@@ -113,6 +113,11 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
                 (TenantReach.ConfinedToTheTokenTenant,
                  "The state row is written with the caller's own tenant id; an unknown finding "
                  + "key inserts a row for that tenant rather than reaching another's."),
+            // ⚠️ Takes a clusterId, and the log layer does not refuse a foreign one, so the route's
+            // own IFleetApi.GetClusterAsync(tenantId, clusterId) is what confines this.
+            ["GET /api/v1/logs/query"] =
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "The cluster is looked up under the token's tenant first, and a foreign id is a 404."),
             ["GET /api/v1/error-budgets"] =
                 (TenantReach.ConfinedToTheTokenTenant, "Tenant predicate; no caller-supplied id."),
             ["GET /api/v1/upgrades"] =
@@ -199,7 +204,7 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
     /// How many times <c>PublicApiEndpoints.cs</c> reads the API principal: once per /api/v1
     /// operation. Measured, not bounded — see the assertion for why a bound was not enough.
     /// </summary>
-    private const int ApiV1PrincipalReads = 24;
+    private const int ApiV1PrincipalReads = 25;
 
     private IReadOnlyList<string> DocumentedOperations()
     {
@@ -268,7 +273,7 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
          + "from every assertion in this file");
 
         Reaches.Values.Count(v => v.Reach == TenantReach.ConfinedToTheTokenTenant)
-            .Should().Be(23, "the three counts have to add up to the operation count, or a row "
+            .Should().Be(24, "the three counts have to add up to the operation count, or a row "
                 + "has gone missing from the arithmetic");
     }
 
@@ -491,7 +496,7 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
 
         PrincipalReads(Path.Combine("src", "EntKube.Web", "Services", "PublicApi", "PublicApiEndpoints.cs"))
             .Should().Be(ApiV1PrincipalReads,
-                "the 24 /api/v1 operations read the principal exactly once each — measured, not "
+                "the 25 /api/v1 operations read the principal exactly once each — measured, not "
                 + "assumed. This was BeGreaterThan(20), which left three routes free to stop "
                 + "scoping themselves with nothing noticing, and the doc never stated the real "
                 + "number so a reader could not see the slack was 12.5%. ⚠️ A legitimate "

@@ -29,7 +29,7 @@ public class BackupBundle
     /// literal here and a second literal in the import's guard, which is how a bundle
     /// this very code wrote came to be rejected by it.</para>
     /// </summary>
-    public const int CurrentVersion = 11;
+    public const int CurrentVersion = 12;
 
     public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -167,6 +167,7 @@ public class BackupBundle
     // Observability config (dashboards, telemetry alert rules, RUM sites, storage target, digests)
     public List<Dashboard> Dashboards { get; set; } = [];
     public List<RumSite> RumSites { get; set; } = [];
+    public List<SavedLogQuery> SavedLogQueries { get; set; } = [];
     public List<TelemetryAlertRule> TelemetryAlertRules { get; set; } = [];
     public List<TelemetryStorageSetting> TelemetryStorageSettings { get; set; } = [];
     public List<AdvisorDigestConfig> AdvisorDigestConfigs { get; set; } = [];

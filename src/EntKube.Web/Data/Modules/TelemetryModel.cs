@@ -34,6 +34,7 @@ internal static class TelemetryModel
         builder.Entity<NotificationDelivery>().ToTable("NotificationDeliveries");
         builder.Entity<NotificationProviderConfig>().ToTable("NotificationProviderConfigs");
         builder.Entity<RumSite>().ToTable("RumSites");
+        builder.Entity<SavedLogQuery>().ToTable("SavedLogQueries");
         builder.Entity<TelemetryAlertRule>().ToTable("TelemetryAlertRules");
         builder.Entity<TelemetrySegment>().ToTable("TelemetrySegments");
         builder.Entity<TelemetryStorageSetting>().ToTable("TelemetryStorageSettings");
@@ -49,6 +50,19 @@ internal static class TelemetryModel
             entity.Property(s => s.Name).HasMaxLength(200).IsRequired();
             entity.Property(s => s.PublicKey).HasMaxLength(64).IsRequired();
             entity.Property(s => s.AllowedOrigins).HasMaxLength(4000);
+        });
+
+        builder.Entity<TelemetryAlertRule>()
+            .Property(r => r.Query)
+            .HasMaxLength(EntKube.Telemetry.LogPipelines.LogPipelineParser.MaxQueryLength);
+
+        builder.Entity<SavedLogQuery>(entity =>
+        {
+            entity.HasKey(q => q.Id);
+            entity.HasIndex(q => new { q.TenantId, q.Name }).IsUnique();
+            entity.Property(q => q.Name).HasMaxLength(200).IsRequired();
+            entity.Property(q => q.Query).HasMaxLength(EntKube.Telemetry.LogPipelines.LogPipelineParser.MaxQueryLength).IsRequired();
+            entity.Property(q => q.CreatedBy).HasMaxLength(256);
         });
 
         builder.Entity<TelemetrySegment>(entity =>

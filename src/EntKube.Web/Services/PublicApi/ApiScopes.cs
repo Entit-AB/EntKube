@@ -127,6 +127,13 @@ public static class ApiScopes
     /// <summary>The operational reports, cost among them.</summary>
     public const string OpsRead = "ops:read";
 
+    /// <summary>
+    /// Read the contents of application logs. Separate from ops:read, whose reports are summaries:
+    /// log lines carry whatever the application printed, and a token issued to read the cost report
+    /// must not gain that when a route is added.
+    /// </summary>
+    public const string LogsRead = "logs:read";
+
     /// <summary>Acknowledge advisor findings.</summary>
     public const string OpsWrite = "ops:write";
 
@@ -151,7 +158,7 @@ public static class ApiScopes
     // Declared before All: static field initializers run in declaration order, so
     // assigning All from a field declared below it would leave All null at runtime.
     private static readonly string[] AllScopes =
-        [FleetRead, AppsRead, AppsWrite, OpsRead, OpsWrite, ConfigRead, ConfigWrite, ScimProvision];
+        [FleetRead, AppsRead, AppsWrite, OpsRead, LogsRead, OpsWrite, ConfigRead, ConfigWrite, ScimProvision];
 
     public static readonly IReadOnlyList<string> All = AllScopes;
 
@@ -189,6 +196,10 @@ public static class ApiScopes
                 ["POST /deployments/{}/sync", "POST /deployments/{}/restart"]),
             new("delivery of an app's vaulted secrets into its cluster",
                 ["POST /apps/{}/secrets/sync"]),
+        ]),
+
+        [LogsRead] = new("Read", [
+            new("the contents of application logs, through log queries", ["GET /logs/query"]),
         ]),
 
         [OpsRead] = new("Read", [

@@ -716,3 +716,17 @@ public sealed record DeploymentResponse(
             LastSyncedAt: deployment.LastSyncedAt,
             IsManaged: deployment.IsManaged);
 }
+
+/// <summary>The table a log query produced.</summary>
+/// <param name="Columns">The output columns, in order.</param>
+/// <param name="Rows">Rows aligned with <paramref name="Columns"/>. Every cell is text; null means no value.</param>
+/// <param name="LinesScanned">How many log lines were read to produce this.</param>
+/// <param name="Partial">
+/// True when reading stopped at its limit, so this describes only the newest lines in the window
+/// and any count is a lower bound.
+/// </param>
+public sealed record LogQueryResponse(
+    IReadOnlyList<string> Columns,
+    IReadOnlyList<IReadOnlyList<string?>> Rows,
+    int LinesScanned,
+    bool Partial);

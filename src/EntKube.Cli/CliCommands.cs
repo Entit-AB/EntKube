@@ -126,6 +126,15 @@ public static class CliCommands
         },
         new CliCommand
         {
+            Path = ["logs", "query"],
+            Description = "Run a log query (--cluster <id> --query <text> [--minutes <n>])",
+            BuildPath = a => "/api/v1/logs/query" + Query(
+                ("clusterId", a.Required("cluster")),
+                ("query", a.Required("query")),
+                ("minutes", a.Optional("minutes"))),
+        },
+        new CliCommand
+        {
             Path = ["incidents"],
             Description = "Alert incidents (--open for unresolved only)",
             BuildPath = a => "/api/v1/incidents" + Query(("open", a.Flag("open") ? "true" : null)),

@@ -61,6 +61,8 @@ internal static class TelemetryServices
         services.AddScoped<IncidentDispatcher>();
         services.AddSingletonWork<TelemetryAlertEvaluator>();
         services.AddScoped<LogQueryService>();
+        services.AddScoped<LogPipelineService>();
+        services.AddScoped<SavedLogQueryService>();
         services.AddScoped<IncidentService>();
         services.AddScoped<NotificationService>();
         services.AddScoped<NotificationProviderConfigService>();

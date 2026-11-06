@@ -2,6 +2,7 @@ using System.Text.Json;
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using EntKube.Web.Services.Telemetry;
+using EntKube.Telemetry.LogPipelines;
 using Microsoft.EntityFrameworkCore;
 using EntKube.Web.Services.ClusterChanges;
 
@@ -356,7 +357,15 @@ public sealed class TelemetryAlertEvaluator(
 
     private static Task<bool> HasSignalAsync(
         TelemetryAlertKind kind, Guid clusterId, ITraceQueryService trace, ILogBackend log, CancellationToken ct)
-        => kind == TelemetryAlertKind.LogErrorRate ? log.HasDataAsync(clusterId, ct) : trace.HasDataAsync(clusterId, ct);
+        => ReadsLogs(kind) ? log.HasDataAsync(clusterId, ct) : trace.HasDataAsync(clusterId, ct);
+
+    /// <summary>
+    /// Whether a rule's data is logs rather than traces. A tenant-wide rule only runs on clusters
+    /// holding that signal, so a log kind missing here would quietly evaluate nowhere on a cluster
+    /// that has logs and no traces.
+    /// </summary>
+    public static bool ReadsLogs(TelemetryAlertKind kind) =>
+        kind is TelemetryAlertKind.LogErrorRate or TelemetryAlertKind.LogQuery;
 
     private enum EvalStatus { Firing, Clear, Indeterminate }
 
@@ -434,10 +443,29 @@ public sealed class TelemetryAlertEvaluator(
                     $"error logs {perMin:F1}/min > {rule.Threshold:F1}/min ({ns})",
                     $"Error/fatal log rate was {perMin:F1}/min ({res.Data} lines) in {ns} over the last {w} minutes.");
             }
+            case TelemetryAlertKind.LogQuery:
+            {
+                LogPipelineSource source = new(
+                    (filter, limit, token) => log.QueryAsync(clusterId, filter, from, now, limit, token),
+                    token => log.GetNamespacesAsync(clusterId, w, token));
+
+                LogAlertVerdict verdict = await LogPipelineAlert.CheckAsync(rule.Query, source, rule.Threshold, MaxAlertLines, ct);
+                if (verdict.State == LogAlertState.Hold) return Evaluation.Unknown;
+
+                return Evaluation.From(verdict.State == LogAlertState.Fire,
+                    $"{rule.Name}: {verdict.Value:0.##} > {rule.Threshold:0.##} over {w}m",
+                    $"The log query returned {verdict.Value:0.##} (threshold {rule.Threshold:0.##}) over the last {w} minutes.");
+            }
             default:
                 return Evaluation.Clear;
         }
     }
+
+    /// <summary>
+    /// How many lines one rule may read per evaluation. Lower than an interactive query's limit,
+    /// because this runs every minute for every rule on every cluster it covers.
+    /// </summary>
+    private const int MaxAlertLines = 5000;
 
     private static AlertIncident NewIncident(TelemetryAlertRule rule, Guid clusterId, string fingerprint, Evaluation ev, DateTime now)
         => new()

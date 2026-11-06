@@ -83,7 +83,7 @@ public class CliEndpointParityTests(GeneratedOpenApiDocumentFixture fixture)
             {
                 built = command.BuildPath(CliArgs.Parse(
                 [
-                    "--cluster", "{}", "--id", "{}", "--app", "{}",
+                    "--cluster", "{}", "--id", "{}", "--app", "{}", "--query", "{}",
                     "--workload", "{}", "--environment", "{}",
                 ]));
             }

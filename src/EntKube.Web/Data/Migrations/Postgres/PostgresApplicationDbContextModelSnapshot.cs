@@ -6962,6 +6962,43 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("RumSites", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.SavedLogQuery", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Query")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("SavedLogQueries", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.SecretExpiryNotification", b =>
                 {
                     b.Property<Guid>("Id")
@@ -7759,6 +7796,10 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<string>("Namespace")
                         .HasColumnType("text");
+
+                    b.Property<string>("Query")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
 
                     b.Property<string>("RunbookUrl")
                         .HasColumnType("text");

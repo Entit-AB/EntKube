@@ -6957,6 +6957,43 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("RumSites", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.SavedLogQuery", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Query")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("SavedLogQueries", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.SecretExpiryNotification", b =>
                 {
                     b.Property<Guid>("Id")
@@ -7753,6 +7790,10 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Namespace")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Query")
+                        .HasMaxLength(2000)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("RunbookUrl")

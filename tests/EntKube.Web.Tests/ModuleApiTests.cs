@@ -107,7 +107,8 @@ public class ModuleApiTests : IDisposable
     // whole point of the contract is that the composition happens behind it.
     private ITelemetryApi Telemetry => new TelemetryApi(
         factory,
-        new EntKube.Web.Services.ErrorBudgetService(Delivery, new SupportApi(factory)));
+        new EntKube.Web.Services.ErrorBudgetService(Delivery, new SupportApi(factory)),
+        logPipelines: null!);
 
     [Fact]
     public async Task Catalog_answers_for_the_asking_tenant_and_refuses_the_neighbour()
