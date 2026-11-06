@@ -234,6 +234,22 @@ public sealed class ClusterProvisioningStatusOnTheWireTests : IDisposable
     /// <c>(TenantId, Name)</c> and TEXT columns collating BINARY, that is already ordinal name
     /// order. The test host silently supplies the behaviour the handler is responsible for.</para>
     ///
+    /// <para>⚠️ <b>And the reason it cannot be fixed, which is sharper than "this table has an
+    /// index".</b> Reading the paragraph above as a fact about <c>KubernetesClusters</c> produced
+    /// a wrong prediction for <c>GET /apps</c>: those tables' indexes are declared in
+    /// <c>Data/Modules/DeliveryModel.cs</c> rather than in the context, and a fixture that put
+    /// every row under one parent reproduced this same hole there. It was closed by splitting the
+    /// rows across two customers, so the index's LEADING column varies and its order no longer
+    /// matches the answer — see <c>AppsAndDeploymentsOnTheWireTests</c>.
+    ///
+    /// <para>That cannot be done here. This index's leading column is <c>TenantId</c>, and a
+    /// request carries one API token, which fixes one tenant — so every row this route can return
+    /// shares the leading column by construction and the index always yields ordinal name order.
+    /// The general question is therefore not "does the table have an index" but <b>"can the
+    /// fixture make the index's leading columns vary across the rows under test"</b>. Here the
+    /// request itself pins them, which is what makes this one genuinely unverifiable rather than
+    /// merely untested.</para></para>
+    ///
     /// <para>⚠️ <b>Which makes the handler's <c>OrderBy</c> more load-bearing than it looks, not
     /// less.</b> Production is Postgres, where a query with no <c>ORDER BY</c> has undefined row
     /// order — so the sort is doing real work there and is unverifiable here. That gap is stated

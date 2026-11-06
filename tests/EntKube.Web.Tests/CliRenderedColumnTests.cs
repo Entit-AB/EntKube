@@ -254,6 +254,61 @@ public class CliRenderedColumnTests
     }
 
     /// <summary>
+    /// ⚠️ The fixture's <c>deploymentCount</c> is <b>non-zero</b>. Zero is what
+    /// <c>GetValueOrDefault</c> gives an app with no deployments, and it renders as <c>"0"</c>
+    /// rather than a dash — so a fixture using 0 would satisfy this assertion while proving
+    /// nothing about whether the count was read at all.
+    /// </summary>
+    [Fact]
+    public void The_apps_list_renders_every_column()
+    {
+        EntKube.Contracts.Delivery.AppSummary app = new(
+            Id: Guid.NewGuid(),
+            TenantId: Guid.NewGuid(),
+            CustomerId: Guid.NewGuid(),
+            CustomerName: "Acme AB",
+            Name: "invoicing",
+            Namespace: "invoicing-prod");
+
+        EveryColumnRenders(
+            Command("apps", "list"),
+            JsonSerializer.Serialize(
+                new[] { AppResponse.From(app, deploymentCount: 7) }, AsTheApiSerialises));
+    }
+
+    /// <summary>
+    /// ⚠️ The three enum members are all <b>non-zero</b> ones.
+    /// <c>Manual</c>/<c>Unknown</c>/<c>Unknown</c> are 0, so a fixture left on the defaults would
+    /// render whatever the factory read — including the wrong enum — as a plausible cell.
+    /// </summary>
+    [Fact]
+    public void The_deployments_list_renders_every_column()
+    {
+        EntKube.Contracts.Delivery.DeploymentSummary deployment = new(
+            Id: Guid.NewGuid(),
+            TenantId: Guid.NewGuid(),
+            AppId: Guid.NewGuid(),
+            AppName: "checkout",
+            EnvironmentId: Guid.NewGuid(),
+            EnvironmentName: "Production",
+            ClusterId: Guid.NewGuid(),
+            ClusterName: "prod-north",
+            Name: "checkout-api",
+            Type: EntKube.Contracts.Delivery.DeploymentType.GitHelm,
+            Namespace: "checkout-prod",
+            SyncStatus: EntKube.Contracts.Delivery.SyncStatus.OutOfSync,
+            HealthStatus: EntKube.Contracts.Delivery.HealthStatus.Degraded,
+            StatusMessage: "a previous sync timed out",
+            LastSyncedAt: new DateTime(2026, 11, 1, 6, 30, 0, DateTimeKind.Utc),
+            IsManaged: true);
+
+        EveryColumnRenders(
+            Command("deployments", "list"),
+            JsonSerializer.Serialize(
+                new[] { DeploymentResponse.From(deployment) }, AsTheApiSerialises));
+    }
+
+    /// <summary>
     /// ⚠️ The measure. The facts above are exactly the commands
     /// <see cref="CliColumnParityTests"/> can check against a schema, and they must stay in step:
     /// if a route gains a response type and no rendering fact is added for its command, this fails
@@ -265,7 +320,7 @@ public class CliRenderedColumnTests
         string[] rendered =
         [
             "cost", "cost history", "cost months", "cost rates list",
-            "clusters list", "components list",
+            "clusters list", "components list", "apps list", "deployments list",
         ];
 
         IEnumerable<string> describable =

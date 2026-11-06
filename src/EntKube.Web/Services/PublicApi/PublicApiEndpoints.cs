@@ -108,7 +108,7 @@ public static class PublicApiEndpoints
 
         // ── Apps and deployments ──
 
-        api.MapGet("/apps", async (
+        api.MapGet("/apps", async Task<Ok<IEnumerable<AppResponse>>> (
             HttpContext ctx, EntKube.Contracts.Delivery.IDeliveryApi delivery, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
@@ -125,19 +125,25 @@ public static class PublicApiEndpoints
                 .GroupBy(d => d.AppId)
                 .ToDictionary(g => g.Key, g => g.Count());
 
-            return Results.Ok(apps
+            // ⚠️ The explicit type argument is required: inference would give
+            // Ok<List<AppResponse>>, which does not convert to the declared
+            // Ok<IEnumerable<AppResponse>>.
+            //
+            // .ToList() is kept because main had it, and keeping it means the typed version
+            // enumerates exactly where the untyped one did. It is NOT protecting anything here:
+            // `apps` is an already-materialised IReadOnlyList whose DbContext DeliveryApi has
+            // disposed, so nothing in this chain can fault during the response write. The
+            // placement matters on a route whose source is a live IQueryable — there, deferring
+            // past the committed 200 means enumerating against a disposed context — and this is
+            // not one of those. Said plainly so the next route typed by this template gets
+            // .ToList() for a reason that transfers.
+            return TypedResults.Ok<IEnumerable<AppResponse>>(apps
                 .OrderBy(a => a.Name, StringComparer.Ordinal)
-                .Select(a => new
-                {
-                    id = a.Id,
-                    name = a.Name,
-                    customer = a.CustomerName,
-                    deploymentCount = deploymentCounts.GetValueOrDefault(a.Id),
-                })
+                .Select(a => AppResponse.From(a, deploymentCounts.GetValueOrDefault(a.Id)))
                 .ToList());
         }).RequireApiScope(ApiScopes.AppsRead);
 
-        api.MapGet("/deployments", async (
+        api.MapGet("/deployments", async Task<Ok<IEnumerable<DeploymentResponse>>> (
             HttpContext ctx, EntKube.Contracts.Delivery.IDeliveryApi delivery,
             Guid? appId, CancellationToken ct) =>
         {
@@ -155,22 +161,15 @@ public static class PublicApiEndpoints
             // earned it a place beside ClusterId — so the separate Fleet lookup this route used to
             // make is gone. The enum strings are unchanged: #223 made the contract enums mirror
             // Delivery's member for member, and ModuleApiTests holds them there.
-            return Results.Ok(deployments
+            // ⚠️ .ToList() for the same reason as /apps, and NOT because of the Where above:
+            // GetDeploymentsForTenantAsync returns IReadOnlyList<DeploymentSummary>, so the filter
+            // is an in-memory Guid comparison over a list whose context is already disposed. It
+            // cannot throw and it holds nothing open. The two handlers are alike in this, not
+            // different — an earlier draft of this comment claimed the filter made the placement
+            // load-bearing, which the contract's own return type contradicts.
+            return TypedResults.Ok<IEnumerable<DeploymentResponse>>(deployments
                 .OrderBy(d => d.Name, StringComparer.Ordinal)
-                .Select(d => new
-                {
-                    id = d.Id,
-                    name = d.Name,
-                    app = d.AppName,
-                    type = d.Type.ToString(),
-                    environment = d.EnvironmentName,
-                    cluster = d.ClusterName,
-                    ns = d.Namespace,
-                    syncStatus = d.SyncStatus.ToString(),
-                    healthStatus = d.HealthStatus.ToString(),
-                    lastSyncedAt = d.LastSyncedAt,
-                    isManaged = d.IsManaged,
-                })
+                .Select(DeploymentResponse.From)
                 .ToList());
         }).RequireApiScope(ApiScopes.AppsRead);
 

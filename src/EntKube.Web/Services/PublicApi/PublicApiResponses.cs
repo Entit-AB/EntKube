@@ -598,3 +598,121 @@ public sealed record ComponentResponse(
             Version: component.HelmChartVersion,
             InstalledAt: component.InstalledAt);
 }
+
+/// <summary>
+/// One customer application, as <c>GET /apps</c> lists it.
+///
+/// <para>⚠️ <b><c>deploymentCount</c> is not a member of
+/// <see cref="EntKube.Contracts.Delivery.AppSummary"/>.</b> The handler fetches the tenant's
+/// deployments once, groups them by app id and looks each app up in that dictionary, so the count
+/// belongs to the HANDLER and the factory takes it as an argument. The record must not try to
+/// derive it: an app with no deployments is absent from the grouping and reads back as 0 through
+/// <c>GetValueOrDefault</c>, which is the right answer and is only reachable from the caller's
+/// side.</para>
+///
+/// <para>⚠️ <b><c>customer</c> is renamed from <c>CustomerName</c></b>, and it is NOT nullable: an
+/// app reaches its tenant by way of a customer, so there is always one.</para>
+///
+/// <para><c>AppSummary</c> also carries <c>TenantId</c>, <c>CustomerId</c> and <c>Namespace</c>.
+/// This route has never emitted any of the three, so they are absent here too — adding one would
+/// be a new wire field rather than a transcription, and
+/// <c>AppsAndDeploymentsWireShapeTests</c> pins the key list at four to keep it that way.</para>
+/// </summary>
+public sealed record AppResponse(
+    Guid Id,
+    string Name,
+    string Customer,
+    int DeploymentCount)
+{
+    /// <summary>
+    /// ⚠️ <b>Named arguments, not positional.</b> <c>Name</c> and <c>Customer</c> are adjacent
+    /// <c>string</c>s, so a positional call that swapped them would compile and would print the
+    /// customer in the CLI's NAME column and the app in its CUSTOMER column.
+    ///
+    /// <para>⚠️ <paramref name="deploymentCount"/> comes from the handler's grouping, so nothing
+    /// on <paramref name="app"/> can contradict a wrong value — the mapping test has to supply a
+    /// count distinct from every other number in the fixture for that argument to be proved at
+    /// all.</para>
+    /// </summary>
+    public static AppResponse From(
+        EntKube.Contracts.Delivery.AppSummary app, int deploymentCount) =>
+        new(
+            Id: app.Id,
+            Name: app.Name,
+            Customer: app.CustomerName,
+            DeploymentCount: deploymentCount);
+}
+
+/// <summary>
+/// One deployment of one app into one environment on one cluster, as <c>GET /deployments</c>
+/// lists it.
+///
+/// <para>⚠️ <b>Three enums arrive as STRINGS, by member name.</b> <c>type</c>, <c>syncStatus</c>
+/// and <c>healthStatus</c> are <c>.ToString()</c> of <c>DeploymentType</c>, <c>SyncStatus</c> and
+/// <c>HealthStatus</c>, so a client reads <c>"GitHelm"</c>, <c>"OutOfSync"</c>, <c>"Degraded"</c>
+/// — not 4, 2 and 3, and not a camelCased form. They are declared <c>string</c> here rather than
+/// as the enum types deliberately: typing them as the enums would serialise the NUMERIC value
+/// under <c>JsonSerializerDefaults.Web</c>, which adds no string-enum converter, and would
+/// silently change the wire format for every existing client. The consequence is that renaming a
+/// member of any of the three contract enums is a wire change — and ⚠️ <c>ModuleApiTests</c> does
+/// NOT catch that: it compares the two <c>Enum.GetNames</c> lists, so a rename applied to both
+/// declarations stays green while the wire changes under it. The literal JSON assertions in
+/// <c>AppsAndDeploymentsWireShapeTests</c> are what stand in that gap.</para>
+///
+/// <para>⚠️ <b><c>ns</c> is nullable because the CONTRACT is, not because the data is.</b>
+/// <c>DeploymentSummary.Namespace</c> is <c>string?</c>, so this must accept a null — but the only
+/// thing that fills it today cannot produce one: <c>DeliveryApi</c> projects through a private
+/// <c>Row</c> whose <c>Namespace</c> is a non-nullable <c>string</c>, off an
+/// <c>AppDeployment.Namespace</c> that is <c>required</c> and a column declared
+/// <c>nullable: false</c>. The contract widens it; the route has never emitted it. So ⚠️ the
+/// <c>"ns": null</c> case in <c>AppsAndDeploymentsWireShapeTests</c> defends a contract allowance
+/// against a future producer, <b>not</b> an observed response — and that is worth knowing before
+/// anyone "simplifies" this to <c>string</c>, because doing so would make the contract's own
+/// nullable member unassignable. What must not happen either way is a <c>""</c> or a
+/// <c>"default"</c> invented here, which a client would read as a real namespace.</para>
+///
+/// <para>⚠️ <b><c>isManaged</c> keeps its <c>Is</c> prefix, unlike the cost shapes.</b> The
+/// anonymous object emitted <c>isManaged</c>, so the property is <c>IsManaged</c>. Dropping the
+/// prefix the way <see cref="CostNamespaceResponse"/> does for <c>Unattributed</c> would rename a
+/// live field — the renames are per-route history, not a house rule.</para>
+///
+/// <para><c>DeploymentSummary</c> also carries <c>TenantId</c>, <c>AppId</c>,
+/// <c>EnvironmentId</c>, <c>ClusterId</c> and <c>StatusMessage</c>; none of the five has ever been
+/// on this route's wire. <c>appId</c> is a query PARAMETER of this route, not a field of it.</para>
+/// </summary>
+public sealed record DeploymentResponse(
+    Guid Id,
+    string Name,
+    string App,
+    string Type,
+    string Environment,
+    string Cluster,
+    string? Ns,
+    string SyncStatus,
+    string HealthStatus,
+    DateTime? LastSyncedAt,
+    bool IsManaged)
+{
+    /// <summary>
+    /// ⚠️ <b>Named arguments, and here they are close to forced.</b> Eight of the eleven
+    /// parameters are <c>string</c> or <c>string?</c> and all eight are ADJACENT, so a positional
+    /// call that transposed <c>environment</c> and <c>cluster</c> — or <c>name</c> and <c>app</c>,
+    /// or the two statuses — would compile and would tell an operator that a degraded deployment
+    /// is out of sync, or that it runs on a cluster it does not run on.
+    /// </summary>
+    public static DeploymentResponse From(
+        EntKube.Contracts.Delivery.DeploymentSummary deployment) =>
+        new(
+            Id: deployment.Id,
+            Name: deployment.Name,
+            App: deployment.AppName,
+            // ⚠️ By NAME, not by value: a client reads "GitHelm", never 4.
+            Type: deployment.Type.ToString(),
+            Environment: deployment.EnvironmentName,
+            Cluster: deployment.ClusterName,
+            Ns: deployment.Namespace,
+            SyncStatus: deployment.SyncStatus.ToString(),
+            HealthStatus: deployment.HealthStatus.ToString(),
+            LastSyncedAt: deployment.LastSyncedAt,
+            IsManaged: deployment.IsManaged);
+}
