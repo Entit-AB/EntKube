@@ -1079,6 +1079,8 @@ public class Program
             return Results.NoContent();
         }).DisableAntiforgery();
 
+        app.MapFeedbackEndpoints();
+
         app.MapPost("/ingest/rum/v1/{key}", async (
             HttpContext httpContext, string key, ITelemetryIngest telemetry, RumSiteService sites,
             IngestRateLimiter rateLimiter, ILoggerFactory loggerFactory, CancellationToken ct) =>

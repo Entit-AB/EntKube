@@ -135,6 +135,12 @@ public class TenantService(
         // 1. Orphan tables — a TenantId column with no FK to Tenant, so cascade never reaches
         //    them. Purge explicitly. Keep this list in sync with any new tenant-keyed table
         //    that deliberately opts out of a Tenant FK (see the telemetry/dashboard entities).
+        // Feedback has no foreign key to its site, so losing the site would not take it along.
+        // Screenshots go with their items by cascade.
+        await db.FeedbackItems.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.SavedLogQueries.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+        // Their results go by cascade. A check holds no foreign key to its tenant or cluster.
+        await db.SyntheticChecks.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.RumSites.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.TelemetrySegments.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.TelemetryStorageSettings.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);

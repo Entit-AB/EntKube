@@ -477,7 +477,7 @@ else
         new("Routes", "bi-signpost-split",
         [ new("ingress", "Routes & Ingress", "bi-signpost-split") ]),
         new("Monitoring", "bi-speedometer2",
-        [ new("overview", "Overview", "bi-speedometer2"), new("workloads", "Workloads", "bi-boxes"), new("logs", "Logs", "bi-journal-text"), new("traces", "Traces", "bi-diagram-3"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
+        [ new("overview", "Overview", "bi-speedometer2"), new("workloads", "Workloads", "bi-boxes"), new("logs", "Logs", "bi-journal-text"), new("log-analytics", "Log analytics", "bi-terminal"), new("traces", "Traces", "bi-diagram-3"), new("synthetics", "Synthetic checks", "bi-activity"), new("metrics", "Metrics", "bi-graph-up-arrow"), new("infrastructure", "Infrastructure", "bi-hdd-network"), new("dashboards", "Dashboards", "bi-grid-1x2"), new("rum", "RUM", "bi-browser-chrome"), new("analytics", "Analytics", "bi-graph-up"), new("telemetry-storage", "Telemetry storage", "bi-hdd-stack") ]),
         new("Cost", "bi-cash-coin",
         [ new("cost", "Cost & chargeback", "bi-cash-coin") ]),
     ];
@@ -512,7 +512,10 @@ else
           // Beside the queue because it is the question the queue raises: whose is this
           // one. A rota nobody can find is a rota nobody is on, and an empty rota means
           // every ticket opens unassigned.
-          new("support-roster", "Support roster", "bi-person-check") ]),
+          new("support-roster", "Support roster", "bi-person-check"),
+          // Beside the queue because it is what feeds it: what people said through the widget,
+          // waiting for somebody to decide which of it is a ticket.
+          new("feedback", "Customer feedback", "bi-chat-square-text") ]),
         new("Alerting", "bi-bell",
         [ new("alerts", "Alerts", "bi-bell"), new("alert-rules", "Alert rules", "bi-sliders"), new("telemetry-alerts", "Telemetry alerts", "bi-bell-fill"), new("alert-routing", "Alert routing", "bi-signpost-split"), new("notifications", "Notifications", "bi-broadcast"), new("notification-providers", "Notification providers", "bi-bell-fill") ]),
         new("Incidents", "bi-exclamation-octagon",
@@ -1041,6 +1044,7 @@ else
             case "support-inbox": builder.OpenComponent<SupportInbox>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "support-mailbox": builder.OpenComponent<SupportMailboxTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "mail-triage": builder.OpenComponent<MailTriageRulesTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "feedback": builder.OpenComponent<FeedbackInbox>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "tickets": builder.OpenComponent<TicketQueue>(0); builder.AddComponentParameter(1, "TenantId", (Guid?)tid); builder.CloseComponent(); break;
             case "ticket-bridge": builder.OpenComponent<TicketBridgeTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "incidents":
@@ -1049,6 +1053,8 @@ else
                 builder.AddComponentParameter(2, "FocusIncidentId", IncidentParam);
                 builder.CloseComponent();
                 break;
+            case "log-analytics": builder.OpenComponent<LogAnalytics>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
+            case "synthetics": builder.OpenComponent<SyntheticChecks>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "logs": builder.OpenComponent<TenantLogsTab>(0); builder.AddComponentParameter(1, "TenantId", tid); builder.CloseComponent(); break;
             case "traces":
                 builder.OpenComponent<TenantTracesTab>(0);

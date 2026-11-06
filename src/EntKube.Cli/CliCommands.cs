@@ -126,6 +126,31 @@ public static class CliCommands
         },
         new CliCommand
         {
+            Path = ["feedback"],
+            Description = "In-app feedback (--status New|Triaged|Resolved|Dismissed)",
+            BuildPath = a => "/api/v1/feedback" + Query(("status", a.Optional("status"))),
+            Columns = [("RECEIVED", "createdAt"), ("KIND", "kind"), ("STATUS", "status"), ("RATING", "rating"),
+                       ("SITE", "site"), ("PAGE", "pagePath"), ("MESSAGE", "message")],
+        },
+        new CliCommand
+        {
+            Path = ["logs", "query"],
+            Description = "Run a log query (--cluster <id> --query <text> [--minutes <n>])",
+            BuildPath = a => "/api/v1/logs/query" + Query(
+                ("clusterId", a.Required("cluster")),
+                ("query", a.Required("query")),
+                ("minutes", a.Optional("minutes"))),
+        },
+        new CliCommand
+        {
+            Path = ["synthetics"],
+            Description = "Synthetic checks and their uptime over 24 hours",
+            BuildPath = _ => "/api/v1/synthetic-checks",
+            Columns = [("NAME", "name"), ("STATE", "state"), ("UPTIME", "uptimePercent"),
+                       ("MS", "lastDurationMs"), ("URL", "url")],
+        },
+        new CliCommand
+        {
             Path = ["incidents"],
             Description = "Alert incidents (--open for unresolved only)",
             BuildPath = a => "/api/v1/incidents" + Query(("open", a.Flag("open") ? "true" : null)),

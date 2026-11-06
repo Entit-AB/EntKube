@@ -1,3 +1,4 @@
+using EntKube.Web.Services;
 using Microsoft.EntityFrameworkCore;
 
 namespace EntKube.Web.Data.Modules;
@@ -28,12 +29,17 @@ internal static class TelemetryModel
         builder.Entity<AlertIncident>().ToTable("AlertIncidents");
         builder.Entity<AlertRoutingRule>().ToTable("AlertRoutingRules");
         builder.Entity<Dashboard>().ToTable("Dashboards");
+        builder.Entity<FeedbackItem>().ToTable("FeedbackItems");
+        builder.Entity<FeedbackScreenshot>().ToTable("FeedbackScreenshots");
         builder.Entity<IncidentNote>().ToTable("IncidentNotes");
         builder.Entity<MetricRollup>().ToTable("MetricRollups");
         builder.Entity<NotificationChannel>().ToTable("NotificationChannels");
         builder.Entity<NotificationDelivery>().ToTable("NotificationDeliveries");
         builder.Entity<NotificationProviderConfig>().ToTable("NotificationProviderConfigs");
         builder.Entity<RumSite>().ToTable("RumSites");
+        builder.Entity<SavedLogQuery>().ToTable("SavedLogQueries");
+        builder.Entity<SyntheticCheck>().ToTable("SyntheticChecks");
+        builder.Entity<SyntheticCheckResult>().ToTable("SyntheticCheckResults");
         builder.Entity<TelemetryAlertRule>().ToTable("TelemetryAlertRules");
         builder.Entity<TelemetrySegment>().ToTable("TelemetrySegments");
         builder.Entity<TelemetryStorageSetting>().ToTable("TelemetryStorageSettings");
@@ -49,6 +55,77 @@ internal static class TelemetryModel
             entity.Property(s => s.Name).HasMaxLength(200).IsRequired();
             entity.Property(s => s.PublicKey).HasMaxLength(64).IsRequired();
             entity.Property(s => s.AllowedOrigins).HasMaxLength(4000);
+        });
+
+        builder.Entity<FeedbackItem>(entity =>
+        {
+            entity.HasKey(f => f.Id);
+            // The inbox: one tenant's newest first, optionally narrowed by status.
+            entity.HasIndex(f => new { f.TenantId, f.Status, f.CreatedAt });
+            // The per-site daily quota, counted on every public submission.
+            entity.HasIndex(f => new { f.RumSiteId, f.CreatedAt });
+            // The retention sweep deletes by age alone, across every tenant.
+            entity.HasIndex(f => f.CreatedAt);
+            entity.Property(f => f.Kind).HasConversion<string>().HasMaxLength(20);
+            entity.Property(f => f.Status).HasConversion<string>().HasMaxLength(20);
+            entity.Property(f => f.SiteName).HasMaxLength(200).IsRequired();
+            entity.Property(f => f.Message).HasMaxLength(FeedbackLimits.MaxMessageLength).IsRequired();
+            entity.Property(f => f.ContactEmail).HasMaxLength(FeedbackLimits.MaxEmailLength);
+            entity.Property(f => f.PagePath).HasMaxLength(FeedbackLimits.MaxPathLength).IsRequired();
+            entity.Property(f => f.Browser).HasMaxLength(40);
+            entity.Property(f => f.Os).HasMaxLength(40);
+            entity.Property(f => f.Device).HasMaxLength(40);
+            entity.Property(f => f.RumSessionId).HasMaxLength(FeedbackLimits.MaxSessionIdLength);
+            entity.Property(f => f.RecentErrors).HasMaxLength(FeedbackLimits.MaxErrorsLength);
+            entity.Property(f => f.TriagedBy).HasMaxLength(256);
+        });
+
+        builder.Entity<FeedbackScreenshot>(entity =>
+        {
+            entity.HasKey(s => s.FeedbackItemId);
+            entity.Property(s => s.ContentType).HasMaxLength(20).IsRequired();
+            entity.HasOne<FeedbackItem>()
+                .WithOne()
+                .HasForeignKey<FeedbackScreenshot>(s => s.FeedbackItemId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<TelemetryAlertRule>()
+            .Property(r => r.Query)
+            .HasMaxLength(EntKube.Telemetry.LogPipelines.LogPipelineParser.MaxQueryLength);
+
+        builder.Entity<SavedLogQuery>(entity =>
+        {
+            entity.HasKey(q => q.Id);
+            entity.HasIndex(q => new { q.TenantId, q.Name }).IsUnique();
+            entity.Property(q => q.Name).HasMaxLength(200).IsRequired();
+            entity.Property(q => q.Query).HasMaxLength(EntKube.Telemetry.LogPipelines.LogPipelineParser.MaxQueryLength).IsRequired();
+            entity.Property(q => q.CreatedBy).HasMaxLength(256);
+        });
+
+        builder.Entity<SyntheticCheck>(entity =>
+        {
+            entity.HasKey(c => c.Id);
+            // What the runner asks every tick: this tenant's enabled checks that are due.
+            entity.HasIndex(c => new { c.TenantId, c.IsEnabled, c.NextRunAt });
+            entity.Property(c => c.Name).HasMaxLength(200).IsRequired();
+            entity.Property(c => c.Url).HasMaxLength(EntKube.Web.Services.SyntheticCheckService.MaxUrlLength).IsRequired();
+            entity.Property(c => c.ExpectedText).HasMaxLength(EntKube.Web.Services.SyntheticCheckService.MaxExpectedTextLength);
+            entity.Property(c => c.Severity).HasMaxLength(20).IsRequired();
+            entity.Property(c => c.State).HasConversion<string>().HasMaxLength(20);
+            entity.Property(c => c.LastFailure).HasMaxLength(200);
+        });
+
+        builder.Entity<SyntheticCheckResult>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.HasIndex(r => new { r.CheckId, r.At });
+            // The retention prune deletes by age alone, across every tenant.
+            entity.HasIndex(r => r.At);
+            entity.HasOne<SyntheticCheck>()
+                .WithMany()
+                .HasForeignKey(r => r.CheckId)
+                .OnDelete(DeleteBehavior.Cascade);
         });
 
         builder.Entity<TelemetrySegment>(entity =>

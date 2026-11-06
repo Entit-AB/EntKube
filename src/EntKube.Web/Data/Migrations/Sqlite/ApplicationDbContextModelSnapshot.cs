@@ -4106,6 +4106,122 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("ExternalTicketLinks", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.FeedbackItem", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Browser")
+                        .HasMaxLength(40)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ContactEmail")
+                        .HasMaxLength(254)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Device")
+                        .HasMaxLength(40)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Os")
+                        .HasMaxLength(40)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("PagePath")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("Rating")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("RecentErrors")
+                        .HasMaxLength(1505)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("RumSessionId")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("RumSiteId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SiteName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("TriagedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("ViewportHeight")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("ViewportWidth")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt");
+
+                    b.HasIndex("RumSiteId", "CreatedAt");
+
+                    b.HasIndex("TenantId", "Status", "CreatedAt");
+
+                    b.ToTable("FeedbackItems", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.FeedbackScreenshot", b =>
+                {
+                    b.Property<Guid>("FeedbackItemId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<byte[]>("Bytes")
+                        .IsRequired()
+                        .HasColumnType("BLOB");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("FeedbackItemId");
+
+                    b.ToTable("FeedbackScreenshots", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.GitKnownHost", b =>
                 {
                     b.Property<Guid>("Id")
@@ -6923,6 +7039,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("TEXT");
 
+                    b.Property<bool>("FeedbackEnabled")
+                        .HasColumnType("INTEGER");
+
                     b.Property<bool>("IsEnabled")
                         .HasColumnType("INTEGER");
 
@@ -6955,6 +7074,43 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.HasIndex("TenantId");
 
                     b.ToTable("RumSites", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SavedLogQuery", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Query")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("SavedLogQueries", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.SecretExpiryNotification", b =>
@@ -7727,10 +7883,123 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("SupportMailboxes", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.SyntheticCheck", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("ConsecutiveFailures")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("ExpectedStatus")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("ExpectedText")
+                        .HasMaxLength(500)
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("FailuresBeforeAlert")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int>("IntervalSeconds")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("LastDurationMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("LastFailure")
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime?>("LastRunAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int?>("LastStatusCode")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("NextRunAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Severity")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Url")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "IsEnabled", "NextRunAt");
+
+                    b.ToTable("SyntheticChecks", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SyntheticCheckResult", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime>("At")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("CheckId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("DurationMs")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<bool>("Passed")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<int?>("StatusCode")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("At");
+
+                    b.HasIndex("CheckId", "At");
+
+                    b.ToTable("SyntheticCheckResults", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TelemetryAlertRule", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("CheckId")
                         .HasColumnType("TEXT");
 
                     b.Property<Guid?>("ClusterId")
@@ -7753,6 +8022,10 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.Property<string>("Namespace")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Query")
+                        .HasMaxLength(2000)
                         .HasColumnType("TEXT");
 
                     b.Property<string>("RunbookUrl")
@@ -10064,6 +10337,15 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Ticket");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.FeedbackScreenshot", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.FeedbackItem", null)
+                        .WithOne()
+                        .HasForeignKey("EntKube.Web.Data.FeedbackScreenshot", "FeedbackItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.GitKnownHost", b =>
                 {
                     b.HasOne("EntKube.Web.Data.GitRepository", null)
@@ -11199,6 +11481,15 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .IsRequired();
 
                     b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SyntheticCheckResult", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.SyntheticCheck", null)
+                        .WithMany()
+                        .HasForeignKey("CheckId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TenantMembership", b =>

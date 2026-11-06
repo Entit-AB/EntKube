@@ -716,3 +716,65 @@ public sealed record DeploymentResponse(
             LastSyncedAt: deployment.LastSyncedAt,
             IsManaged: deployment.IsManaged);
 }
+
+/// <summary>One submission from the in-app feedback widget.</summary>
+/// <param name="Id">The item's id.</param>
+/// <param name="Kind">Bug, Idea, Question or Praise.</param>
+/// <param name="Status">New, Triaged, Resolved or Dismissed.</param>
+/// <param name="Rating">1 to 5, or null when the reporter did not rate. Never 0.</param>
+/// <param name="Message">What the reporter wrote. Untrusted text from an anonymous browser.</param>
+/// <param name="ContactEmail">An address the reporter typed. Unverified.</param>
+/// <param name="Site">The RUM site's name when this arrived.</param>
+/// <param name="PagePath">The page's path, without query string or fragment.</param>
+/// <param name="HasScreenshot">Whether a screenshot is still held; they age out before the item.</param>
+/// <param name="TicketId">The ticket this was promoted to, if any.</param>
+/// <param name="CreatedAt">When it arrived, UTC.</param>
+public sealed record FeedbackResponse(
+    Guid Id,
+    string Kind,
+    string Status,
+    int? Rating,
+    string Message,
+    string? ContactEmail,
+    string Site,
+    string PagePath,
+    bool HasScreenshot,
+    Guid? TicketId,
+    DateTime CreatedAt);
+/// <summary>The table a log query produced.</summary>
+/// <param name="Columns">The output columns, in order.</param>
+/// <param name="Rows">Rows aligned with <paramref name="Columns"/>. Every cell is text; null means no value.</param>
+/// <param name="LinesScanned">How many log lines were read to produce this.</param>
+/// <param name="Partial">
+/// True when reading stopped at its limit, so this describes only the newest lines in the window
+/// and any count is a lower bound.
+/// </param>
+public sealed record LogQueryResponse(
+    IReadOnlyList<string> Columns,
+    IReadOnlyList<IReadOnlyList<string?>> Rows,
+    int LinesScanned,
+    bool Partial);
+/// <summary>A synthetic check and how it has done.</summary>
+/// <param name="Id">The check's id.</param>
+/// <param name="Name">Its name.</param>
+/// <param name="Url">The URL it requests.</param>
+/// <param name="IsEnabled">Whether it runs.</param>
+/// <param name="State">Unknown, Passing or Failing.</param>
+/// <param name="ConsecutiveFailures">Failures in a row.</param>
+/// <param name="UptimePercent">Runs passed over the last 24 hours. Null means no runs, NOT zero.</param>
+/// <param name="LastStatusCode">The last status received. Null when no response came back.</param>
+/// <param name="LastDurationMs">How long the last run took.</param>
+/// <param name="LastFailure">Why the last run failed, if it did.</param>
+/// <param name="LastRunAt">When it last ran, UTC.</param>
+public sealed record SyntheticCheckResponse(
+    Guid Id,
+    string Name,
+    string Url,
+    bool IsEnabled,
+    string State,
+    int ConsecutiveFailures,
+    double? UptimePercent,
+    int? LastStatusCode,
+    int? LastDurationMs,
+    string? LastFailure,
+    DateTime? LastRunAt);

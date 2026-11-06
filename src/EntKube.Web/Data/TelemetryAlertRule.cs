@@ -12,7 +12,11 @@ public enum TelemetryAlertKind
     /// <summary>Rate of browser JS errors per minute for a RUM site over the window.</summary>
     RumErrorRate,
     /// <summary>A RUM site's p75 Largest Contentful Paint (ms) over the window.</summary>
-    RumLcpP75
+    RumLcpP75,
+    /// <summary>A log query's answer over the window: its single value, or else how many rows it returned.</summary>
+    LogQuery,
+    /// <summary>A synthetic check's failure streak. Managed by its check, and never edited as a rule.</summary>
+    SyntheticCheck
 }
 
 /// <summary>
@@ -32,6 +36,9 @@ public class TelemetryAlertRule
     /// <summary>The RUM site to evaluate, for the RUM kinds (required for those).</summary>
     public Guid? SiteId { get; set; }
 
+    /// <summary>The check this rule belongs to, for the SyntheticCheck kind.</summary>
+    public Guid? CheckId { get; set; }
+
     public required string Name { get; set; }
     public TelemetryAlertKind Kind { get; set; }
 
@@ -41,6 +48,9 @@ public class TelemetryAlertRule
     public string? Namespace { get; set; }
     /// <summary>Optional case-sensitive substring the log body must contain (LogErrorRate).</summary>
     public string? MatchText { get; set; }
+
+    /// <summary>The query text for LogQuery rules.</summary>
+    public string? Query { get; set; }
 
     /// <summary>Threshold whose unit depends on Kind: ms (p95), percent (error rate), or per-minute (log rate).</summary>
     public double Threshold { get; set; }

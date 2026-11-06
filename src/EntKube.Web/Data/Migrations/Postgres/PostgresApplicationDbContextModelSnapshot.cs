@@ -4111,6 +4111,122 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("ExternalTicketLinks", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.FeedbackItem", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("AppId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Browser")
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<string>("ContactEmail")
+                        .HasMaxLength(254)
+                        .HasColumnType("character varying(254)");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Device")
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("Message")
+                        .IsRequired()
+                        .HasMaxLength(4000)
+                        .HasColumnType("character varying(4000)");
+
+                    b.Property<string>("Os")
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)");
+
+                    b.Property<string>("PagePath")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)");
+
+                    b.Property<int?>("Rating")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("RecentErrors")
+                        .HasMaxLength(1505)
+                        .HasColumnType("character varying(1505)");
+
+                    b.Property<string>("RumSessionId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid>("RumSiteId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("SiteName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("TicketId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("TriagedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int?>("ViewportHeight")
+                        .HasColumnType("integer");
+
+                    b.Property<int?>("ViewportWidth")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("CreatedAt");
+
+                    b.HasIndex("RumSiteId", "CreatedAt");
+
+                    b.HasIndex("TenantId", "Status", "CreatedAt");
+
+                    b.ToTable("FeedbackItems", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.FeedbackScreenshot", b =>
+                {
+                    b.Property<Guid>("FeedbackItemId")
+                        .HasColumnType("uuid");
+
+                    b.Property<byte[]>("Bytes")
+                        .IsRequired()
+                        .HasColumnType("bytea");
+
+                    b.Property<string>("ContentType")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.HasKey("FeedbackItemId");
+
+                    b.ToTable("FeedbackScreenshots", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.GitKnownHost", b =>
                 {
                     b.Property<Guid>("Id")
@@ -6928,6 +7044,9 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone");
 
+                    b.Property<bool>("FeedbackEnabled")
+                        .HasColumnType("boolean");
+
                     b.Property<bool>("IsEnabled")
                         .HasColumnType("boolean");
 
@@ -6960,6 +7079,43 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.HasIndex("TenantId");
 
                     b.ToTable("RumSites", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SavedLogQuery", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("CreatedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Query")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "Name")
+                        .IsUnique();
+
+                    b.ToTable("SavedLogQueries", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.SecretExpiryNotification", b =>
@@ -7732,10 +7888,125 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("SupportMailboxes", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.SyntheticCheck", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("ConsecutiveFailures")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int?>("ExpectedStatus")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("ExpectedText")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)");
+
+                    b.Property<int>("FailuresBeforeAlert")
+                        .HasColumnType("integer");
+
+                    b.Property<int>("IntervalSeconds")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("IsEnabled")
+                        .HasColumnType("boolean");
+
+                    b.Property<int?>("LastDurationMs")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("LastFailure")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime?>("LastRunAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int?>("LastStatusCode")
+                        .HasColumnType("integer");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<DateTime>("NextRunAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Severity")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("State")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Url")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId", "IsEnabled", "NextRunAt");
+
+                    b.ToTable("SyntheticChecks", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SyntheticCheckResult", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("At")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("CheckId")
+                        .HasColumnType("uuid");
+
+                    b.Property<int>("DurationMs")
+                        .HasColumnType("integer");
+
+                    b.Property<bool>("Passed")
+                        .HasColumnType("boolean");
+
+                    b.Property<int?>("StatusCode")
+                        .HasColumnType("integer");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("At");
+
+                    b.HasIndex("CheckId", "At");
+
+                    b.ToTable("SyntheticCheckResults", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.TelemetryAlertRule", b =>
                 {
                     b.Property<Guid>("Id")
                         .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<Guid?>("CheckId")
                         .HasColumnType("uuid");
 
                     b.Property<Guid?>("ClusterId")
@@ -7759,6 +8030,10 @@ namespace EntKube.Web.Data.Migrations.Postgres
 
                     b.Property<string>("Namespace")
                         .HasColumnType("text");
+
+                    b.Property<string>("Query")
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
 
                     b.Property<string>("RunbookUrl")
                         .HasColumnType("text");
@@ -10073,6 +10348,15 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.Navigation("Ticket");
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.FeedbackScreenshot", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.FeedbackItem", null)
+                        .WithOne()
+                        .HasForeignKey("EntKube.Web.Data.FeedbackScreenshot", "FeedbackItemId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.GitKnownHost", b =>
                 {
                     b.HasOne("EntKube.Web.Data.GitRepository", null)
@@ -11208,6 +11492,15 @@ namespace EntKube.Web.Data.Migrations.Postgres
                         .IsRequired();
 
                     b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SyntheticCheckResult", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.SyntheticCheck", null)
+                        .WithMany()
+                        .HasForeignKey("CheckId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.TenantMembership", b =>

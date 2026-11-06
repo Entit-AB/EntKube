@@ -30,6 +30,7 @@
                     <option value="@TelemetryAlertKind.TraceLatencyP95">Trace: service p95 latency (ms)</option>
                     <option value="@TelemetryAlertKind.TraceErrorRate">Trace: service error rate (%)</option>
                     <option value="@TelemetryAlertKind.LogErrorRate">Log: error rate (per min)</option>
+                    <option value="@TelemetryAlertKind.LogQuery">Log: query result</option>
                     <option value="@TelemetryAlertKind.RumErrorRate">RUM: browser error rate (per min)</option>
                     <option value="@TelemetryAlertKind.RumLcpP75">RUM: LCP p75 (ms)</option>
                 </select>
@@ -80,6 +81,22 @@
                     <div class="col-md-4">
                         <label class="form-label small mb-1">Body contains (optional)</label>
                         <input class="form-control form-control-sm font-monospace" @bind="editing.MatchText" placeholder="substring" />
+                    </div>
+                }
+                else if (editing.Kind == TelemetryAlertKind.LogQuery)
+                {
+                    <div class="col-12">
+                        <label class="form-label small mb-1">Query</label>
+                        <textarea class="form-control form-control-sm font-monospace" rows="3" spellcheck="false" @bind="editing.Query" @bind:event="oninput"
+                                  placeholder="logs | where level >= error | summarize count()"></textarea>
+                        @if (QueryProblem is not null)
+                        {
+                            <div class="form-text text-danger">@QueryProblem</div>
+                        }
+                        else
+                        {
+                            <div class="form-text">Fires when the query's single value, or else its row count, goes over the threshold.</div>
+                        }
                     </div>
                 }
             }
@@ -175,7 +192,9 @@ else if (rules.Count > 0)
         await Reload();
     }
 
-    private async Task Reload() => rules = await Rules.ListAsync(TenantId);
+    // A synthetic check's rule is the check's own, edited on its page, so it would only confuse here.
+    private async Task Reload() =>
+        rules = [.. (await Rules.ListAsync(TenantId)).Where(r => r.Kind != TelemetryAlertKind.SyntheticCheck)];
 
     private void StartNew() => StartEdit(new TelemetryAlertRule { Name = "", TenantId = TenantId });
 
@@ -218,8 +237,13 @@ else if (rules.Count > 0)
         await Reload();
     }
 
+    private string? QueryProblem => editing?.Kind == TelemetryAlertKind.LogQuery
+        ? EntKube.Telemetry.LogPipelines.LogPipelineParser.Parse(editing.Query).Error?.Message
+        : null;
+
     private string ThresholdUnit => editing?.Kind switch
     {
+        TelemetryAlertKind.LogQuery => "value",
         TelemetryAlertKind.TraceLatencyP95 or TelemetryAlertKind.RumLcpP75 => "ms",
         TelemetryAlertKind.TraceErrorRate => "%",
         _ => "per min"
@@ -227,6 +251,7 @@ else if (rules.Count > 0)
 
     private static string UnitFor(TelemetryAlertKind k) => k switch
     {
+        TelemetryAlertKind.LogQuery => "",
         TelemetryAlertKind.TraceLatencyP95 or TelemetryAlertKind.RumLcpP75 => "ms",
         TelemetryAlertKind.TraceErrorRate => "%",
         _ => "/min"
@@ -237,6 +262,7 @@ else if (rules.Count > 0)
         TelemetryAlertKind.TraceLatencyP95 => "p95 latency",
         TelemetryAlertKind.TraceErrorRate => "error rate",
         TelemetryAlertKind.LogErrorRate => "log error rate",
+        TelemetryAlertKind.LogQuery => "log query",
         TelemetryAlertKind.RumErrorRate => "RUM error rate",
         TelemetryAlertKind.RumLcpP75 => "RUM LCP p75",
         _ => k.ToString()
@@ -245,6 +271,7 @@ else if (rules.Count > 0)
     private string Target(TelemetryAlertRule r) => r.Kind switch
     {
         TelemetryAlertKind.LogErrorRate => r.Namespace is null ? "all namespaces" : r.Namespace,
+        TelemetryAlertKind.LogQuery => r.Query ?? "—",
         TelemetryAlertKind.RumErrorRate or TelemetryAlertKind.RumLcpP75 =>
             rumSites.FirstOrDefault(s => s.Id == r.SiteId)?.Name ?? "(site)",
         _ => r.Service ?? "—"
@@ -258,7 +285,7 @@ else if (rules.Count > 0)
     private static TelemetryAlertRule Clone(TelemetryAlertRule r) => new()
     {
         Id = r.Id, TenantId = r.TenantId, ClusterId = r.ClusterId, SiteId = r.SiteId, Name = r.Name, Kind = r.Kind,
-        Service = r.Service, Namespace = r.Namespace, MatchText = r.MatchText, Threshold = r.Threshold,
+        Service = r.Service, Namespace = r.Namespace, MatchText = r.MatchText, Query = r.Query, Threshold = r.Threshold,
         WindowMinutes = r.WindowMinutes, Severity = r.Severity, RunbookUrl = r.RunbookUrl, IsEnabled = r.IsEnabled
     };
 

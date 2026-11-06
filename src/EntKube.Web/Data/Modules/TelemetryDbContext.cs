@@ -15,6 +15,11 @@ public class TelemetryDbContext(DbContextOptions<TelemetryDbContext> options) : 
     public DbSet<TelemetrySegment> TelemetrySegments => Set<TelemetrySegment>();
     public DbSet<TelemetryStorageSetting> TelemetryStorageSettings => Set<TelemetryStorageSetting>();
     public DbSet<RumSite> RumSites => Set<RumSite>();
+    public DbSet<FeedbackItem> FeedbackItems => Set<FeedbackItem>();
+    public DbSet<FeedbackScreenshot> FeedbackScreenshots => Set<FeedbackScreenshot>();
+    public DbSet<SavedLogQuery> SavedLogQueries => Set<SavedLogQuery>();
+    public DbSet<SyntheticCheck> SyntheticChecks => Set<SyntheticCheck>();
+    public DbSet<SyntheticCheckResult> SyntheticCheckResults => Set<SyntheticCheckResult>();
     public DbSet<Dashboard> Dashboards => Set<Dashboard>();
     public DbSet<AlertIncident> AlertIncidents => Set<AlertIncident>();
     public DbSet<IncidentNote> IncidentNotes => Set<IncidentNote>();

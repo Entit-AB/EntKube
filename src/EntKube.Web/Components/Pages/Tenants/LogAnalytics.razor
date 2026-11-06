@@ -1,0 +1,238 @@
+@using EntKube.Telemetry.LogPipelines
+@using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
+@using EntKube.Web.Services
+@using Microsoft.AspNetCore.Components.Authorization
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<TelemetryDbContext> DbFactory
+@inject LogPipelineService Pipeline
+@inject SavedLogQueryService Saved
+@inject AuthenticationStateProvider Auth
+
+<div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+    <div class="me-auto">
+        <h6 class="mb-0">Log analytics</h6>
+        <small class="text-muted">Query logs with a Kusto-style pipeline: filter, count and group, then save it or alert on it.</small>
+    </div>
+    <select class="form-select form-select-sm" style="width:auto;min-width:180px" aria-label="Cluster" @bind="clusterIdStr">
+        <option value="">— select a cluster —</option>
+        @foreach (ClusterOption c in clusters)
+        {
+            <option value="@c.Id">@c.Name</option>
+        }
+    </select>
+    <select class="form-select form-select-sm" style="width:auto" aria-label="Time range" @bind="rangeMinutes">
+        <option value="15">Last 15 minutes</option>
+        <option value="60">Last hour</option>
+        <option value="360">Last 6 hours</option>
+        <option value="1440">Last 24 hours</option>
+        <option value="10080">Last 7 days</option>
+    </select>
+</div>
+
+<div class="row g-3">
+    <div class="col-lg-9">
+        <textarea class="form-control font-monospace" rows="6" aria-label="Query" spellcheck="false" @bind="query" @bind:event="oninput"></textarea>
+
+        <div class="d-flex flex-wrap gap-2 mt-2">
+            <button class="btn btn-sm btn-primary" disabled="@(running || string.IsNullOrEmpty(clusterIdStr))" @onclick="RunAsync">
+                <span class="bi bi-play-fill me-1"></span>@(running ? "Running…" : "Run")
+            </button>
+            <input class="form-control form-control-sm" style="max-width:240px" aria-label="Name for this query" placeholder="Name to save as" @bind="saveName" @bind:event="oninput" />
+            <button class="btn btn-sm btn-outline-secondary" disabled="@string.IsNullOrWhiteSpace(saveName)" @onclick="SaveAsync">Save</button>
+        </div>
+
+        @if (syntaxError is not null)
+        {
+            <div class="alert alert-danger py-2 small mt-3 mb-0" role="alert">
+                <div>@syntaxError.Message</div>
+                <pre class="mb-0 mt-1">@ErrorContext(syntaxError)</pre>
+            </div>
+        }
+        else if (failure is not null)
+        {
+            <div class="alert alert-warning py-2 small mt-3 mb-0" role="alert">The query could not run: @failure</div>
+        }
+
+        @if (result is not null)
+        {
+            <div class="small text-muted mt-3 mb-1">
+                @result.Rows.Count.ToString("N0", Invariant) rows from @result.LinesScanned.ToString("N0", Invariant) lines
+            </div>
+
+            @if (result.Partial)
+            {
+                <div class="alert alert-warning py-2 small" role="alert">
+                    <strong>Partial result.</strong> Reading stopped at the newest @result.LinesScanned.ToString("N0", Invariant) lines in this
+                    window, so counts here are lower bounds. Narrow the time range, or add a namespace to the first <code>where</code>.
+                </div>
+            }
+
+            @if (result.Rows.Count == 0)
+            {
+                <div class="text-center py-4 text-muted">No rows matched.</div>
+            }
+            else
+            {
+                <div class="table-responsive">
+                    <table class="table table-sm align-middle small">
+                        <thead><tr>
+                            @foreach (LogColumn c in result.Columns)
+                            {
+                                <th class="@(c.Type == LogColumnType.Number ? "text-end" : "")">@c.Name</th>
+                            }
+                        </tr></thead>
+                        <tbody>
+                            @foreach (object?[] row in result.Rows.Take(MaxRenderedRows))
+                            {
+                                <tr>
+                                    @for (int i = 0; i < row.Length; i++)
+                                    {
+                                        <td class="@CellClass(result.Columns[i])">@LogPipelineFormat.Cell(row[i])</td>
+                                    }
+                                </tr>
+                            }
+                        </tbody>
+                    </table>
+                </div>
+
+                @if (result.Rows.Count > MaxRenderedRows)
+                {
+                    <div class="small text-muted">Showing the first @MaxRenderedRows.ToString("N0", Invariant) rows.</div>
+                }
+            }
+        }
+    </div>
+
+    <div class="col-lg-3">
+        <div class="small fw-semibold mb-1">Saved queries</div>
+        @if (saved.Count == 0)
+        {
+            <div class="small text-muted">None yet.</div>
+        }
+        <ul class="list-unstyled small mb-3">
+            @foreach (SavedLogQuery s in saved)
+            {
+                <li class="d-flex align-items-center gap-1 mb-1">
+                    <button class="btn btn-link btn-sm p-0 text-start text-truncate flex-grow-1" title="@s.Query" @onclick="() => Load(s)">@s.Name</button>
+                    <button class="btn btn-link btn-sm p-0 text-danger" aria-label="Delete @s.Name" @onclick="() => DeleteAsync(s)"><span class="bi bi-x-lg"></span></button>
+                </li>
+            }
+        </ul>
+
+        <div class="small fw-semibold mb-1">Examples</div>
+        <ul class="list-unstyled small">
+            @foreach ((string label, string example) in Examples)
+            {
+                <li class="mb-1"><button class="btn btn-link btn-sm p-0 text-start" @onclick="() => query = example">@label</button></li>
+            }
+        </ul>
+    </div>
+</div>
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private const int MaxRenderedRows = 1000;
+
+    private static readonly System.Globalization.CultureInfo Invariant = System.Globalization.CultureInfo.InvariantCulture;
+
+    private static readonly (string Label, string Query)[] Examples =
+    [
+        ("Errors by pod", "logs\n| where level >= error\n| summarize failures = count() by pod\n| top 10 by failures"),
+        ("Errors over time", "logs\n| where level >= error\n| summarize count() by bin(timestamp, 5m)\n| sort by timestamp asc"),
+        ("Timeouts", "logs\n| where body has \"timeout\"\n| project timestamp, pod, body\n| take 100"),
+        ("Pods logging per namespace", "logs\n| summarize pods = dcount(pod) by namespace\n| sort by pods desc"),
+    ];
+
+    private List<ClusterOption> clusters = [];
+    private List<SavedLogQuery> saved = [];
+    private string clusterIdStr = "";
+    private int rangeMinutes = 60;
+    private string query = Examples[0].Query;
+    private string saveName = "";
+    private bool running;
+    private LogPipelineResult? result;
+    private LogPipelineError? syntaxError;
+    private string? failure;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using TelemetryDbContext db = await DbFactory.CreateDbContextAsync();
+        clusters = await db.KubernetesClusters
+            .Where(c => c.TenantId == TenantId)
+            .OrderBy(c => c.Name)
+            .Select(c => new ClusterOption(c.Id, c.Name))
+            .ToListAsync();
+
+        if (clusters.Count == 1) clusterIdStr = clusters[0].Id.ToString();
+
+        saved = await Saved.ListAsync(TenantId);
+    }
+
+    private async Task RunAsync()
+    {
+        // Only a cluster this page listed, so a tampered value cannot reach another tenant's logs.
+        if (!Guid.TryParse(clusterIdStr, out Guid clusterId) || clusters.All(c => c.Id != clusterId)) return;
+
+        running = true;
+        result = null;
+        syntaxError = null;
+        failure = null;
+
+        DateTime to = DateTime.UtcNow;
+        LogPipelineOutcome outcome = await Pipeline.RunAsync(TenantId, clusterId, query, to.AddMinutes(-rangeMinutes), to);
+
+        result = outcome.Result;
+        syntaxError = outcome.SyntaxError;
+        failure = outcome.Failure;
+        running = false;
+    }
+
+    private async Task SaveAsync()
+    {
+        string? actor = (await Auth.GetAuthenticationStateAsync()).User.Identity?.Name;
+        string? problem = await Saved.SaveAsync(TenantId, saveName, query, actor);
+
+        failure = problem;
+        syntaxError = null;
+
+        if (problem is null)
+        {
+            saveName = "";
+            saved = await Saved.ListAsync(TenantId);
+        }
+    }
+
+    private void Load(SavedLogQuery s)
+    {
+        query = s.Query;
+        saveName = s.Name;
+    }
+
+    private async Task DeleteAsync(SavedLogQuery s)
+    {
+        await Saved.DeleteAsync(TenantId, s.Id);
+        saved = await Saved.ListAsync(TenantId);
+    }
+
+    /// <summary>The line the error is on, with a caret under the position.</summary>
+    private string ErrorContext(LogPipelineError error)
+    {
+        int at = Math.Clamp(error.Position, 0, query.Length);
+        int start = at == 0 ? 0 : query.LastIndexOf('\n', at - 1) + 1;
+        int end = query.IndexOf('\n', at);
+        string line = query[start..(end < 0 ? query.Length : end)];
+        return line + "\n" + new string(' ', at - start) + "^";
+    }
+
+    private static string CellClass(LogColumn column) => column switch
+    {
+        { Type: LogColumnType.Number } => "text-end",
+        { Name: "body" } => "font-monospace text-break",
+        { Type: LogColumnType.Time } => "text-nowrap",
+        _ => "",
+    };
+
+    private sealed record ClusterOption(Guid Id, string Name);
+}

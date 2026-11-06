@@ -56,6 +56,12 @@ public class BackupCoverageTests
         // cluster THIS installation was watching: a restored server re-observes from the moment
         // it starts, and carrying the old numbers across would describe machines it never saw.
         ["MetricRollup"] = "measurements of the old installation's own clusters",
+        ["SyntheticCheckResult"] = "probes the new server repeats",
+
+        // The feedback itself travels; the inbox shows an item with no image when this is absent.
+        // Images of somebody's screen, kept briefly on purpose, should not be copied into a file
+        // that outlives every retention setting.
+        ["FeedbackScreenshot"] = "personal data on a short retention, and the item survives without it",
 
         // Mirrors of Kubernetes objects. The backup exists in the cluster; the row is a
         // copy of what the operator reports, and is re-read.

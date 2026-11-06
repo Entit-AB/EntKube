@@ -1,0 +1,234 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using EntKube.Web.Services.Tickets
+@using Microsoft.AspNetCore.Components.Authorization
+@inject FeedbackService Feedback
+@inject FeedbackTicketBridge Tickets
+@inject AuthenticationStateProvider Auth
+
+@* What people said through the feedback widget. ReadOnly is the customer portal's view: a customer
+   reads their own site's feedback, and triage stays with the operator. *@
+
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <div>
+        <h6 class="mb-0">Customer feedback</h6>
+        <small class="text-muted">
+            @summary.Unread unread
+            @if (summary.AverageRating is { } average)
+            {
+                <span> · average rating @average.ToString("0.0", System.Globalization.CultureInfo.InvariantCulture) of 5 from @summary.Rated in the last 30 days</span>
+            }
+            else
+            {
+                <span> · no ratings in the last 30 days</span>
+            }
+        </small>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+        <select class="form-select form-select-sm" style="width:auto" aria-label="Status" @bind="statusFilter" @bind:after="ReloadAsync">
+            <option value="">All statuses</option>
+            @foreach (FeedbackStatus s in Enum.GetValues<FeedbackStatus>())
+            {
+                <option value="@s">@s</option>
+            }
+        </select>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="ReloadAsync"><span class="bi bi-arrow-clockwise"></span> Refresh</button>
+    </div>
+</div>
+
+@if (error is not null)
+{
+    <div class="alert alert-warning py-2 small">@error</div>
+}
+
+@if (rows.Count == 0)
+{
+    <div class="text-center py-5 text-muted">
+        <span class="bi bi-chat-square-text display-6 d-block mb-2 opacity-25"></span>
+        No feedback here yet.
+        @if (!ReadOnly)
+        {
+            <span>Switch it on for a site under Observability › RUM › Sites, then embed the widget.</span>
+        }
+    </div>
+}
+else
+{
+    <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle small">
+            <thead><tr><th>Received</th><th>Kind</th><th>Rating</th><th>Message</th><th>Site</th><th>Page</th><th>Status</th></tr></thead>
+            <tbody>
+                @foreach (FeedbackRow row in rows)
+                {
+                    FeedbackItem f = row.Item;
+                    <tr class="@(selected?.Id == f.Id ? "table-active" : "")" style="cursor:pointer" @onclick="() => OpenAsync(f)">
+                        <td class="text-nowrap">@f.CreatedAt.ToString("yyyy-MM-dd HH:mm")</td>
+                        <td><span class="badge @KindBadge(f.Kind)">@f.Kind</span></td>
+                        <td class="text-nowrap">@(f.Rating is { } r ? $"{r} / 5" : "")</td>
+                        <td class="text-truncate" style="max-width:320px">
+                            @if (row.HasScreenshot) { <span class="bi bi-image me-1" title="Has a screenshot"></span> }
+                            @f.Message
+                        </td>
+                        <td>@f.SiteName</td>
+                        <td class="font-monospace text-truncate" style="max-width:180px">@f.PagePath</td>
+                        <td>@f.Status</td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@if (selected is not null)
+{
+    <div class="card card-body mt-3">
+        <div class="d-flex flex-wrap justify-content-between gap-2 mb-2">
+            <div class="fw-semibold"><span class="badge @KindBadge(selected.Kind) me-2">@selected.Kind</span>@selected.PagePath</div>
+            @if (!ReadOnly)
+            {
+                <div class="d-flex flex-wrap gap-1">
+                    @if (selected.TicketId is null)
+                    {
+                        <button class="btn btn-sm btn-primary" disabled="@busy" @onclick="OpenTicketAsync"><span class="bi bi-life-preserver me-1"></span>Create ticket</button>
+                    }
+                    <button class="btn btn-sm btn-outline-secondary" disabled="@busy" @onclick="() => SetStatusAsync(FeedbackStatus.Triaged)">Triaged</button>
+                    <button class="btn btn-sm btn-outline-success" disabled="@busy" @onclick="() => SetStatusAsync(FeedbackStatus.Resolved)">Resolved</button>
+                    <button class="btn btn-sm btn-outline-danger" disabled="@busy" @onclick="() => SetStatusAsync(FeedbackStatus.Dismissed)">Dismiss</button>
+                </div>
+            }
+        </div>
+
+        @* Blazor encodes this. pre-wrap keeps the reporter's line breaks without rendering any markup. *@
+        <p style="white-space:pre-wrap">@selected.Message</p>
+
+        <dl class="row small mb-2">
+            <dt class="col-sm-2">Received</dt><dd class="col-sm-10">@selected.CreatedAt.ToString("yyyy-MM-dd HH:mm") UTC</dd>
+            @if (selected.Rating is { } rating)
+            {
+                <dt class="col-sm-2">Rating</dt><dd class="col-sm-10">@rating of 5</dd>
+            }
+            @if (!string.IsNullOrEmpty(selected.ContactEmail))
+            {
+                <dt class="col-sm-2">Address</dt><dd class="col-sm-10">@selected.ContactEmail <span class="text-muted">(typed by the reporter, not verified)</span></dd>
+            }
+            <dt class="col-sm-2">Client</dt><dd class="col-sm-10">@Client(selected)</dd>
+            @if (!string.IsNullOrEmpty(selected.RumSessionId))
+            {
+                <dt class="col-sm-2">RUM session</dt><dd class="col-sm-10 font-monospace">@selected.RumSessionId</dd>
+            }
+            @if (selected.TicketId is not null)
+            {
+                <dt class="col-sm-2">Ticket</dt><dd class="col-sm-10">A ticket was created from this feedback.</dd>
+            }
+            @if (!string.IsNullOrEmpty(selected.TriagedBy))
+            {
+                <dt class="col-sm-2">Triaged by</dt><dd class="col-sm-10">@selected.TriagedBy</dd>
+            }
+        </dl>
+
+        @if (selected.Errors.Count > 0)
+        {
+            <div class="small fw-semibold mb-1">Recent errors on the page</div>
+            <pre class="small bg-body-secondary rounded p-2 mb-2">@string.Join("\n", selected.Errors)</pre>
+        }
+
+        @if (screenshotUrl is not null)
+        {
+            <img src="@screenshotUrl" alt="Screenshot attached to this feedback" class="img-fluid border rounded" />
+        }
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    /// <summary>Narrows to one site. The portal passes a site it has confined to the customer.</summary>
+    [Parameter] public Guid? SiteId { get; set; }
+
+    [Parameter] public bool ReadOnly { get; set; }
+
+    private List<FeedbackRow> rows = [];
+    private FeedbackSummary summary = new(0, 0, null);
+    private FeedbackItem? selected;
+    private string? screenshotUrl;
+    private string statusFilter = "";
+    private string? error;
+    private bool busy;
+    private (Guid Tenant, Guid? Site)? loaded;
+
+    protected override async Task OnParametersSetAsync()
+    {
+        if (loaded == (TenantId, SiteId)) return;
+        loaded = (TenantId, SiteId);
+        selected = null;
+        screenshotUrl = null;
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync()
+    {
+        FeedbackStatus? status = Enum.TryParse(statusFilter, out FeedbackStatus parsed) ? parsed : null;
+        rows = await Feedback.ListAsync(TenantId, SiteId, status);
+        summary = await Feedback.SummarizeAsync(TenantId, SiteId, DateTime.UtcNow.AddDays(-30));
+    }
+
+    private async Task OpenAsync(FeedbackItem item)
+    {
+        selected = item;
+        error = null;
+        screenshotUrl = null;
+
+        FeedbackScreenshot? shot = await Feedback.GetScreenshotAsync(TenantId, item.Id);
+
+        // A data URL, which the CSP's img-src allows, so the image needs no route of its own and the
+        // authorization is this component's. The type came from the bytes at ingest, never the client.
+        if (shot is not null)
+        {
+            screenshotUrl = $"data:{shot.ContentType};base64,{Convert.ToBase64String(shot.Bytes)}";
+        }
+    }
+
+    private async Task SetStatusAsync(FeedbackStatus status)
+    {
+        if (selected is null || ReadOnly) return;
+
+        busy = true;
+        await Feedback.SetStatusAsync(TenantId, selected.Id, status, await ActorAsync());
+        await RefreshSelectedAsync();
+        busy = false;
+    }
+
+    private async Task OpenTicketAsync()
+    {
+        if (selected is null || ReadOnly) return;
+
+        busy = true;
+        FeedbackTicketResult result = await Tickets.OpenAsync(TenantId, selected.Id, await ActorAsync());
+        error = result.Refusal;
+        await RefreshSelectedAsync();
+        busy = false;
+    }
+
+    private async Task RefreshSelectedAsync()
+    {
+        selected = await Feedback.GetAsync(TenantId, selected!.Id);
+        await ReloadAsync();
+    }
+
+    private async Task<string?> ActorAsync() =>
+        (await Auth.GetAuthenticationStateAsync()).User.Identity?.Name;
+
+    private static string Client(FeedbackItem f)
+    {
+        string client = string.Join(", ", new[] { f.Browser, f.Os, f.Device }.Where(s => !string.IsNullOrEmpty(s)));
+        return f.ViewportWidth is { } w && f.ViewportHeight is { } h ? $"{client} ({w}×{h})" : client;
+    }
+
+    private static string KindBadge(FeedbackKind kind) => kind switch
+    {
+        FeedbackKind.Bug => "bg-danger",
+        FeedbackKind.Idea => "bg-primary",
+        FeedbackKind.Question => "bg-info text-dark",
+        _ => "bg-success",
+    };
+}

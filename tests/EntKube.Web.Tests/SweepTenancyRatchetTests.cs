@@ -75,6 +75,7 @@ public class SweepTenancyRatchetTests
         "RolloutWatcherService",
         "SecretExpiryNotificationService",
         "SupportMailPoller",
+        "SyntheticCheckRunner",
         "SupplyChainScanService",
         "TelemetryAlertEvaluator",
         "UptimeTrackingService",
@@ -95,6 +96,10 @@ public class SweepTenancyRatchetTests
     /// <summary>Sweeps with no tenant-scoped work to do, and why.</summary>
     private static readonly Dictionary<string, string> NoTenantScopedWork = new(StringComparer.Ordinal)
     {
+        ["FeedbackRetentionService"] =
+            "deletes by age alone: it names no tenant, decides nothing about one and reaches no "
+            + "cluster, the same shape as UptimeTrackingService's retention prune. Scoping it would "
+            + "turn one delete into one per tenant with no authorization gain",
         ["PresenceHeartbeatService"] =
             "refreshes an in-memory presence tracker; touches no rows and reaches no cluster",
         ["SegmentSealService"] =
