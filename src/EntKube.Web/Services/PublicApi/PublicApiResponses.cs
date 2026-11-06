@@ -778,3 +778,32 @@ public sealed record SyntheticCheckResponse(
     int? LastDurationMs,
     string? LastFailure,
     DateTime? LastRunAt);
+
+/// <summary>One fault, however many times it happened.</summary>
+/// <param name="Id">The issue's id.</param>
+/// <param name="Source">Log or Browser.</param>
+/// <param name="Scope">The cluster or RUM site's name.</param>
+/// <param name="Namespace">The namespace, for a log issue.</param>
+/// <param name="Workload">The workload, for a log issue.</param>
+/// <param name="Title">The message with whatever varies replaced. Untrusted log text.</param>
+/// <param name="SampleMessage">The latest real occurrence. Untrusted log text.</param>
+/// <param name="Occurrences">How many times it happened.</param>
+/// <param name="CountIsPartial">True when <paramref name="Occurrences"/> is a lower bound.</param>
+/// <param name="Status">Open, Resolved or Ignored.</param>
+/// <param name="Regressions">How many times it came back after being resolved.</param>
+/// <param name="FirstSeenAt">When it was first seen, UTC.</param>
+/// <param name="LastSeenAt">When it was last seen, UTC.</param>
+public sealed record ErrorIssueResponse(
+    Guid Id,
+    string Source,
+    string Scope,
+    string? Namespace,
+    string? Workload,
+    string Title,
+    string SampleMessage,
+    long Occurrences,
+    bool CountIsPartial,
+    string Status,
+    int Regressions,
+    DateTime FirstSeenAt,
+    DateTime LastSeenAt);

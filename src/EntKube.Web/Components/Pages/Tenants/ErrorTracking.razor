@@ -1,0 +1,149 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@using Microsoft.AspNetCore.Components.Authorization
+@inject ErrorTrackingService Issues
+@inject AuthenticationStateProvider Auth
+
+<div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <div>
+        <h6 class="mb-0">Error tracking</h6>
+        <small class="text-muted">Error logs and browser errors, grouped into issues. Resolve one and it reopens if it comes back.</small>
+    </div>
+    <div class="d-flex align-items-center gap-2">
+        <select class="form-select form-select-sm" style="width:auto" aria-label="Status" @bind="statusFilter" @bind:after="ReloadAsync">
+            <option value="">All statuses</option>
+            @foreach (ErrorIssueStatus s in Enum.GetValues<ErrorIssueStatus>())
+            {
+                <option value="@s">@s</option>
+            }
+        </select>
+        <button class="btn btn-sm btn-outline-secondary" @onclick="ReloadAsync"><span class="bi bi-arrow-clockwise"></span> Refresh</button>
+    </div>
+</div>
+
+@if (issues.Count == 0)
+{
+    <div class="text-center py-5 text-muted">
+        <span class="bi bi-bug display-6 d-block mb-2 opacity-25"></span>
+        No issues here. New ones appear within a couple of minutes of an error being logged.
+    </div>
+}
+else
+{
+    <div class="table-responsive">
+        <table class="table table-sm table-hover align-middle small">
+            <thead><tr><th>Issue</th><th>Where</th><th class="text-end">Events</th><th>First seen</th><th>Last seen</th><th>Status</th></tr></thead>
+            <tbody>
+                @foreach (ErrorIssue issue in issues)
+                {
+                    <tr class="@(selected?.Id == issue.Id ? "table-active" : "")" style="cursor:pointer" @onclick="() => selected = issue">
+                        <td class="font-monospace text-truncate" style="max-width:420px">
+                            <span class="bi @(issue.Source == ErrorIssueSource.Browser ? "bi-browser-chrome" : "bi-journal-text") me-1" title="@issue.Source"></span>@issue.Title
+                        </td>
+                        <td>@Where(issue)</td>
+                        <td class="text-end text-nowrap">@Events(issue)</td>
+                        <td class="text-nowrap">@issue.FirstSeenAt.ToString("yyyy-MM-dd HH:mm")</td>
+                        <td class="text-nowrap">@issue.LastSeenAt.ToString("yyyy-MM-dd HH:mm")</td>
+                        <td>
+                            <span class="badge @StatusBadge(issue.Status)">@issue.Status</span>
+                            @if (issue.Regressions > 0 && issue.Status == ErrorIssueStatus.Open)
+                            {
+                                <span class="badge bg-warning text-dark ms-1" title="This came back after being resolved">Regressed</span>
+                            }
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+}
+
+@if (selected is not null)
+{
+    <div class="card card-body mt-3">
+        <div class="d-flex flex-wrap justify-content-between gap-2 mb-2">
+            <div class="fw-semibold font-monospace text-break">@selected.Title</div>
+            <div class="d-flex gap-1">
+                @if (selected.Status != ErrorIssueStatus.Resolved)
+                {
+                    <button class="btn btn-sm btn-outline-success" @onclick="() => SetStatusAsync(ErrorIssueStatus.Resolved)">Resolve</button>
+                }
+                @if (selected.Status != ErrorIssueStatus.Ignored)
+                {
+                    <button class="btn btn-sm btn-outline-secondary" @onclick="() => SetStatusAsync(ErrorIssueStatus.Ignored)">Ignore</button>
+                }
+                @if (selected.Status != ErrorIssueStatus.Open)
+                {
+                    <button class="btn btn-sm btn-outline-danger" @onclick="() => SetStatusAsync(ErrorIssueStatus.Open)">Reopen</button>
+                }
+            </div>
+        </div>
+
+        <dl class="row small mb-2">
+            <dt class="col-sm-2">Where</dt><dd class="col-sm-10">@Where(selected)</dd>
+            <dt class="col-sm-2">Events</dt><dd class="col-sm-10">@Events(selected)</dd>
+            @if (selected.CountIsPartial)
+            {
+                <dd class="col-sm-10 offset-sm-2 text-muted">Some scans hit their limit, so this is a lower bound.</dd>
+            }
+            @if (selected.Regressions > 0)
+            {
+                <dt class="col-sm-2">Regressions</dt>
+                <dd class="col-sm-10">@selected.Regressions, last at @selected.RegressedAt?.ToString("yyyy-MM-dd HH:mm") UTC</dd>
+            }
+            @if (!string.IsNullOrEmpty(selected.ResolvedBy))
+            {
+                <dt class="col-sm-2">Resolved by</dt><dd class="col-sm-10">@selected.ResolvedBy</dd>
+            }
+            @if (!string.IsNullOrEmpty(selected.SampleTraceId))
+            {
+                <dt class="col-sm-2">Trace</dt><dd class="col-sm-10 font-monospace">@selected.SampleTraceId</dd>
+            }
+        </dl>
+
+        <div class="small fw-semibold mb-1">Latest occurrence</div>
+        <pre class="small bg-body-secondary rounded p-2 mb-0" style="white-space:pre-wrap">@selected.SampleMessage</pre>
+    </div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private List<ErrorIssue> issues = [];
+    private ErrorIssue? selected;
+    private string statusFilter = nameof(ErrorIssueStatus.Open);
+
+    protected override Task OnInitializedAsync() => ReloadAsync();
+
+    private async Task ReloadAsync()
+    {
+        ErrorIssueStatus? status = Enum.TryParse(statusFilter, out ErrorIssueStatus parsed) ? parsed : null;
+        issues = await Issues.ListAsync(TenantId, status);
+
+        // Keep the panel on the same issue through a reload, and drop it if the filter hid it.
+        selected = issues.FirstOrDefault(i => i.Id == selected?.Id);
+    }
+
+    private async Task SetStatusAsync(ErrorIssueStatus status)
+    {
+        if (selected is null) return;
+
+        string? actor = (await Auth.GetAuthenticationStateAsync()).User.Identity?.Name;
+        await Issues.SetStatusAsync(TenantId, selected.Id, status, actor);
+        await ReloadAsync();
+    }
+
+    private static string Where(ErrorIssue issue) =>
+        string.Join(" / ", new[] { issue.ScopeName, issue.Namespace, issue.Workload }.Where(s => !string.IsNullOrEmpty(s)));
+
+    /// <summary>A lower bound says so, because a total it is not.</summary>
+    private static string Events(ErrorIssue issue) =>
+        issue.Occurrences.ToString("N0", System.Globalization.CultureInfo.InvariantCulture) + (issue.CountIsPartial ? "+" : "");
+
+    private static string StatusBadge(ErrorIssueStatus status) => status switch
+    {
+        ErrorIssueStatus.Open => "bg-danger",
+        ErrorIssueStatus.Resolved => "bg-success",
+        _ => "bg-secondary",
+    };
+}

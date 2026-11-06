@@ -17,6 +17,12 @@ public interface IRumQueryService
 
     Task<List<RumTopError>> GetTopErrorsAsync(Guid tenantId, Guid siteId, DateTime from, DateTime to, int limit = 10, CancellationToken ct = default);
 
+    /// <summary>
+    /// As <see cref="GetTopErrorsAsync"/>, but null when the store could not be read. A dashboard can
+    /// show a failure as an empty table; a sweep that moves a cursor past it would lose the window.
+    /// </summary>
+    Task<List<RumTopError>?> TryGetTopErrorsAsync(Guid tenantId, Guid siteId, DateTime from, DateTime to, int limit = 10, CancellationToken ct = default);
+
     Task<List<TimeSeriesDataPoint>> GetPageViewSeriesAsync(Guid tenantId, Guid siteId, DateTime from, DateTime to, int buckets = 60, CancellationToken ct = default);
 
     Task<List<RumSessionSummary>> GetSessionsAsync(Guid tenantId, Guid siteId, DateTime from, DateTime to, int limit = 50, CancellationToken ct = default);

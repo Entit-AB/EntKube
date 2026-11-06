@@ -84,7 +84,8 @@ public class ErrorBudgetContractTests
             errorBudgets: new ErrorBudgetService(delivery.Object, support.Object),
             feedback: null!,
             logPipelines: null!,
-            syntheticChecks: null!);
+            syntheticChecks: null!,
+            errorTracking: null!);
     }
 
     [Fact]
@@ -161,7 +162,7 @@ public class ErrorBudgetContractTests
 
         ITelemetryApi subject = new TelemetryApi(
             dbFactory: null!, errorBudgets: new ErrorBudgetService(delivery.Object, support.Object),
-            feedback: null!, logPipelines: null!, syntheticChecks: null!);
+            feedback: null!, logPipelines: null!, syntheticChecks: null!, errorTracking: null!);
 
         ErrorBudgetSummary b = (await subject.GetErrorBudgetsAsync(Tenant, CancellationToken.None))
             .Should().ContainSingle().Subject;
@@ -193,7 +194,7 @@ public class ErrorBudgetContractTests
 
         ITelemetryApi subject = new TelemetryApi(
             dbFactory: null!, errorBudgets: new ErrorBudgetService(delivery.Object, support.Object),
-            feedback: null!, logPipelines: null!, syntheticChecks: null!);
+            feedback: null!, logPipelines: null!, syntheticChecks: null!, errorTracking: null!);
 
         (await subject.GetErrorBudgetsAsync(Tenant, CancellationToken.None)).Should().BeEmpty();
 

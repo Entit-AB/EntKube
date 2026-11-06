@@ -672,6 +672,7 @@ public sealed class LogQueryAlertRuleTests : IDisposable
     [Theory]
     [InlineData(TelemetryAlertKind.LogQuery, true)]
     [InlineData(TelemetryAlertKind.LogErrorRate, true)]
+    [InlineData(TelemetryAlertKind.NewErrorIssues, true)]
     [InlineData(TelemetryAlertKind.TraceErrorRate, false)]
     public void A_log_rule_looks_for_clusters_with_logs_rather_than_traces(TelemetryAlertKind kind, bool expected)
     {

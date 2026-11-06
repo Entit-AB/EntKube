@@ -3855,6 +3855,117 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("Environments", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ErrorIssue", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<bool>("CountIsPartial")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<string>("Fingerprint")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("FirstSeenAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("LastSeenAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Namespace")
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Occurrences")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("RegressedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("Regressions")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<DateTime?>("ResolvedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ResolvedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SampleMessage")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("SampleTraceId")
+                        .HasMaxLength(64)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ScopeId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("ScopeName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Workload")
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LastSeenAt");
+
+                    b.HasIndex("TenantId", "ScopeId", "Fingerprint")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "Status", "LastSeenAt");
+
+                    b.ToTable("ErrorIssues", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ErrorScanCursor", b =>
+                {
+                    b.Property<Guid>("ScopeId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("ScannedThrough")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.HasKey("ScopeId");
+
+                    b.ToTable("ErrorScanCursors", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ExternalDependency", b =>
                 {
                     b.Property<Guid>("Id")

@@ -61,6 +61,8 @@ public class TenantPurgeTests : IDisposable
         (await ctx.Dashboards.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.TelemetryAlertRules.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.RumSites.CountAsync(x => x.TenantId == t1)).Should().Be(0);
+        (await ctx.ErrorIssues.CountAsync(x => x.TenantId == t1)).Should().Be(0);
+        (await ctx.ErrorScanCursors.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.FeedbackItems.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.FeedbackScreenshots.CountAsync()).Should().Be(1, "only the other tenant's is left");
         (await ctx.SavedLogQueries.CountAsync(x => x.TenantId == t1)).Should().Be(0);
@@ -72,6 +74,8 @@ public class TenantPurgeTests : IDisposable
         (await ctx.Apps.CountAsync(a => a.Customer.TenantId == t2)).Should().Be(2);
         (await ctx.KubernetesClusters.CountAsync(c => c.TenantId == t2)).Should().Be(1);
         (await ctx.Dashboards.CountAsync(x => x.TenantId == t2)).Should().Be(1);
+        (await ctx.ErrorIssues.CountAsync(x => x.TenantId == t2)).Should().Be(1);
+        (await ctx.ErrorScanCursors.CountAsync(x => x.TenantId == t2)).Should().Be(1);
         (await ctx.FeedbackItems.CountAsync(x => x.TenantId == t2)).Should().Be(1);
         (await ctx.SavedLogQueries.CountAsync(x => x.TenantId == t2)).Should().Be(1);
         (await ctx.SyntheticChecks.CountAsync(x => x.TenantId == t2)).Should().Be(1);
@@ -202,6 +206,12 @@ public class TenantPurgeTests : IDisposable
         ctx.Dashboards.Add(dashboard);
         ctx.TelemetryAlertRules.Add(alertRule);
         ctx.RumSites.Add(rumSite);
+        ctx.ErrorIssues.Add(new ErrorIssue
+        {
+            Id = Guid.NewGuid(), TenantId = tenant.Id, ScopeId = Guid.NewGuid(), ScopeName = "c", Fingerprint = "f",
+            Title = "t", SampleMessage = "s", FirstSeenAt = DateTime.UtcNow, LastSeenAt = DateTime.UtcNow, UpdatedAt = DateTime.UtcNow,
+        });
+        ctx.ErrorScanCursors.Add(new ErrorScanCursor { ScopeId = Guid.NewGuid(), TenantId = tenant.Id, ScannedThrough = DateTime.UtcNow });
         ctx.SavedLogQueries.Add(new SavedLogQuery
         {
             Id = Guid.NewGuid(), TenantId = tenant.Id, Name = "errors", Query = "logs",

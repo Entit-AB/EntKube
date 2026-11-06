@@ -148,6 +148,8 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<TelemetryAlertRule> TelemetryAlertRules => Set<TelemetryAlertRule>();
     public DbSet<Dashboard> Dashboards => Set<Dashboard>();
     public DbSet<RumSite> RumSites => Set<RumSite>();
+    public DbSet<ErrorIssue> ErrorIssues => Set<ErrorIssue>();
+    public DbSet<ErrorScanCursor> ErrorScanCursors => Set<ErrorScanCursor>();
     public DbSet<FeedbackItem> FeedbackItems => Set<FeedbackItem>();
     public DbSet<FeedbackScreenshot> FeedbackScreenshots => Set<FeedbackScreenshot>();
     public DbSet<SavedLogQuery> SavedLogQueries => Set<SavedLogQuery>();

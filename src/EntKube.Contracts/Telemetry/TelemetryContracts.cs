@@ -181,6 +181,40 @@ public sealed record SyntheticCheckSummary(
     string? LastFailure,
     DateTime? LastRunAt);
 
+/// <summary>
+/// One fault, however many times it happened.
+///
+/// <para>⚠️ Title and SampleMessage are log text, and a browser error's message can be set by whoever
+/// can run script on the page. Treat both as untrusted.</para>
+/// </summary>
+/// <param name="Id">The issue's id.</param>
+/// <param name="Source">Log or Browser.</param>
+/// <param name="Scope">The cluster or RUM site's name.</param>
+/// <param name="Namespace">The namespace, for a log issue.</param>
+/// <param name="Workload">The workload, for a log issue.</param>
+/// <param name="Title">The message with whatever varies replaced.</param>
+/// <param name="SampleMessage">The latest real occurrence.</param>
+/// <param name="Occurrences">How many times it happened.</param>
+/// <param name="CountIsPartial">True when Occurrences is a lower bound.</param>
+/// <param name="Status">Open, Resolved or Ignored.</param>
+/// <param name="Regressions">How many times it came back after being resolved.</param>
+/// <param name="FirstSeenAt">When it was first seen.</param>
+/// <param name="LastSeenAt">When it was last seen.</param>
+public sealed record ErrorIssueSummary(
+    Guid Id,
+    string Source,
+    string Scope,
+    string? Namespace,
+    string? Workload,
+    string Title,
+    string SampleMessage,
+    long Occurrences,
+    bool CountIsPartial,
+    string Status,
+    int Regressions,
+    DateTime FirstSeenAt,
+    DateTime LastSeenAt);
+
 public interface ITelemetryApi
 {
     /// <summary>
@@ -221,6 +255,13 @@ public interface ITelemetryApi
     /// </summary>
     Task<LogQueryOutcome> QueryLogsAsync(
         Guid tenantId, Guid clusterId, string query, DateTime from, DateTime to, CancellationToken ct = default);
+    /// <summary>
+    /// One tenant's error issues, most recently seen first. <paramref name="status"/> is a status name
+    /// or null for all. The route validates it, so an unknown name here is a programming error.
+    /// </summary>
+    Task<IReadOnlyList<ErrorIssueSummary>> GetErrorIssuesAsync(
+        Guid tenantId, string? status = null, int limit = 200, CancellationToken ct = default);
+
     /// <summary>One tenant's synthetic checks and how each has done.</summary>
     Task<IReadOnlyList<SyntheticCheckSummary>> GetSyntheticChecksAsync(
         Guid tenantId, CancellationToken ct = default);

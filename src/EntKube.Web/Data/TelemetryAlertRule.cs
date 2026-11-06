@@ -16,7 +16,9 @@ public enum TelemetryAlertKind
     /// <summary>A log query's answer over the window: its single value, or else how many rows it returned.</summary>
     LogQuery,
     /// <summary>A synthetic check's failure streak. Managed by its check, and never edited as a rule.</summary>
-    SyntheticCheck
+    SyntheticCheck,
+    /// <summary>How many issues in a cluster are new, or came back, within the window.</summary>
+    NewErrorIssues
 }
 
 /// <summary>

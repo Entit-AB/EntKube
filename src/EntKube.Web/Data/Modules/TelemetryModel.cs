@@ -37,6 +37,8 @@ internal static class TelemetryModel
         builder.Entity<NotificationDelivery>().ToTable("NotificationDeliveries");
         builder.Entity<NotificationProviderConfig>().ToTable("NotificationProviderConfigs");
         builder.Entity<RumSite>().ToTable("RumSites");
+        builder.Entity<ErrorIssue>().ToTable("ErrorIssues");
+        builder.Entity<ErrorScanCursor>().ToTable("ErrorScanCursors");
         builder.Entity<SavedLogQuery>().ToTable("SavedLogQueries");
         builder.Entity<SyntheticCheck>().ToTable("SyntheticChecks");
         builder.Entity<SyntheticCheckResult>().ToTable("SyntheticCheckResults");
@@ -127,6 +129,29 @@ internal static class TelemetryModel
                 .HasForeignKey(r => r.CheckId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
+
+        builder.Entity<ErrorIssue>(entity =>
+        {
+            entity.HasKey(i => i.Id);
+            // One issue per fault per scope, which is what folding an occurrence looks up.
+            entity.HasIndex(i => new { i.TenantId, i.ScopeId, i.Fingerprint }).IsUnique();
+            // The inbox: one tenant's by status, most recently seen first.
+            entity.HasIndex(i => new { i.TenantId, i.Status, i.LastSeenAt });
+            // The retention prune deletes by age alone, across every tenant.
+            entity.HasIndex(i => i.LastSeenAt);
+            entity.Property(i => i.Source).HasConversion<string>().HasMaxLength(20);
+            entity.Property(i => i.Status).HasConversion<string>().HasMaxLength(20);
+            entity.Property(i => i.ScopeName).HasMaxLength(200).IsRequired();
+            entity.Property(i => i.Fingerprint).HasMaxLength(32).IsRequired();
+            entity.Property(i => i.Title).HasMaxLength(ErrorTrackingService.MaxTitleLength).IsRequired();
+            entity.Property(i => i.Namespace).HasMaxLength(253);
+            entity.Property(i => i.Workload).HasMaxLength(253);
+            entity.Property(i => i.SampleMessage).HasMaxLength(ErrorTrackingService.MaxSampleLength).IsRequired();
+            entity.Property(i => i.SampleTraceId).HasMaxLength(64);
+            entity.Property(i => i.ResolvedBy).HasMaxLength(256);
+        });
+
+        builder.Entity<ErrorScanCursor>(entity => entity.HasKey(c => c.ScopeId));
 
         builder.Entity<TelemetrySegment>(entity =>
         {

@@ -110,9 +110,12 @@ public sealed class TelemetryAlertEvaluator(
                 {
                     if (InMaintenance(tenantId, clusterId)) continue;        // hold state during maintenance
 
-                    Evaluation ev = rule.Kind == TelemetryAlertKind.SyntheticCheck
-                        ? await EvaluateSyntheticCheckAsync(db, rule, clusterId, now, ct)
-                        : await EvaluateRuleAsync(rule, clusterId, now, trace, log, rum, ct);
+                    Evaluation ev = rule.Kind switch
+                    {
+                        TelemetryAlertKind.SyntheticCheck => await EvaluateSyntheticCheckAsync(db, rule, clusterId, now, ct),
+                        TelemetryAlertKind.NewErrorIssues => await EvaluateNewErrorIssuesAsync(db, rule, clusterId, now, ct),
+                        _ => await EvaluateRuleAsync(rule, clusterId, now, trace, log, rum, ct),
+                    };
                     if (ev.Status == EvalStatus.Indeterminate) continue;     // transient failure / no data — hold state
 
                     string fingerprint = $"telemetry:{rule.Id:N}:{clusterId:N}";
@@ -367,7 +370,7 @@ public sealed class TelemetryAlertEvaluator(
     /// that has logs and no traces.
     /// </summary>
     public static bool ReadsLogs(TelemetryAlertKind kind) =>
-        kind is TelemetryAlertKind.LogErrorRate or TelemetryAlertKind.LogQuery;
+        kind is TelemetryAlertKind.LogErrorRate or TelemetryAlertKind.LogQuery or TelemetryAlertKind.NewErrorIssues;
 
     private enum EvalStatus { Firing, Clear, Indeterminate }
 
@@ -490,6 +493,17 @@ public sealed class TelemetryAlertEvaluator(
             SyntheticAlertState.Clear => Evaluation.Clear,
             _ => Evaluation.Unknown,
         };
+    }
+
+    private static async Task<Evaluation> EvaluateNewErrorIssuesAsync(
+        TelemetryDbContext db, TelemetryAlertRule rule, Guid clusterId, DateTime now, CancellationToken ct)
+    {
+        int w = Math.Max(1, rule.WindowMinutes);
+        int count = await ErrorTrackingService.CountNewOrRegressedAsync(db, rule.TenantId, clusterId, now.AddMinutes(-w), ct);
+
+        return Evaluation.From(count > rule.Threshold,
+            $"{count} new or regressed error issues over {w}m",
+            $"{count} error issues appeared or came back in the last {w} minutes (threshold {rule.Threshold:0.##}).");
     }
 
     private static AlertIncident NewIncident(TelemetryAlertRule rule, Guid clusterId, string fingerprint, Evaluation ev, DateTime now)

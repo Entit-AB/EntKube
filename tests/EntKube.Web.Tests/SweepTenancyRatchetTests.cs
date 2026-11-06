@@ -65,6 +65,7 @@ public class SweepTenancyRatchetTests
         "DeploymentSyncService",
         "DrScanService",
         "DriftScanService",
+        "ErrorScanSweep",
         "GitSyncService",
         "HeadscaleCertSyncService",
         "JitGrantReaperService",

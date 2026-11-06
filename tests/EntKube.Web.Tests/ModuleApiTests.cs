@@ -111,7 +111,8 @@ public class ModuleApiTests : IDisposable
         new EntKube.Web.Services.FeedbackService(
             factory, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()),
         logPipelines: null!,
-        syntheticChecks: null!);
+        syntheticChecks: null!,
+        errorTracking: null!);
 
     [Fact]
     public async Task Catalog_answers_for_the_asking_tenant_and_refuses_the_neighbour()

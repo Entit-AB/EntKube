@@ -3860,6 +3860,117 @@ namespace EntKube.Web.Data.Migrations.Postgres
                     b.ToTable("Environments", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ErrorIssue", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<bool>("CountIsPartial")
+                        .HasColumnType("boolean");
+
+                    b.Property<string>("Fingerprint")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)");
+
+                    b.Property<DateTime>("FirstSeenAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<DateTime>("LastSeenAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Namespace")
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.Property<long>("Occurrences")
+                        .HasColumnType("bigint");
+
+                    b.Property<DateTime?>("RegressedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<int>("Regressions")
+                        .HasColumnType("integer");
+
+                    b.Property<DateTime?>("ResolvedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("ResolvedBy")
+                        .HasMaxLength(256)
+                        .HasColumnType("character varying(256)");
+
+                    b.Property<string>("SampleMessage")
+                        .IsRequired()
+                        .HasMaxLength(2000)
+                        .HasColumnType("character varying(2000)");
+
+                    b.Property<string>("SampleTraceId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)");
+
+                    b.Property<Guid>("ScopeId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("ScopeName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)");
+
+                    b.Property<string>("Source")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<string>("Workload")
+                        .HasMaxLength(253)
+                        .HasColumnType("character varying(253)");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("LastSeenAt");
+
+                    b.HasIndex("TenantId", "ScopeId", "Fingerprint")
+                        .IsUnique();
+
+                    b.HasIndex("TenantId", "Status", "LastSeenAt");
+
+                    b.ToTable("ErrorIssues", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.ErrorScanCursor", b =>
+                {
+                    b.Property<Guid>("ScopeId")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid");
+
+                    b.Property<DateTime>("ScannedThrough")
+                        .HasColumnType("timestamp with time zone");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("uuid");
+
+                    b.HasKey("ScopeId");
+
+                    b.ToTable("ErrorScanCursors", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.ExternalDependency", b =>
                 {
                     b.Property<Guid>("Id")

@@ -57,6 +57,7 @@ public class BackupCoverageTests
         // it starts, and carrying the old numbers across would describe machines it never saw.
         ["MetricRollup"] = "measurements of the old installation's own clusters",
         ["SyntheticCheckResult"] = "probes the new server repeats",
+        ["ErrorScanCursor"] = "a position in a sweep the new server has not run",
 
         // The feedback itself travels; the inbox shows an item with no image when this is absent.
         // Images of somebody's screen, kept briefly on purpose, should not be copied into a file
