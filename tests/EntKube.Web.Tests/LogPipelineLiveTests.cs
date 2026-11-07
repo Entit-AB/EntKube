@@ -36,6 +36,10 @@ public sealed class LogPipelineLiveFixture : IAsyncLifetime
             b.UseSetting("Vault:RootKey", "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
             b.UseSetting("DataProtection:KeyPath", Path.Combine(tempDir, "keys"));
             b.UseSetting("Seed:AdminEmail", "");
+
+            // No sweeps. These tests call the scans themselves, and a hosted ErrorScanSweep claiming
+            // a cursor first would make a test's own scan find nothing to apply.
+            b.UseSetting(EntKube.Web.Modules.HostedWork.RunSingletonWorkKey, "false");
         });
 
         IServiceProvider services = Factory.Services;

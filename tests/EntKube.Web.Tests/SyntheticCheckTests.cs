@@ -676,6 +676,9 @@ public sealed class SyntheticHostFixture : IDisposable
             b.UseSetting("DataProtection:KeyPath", Path.Combine(tempDir, "keys"));
             b.UseSetting("Seed:AdminEmail", "");
             b.UseSetting("Synthetics:AllowPrivateTargets", "true");
+
+            // The runner under test is singleton work, so say so rather than lean on the default.
+            b.UseSetting(EntKube.Web.Modules.HostedWork.RunSingletonWorkKey, "true");
         });
     }
 
@@ -723,9 +726,15 @@ public sealed class SyntheticRunnerLiveTests(SyntheticHostFixture host) : IClass
         })).Should().BeNull();
 
         SyntheticCheck? seen = null;
-        DateTime deadline = DateTime.UtcNow.AddSeconds(30);
 
-        while (DateTime.UtcNow < deadline)
+        // ⚠️ A Stopwatch, not DateTime.UtcNow. The runner's timer is monotonic, and on a laptop that
+        // sleeps mid-run the wall clock jumps ahead while monotonic time stands still: a wall-clock
+        // deadline then expired during the sleep, before the runner had ticked once. Three failures
+        // looked like a slow machine and like settings leaking between hosts, and were neither; the
+        // timestamps showed the check due at 15:34 and the test giving up at 15:49 after "13 s".
+        System.Diagnostics.Stopwatch waited = System.Diagnostics.Stopwatch.StartNew();
+
+        while (waited.Elapsed < TimeSpan.FromSeconds(60))
         {
             seen = (await checks.ListAsync(tenantId)).Single().Check;
             if (seen.State != SyntheticCheckState.Unknown) break;
