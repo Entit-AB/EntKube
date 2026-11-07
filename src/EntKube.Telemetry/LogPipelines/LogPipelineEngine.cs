@@ -190,7 +190,7 @@ public static class LogPipelineEngine
             object?[] key = new object?[s.Keys.Count];
             for (int i = 0; i < key.Length; i++)
             {
-                key[i] = s.Keys[i].Bin is { } width ? Floor((DateTime)row[keyIndex[i]]!, width) : row[keyIndex[i]];
+                key[i] = KeyValue(s.Keys[i], row[keyIndex[i]]);
             }
 
             GroupKey group = new(key);
@@ -213,7 +213,7 @@ public static class LogPipelineEngine
             groups[new GroupKey([])] = (0, [.. s.Aggregates.Select(_ => new HashSet<object?>())]);
         }
 
-        List<LogColumn> output = [.. keyIndex.Select(i => columns[i])];
+        List<LogColumn> output = [.. s.Keys.Select((k, i) => new LogColumn(k.OutputName, k.Pattern ? LogColumnType.Text : columns[keyIndex[i]].Type))];
         output.AddRange(s.Aggregates.Select(a => new LogColumn(a.Alias, LogColumnType.Number)));
 
         List<object?[]> result = [.. groups.Select(g =>
@@ -230,6 +230,13 @@ public static class LogPipelineEngine
         })];
 
         return (output, result);
+    }
+
+    private static object? KeyValue(LogGroupKey key, object? value)
+    {
+        if (key.Pattern) return ErrorFingerprint.Normalize(value as string);
+
+        return key.Bin is { } width ? Floor((DateTime)value!, width) : value;
     }
 
     private static DateTime Floor(DateTime value, TimeSpan width) =>

@@ -13,7 +13,9 @@ public enum DashboardPanelType
     /// <summary>A service's RED (requests / error-rate / p95) summary + request-volume strip.</summary>
     ServiceRed,
     /// <summary>Log volume over time (histogram), optionally namespace/text-scoped.</summary>
-    LogVolume
+    LogVolume,
+    /// <summary>A log query's answer: a table, or one number when that is all it returns.</summary>
+    LogQuery
 }
 
 /// <summary>One panel in a dashboard. Serialized into <see cref="Dashboard.PanelsJson"/>.</summary>
@@ -26,6 +28,7 @@ public sealed class DashboardPanel
     public string? Service { get; set; }     // MetricSeries scope / ServiceRed
     public string? Namespace { get; set; }   // LogVolume
     public string? MatchText { get; set; }   // LogVolume
+    public string? Query { get; set; }       // LogQuery
     /// <summary>Bootstrap grid width (columns of 12); 6 = half, 12 = full.</summary>
     public int Width { get; set; } = 6;
 }

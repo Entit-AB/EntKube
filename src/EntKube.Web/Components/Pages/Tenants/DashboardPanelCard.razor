@@ -3,6 +3,7 @@
 @inject IMetricsQuery Metrics
 @inject ITelemetryBackends Backends
 @inject LogQueryService Logs
+@inject LogPipelineService LogPipelines
 
 <div class="card h-100">
     <div class="card-header py-1 px-2 d-flex justify-content-between align-items-center">
@@ -24,6 +25,10 @@
         {
             @if (series.Count > 0) { <MetricChart DataPoints="series" Color="#4a90d9" HeightPx="140" /> }
             else { <div class="text-muted small py-4 text-center">@EmptyText</div> }
+        }
+        else if (Panel.Type == DashboardPanelType.LogQuery)
+        {
+            <LogQueryPanelBody Outcome="logQuery" />
         }
         else if (Panel.Type == DashboardPanelType.ServiceRed)
         {
@@ -88,13 +93,14 @@
     private List<TimeSeriesDataPoint> series = [];
     private List<RedBucket> red = [];
     private List<LogHistogramBucket> histogram = [];
+    private LogPipelineOutcome? logQuery;
     private string _lastKey = "";
 
     private string Heading => string.IsNullOrEmpty(Panel.Title) ? DefaultTitle() : Panel.Title;
 
     protected override async Task OnParametersSetAsync()
     {
-        string key = $"{ClusterId}|{From:o}|{To:o}|{Panel.Type}|{Panel.Metric}|{Panel.Service}|{Panel.Namespace}|{Panel.MatchText}";
+        string key = $"{ClusterId}|{From:o}|{To:o}|{Panel.Type}|{Panel.Metric}|{Panel.Service}|{Panel.Namespace}|{Panel.MatchText}|{Panel.Query}";
         if (key == _lastKey) return;
         _lastKey = key;
         await RefreshAsync();
@@ -125,6 +131,11 @@
                     if (r.IsSuccess && r.Data is not null) red = r.Data;
                 }
                 break;
+            case DashboardPanelType.LogQuery:
+                logQuery = string.IsNullOrWhiteSpace(Panel.Query)
+                    ? null
+                    : await LogPipelines.RunAsync(TenantId, ClusterId, Panel.Query, From, To);
+                break;
             default: // LogVolume — needs a namespace
                 histogram = [];
                 if (!string.IsNullOrEmpty(Panel.Namespace))
@@ -151,6 +162,7 @@
     {
         DashboardPanelType.MetricSeries => Panel.Metric ?? "metric",
         DashboardPanelType.ServiceRed => $"{Panel.Service} RED",
+        DashboardPanelType.LogQuery => "log query",
         _ => $"logs {Panel.Namespace}"
     };
 

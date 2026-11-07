@@ -50,6 +50,7 @@
                     <option value="@DashboardPanelType.MetricSeries">Metric series</option>
                     <option value="@DashboardPanelType.ServiceRed">Service RED</option>
                     <option value="@DashboardPanelType.LogVolume">Log volume</option>
+                    <option value="@DashboardPanelType.LogQuery">Log query</option>
                 </select>
             </div>
             @if (editing.Type == DashboardPanelType.MetricSeries)
@@ -61,6 +62,18 @@
                 <div class="col-md-3">
                     <label class="form-label small mb-1">Service (optional)</label>
                     <input class="form-control form-control-sm font-monospace" @bind="editing.Service" placeholder="all" />
+                </div>
+            }
+            else if (editing.Type == DashboardPanelType.LogQuery)
+            {
+                <div class="col-12">
+                    <label class="form-label small mb-1">Query</label>
+                    <textarea class="form-control form-control-sm font-monospace" rows="3" spellcheck="false" @bind="editing.Query" @bind:event="oninput"
+                              placeholder="logs | where level >= error | summarize count() by pod"></textarea>
+                    @if (EntKube.Telemetry.LogPipelines.LogPipelineParser.Parse(editing.Query).Error is { } queryProblem && !string.IsNullOrWhiteSpace(editing.Query))
+                    {
+                        <div class="form-text text-danger">@queryProblem.Message</div>
+                    }
                 </div>
             }
             else if (editing.Type == DashboardPanelType.ServiceRed)
@@ -216,7 +229,7 @@ else
     private static DashboardPanel Clone(DashboardPanel p) => new()
     {
         Id = p.Id, Title = p.Title, Type = p.Type, Metric = p.Metric,
-        Service = p.Service, Namespace = p.Namespace, MatchText = p.MatchText, Width = p.Width
+        Service = p.Service, Namespace = p.Namespace, MatchText = p.MatchText, Query = p.Query, Width = p.Width
     };
 
     private Task SaveAsync() => Dashboards.SavePanelsAsync(TenantId, Dashboard.Id, panels);

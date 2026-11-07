@@ -201,6 +201,58 @@ public class LogPipelineEngineTests
         Run($"logs | where {condition}").Rows.Should().HaveCount(rows);
     }
 
+    [Fact]
+    public void Pattern_groups_lines_that_differ_only_in_what_varies()
+    {
+        List<object?[]> lines =
+        [
+            Line(0, LogLevel.Error, "a", "Order 1 failed"),
+            Line(1, LogLevel.Error, "a", "Order 2 failed"),
+            Line(2, LogLevel.Error, "b", "Order 3 failed"),
+            Line(3, LogLevel.Info, "a", "Cache refreshed in 12 ms"),
+        ];
+
+        LogPipelineResult result = Run("logs | summarize n = count() by pattern(body) | sort by n desc", lines);
+
+        result.Columns.Select(c => c.Name).Should().Equal("pattern", "n");
+        ByFirstColumn(result).Should().BeEquivalentTo(new Dictionary<string, string>
+        {
+            ["Order <n> failed"] = "3",
+            ["Cache refreshed in <n> ms"] = "1",
+        });
+    }
+
+    [Fact]
+    public void A_pattern_can_be_grouped_with_another_key_and_filtered_afterwards()
+    {
+        List<object?[]> lines =
+        [
+            Line(0, LogLevel.Error, "a", "Order 1 failed"),
+            Line(1, LogLevel.Error, "b", "Order 2 failed"),
+        ];
+
+        LogPipelineResult result = Run("logs | summarize n = count() by pod, pattern(body) | where pattern has \"Order\"", lines);
+
+        result.Columns.Select(c => c.Name).Should().Equal("pod", "pattern", "n");
+        result.Rows.Should().HaveCount(2);
+    }
+
+    [Fact]
+    public void After_a_pattern_the_original_column_is_gone()
+    {
+        LogPipelineParser.Parse("logs | summarize count() by pattern(body) | project body").Error!.Message
+            .Should().Contain("no column 'body'");
+    }
+
+    [Theory]
+    [InlineData("level")]
+    [InlineData("timestamp")]
+    public void A_pattern_needs_text(string column)
+    {
+        LogPipelineParser.Parse($"logs | summarize count() by pattern({column})").Error!.Message
+            .Should().Contain("text column");
+    }
+
     [Theory]
     [InlineData("a b c", "b", true)]
     [InlineData("b", "b", true)]

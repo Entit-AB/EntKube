@@ -13,17 +13,26 @@ public sealed record LogPipelineOutcome(
 /// Runs a log query against one cluster through <see cref="LogQueryService"/>, so a cluster on Loki
 /// answers it as well as one on the native store.
 ///
-/// <para>⚠️ The caller must already know the cluster is the tenant's. <see cref="LogQueryService"/>
-/// takes the tenant and resolves that tenant's backend; it does not refuse a foreign cluster id, so
-/// the API route asks Fleet first and the page offers only the tenant's own clusters.</para>
+/// <para>⚠️ <b>The tenant check on the cluster is here, once, for every caller.</b> The native log
+/// layer resolves the tenant from the cluster, so it does not refuse a foreign id: it reads that
+/// cluster's own tenant's logs. A cluster id often arrives from a browser's select element, so
+/// leaving this to each page would make one forgotten guard a cross-tenant read.</para>
 /// </summary>
-public sealed class LogPipelineService(LogQueryService logs)
+public sealed class LogPipelineService(LogQueryService logs, IDbContextFactory<TelemetryDbContext> dbFactory)
 {
     public async Task<LogPipelineOutcome> RunAsync(
         Guid tenantId, Guid clusterId, string text, DateTime from, DateTime to, CancellationToken ct = default)
     {
         (LogPipelineQuery? query, LogPipelineError? error) = LogPipelineParser.Parse(text);
         if (query is null) return new LogPipelineOutcome(null, error, null);
+
+        await using (TelemetryDbContext db = await dbFactory.CreateDbContextAsync(ct))
+        {
+            if (!await db.KubernetesClusters.AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct))
+            {
+                return new LogPipelineOutcome(null, null, "That cluster does not exist.");
+            }
+        }
 
         int windowMinutes = Math.Max(1, (int)Math.Ceiling((to - from).TotalMinutes));
 

@@ -28,6 +28,7 @@ logs
 | `summarize` | `summarize count() by pod` |
 | | `summarize pods = dcount(pod) by namespace` |
 | | `summarize count() by bin(timestamp, 5m)` |
+| | `summarize count() by pattern(body)` |
 | `project` | `project timestamp, pod, body` |
 | `sort by` | `sort by count_ desc` (`order by` also works) |
 | `top` | `top 10 by count_` |
@@ -48,6 +49,22 @@ A `summarize` or `project` replaces the columns, so later stages see only what t
 
 There is no regular-expression operator.
 
+## Log patterns
+
+`pattern(body)` groups lines by shape, so you can see what a log mostly consists of without knowing what
+to search for:
+
+```
+logs
+| where namespace == "shop"
+| summarize lines = count() by pattern(body)
+| top 20 by lines
+```
+
+Numbers, IDs, timestamps, addresses and quoted values become placeholders, so `Order 42 failed` and
+`Order 97 failed` are both `Order <n> failed`. Only a line's first line of text counts. The result has a
+`pattern` column in place of the column you grouped.
+
 ## Partial results
 
 A query reads at most the newest 20,000 lines in the window. If it hits that limit, the result is
@@ -65,6 +82,12 @@ Loki's case-sensitive text match, so it can miss a line that differs in case.
 
 Enter a name and choose **Save**. Saved queries are shared with everyone in the tenant, and saving
 under an existing name replaces that query.
+
+## Dashboards
+
+Add a **Log query** panel to a dashboard under **Observability › Monitoring › Dashboards**. It shows a
+table, or one large number when the query returns a single value, and follows the dashboard's cluster
+and time range. A panel showing a partial result says so.
 
 ## Alerting on a query
 

@@ -157,6 +157,24 @@ public sealed class LogPipelineLiveTests(LogPipelineLiveFixture host) : IClassFi
         outcome.Result!.Rows.Select(r => (r[0], r[1], r[2])).Should().Equal(("shop", 4d, 2d), ("jobs", 2d, 1d));
     }
 
+    /// <summary>
+    /// ⚠️ The native layer resolves the tenant from the cluster, so without the check in
+    /// LogPipelineService this returns the other tenant's real lines. A dashboard's cluster id
+    /// comes from a browser.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenant_naming_this_cluster_reads_nothing()
+    {
+        using IServiceScope scope = host.Factory.Services.CreateScope();
+        LogPipelineOutcome outcome = await scope.ServiceProvider.GetRequiredService<LogPipelineService>()
+            .RunAsync(Guid.NewGuid(), host.ClusterId, "logs", host.Now.AddHours(-1), host.Now.AddMinutes(1));
+
+        outcome.Result.Should().BeNull();
+        outcome.Failure.Should().Contain("does not exist");
+
+        (await RowsAsync("logs")).Should().Be(6, "the owner still reads them");
+    }
+
     [Fact]
     public async Task Another_cluster_s_id_reads_nothing_of_this_one()
     {
