@@ -50,6 +50,7 @@ public sealed class TelemetryBackendRouter(
     SegmentTraceService localTraces,
     TelemetryNodeClient nodes,
     EntKubeTelemetryService telemetry,
+    IClusterTenantResolver owners,
     ILoggerFactory loggers) : ITelemetryBackends
 {
     // One per signal: the two decisions differ in their "does the node hold anything" probe, which is
@@ -65,11 +66,11 @@ public sealed class TelemetryBackendRouter(
     // supply without this change.
     public ILogBackend LogsFor(Guid tenantId) => logs.GetOrAdd(tenantId, t =>
         new ClusterRoutedLogBackend(t, new NodeLogBackend(t, nodes), localLogs, nodes, telemetry, logRoutes,
-            loggers.CreateLogger<ClusterRoutedLogBackend>()));
+            loggers.CreateLogger<ClusterRoutedLogBackend>(), owners));
 
     public ITraceQueryService TracesFor(Guid tenantId) => traces.GetOrAdd(tenantId, t =>
         new ClusterRoutedTraceService(t, new NodeTraceService(t, nodes), localTraces, nodes, telemetry, traceRoutes,
-            loggers.CreateLogger<ClusterRoutedTraceService>()));
+            loggers.CreateLogger<ClusterRoutedTraceService>(), owners));
 }
 
 /// <summary>
@@ -98,12 +99,19 @@ public sealed class ClusterRoutedLogBackend(
     TelemetryNodeClient nodes,
     EntKubeTelemetryService telemetry,
     RouteCache routes,
-    ILogger<ClusterRoutedLogBackend> logger) : ILogBackend
+    ILogger<ClusterRoutedLogBackend> logger,
+    IClusterTenantResolver owners) : ILogBackend
 {
     public bool IsEnabled => true;
 
+    /// <summary>
+    /// ⚠️ The ownership check comes first, and it is the only one. <see cref="SegmentLogService"/>
+    /// resolves the tenant FROM the cluster, so asked about another tenant's cluster it answered with
+    /// that tenant's logs; the cluster id often comes from a browser's select element. A cluster that
+    /// is not this tenant's is answered as one that does not exist.
+    /// </summary>
     private async Task<ILogBackend> RouteAsync(Guid clusterId, CancellationToken ct)
-        => await routes.UseInClusterAsync(tenantId, clusterId,
+        => await owners.ResolveAsync(clusterId, ct) != tenantId ? ForeignCluster.Logs : await routes.UseInClusterAsync(tenantId, clusterId,
             () => nodes.IsAvailableAsync(tenantId, clusterId, ct),
             () => inCluster.HasDataAsync(clusterId, ct),
             () => telemetry.ManagementPlaneStillReceivesAsync(tenantId, clusterId, ct),
@@ -150,10 +158,12 @@ public sealed class ClusterRoutedTraceService(
     TelemetryNodeClient nodes,
     EntKubeTelemetryService telemetry,
     RouteCache routes,
-    ILogger<ClusterRoutedTraceService> logger) : ITraceQueryService
+    ILogger<ClusterRoutedTraceService> logger,
+    IClusterTenantResolver owners) : ITraceQueryService
 {
+    /// <summary>As on <see cref="ClusterRoutedLogBackend"/>: a foreign cluster is one that does not exist.</summary>
     private async Task<ITraceQueryService> RouteAsync(Guid clusterId, CancellationToken ct)
-        => await routes.UseInClusterAsync(tenantId, clusterId,
+        => await owners.ResolveAsync(clusterId, ct) != tenantId ? ForeignCluster.Traces : await routes.UseInClusterAsync(tenantId, clusterId,
             () => nodes.IsAvailableAsync(tenantId, clusterId, ct),
             () => inCluster.HasDataAsync(clusterId, ct),
             () => telemetry.ManagementPlaneStillReceivesAsync(tenantId, clusterId, ct),
@@ -282,5 +292,43 @@ public static class TelemetryRoute
             ? (false, "its telemetry node is empty and its collector still exports to the management "
                       + "plane — re-apply the collector to complete the cutover")
             : (true, "its node is the destination for this cluster's telemetry, and has nothing yet");
+    }
+}
+
+/// <summary>
+/// What a tenant gets when it names a cluster that is not its own: nothing, and a failure rather than
+/// an empty success, so no caller can read the refusal as "this cluster is quiet".
+/// </summary>
+internal static class ForeignCluster
+{
+    private const string Refusal = "That cluster does not exist.";
+
+    public static readonly ILogBackend Logs = new RefusedLogs();
+    public static readonly ITraceQueryService Traces = new RefusedTraces();
+
+    private static KubernetesOperationResult<T> No<T>() => KubernetesOperationResult<T>.Failure(Refusal);
+
+    private sealed class RefusedLogs : ILogBackend
+    {
+        public bool IsEnabled => true;
+        public Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default) => Task.FromResult(false);
+        public Task<KubernetesOperationResult<List<string>>> GetNamespacesAsync(Guid clusterId, int windowMinutes = 60, CancellationToken ct = default) => Task.FromResult(No<List<string>>());
+        public Task<KubernetesOperationResult<List<string>>> GetPodsAsync(Guid clusterId, string namespaceName, int windowMinutes = 60, CancellationToken ct = default) => Task.FromResult(No<List<string>>());
+        public Task<KubernetesOperationResult<List<string>>> GetContainersAsync(Guid clusterId, string namespaceName, int windowMinutes = 60, CancellationToken ct = default) => Task.FromResult(No<List<string>>());
+        public Task<KubernetesOperationResult<List<LokiLogStream>>> QueryAsync(Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int limit = 200, CancellationToken ct = default) => Task.FromResult(No<List<LokiLogStream>>());
+        public Task<KubernetesOperationResult<List<LokiLogStream>>> QueryByTraceAsync(Guid clusterId, string traceId, int limit = 500, CancellationToken ct = default) => Task.FromResult(No<List<LokiLogStream>>());
+        public Task<KubernetesOperationResult<List<LogHistogramBucket>>> GetHistogramAsync(Guid clusterId, LogQueryFilter filter, DateTime from, DateTime to, int buckets = 48, CancellationToken ct = default) => Task.FromResult(No<List<LogHistogramBucket>>());
+        public Task<KubernetesOperationResult<long>> CountAsync(Guid clusterId, string? ns, string? matchText, LogLevel minLevel, DateTime from, DateTime to, CancellationToken ct = default) => Task.FromResult(No<long>());
+    }
+
+    private sealed class RefusedTraces : ITraceQueryService
+    {
+        public Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default) => Task.FromResult(false);
+        public Task<KubernetesOperationResult<List<string>>> GetServicesAsync(Guid clusterId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null, string? podPattern = null, int windowMinutes = 60) => Task.FromResult(No<List<string>>());
+        public Task<KubernetesOperationResult<List<TraceSummary>>> ListTracesAsync(Guid clusterId, string? service, DateTime from, DateTime to, double minDurationMs = 0, bool errorsOnly = false, int limit = 50, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null, string? podPattern = null) => Task.FromResult(No<List<TraceSummary>>());
+        public Task<KubernetesOperationResult<List<SpanRecord>>> GetTraceAsync(Guid clusterId, string traceId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null) => Task.FromResult(No<List<SpanRecord>>());
+        public Task<KubernetesOperationResult<List<RedBucket>>> GetServiceRedAsync(Guid clusterId, string service, DateTime from, DateTime to, int buckets = 48, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null, string? podPattern = null) => Task.FromResult(No<List<RedBucket>>());
+        public Task<KubernetesOperationResult<List<ServiceEdge>>> GetServiceMapAsync(Guid clusterId, DateTime from, DateTime to, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null, string? podPattern = null) => Task.FromResult(No<List<ServiceEdge>>());
+        public Task<KubernetesOperationResult<ServiceStats>> GetServiceStatsAsync(Guid clusterId, string service, DateTime from, DateTime to, CancellationToken ct = default) => Task.FromResult(No<ServiceStats>());
     }
 }
