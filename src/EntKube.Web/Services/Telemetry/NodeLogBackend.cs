@@ -37,7 +37,7 @@ public sealed class NodeLogBackend(Guid tenantId, TelemetryNodeClient client) : 
     internal static async Task<bool> AskAsync(
         TelemetryNodeClient client, Guid tenantId, Guid clusterId, string path, CancellationToken ct)
     {
-        KubernetesOperationResult<bool> result = await client.GetAsync<bool>(tenantId, clusterId, path, ct);
+        KubernetesOperationResult<bool> result = await client.ProbeAsync<bool>(tenantId, clusterId, path, ct);
         return result.IsSuccess && result.Data;
     }
 

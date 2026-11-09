@@ -112,6 +112,7 @@ public sealed class ClusterRoutedLogBackend(
     /// </summary>
     private async Task<ILogBackend> RouteAsync(Guid clusterId, CancellationToken ct)
         => await owners.ResolveAsync(clusterId, ct) != tenantId ? ForeignCluster.Logs : await routes.UseInClusterAsync(tenantId, clusterId,
+            () => local.HasDataSinceAsync(clusterId, DateTime.UtcNow - TelemetryRoute.RecentWindow, ct),
             () => nodes.IsAvailableAsync(tenantId, clusterId, ct),
             () => inCluster.HasDataAsync(clusterId, ct),
             () => telemetry.ManagementPlaneStillReceivesAsync(tenantId, clusterId, ct),
@@ -164,6 +165,7 @@ public sealed class ClusterRoutedTraceService(
     /// <summary>As on <see cref="ClusterRoutedLogBackend"/>: a foreign cluster is one that does not exist.</summary>
     private async Task<ITraceQueryService> RouteAsync(Guid clusterId, CancellationToken ct)
         => await owners.ResolveAsync(clusterId, ct) != tenantId ? ForeignCluster.Traces : await routes.UseInClusterAsync(tenantId, clusterId,
+            () => local.HasDataSinceAsync(clusterId, DateTime.UtcNow - TelemetryRoute.RecentWindow, ct),
             () => nodes.IsAvailableAsync(tenantId, clusterId, ct),
             () => inCluster.HasDataAsync(clusterId, ct),
             () => telemetry.ManagementPlaneStillReceivesAsync(tenantId, clusterId, ct),
@@ -223,6 +225,8 @@ public sealed class RouteCache
     private readonly ConcurrentDictionary<(Guid TenantId, Guid ClusterId), (DateTime At, bool InCluster)> _cache = new();
     private static readonly TimeSpan Ttl = TimeSpan.FromSeconds(30);
 
+    /// <param name="centralIsRecent">Whether the management plane's own store received anything for
+    /// this cluster within <see cref="TelemetryRoute.RecentWindow"/>.</param>
     /// <param name="nodePresent">Whether the cluster has an in-cluster telemetry node at all.</param>
     /// <param name="nodeHasData">Whether that node holds anything for this signal.</param>
     /// <param name="stillReceives">
@@ -230,13 +234,14 @@ public sealed class RouteCache
     /// <paramref name="tenantId"/></em> — which is the whole reason the key below carries the tenant.
     /// </param>
     /// <remarks>
-    /// The three questions arrive as delegates rather than as the clients that answer them, for the
+    /// The four questions arrive as delegates rather than as the clients that answer them, for the
     /// same reason <see cref="TelemetryRoute"/> is separate from both: the caching rule and the
     /// precedence rule are each testable on their own, and neither needs a cluster, a node or a
     /// database to exercise.
     /// </remarks>
     public async Task<bool> UseInClusterAsync(
         Guid tenantId, Guid clusterId,
+        Func<Task<bool>> centralIsRecent,
         Func<Task<bool>> nodePresent, Func<Task<bool>> nodeHasData, Func<Task<bool?>> stillReceives,
         ILogger logger, CancellationToken ct = default)
     {
@@ -244,7 +249,8 @@ public sealed class RouteCache
             && DateTime.UtcNow - hit.At < Ttl)
             return hit.InCluster;
 
-        (bool inCluster, string why) = await TelemetryRoute.DecideAsync(nodePresent, nodeHasData, stillReceives);
+        (bool inCluster, string why) = await TelemetryRoute.DecideAsync(
+            centralIsRecent, nodePresent, nodeHasData, stillReceives);
 
         if (!_cache.TryGetValue((tenantId, clusterId), out (DateTime At, bool InCluster) prior)
             || prior.InCluster != inCluster)
@@ -273,14 +279,36 @@ public sealed class RouteCache
 /// settle it, and there the question is whether the management plane is still the collector's
 /// destination.</para>
 ///
+/// <para><b>"Holds anything" was only right in one direction.</b> The node's answer covers a week, so it
+/// settled the forward cutover — a node that has received anything is the destination. Telemetry has since
+/// moved back to the management plane (docs/telemetry-central-again.md), and in that direction a node keeps
+/// "holding data" for a week after its collector stopped sending to it. Every read for that week went to a
+/// store that no longer received anything, through the cluster's API-server proxy: the trace service list,
+/// which covers the last hour, came back empty, and a slow or half-removed node held pages until they timed
+/// out. So the management plane's own store is asked first, and about the last hour only. If it is
+/// receiving this cluster's telemetry now, it is the destination now, whatever an old node still holds. It
+/// is a question about data too, so a collector that really does export to a node, whatever its stored
+/// values say, leaves this store quiet and falls through to the rules above. It is also local, so a cluster
+/// that has moved back costs no remote call at all.</para>
+///
 /// <para>Separated from the caching and the concrete clients so the precedence, which is the part with the
 /// rules in it, can be read and tested on its own.</para>
 /// </summary>
 public static class TelemetryRoute
 {
+    /// <summary>
+    /// How recent the management plane's data must be to make it the destination. An hour is what the
+    /// log and trace views open on, so a store that answers yes has something for the default view.
+    /// </summary>
+    public static readonly TimeSpan RecentWindow = TimeSpan.FromHours(1);
+
     public static async Task<(bool InCluster, string Why)> DecideAsync(
+        Func<Task<bool>> centralIsRecent,
         Func<Task<bool>> nodePresent, Func<Task<bool>> nodeHasData, Func<Task<bool?>> managementPlaneStillReceives)
     {
+        if (await centralIsRecent())
+            return (false, "the management plane is receiving its telemetry");
+
         if (!await nodePresent())
             return (false, "no in-cluster telemetry node is installed on it");
 

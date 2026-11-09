@@ -40,20 +40,33 @@ public sealed class SegmentLogService(
     private static readonly ConcurrentDictionary<string, (DateTime At, List<string> Values)> LabelCache = new();
     private static readonly TimeSpan LabelTtl = TimeSpan.FromSeconds(30);
 
-    public async Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
+    public Task<bool> HasDataAsync(Guid clusterId, CancellationToken ct = default)
+        // "Has recent data" is the routing signal — bound to a week so this doesn't open a reader for
+        // every segment across the (up to 90-day) retention window just to check existence.
+        => HasDataSinceAsync(clusterId, DateTime.UtcNow.AddDays(-7), ct);
+
+    /// <summary>
+    /// Whether any of this cluster's lines arrived at or after <paramref name="since"/>. Either tier
+    /// having data counts. The bound is in the query as well as on the segments opened, because a
+    /// segment overlapping <paramref name="since"/> can hold lines from well before it, and "recently"
+    /// is the whole question when routing asks it.
+    /// </summary>
+    public async Task<bool> HasDataSinceAsync(Guid clusterId, DateTime since, CancellationToken ct = default)
     {
         Guid? tenantId = await tenants.ResolveAsync(clusterId, ct);
         if (tenantId is null) return false;
-        // "Has recent data" is the routing signal — bound to a week so this doesn't open a reader for
-        // every segment across the (up to 90-day) retention window just to check existence. Either tier
-        // having data counts.
-        DateTime from = DateTime.UtcNow.AddDays(-7);
+        var filter = new BooleanQuery
+        {
+            { ScopeQuery(tenantId.Value, clusterId), Occur.MUST },
+            { NumericRangeQuery.NewInt64Range(
+                LogSegmentSchema.Ts, LogSegmentSchema.ToEpochMillis(since), null, true, true), Occur.MUST },
+        };
         foreach (LogSegmentManager segments in tiers.QueryManagers(tenantId.Value))
         {
             // AnyAsync, not QueryAsync: an existence check must not open (and, for a cold segment,
-            // download) the whole week before it can answer. See SegmentManagerBase.AnyAsync.
-            bool any = await segments.AnyAsync(scope, from, null,
-                s => s.Search(ScopeQuery(tenantId.Value, clusterId), 1).TotalHits > 0, ct);
+            // download) the whole window before it can answer. See SegmentManagerBase.AnyAsync.
+            bool any = await segments.AnyAsync(scope, since, null,
+                s => s.Search(filter, 1).TotalHits > 0, ct);
             if (any) return true;
         }
         return false;

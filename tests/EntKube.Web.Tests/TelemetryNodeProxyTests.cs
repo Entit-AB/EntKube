@@ -168,6 +168,88 @@ public class TelemetryNodeProxyTests : IDisposable
             It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
+    // ── Deadlines ──
+    // Every node call crosses the cluster's API server, and none had a deadline of its own, so a node that
+    // never answered held the page until the HTTP client gave up 100 seconds later. Each test makes the
+    // seam hang until cancelled and asserts the call comes back on its own bound, with a message.
+
+    /// <summary>
+    /// Hangs until the CALLER's deadline cancels it, and no longer than <see cref="Ceiling"/>. Without the
+    /// ceiling a removed deadline would hang the test rather than fail it, which a suite reports as
+    /// nothing at all until the job times out.
+    /// </summary>
+    private static async Task<T> HangUntilCancelled<T>(CancellationToken ct)
+    {
+        await Task.Delay(Ceiling, ct);
+        throw new TimeoutException("the client never cancelled the call; nothing bounded it");
+    }
+
+    private static readonly TimeSpan Ceiling = TimeSpan.FromSeconds(15);
+
+    private TelemetryNodeClient ClientWith(TimeSpan lookup, TimeSpan probe, TimeSpan read) =>
+        new(new ClusterClientFactory(testDb.Factory, k8s.Object),
+            new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory),
+            new IngestTokenService(TestServices.TestConfiguration()),
+            NullLogger<TelemetryNodeClient>.Instance)
+        {
+            LookupTimeout = lookup, ProbeTimeout = probe, ReadTimeout = read,
+        };
+
+    private void ProxyHangs() =>
+        k8s.Setup(x => x.ProxyServiceAsync(It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(),
+                It.IsAny<HttpMethod>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<object?>(),
+                It.IsAny<IReadOnlyDictionary<string, string>?>(), It.IsAny<CancellationToken>()))
+            .Returns((string _, string _, int _, HttpMethod _, string _, string _, object? _,
+                    IReadOnlyDictionary<string, string>? _, CancellationToken ct)
+                => HangUntilCancelled<ServiceProxyResponse>(ct));
+
+    [Fact]
+    public async Task A_read_from_a_node_that_never_answers_fails_on_the_read_deadline()
+    {
+        ProxyHangs();
+        TelemetryNodeClient client = ClientWith(
+            lookup: TimeSpan.FromSeconds(30), probe: TimeSpan.FromSeconds(30), read: TimeSpan.FromMilliseconds(300));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        KubernetesOperationResult<List<string>> result =
+            await client.GetAsync<List<string>>(tenantId, clusterId, "api/traces/services");
+
+        clock.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10));
+        result.IsSuccess.Should().BeFalse();
+        result.Error.Should().Contain("did not answer within", "a hung node must say so, not just fail");
+    }
+
+    [Fact]
+    public async Task A_has_data_probe_answers_no_on_the_probe_deadline_not_the_read_one()
+    {
+        ProxyHangs();
+        TelemetryNodeClient client = ClientWith(
+            lookup: TimeSpan.FromSeconds(30), probe: TimeSpan.FromMilliseconds(300), read: TimeSpan.FromMinutes(5));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        bool holds = await new NodeTraceService(tenantId, client).HasDataAsync(clusterId);
+
+        clock.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10),
+            "the routing probe runs in front of every view, so it must not wait as long as a search may");
+        holds.Should().BeFalse("silence is not \"I hold data\"");
+    }
+
+    [Fact]
+    public async Task A_service_lookup_that_never_answers_counts_as_no_node()
+    {
+        k8s.Setup(x => x.GetJsonAsync("services", It.IsAny<string>(), It.IsAny<string>(),
+                It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .Returns((string _, string _, string _, string _, CancellationToken ct) => HangUntilCancelled<string>(ct));
+        TelemetryNodeClient client = ClientWith(
+            lookup: TimeSpan.FromMilliseconds(300), probe: TimeSpan.FromMinutes(5), read: TimeSpan.FromMinutes(5));
+        var clock = System.Diagnostics.Stopwatch.StartNew();
+
+        bool present = await client.IsAvailableAsync(tenantId, clusterId);
+
+        clock.Elapsed.Should().BeLessThan(TimeSpan.FromSeconds(10));
+        present.Should().BeFalse();
+    }
+
     /// <summary>
     /// The port fallbacks, which decide whether an installed node is reachable at all. Exercised
     /// directly because a wrong port presents as a healthy node that answers nothing.

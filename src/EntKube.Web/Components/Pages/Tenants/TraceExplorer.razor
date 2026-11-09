@@ -44,6 +44,10 @@ else
                     <option value="@s">@s</option>
                 }
             </select>
+            @if (servicesError is not null)
+            {
+                <div class="small text-danger mt-1" data-test="services-error">Couldn't list services: @servicesError</div>
+            }
         </div>
         <div class="col-md-2">
             <label class="form-label small text-muted mb-1">Time range</label>
@@ -341,6 +345,7 @@ ERROR checkout failed trace-id: 4bf92f35…</pre>
     private bool isLoading = true;
     private bool servicesLoading;
     private List<string> services = [];
+    private string? servicesError;
 
     private string selectedService = "";
     private int timeRangeMinutes = 60;
@@ -394,10 +399,14 @@ ERROR checkout failed trace-id: 4bf92f35…</pre>
     // dropdown reflects the window being searched.
     private async Task LoadServicesAsync()
     {
+        servicesError = null;
         if (!available) { services = []; return; }
         KubernetesOperationResult<List<string>> svc = await Traces.GetServicesAsync(
             ClusterId, namespaces: Namespaces, podPattern: PodPattern, windowMinutes: timeRangeMinutes);
         services = svc.IsSuccess ? svc.Data ?? [] : [];
+        // A failed read and a quiet window both leave the list empty, and only one of them is about the
+        // cluster. Saying which is the difference between "nothing traced this hour" and "go and look".
+        if (!svc.IsSuccess) servicesError = svc.Error ?? "the trace store did not answer";
 
         // ⭐ Never query by a filter the filter row cannot display. A <select> whose bound value matches
         // no rendered <option> paints as "All services" while the field behind it still holds the old
