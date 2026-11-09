@@ -87,6 +87,23 @@ public class TraceExplorerFilterScopeTests : BunitContext
         cut.Markup.Should().Contain("No traces match the selected criteria.");
     }
 
+    // ── An empty service list must say whether the window was quiet or the read failed ────────────
+
+    [Fact]
+    public void A_failed_service_list_says_so_and_a_quiet_one_does_not()
+    {
+        traces.ServicesError = "The cluster's telemetry node did not answer within 40 seconds.";
+        IRenderedComponent<TraceExplorer> failed = Mount(ClusterA);
+
+        failed.Find("[data-test=services-error]").TextContent.Should().Contain("did not answer within 40 seconds",
+            "an empty dropdown was all the page showed, which reads as 'nothing traced this hour'");
+
+        traces.ServicesError = null;
+        IRenderedComponent<TraceExplorer> quiet = Mount(ClusterB);
+
+        quiet.FindAll("[data-test=services-error]").Should().BeEmpty("a quiet hour is not a failure");
+    }
+
     // ── A cluster switch must not keep a service filter the new cluster's dropdown cannot show ────
 
     /// <summary>
@@ -224,8 +241,12 @@ public class TraceExplorerFilterScopeTests : BunitContext
         public Task<KubernetesOperationResult<List<string>>> GetServicesAsync(
             Guid clusterId, CancellationToken ct = default, IReadOnlyList<string>? namespaces = null,
             string? podPattern = null, int windowMinutes = 60)
-            => Task.FromResult(KubernetesOperationResult<List<string>>.Success(
-                Services.TryGetValue(clusterId, out List<string>? s) ? s : []));
+            => Task.FromResult(ServicesError is not null
+                ? KubernetesOperationResult<List<string>>.Failure(ServicesError)
+                : KubernetesOperationResult<List<string>>.Success(
+                    Services.TryGetValue(clusterId, out List<string>? s) ? s : []));
+
+        public string? ServicesError { get; set; }
 
         public Task<KubernetesOperationResult<List<TraceSummary>>> ListTracesAsync(
             Guid clusterId, string? service, DateTime from, DateTime to,

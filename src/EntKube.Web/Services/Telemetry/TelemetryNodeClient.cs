@@ -50,6 +50,25 @@ public sealed class TelemetryNodeClient(
         (DateTime At, NodeEndpoint? Endpoint)> EndpointCache = new();
     private static readonly TimeSpan EndpointTtl = TimeSpan.FromSeconds(60);
 
+    // Every call below crosses the cluster's API server, and none of them had a deadline of its own: a node
+    // whose pods were gone, or an API server slow to proxy, held the page that asked until something
+    // further out gave up — the circuit, the browser or the user. Each kind of call now has its own bound.
+
+    /// <summary>How long finding the node's Service may take. A timeout counts as "no node here".</summary>
+    public TimeSpan LookupTimeout { get; init; } = TimeSpan.FromSeconds(5);
+
+    /// <summary>
+    /// How long a "does the node hold anything" probe may take — the same 8s
+    /// <see cref="LogQueryService"/> gives its own routing probes. A timeout counts as "no".
+    /// </summary>
+    public TimeSpan ProbeTimeout { get; init; } = TimeSpan.FromSeconds(8);
+
+    /// <summary>
+    /// How long any other request to the node may take. Above the node's own 30s budget for its sealed
+    /// tier, so a node doing slow but real work answers; a node that is not answering at all fails.
+    /// </summary>
+    public TimeSpan ReadTimeout { get; init; } = TimeSpan.FromSeconds(40);
+
     /// <summary>True when this cluster has a telemetry node the management plane can query.</summary>
     public async Task<bool> IsAvailableAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
@@ -69,15 +88,20 @@ public sealed class TelemetryNodeClient(
 
     public Task<KubernetesOperationResult<T>> GetAsync<T>(
         Guid tenantId, Guid clusterId, string path, CancellationToken ct = default)
-        => SendAsync<T>(tenantId, clusterId, HttpMethod.Get, path, null, ct);
+        => SendAsync<T>(tenantId, clusterId, HttpMethod.Get, path, null, ReadTimeout, ct);
+
+    /// <summary>A GET bounded by <see cref="ProbeTimeout"/> rather than <see cref="ReadTimeout"/>.</summary>
+    public Task<KubernetesOperationResult<T>> ProbeAsync<T>(
+        Guid tenantId, Guid clusterId, string path, CancellationToken ct = default)
+        => SendAsync<T>(tenantId, clusterId, HttpMethod.Get, path, null, ProbeTimeout, ct);
 
     public Task<KubernetesOperationResult<T>> PostAsync<T>(
         Guid tenantId, Guid clusterId, string path, object body, CancellationToken ct = default)
-        => SendAsync<T>(tenantId, clusterId, HttpMethod.Post, path, body, ct);
+        => SendAsync<T>(tenantId, clusterId, HttpMethod.Post, path, body, ReadTimeout, ct);
 
     private async Task<KubernetesOperationResult<T>> SendAsync<T>(
         Guid tenantId, Guid clusterId, HttpMethod method, string path, object? body,
-        CancellationToken ct)
+        TimeSpan timeout, CancellationToken ct)
     {
         EntKube.Web.Services.Clusters.IClusterClient? access =
             await clusterAccess.ForAsync(tenantId, clusterId, ct);
@@ -91,6 +115,9 @@ public sealed class TelemetryNodeClient(
             return KubernetesOperationResult<T>.Failure(
                 "This cluster has no EntKube telemetry node installed, or its Service could not be found.");
 
+        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(timeout);
+
         try
         {
             // The seam sends it. Note what is NOT passed: Authorization. That header authenticates
@@ -103,7 +130,7 @@ public sealed class TelemetryNodeClient(
                 endpoint.Namespace, endpoint.ServiceName, endpoint.Port, method, path,
                 body,
                 new Dictionary<string, string> { [EntKube.Telemetry.NodeApi.TokenHeader] = endpoint.Token },
-                ct);
+                deadline.Token);
 
             if (!response.Success)
             {
@@ -135,6 +162,14 @@ public sealed class TelemetryNodeClient(
             return value is null
                 ? KubernetesOperationResult<T>.Failure("The telemetry node returned an empty body.")
                 : KubernetesOperationResult<T>.Success(value);
+        }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            logger.LogWarning(
+                "Telemetry node query {Path} on cluster {ClusterId} did not answer within {Seconds}s.",
+                path, clusterId, timeout.TotalSeconds);
+            return KubernetesOperationResult<T>.Failure(
+                $"The cluster's telemetry node did not answer within {timeout.TotalSeconds:0} seconds.");
         }
         catch (Exception ex)
         {
@@ -198,6 +233,14 @@ public sealed class TelemetryNodeClient(
         {
             endpoint = await ResolveUncachedAsync(tenantId, clusterId, ct);
         }
+        catch (OperationCanceledException) when (!ct.IsCancellationRequested)
+        {
+            // Cached like any other "no node": a lookup that cannot finish in time would not finish on the
+            // next panel's call either, and asking again is exactly the wait this bound removes.
+            logger.LogWarning(
+                "Looking up the telemetry node for cluster {ClusterId} took longer than {Seconds}s; reading "
+                + "from the management-plane store instead.", clusterId, LookupTimeout.TotalSeconds);
+        }
         catch (Exception ex)
         {
             // Cache the negative result too. Without that, a cluster with no node re-runs this lookup on
@@ -238,9 +281,13 @@ public sealed class TelemetryNodeClient(
 
         string ns = string.IsNullOrWhiteSpace(component.Namespace) ? "monitoring" : component.Namespace;
 
-        // The Service list through the seam — the same question, without the credential.
+        // The Service list through the seam — the same question, without the credential. Only this call
+        // is under LookupTimeout. Everything above it is local (the database, the vault, Catalog), and a
+        // deadline over those would read a busy management plane as "no node here" and cache that.
+        using CancellationTokenSource deadline = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        deadline.CancelAfter(LookupTimeout);
         string json = await access.GetJsonAsync(
-            "services", ns, "app.kubernetes.io/name=entkube-telemetry", ct);
+            "services", ns, "app.kubernetes.io/name=entkube-telemetry", deadline.Token);
 
         List<(string Name, string? Role, int Port)> candidates = ReadServices(json);
 

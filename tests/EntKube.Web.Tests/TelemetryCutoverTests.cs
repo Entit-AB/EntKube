@@ -241,11 +241,43 @@ public class TelemetryCutoverTests
 public class TelemetryRouteTests
 {
     private static Task<(bool InCluster, string Why)> Decide(
-        bool present, bool nodeHasData, bool? mgmtStillReceives)
+        bool present, bool nodeHasData, bool? mgmtStillReceives, bool centralIsRecent = false)
         => TelemetryRoute.DecideAsync(
+            () => Task.FromResult(centralIsRecent),
             () => Task.FromResult(present),
             () => Task.FromResult(nodeHasData),
             () => Task.FromResult(mgmtStillReceives));
+
+    /// <summary>
+    /// ⭐ The reverse cutover. Telemetry moved back to the management plane, and a node keeps "holding data"
+    /// for a week after its collector stops sending. Under "a node holding data wins" every read in that week
+    /// went to a node receiving nothing, so the trace service list for the last hour came back empty. The
+    /// management plane receiving NOW settles it, and the node is never asked: asking it is the remote call
+    /// through the API server that held the pages.
+    /// </summary>
+    [Fact]
+    public async Task A_management_plane_receiving_now_wins_over_a_node_holding_old_data()
+    {
+        int nodeQuestions = 0;
+        (bool inCluster, string why) = await TelemetryRoute.DecideAsync(
+            () => Task.FromResult(true),
+            () => { nodeQuestions++; return Task.FromResult(true); },
+            () => { nodeQuestions++; return Task.FromResult(true); },
+            () => Task.FromResult<bool?>(true));
+
+        inCluster.Should().BeFalse();
+        why.Should().Contain("management plane is receiving");
+        nodeQuestions.Should().Be(0, "a cluster that has moved back must cost no remote call to route");
+    }
+
+    [Fact]
+    public async Task A_quiet_management_plane_still_defers_to_a_node_holding_data()
+    {
+        // The case the data-first rule was written for, still standing: a collector that really exports to
+        // the node leaves the management plane quiet, whatever its stored values say.
+        (await Decide(present: true, nodeHasData: true, mgmtStillReceives: true, centralIsRecent: false))
+            .InCluster.Should().BeTrue();
+    }
 
     [Fact]
     public async Task No_node_reads_the_management_plane()

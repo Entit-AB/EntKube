@@ -40,6 +40,7 @@ public class TelemetryRoutingTenancyTests
     private static Task<bool> Decide(RouteCache routes, Guid tenantId, Func<Task<bool?>> stillReceives)
         => routes.UseInClusterAsync(
             tenantId, Cluster,
+            centralIsRecent: No,        // the decision under test is the one the node and Catalog make
             nodePresent: Yes,
             nodeHasData: No,            // the node exists and is empty — the state the cutover passes through
             stillReceives: stillReceives,
