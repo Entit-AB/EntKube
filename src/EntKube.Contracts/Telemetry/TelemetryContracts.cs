@@ -215,6 +215,31 @@ public sealed record ErrorIssueSummary(
     DateTime FirstSeenAt,
     DateTime LastSeenAt);
 
+/// <summary>A service level objective and where it stands.</summary>
+/// <param name="Id">The objective's id.</param>
+/// <param name="Name">Its name.</param>
+/// <param name="Kind">SyntheticUptime, ServiceAvailability or ServiceLatency.</param>
+/// <param name="TargetPercent">The share of good events promised.</param>
+/// <param name="WindowDays">The rolling window.</param>
+/// <param name="Good">Good events in the window.</param>
+/// <param name="Total">All events in the window.</param>
+/// <param name="AttainedPercent">Good over total, or null with no events.</param>
+/// <param name="BudgetSpentFraction">Bad over allowed bad: 1 is exactly spent and still met. Null with no events.</param>
+/// <param name="BurnRate">The latest day's spending pace: above 1 is too fast. Null when that day had no events.</param>
+/// <param name="IsBreached">True only when the budget is overspent.</param>
+public sealed record SloSummary(
+    Guid Id,
+    string Name,
+    string Kind,
+    double TargetPercent,
+    int WindowDays,
+    long Good,
+    long Total,
+    double? AttainedPercent,
+    double? BudgetSpentFraction,
+    double? BurnRate,
+    bool IsBreached);
+
 public interface ITelemetryApi
 {
     /// <summary>
@@ -261,6 +286,9 @@ public interface ITelemetryApi
     /// </summary>
     Task<IReadOnlyList<ErrorIssueSummary>> GetErrorIssuesAsync(
         Guid tenantId, string? status = null, int limit = 200, CancellationToken ct = default);
+
+    /// <summary>One tenant's service level objectives and where each stands.</summary>
+    Task<IReadOnlyList<SloSummary>> GetSlosAsync(Guid tenantId, CancellationToken ct = default);
 
     /// <summary>One tenant's synthetic checks and how each has done.</summary>
     Task<IReadOnlyList<SyntheticCheckSummary>> GetSyntheticChecksAsync(

@@ -469,6 +469,20 @@ public static class PublicApiEndpoints
                 .ToList());
         }).RequireApiScope(ApiScopes.OpsRead);
 
+        api.MapGet("/slos", async Task<Ok<IEnumerable<SloResponse>>> (
+            HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+
+            IReadOnlyList<EntKube.Contracts.Telemetry.SloSummary> slos = await telemetry.GetSlosAsync(tenantId, ct);
+
+            return TypedResults.Ok<IEnumerable<SloResponse>>(slos
+                .Select(s => new SloResponse(
+                    s.Id, s.Name, s.Kind, s.TargetPercent, s.WindowDays, s.Good, s.Total, s.AttainedPercent,
+                    s.BudgetSpentFraction, s.BurnRate, s.IsBreached))
+                .ToList());
+        }).RequireApiScope(ApiScopes.OpsRead);
+
         api.MapGet("/synthetic-checks", async Task<Ok<IEnumerable<SyntheticCheckResponse>>> (
             HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry, CancellationToken ct) =>
         {

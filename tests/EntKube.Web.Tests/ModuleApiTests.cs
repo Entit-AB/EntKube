@@ -112,7 +112,8 @@ public class ModuleApiTests : IDisposable
             factory, new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build()),
         logPipelines: null!,
         syntheticChecks: null!,
-        errorTracking: null!);
+        errorTracking: null!,
+        slos: null!);
 
     [Fact]
     public async Task Catalog_answers_for_the_asking_tenant_and_refuses_the_neighbour()

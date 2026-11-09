@@ -114,6 +114,7 @@ public sealed class TelemetryAlertEvaluator(
                     {
                         TelemetryAlertKind.SyntheticCheck => await EvaluateSyntheticCheckAsync(db, rule, clusterId, now, ct),
                         TelemetryAlertKind.NewErrorIssues => await EvaluateNewErrorIssuesAsync(db, rule, clusterId, now, ct),
+                        TelemetryAlertKind.SloBudget => await EvaluateSloBudgetAsync(db, rule, now, ct),
                         _ => await EvaluateRuleAsync(rule, clusterId, now, trace, log, rum, ct),
                     };
                     if (ev.Status == EvalStatus.Indeterminate) continue;     // transient failure / no data — hold state
@@ -493,6 +494,24 @@ public sealed class TelemetryAlertEvaluator(
             SyntheticAlertState.Clear => Evaluation.Clear,
             _ => Evaluation.Unknown,
         };
+    }
+
+    /// <summary>
+    /// An objective with no events in its window says nothing, so it holds: a service that stopped
+    /// taking traffic has not met its target.
+    /// </summary>
+    private static async Task<Evaluation> EvaluateSloBudgetAsync(
+        TelemetryDbContext db, TelemetryAlertRule rule, DateTime now, CancellationToken ct)
+    {
+        if (rule.SloId is not { } sloId) return Evaluation.Unknown;
+
+        SloStatus? status = await SloService.StatusAsync(db, rule.TenantId, sloId, now, ct);
+        if (status?.BudgetSpentFraction is not { } spent) return Evaluation.Unknown;
+
+        double percent = spent * 100;
+        return Evaluation.From(percent > rule.Threshold,
+            $"{rule.Name}: {percent:0.#}% of the error budget spent",
+            $"{percent:0.#}% of the error budget is spent (alert at {rule.Threshold:0.#}%). Attained {status.AttainedPercent:0.###}%.");
     }
 
     private static async Task<Evaluation> EvaluateNewErrorIssuesAsync(

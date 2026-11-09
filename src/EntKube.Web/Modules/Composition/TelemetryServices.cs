@@ -62,6 +62,8 @@ internal static class TelemetryServices
         services.AddSingletonWork<FeedbackRetentionService>();
         services.AddScoped<TelemetryAlertRuleService>();
         services.AddScoped<SyntheticCheckService>();
+        services.AddScoped<SloService>();
+        services.AddSingletonWork<SloTallySweep>();
         services.AddSingletonWork<SyntheticCheckRunner>();
         services.AddScoped<DashboardService>();
         services.AddScoped<IncidentDispatcher>();

@@ -15,6 +15,8 @@ public class TelemetryDbContext(DbContextOptions<TelemetryDbContext> options) : 
     public DbSet<TelemetrySegment> TelemetrySegments => Set<TelemetrySegment>();
     public DbSet<TelemetryStorageSetting> TelemetryStorageSettings => Set<TelemetryStorageSetting>();
     public DbSet<RumSite> RumSites => Set<RumSite>();
+    public DbSet<ServiceLevelObjective> ServiceLevelObjectives => Set<ServiceLevelObjective>();
+    public DbSet<SloDailyTally> SloDailyTallies => Set<SloDailyTally>();
     public DbSet<ErrorIssue> ErrorIssues => Set<ErrorIssue>();
     public DbSet<ErrorScanCursor> ErrorScanCursors => Set<ErrorScanCursor>();
     public DbSet<FeedbackItem> FeedbackItems => Set<FeedbackItem>();

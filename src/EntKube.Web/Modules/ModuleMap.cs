@@ -164,6 +164,8 @@ public static partial class ModuleMap
         [typeof(TelemetrySegment)] = Module.Telemetry,
         [typeof(TelemetryStorageSetting)] = Module.Telemetry,
         [typeof(RumSite)] = Module.Telemetry,
+        [typeof(ServiceLevelObjective)] = Module.Telemetry,
+        [typeof(SloDailyTally)] = Module.Telemetry,
         [typeof(ErrorIssue)] = Module.Telemetry,
         [typeof(ErrorScanCursor)] = Module.Telemetry,
         [typeof(FeedbackItem)] = Module.Telemetry,

@@ -218,6 +218,18 @@ public static class EntKubeTools
 
         new McpTool
         {
+            Name = "entkube_list_slos",
+            Description = "Service level objectives: the share of good events promised over a window, "
+                        + "what was attained, and how much error budget is spent. Read burnRate as well as "
+                        + "isBreached: above 1.0 spends faster than the window allows, which is the "
+                        + "objective about to breach. budgetSpentFraction of exactly 1.0 still MEETS the "
+                        + "target. attainedPercent is null with no events: unknown, NOT zero.",
+            InputSchema = NoArgs(),
+            Handler = (api, _, ct) => api.GetAsync("/api/v1/slos", ct),
+        },
+
+        new McpTool
+        {
             Name = "entkube_upgrades",
             Description = "Which installed components are behind the versions their Helm "
                         + "repositories publish, and by how much (patch/minor/major).",

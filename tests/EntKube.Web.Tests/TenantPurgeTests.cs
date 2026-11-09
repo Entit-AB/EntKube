@@ -61,6 +61,7 @@ public class TenantPurgeTests : IDisposable
         (await ctx.Dashboards.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.TelemetryAlertRules.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.RumSites.CountAsync(x => x.TenantId == t1)).Should().Be(0);
+        (await ctx.ServiceLevelObjectives.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.ErrorIssues.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.ErrorScanCursors.CountAsync(x => x.TenantId == t1)).Should().Be(0);
         (await ctx.FeedbackItems.CountAsync(x => x.TenantId == t1)).Should().Be(0);
@@ -74,6 +75,7 @@ public class TenantPurgeTests : IDisposable
         (await ctx.Apps.CountAsync(a => a.Customer.TenantId == t2)).Should().Be(2);
         (await ctx.KubernetesClusters.CountAsync(c => c.TenantId == t2)).Should().Be(1);
         (await ctx.Dashboards.CountAsync(x => x.TenantId == t2)).Should().Be(1);
+        (await ctx.ServiceLevelObjectives.CountAsync(x => x.TenantId == t2)).Should().Be(1);
         (await ctx.ErrorIssues.CountAsync(x => x.TenantId == t2)).Should().Be(1);
         (await ctx.ErrorScanCursors.CountAsync(x => x.TenantId == t2)).Should().Be(1);
         (await ctx.FeedbackItems.CountAsync(x => x.TenantId == t2)).Should().Be(1);
@@ -206,6 +208,11 @@ public class TenantPurgeTests : IDisposable
         ctx.Dashboards.Add(dashboard);
         ctx.TelemetryAlertRules.Add(alertRule);
         ctx.RumSites.Add(rumSite);
+        ctx.ServiceLevelObjectives.Add(new ServiceLevelObjective
+        {
+            Id = Guid.NewGuid(), TenantId = tenant.Id, Name = "slo", Kind = SloKind.ServiceAvailability,
+            ClusterId = Guid.NewGuid(), Service = "s",
+        });
         ctx.ErrorIssues.Add(new ErrorIssue
         {
             Id = Guid.NewGuid(), TenantId = tenant.Id, ScopeId = Guid.NewGuid(), ScopeName = "c", Fingerprint = "f",

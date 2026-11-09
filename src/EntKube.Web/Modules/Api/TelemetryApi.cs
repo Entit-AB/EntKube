@@ -19,8 +19,21 @@ public sealed class TelemetryApi(
     EntKube.Web.Services.FeedbackService feedback,
     EntKube.Web.Services.LogPipelineService logPipelines,
     EntKube.Web.Services.SyntheticCheckService syntheticChecks,
-    EntKube.Web.Services.ErrorTrackingService errorTracking) : ITelemetryApi
+    EntKube.Web.Services.ErrorTrackingService errorTracking,
+    EntKube.Web.Services.SloService slos) : ITelemetryApi
 {
+    public async Task<IReadOnlyList<SloSummary>> GetSlosAsync(Guid tenantId, CancellationToken ct = default)
+    {
+        List<EntKube.Web.Services.SloRow> rows = await slos.ListAsync(tenantId, DateTime.UtcNow, ct);
+
+        return rows
+            .Select(r => new SloSummary(
+                r.Slo.Id, r.Slo.Name, r.Slo.Kind.ToString(), r.Slo.TargetPercent, r.Slo.WindowDays,
+                r.Status.Good, r.Status.Total, r.Status.AttainedPercent, r.Status.BudgetSpentFraction,
+                r.Status.BurnRate, r.Status.IsBreached))
+            .ToList();
+    }
+
     public async Task<IReadOnlyList<ErrorIssueSummary>> GetErrorIssuesAsync(
         Guid tenantId, string? status = null, int limit = 200, CancellationToken ct = default)
     {

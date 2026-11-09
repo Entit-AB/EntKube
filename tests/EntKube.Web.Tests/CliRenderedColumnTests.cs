@@ -368,6 +368,29 @@ public class CliRenderedColumnTests
     }
 
     /// <summary>
+    /// ⚠️ BREACHED is a bool, and false is the value most objectives carry: a cell that rendered a
+    /// dash for false would hide every objective in good standing.
+    /// </summary>
+    [Fact]
+    public void The_slos_list_renders_every_column()
+    {
+        SloResponse slo = new(
+            Id: Guid.NewGuid(),
+            Name: "Checkout availability",
+            Kind: "ServiceAvailability",
+            TargetPercent: 99.9,
+            WindowDays: 30,
+            Good: 998_000,
+            Total: 1_000_000,
+            AttainedPercent: 99.8,
+            BudgetSpentFraction: 2.0,
+            BurnRate: 1.5,
+            IsBreached: false);
+
+        EveryColumnRenders(Command("slos"), JsonSerializer.Serialize(new[] { slo }, AsTheApiSerialises));
+    }
+
+    /// <summary>
     /// ⚠️ The measure. The facts above are exactly the commands
     /// <see cref="CliColumnParityTests"/> can check against a schema, and they must stay in step:
     /// if a route gains a response type and no rendering fact is added for its command, this fails
@@ -379,7 +402,7 @@ public class CliRenderedColumnTests
         string[] rendered =
         [
             "cost", "cost history", "cost months", "cost rates list",
-            "clusters list", "components list", "apps list", "deployments list", "feedback", "synthetics", "errors",
+            "clusters list", "components list", "apps list", "deployments list", "feedback", "synthetics", "errors", "slos",
         ];
 
         IEnumerable<string> describable =

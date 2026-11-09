@@ -75,6 +75,7 @@ public class SweepTenancyRatchetTests
         "ResourceUsageCollectorService",
         "RolloutWatcherService",
         "SecretExpiryNotificationService",
+        "SloTallySweep",
         "SupportMailPoller",
         "SyntheticCheckRunner",
         "SupplyChainScanService",

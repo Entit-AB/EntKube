@@ -143,6 +143,8 @@ public class TenantService(
         await db.SyntheticChecks.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.ErrorIssues.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.ErrorScanCursors.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+        // Tallies go with their objective by cascade.
+        await db.ServiceLevelObjectives.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.RumSites.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.TelemetrySegments.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.TelemetryStorageSettings.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);

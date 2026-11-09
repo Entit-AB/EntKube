@@ -807,3 +807,28 @@ public sealed record ErrorIssueResponse(
     int Regressions,
     DateTime FirstSeenAt,
     DateTime LastSeenAt);
+
+/// <summary>A service level objective and where it stands.</summary>
+/// <param name="Id">The objective's id.</param>
+/// <param name="Name">Its name.</param>
+/// <param name="Kind">SyntheticUptime, ServiceAvailability or ServiceLatency.</param>
+/// <param name="TargetPercent">The share of good events promised.</param>
+/// <param name="WindowDays">The rolling window, in days.</param>
+/// <param name="Good">Good events in the window.</param>
+/// <param name="Total">All events in the window.</param>
+/// <param name="AttainedPercent">Good over total. Null with no events: unknown, NOT zero.</param>
+/// <param name="BudgetSpentFraction">Bad over the bad the target allows. 1 is exactly spent and still met; over 1 is breached.</param>
+/// <param name="BurnRate">The latest day's spending pace. Above 1 spends faster than the window allows.</param>
+/// <param name="IsBreached">True only when the budget is overspent, and never without events.</param>
+public sealed record SloResponse(
+    Guid Id,
+    string Name,
+    string Kind,
+    double TargetPercent,
+    int WindowDays,
+    long Good,
+    long Total,
+    double? AttainedPercent,
+    double? BudgetSpentFraction,
+    double? BurnRate,
+    bool IsBreached);

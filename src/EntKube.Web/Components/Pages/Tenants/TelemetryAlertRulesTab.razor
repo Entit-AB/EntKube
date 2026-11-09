@@ -193,9 +193,9 @@ else if (rules.Count > 0)
         await Reload();
     }
 
-    // A synthetic check's rule is the check's own, edited on its page, so it would only confuse here.
+    // A synthetic check's or objective's rule is that thing's own, edited on its page, so it would only confuse here.
     private async Task Reload() =>
-        rules = [.. (await Rules.ListAsync(TenantId)).Where(r => r.Kind != TelemetryAlertKind.SyntheticCheck)];
+        rules = [.. (await Rules.ListAsync(TenantId)).Where(r => r.Kind is not (TelemetryAlertKind.SyntheticCheck or TelemetryAlertKind.SloBudget))];
 
     private void StartNew() => StartEdit(new TelemetryAlertRule { Name = "", TenantId = TenantId });
 

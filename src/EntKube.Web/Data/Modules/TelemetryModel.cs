@@ -37,6 +37,8 @@ internal static class TelemetryModel
         builder.Entity<NotificationDelivery>().ToTable("NotificationDeliveries");
         builder.Entity<NotificationProviderConfig>().ToTable("NotificationProviderConfigs");
         builder.Entity<RumSite>().ToTable("RumSites");
+        builder.Entity<ServiceLevelObjective>().ToTable("ServiceLevelObjectives");
+        builder.Entity<SloDailyTally>().ToTable("SloDailyTallies");
         builder.Entity<ErrorIssue>().ToTable("ErrorIssues");
         builder.Entity<ErrorScanCursor>().ToTable("ErrorScanCursors");
         builder.Entity<SavedLogQuery>().ToTable("SavedLogQueries");
@@ -152,6 +154,27 @@ internal static class TelemetryModel
         });
 
         builder.Entity<ErrorScanCursor>(entity => entity.HasKey(c => c.ScopeId));
+
+        builder.Entity<ServiceLevelObjective>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => s.TenantId);
+            entity.Property(s => s.Kind).HasConversion<string>().HasMaxLength(30);
+            entity.Property(s => s.Name).HasMaxLength(200).IsRequired();
+            entity.Property(s => s.Service).HasMaxLength(253);
+            entity.Property(s => s.Severity).HasMaxLength(20).IsRequired();
+        });
+
+        builder.Entity<SloDailyTally>(entity =>
+        {
+            entity.HasKey(t => new { t.SloId, t.Day });
+            // The prune deletes by day alone.
+            entity.HasIndex(t => t.Day);
+            entity.HasOne<ServiceLevelObjective>()
+                .WithMany()
+                .HasForeignKey(t => t.SloId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
 
         builder.Entity<TelemetrySegment>(entity =>
         {

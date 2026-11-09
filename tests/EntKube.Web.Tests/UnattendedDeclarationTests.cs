@@ -57,6 +57,7 @@ public class UnattendedDeclarationTests
         "SupportMailPoller:support-mail-poller",
         "TelemetryAlertEvaluator:telemetry-alert-evaluator",
         "ErrorScanSweep:error-scan",
+        "SloTallySweep:slo-tally",
         "SyntheticCheckRunner:synthetic-check-retention",
         "SyntheticCheckRunner:synthetic-check-runner",
         "UptimeTrackingService:uptime-tracking",

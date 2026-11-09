@@ -7340,6 +7340,65 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.ToTable("SecretVaults", (string)null);
                 });
 
+            modelBuilder.Entity("EntKube.Web.Data.ServiceLevelObjective", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("TEXT");
+
+                    b.Property<double?>("AlertAtBudgetSpentPercent")
+                        .HasColumnType("REAL");
+
+                    b.Property<Guid?>("CheckId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid>("ClusterId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Kind")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("TEXT");
+
+                    b.Property<double?>("LatencyThresholdMs")
+                        .HasColumnType("REAL");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Service")
+                        .HasMaxLength(253)
+                        .HasColumnType("TEXT");
+
+                    b.Property<string>("Severity")
+                        .IsRequired()
+                        .HasMaxLength(20)
+                        .HasColumnType("TEXT");
+
+                    b.Property<double>("TargetPercent")
+                        .HasColumnType("REAL");
+
+                    b.Property<Guid>("TenantId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("UpdatedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<int>("WindowDays")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("Id");
+
+                    b.HasIndex("TenantId");
+
+                    b.ToTable("ServiceLevelObjectives", (string)null);
+                });
+
             modelBuilder.Entity("EntKube.Web.Data.SlaTarget", b =>
                 {
                     b.Property<Guid>("Id")
@@ -7374,6 +7433,30 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .IsUnique();
 
                     b.ToTable("SlaTargets", (string)null);
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SloDailyTally", b =>
+                {
+                    b.Property<Guid>("SloId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateOnly>("Day")
+                        .HasColumnType("TEXT");
+
+                    b.Property<DateTime>("ComputedAt")
+                        .HasColumnType("TEXT");
+
+                    b.Property<long>("Good")
+                        .HasColumnType("INTEGER");
+
+                    b.Property<long>("Total")
+                        .HasColumnType("INTEGER");
+
+                    b.HasKey("SloId", "Day");
+
+                    b.HasIndex("Day");
+
+                    b.ToTable("SloDailyTallies", (string)null);
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.StalwartComponentConfig", b =>
@@ -8150,6 +8233,9 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                         .HasColumnType("TEXT");
 
                     b.Property<Guid?>("SiteId")
+                        .HasColumnType("TEXT");
+
+                    b.Property<Guid?>("SloId")
                         .HasColumnType("TEXT");
 
                     b.Property<Guid>("TenantId")
@@ -11448,6 +11534,15 @@ namespace EntKube.Web.Data.Migrations.Sqlite
                     b.Navigation("Customer");
 
                     b.Navigation("Tenant");
+                });
+
+            modelBuilder.Entity("EntKube.Web.Data.SloDailyTally", b =>
+                {
+                    b.HasOne("EntKube.Web.Data.ServiceLevelObjective", null)
+                        .WithMany()
+                        .HasForeignKey("SloId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired();
                 });
 
             modelBuilder.Entity("EntKube.Web.Data.StalwartComponentConfig", b =>
