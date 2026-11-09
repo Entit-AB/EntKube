@@ -59,6 +59,9 @@ public sealed class SegmentRumService(SegmentManagerRegistry<RumSegmentManager> 
     }
 
     public async Task<List<RumTopError>> GetTopErrorsAsync(Guid tenantId, Guid siteId, DateTime from, DateTime to, int limit = 10, CancellationToken ct = default)
+        => await TryGetTopErrorsAsync(tenantId, siteId, from, to, limit, ct) ?? [];
+
+    public async Task<List<RumTopError>?> TryGetTopErrorsAsync(Guid tenantId, Guid siteId, DateTime from, DateTime to, int limit = 10, CancellationToken ct = default)
     {
         try
         {
@@ -67,7 +70,7 @@ public sealed class SegmentRumService(SegmentManagerRegistry<RumSegmentManager> 
                 .Select(g => new RumTopError(g.Key, g.Count(), TelemetryTime.FromEpochMillis(g.Max(r => r.TsMs))))
                 .OrderByDescending(e => e.Count).Take(limit).ToList();
         }
-        catch (Exception ex) { logger.LogWarning(ex, "Segment RUM top errors failed (site {Site})", siteId); return []; }
+        catch (Exception ex) { logger.LogWarning(ex, "Segment RUM top errors failed (site {Site})", siteId); return null; }
     }
 
     public async Task<List<TimeSeriesDataPoint>> GetPageViewSeriesAsync(Guid tenantId, Guid siteId, DateTime from, DateTime to, int buckets = 60, CancellationToken ct = default)

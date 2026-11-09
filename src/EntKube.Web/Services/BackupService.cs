@@ -263,6 +263,9 @@ public class BackupService(
             SupportDuties = await db.SupportDuties.AsNoTracking().ToListAsync(),
             Dashboards = await db.Dashboards.AsNoTracking().ToListAsync(),
             RumSites = await db.RumSites.AsNoTracking().ToListAsync(),
+            ServiceLevelObjectives = await db.ServiceLevelObjectives.AsNoTracking().ToListAsync(),
+            SloDailyTallies = await db.SloDailyTallies.AsNoTracking().ToListAsync(),
+            ErrorIssues = await db.ErrorIssues.AsNoTracking().ToListAsync(),
             FeedbackItems = await db.FeedbackItems.AsNoTracking().ToListAsync(),
             SavedLogQueries = await db.SavedLogQueries.AsNoTracking().ToListAsync(),
             SyntheticChecks = await db.SyntheticChecks.AsNoTracking().ToListAsync(),
@@ -459,6 +462,9 @@ public class BackupService(
             await InsertEntities(db, db.ElasticsearchIngestPipelines, bundle.ElasticsearchIngestPipelines);
             await InsertEntities(db, db.ElasticsearchDataViews, bundle.ElasticsearchDataViews);
             await InsertEntities(db, db.RumSites, bundle.RumSites);
+            await InsertEntities(db, db.ServiceLevelObjectives, bundle.ServiceLevelObjectives);
+            await InsertEntities(db, db.SloDailyTallies, bundle.SloDailyTallies);
+            await InsertEntities(db, db.ErrorIssues, bundle.ErrorIssues);
             await InsertEntities(db, db.FeedbackItems, bundle.FeedbackItems);
             await InsertEntities(db, db.SavedLogQueries, bundle.SavedLogQueries);
             await InsertEntities(db, db.SyntheticChecks, bundle.SyntheticChecks);

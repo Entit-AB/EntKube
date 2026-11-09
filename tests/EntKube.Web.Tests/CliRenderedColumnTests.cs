@@ -346,6 +346,50 @@ public class CliRenderedColumnTests
         EveryColumnRenders(Command("synthetics"), JsonSerializer.Serialize(new[] { check }, AsTheApiSerialises));
     }
 
+    [Fact]
+    public void The_errors_list_renders_every_column()
+    {
+        ErrorIssueResponse issue = new(
+            Id: Guid.NewGuid(),
+            Source: "Log",
+            Scope: "prod-north",
+            Namespace: "shop",
+            Workload: "api",
+            Title: "connection refused to <ip>",
+            SampleMessage: "connection refused to 10.0.0.1:5432",
+            Occurrences: 12,
+            CountIsPartial: false,
+            Status: "Open",
+            Regressions: 0,
+            FirstSeenAt: new DateTime(2026, 11, 1, 6, 30, 0, DateTimeKind.Utc),
+            LastSeenAt: new DateTime(2026, 11, 1, 7, 30, 0, DateTimeKind.Utc));
+
+        EveryColumnRenders(Command("errors"), JsonSerializer.Serialize(new[] { issue }, AsTheApiSerialises));
+    }
+
+    /// <summary>
+    /// ⚠️ BREACHED is a bool, and false is the value most objectives carry: a cell that rendered a
+    /// dash for false would hide every objective in good standing.
+    /// </summary>
+    [Fact]
+    public void The_slos_list_renders_every_column()
+    {
+        SloResponse slo = new(
+            Id: Guid.NewGuid(),
+            Name: "Checkout availability",
+            Kind: "ServiceAvailability",
+            TargetPercent: 99.9,
+            WindowDays: 30,
+            Good: 998_000,
+            Total: 1_000_000,
+            AttainedPercent: 99.8,
+            BudgetSpentFraction: 2.0,
+            BurnRate: 1.5,
+            IsBreached: false);
+
+        EveryColumnRenders(Command("slos"), JsonSerializer.Serialize(new[] { slo }, AsTheApiSerialises));
+    }
+
     /// <summary>
     /// ⚠️ The measure. The facts above are exactly the commands
     /// <see cref="CliColumnParityTests"/> can check against a schema, and they must stay in step:
@@ -358,7 +402,7 @@ public class CliRenderedColumnTests
         string[] rendered =
         [
             "cost", "cost history", "cost months", "cost rates list",
-            "clusters list", "components list", "apps list", "deployments list", "feedback", "synthetics",
+            "clusters list", "components list", "apps list", "deployments list", "feedback", "synthetics", "errors", "slos",
         ];
 
         IEnumerable<string> describable =

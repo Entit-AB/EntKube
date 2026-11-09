@@ -37,6 +37,10 @@ internal static class TelemetryModel
         builder.Entity<NotificationDelivery>().ToTable("NotificationDeliveries");
         builder.Entity<NotificationProviderConfig>().ToTable("NotificationProviderConfigs");
         builder.Entity<RumSite>().ToTable("RumSites");
+        builder.Entity<ServiceLevelObjective>().ToTable("ServiceLevelObjectives");
+        builder.Entity<SloDailyTally>().ToTable("SloDailyTallies");
+        builder.Entity<ErrorIssue>().ToTable("ErrorIssues");
+        builder.Entity<ErrorScanCursor>().ToTable("ErrorScanCursors");
         builder.Entity<SavedLogQuery>().ToTable("SavedLogQueries");
         builder.Entity<SyntheticCheck>().ToTable("SyntheticChecks");
         builder.Entity<SyntheticCheckResult>().ToTable("SyntheticCheckResults");
@@ -125,6 +129,50 @@ internal static class TelemetryModel
             entity.HasOne<SyntheticCheck>()
                 .WithMany()
                 .HasForeignKey(r => r.CheckId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        builder.Entity<ErrorIssue>(entity =>
+        {
+            entity.HasKey(i => i.Id);
+            // One issue per fault per scope, which is what folding an occurrence looks up.
+            entity.HasIndex(i => new { i.TenantId, i.ScopeId, i.Fingerprint }).IsUnique();
+            // The inbox: one tenant's by status, most recently seen first.
+            entity.HasIndex(i => new { i.TenantId, i.Status, i.LastSeenAt });
+            // The retention prune deletes by age alone, across every tenant.
+            entity.HasIndex(i => i.LastSeenAt);
+            entity.Property(i => i.Source).HasConversion<string>().HasMaxLength(20);
+            entity.Property(i => i.Status).HasConversion<string>().HasMaxLength(20);
+            entity.Property(i => i.ScopeName).HasMaxLength(200).IsRequired();
+            entity.Property(i => i.Fingerprint).HasMaxLength(32).IsRequired();
+            entity.Property(i => i.Title).HasMaxLength(ErrorTrackingService.MaxTitleLength).IsRequired();
+            entity.Property(i => i.Namespace).HasMaxLength(253);
+            entity.Property(i => i.Workload).HasMaxLength(253);
+            entity.Property(i => i.SampleMessage).HasMaxLength(ErrorTrackingService.MaxSampleLength).IsRequired();
+            entity.Property(i => i.SampleTraceId).HasMaxLength(64);
+            entity.Property(i => i.ResolvedBy).HasMaxLength(256);
+        });
+
+        builder.Entity<ErrorScanCursor>(entity => entity.HasKey(c => c.ScopeId));
+
+        builder.Entity<ServiceLevelObjective>(entity =>
+        {
+            entity.HasKey(s => s.Id);
+            entity.HasIndex(s => s.TenantId);
+            entity.Property(s => s.Kind).HasConversion<string>().HasMaxLength(30);
+            entity.Property(s => s.Name).HasMaxLength(200).IsRequired();
+            entity.Property(s => s.Service).HasMaxLength(253);
+            entity.Property(s => s.Severity).HasMaxLength(20).IsRequired();
+        });
+
+        builder.Entity<SloDailyTally>(entity =>
+        {
+            entity.HasKey(t => new { t.SloId, t.Day });
+            // The prune deletes by day alone.
+            entity.HasIndex(t => t.Day);
+            entity.HasOne<ServiceLevelObjective>()
+                .WithMany()
+                .HasForeignKey(t => t.SloId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

@@ -1,0 +1,74 @@
+@using EntKube.Telemetry.LogPipelines
+@using EntKube.Web.Services
+
+@* A dashboard panel's answer to a log query. Separate from the card so that what it says about a
+   result can be read without running one: a failure must not look like an empty result, and a
+   partial answer must say so. *@
+
+@if (Outcome?.SyntaxError is { } syntax)
+{
+    <div class="small text-danger">@syntax.Message</div>
+}
+else if (Outcome?.Failure is { } failure)
+{
+    <div class="small text-warning">The query could not run: @failure</div>
+}
+else if (Outcome?.Result is { } result)
+{
+    @if (result.Partial)
+    {
+        <div class="small text-warning mb-1">Partial: counts are lower bounds.</div>
+    }
+
+    @if (SingleValue(result) is { } value)
+    {
+        <div class="display-6 text-center py-3">@value</div>
+    }
+    else if (result.Rows.Count == 0)
+    {
+        <div class="text-muted small py-4 text-center">No rows matched.</div>
+    }
+    else
+    {
+        <div class="table-responsive" style="max-height:220px">
+            <table class="table table-sm align-middle small mb-0">
+                <thead><tr>
+                    @foreach (LogColumn c in result.Columns)
+                    {
+                        <th class="@(c.Type == LogColumnType.Number ? "text-end" : "")">@c.Name</th>
+                    }
+                </tr></thead>
+                <tbody>
+                    @foreach (object?[] row in result.Rows.Take(MaxRows))
+                    {
+                        <tr>
+                            @for (int i = 0; i < row.Length; i++)
+                            {
+                                <td class="@(result.Columns[i].Type == LogColumnType.Number ? "text-end" : "text-break")">@LogPipelineFormat.Cell(row[i])</td>
+                            }
+                        </tr>
+                    }
+                </tbody>
+            </table>
+        </div>
+
+        @if (result.Rows.Count > MaxRows)
+        {
+            <div class="small text-muted mt-1">Showing @MaxRows of @result.Rows.Count rows.</div>
+        }
+    }
+}
+else
+{
+    <div class="text-muted small py-4 text-center">Configure a query.</div>
+}
+
+@code {
+    private const int MaxRows = 50;
+
+    [Parameter] public LogPipelineOutcome? Outcome { get; set; }
+
+    /// <summary>The text of a one-cell answer, which reads better as one large number.</summary>
+    private static string? SingleValue(LogPipelineResult result) =>
+        result.Rows.Count == 1 && result.Columns.Count == 1 ? LogPipelineFormat.Cell(result.Rows[0][0]) : null;
+}

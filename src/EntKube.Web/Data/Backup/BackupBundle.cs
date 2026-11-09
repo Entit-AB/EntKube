@@ -167,6 +167,9 @@ public class BackupBundle
     // Observability config (dashboards, telemetry alert rules, RUM sites, storage target, digests)
     public List<Dashboard> Dashboards { get; set; } = [];
     public List<RumSite> RumSites { get; set; } = [];
+    public List<ServiceLevelObjective> ServiceLevelObjectives { get; set; } = [];
+    public List<SloDailyTally> SloDailyTallies { get; set; } = [];
+    public List<ErrorIssue> ErrorIssues { get; set; } = [];
     public List<FeedbackItem> FeedbackItems { get; set; } = [];
     public List<SavedLogQuery> SavedLogQueries { get; set; } = [];
     public List<SyntheticCheck> SyntheticChecks { get; set; } = [];

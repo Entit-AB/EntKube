@@ -18,8 +18,36 @@ public sealed class TelemetryApi(
     EntKube.Web.Services.ErrorBudgetService errorBudgets,
     EntKube.Web.Services.FeedbackService feedback,
     EntKube.Web.Services.LogPipelineService logPipelines,
-    EntKube.Web.Services.SyntheticCheckService syntheticChecks) : ITelemetryApi
+    EntKube.Web.Services.SyntheticCheckService syntheticChecks,
+    EntKube.Web.Services.ErrorTrackingService errorTracking,
+    EntKube.Web.Services.SloService slos) : ITelemetryApi
 {
+    public async Task<IReadOnlyList<SloSummary>> GetSlosAsync(Guid tenantId, CancellationToken ct = default)
+    {
+        List<EntKube.Web.Services.SloRow> rows = await slos.ListAsync(tenantId, DateTime.UtcNow, ct);
+
+        return rows
+            .Select(r => new SloSummary(
+                r.Slo.Id, r.Slo.Name, r.Slo.Kind.ToString(), r.Slo.TargetPercent, r.Slo.WindowDays,
+                r.Status.Good, r.Status.Total, r.Status.AttainedPercent, r.Status.BudgetSpentFraction,
+                r.Status.BurnRate, r.Status.IsBreached))
+            .ToList();
+    }
+
+    public async Task<IReadOnlyList<ErrorIssueSummary>> GetErrorIssuesAsync(
+        Guid tenantId, string? status = null, int limit = 200, CancellationToken ct = default)
+    {
+        Data.ErrorIssueStatus? wanted = status is null ? null : Enum.Parse<Data.ErrorIssueStatus>(status, ignoreCase: true);
+
+        List<Data.ErrorIssue> issues = await errorTracking.ListAsync(tenantId, wanted, limit, ct);
+
+        return issues
+            .Select(i => new ErrorIssueSummary(
+                i.Id, i.Source.ToString(), i.ScopeName, i.Namespace, i.Workload, i.Title, i.SampleMessage,
+                i.Occurrences, i.CountIsPartial, i.Status.ToString(), i.Regressions, i.FirstSeenAt, i.LastSeenAt))
+            .ToList();
+    }
+
     public async Task<IReadOnlyList<FeedbackEntry>> GetFeedbackAsync(
         Guid tenantId, string? status = null, int limit = 200, CancellationToken ct = default)
     {

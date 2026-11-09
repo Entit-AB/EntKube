@@ -36,6 +36,10 @@ public sealed class LogPipelineLiveFixture : IAsyncLifetime
             b.UseSetting("Vault:RootKey", "dGhpcyBpcyBhIDMyIGJ5dGUga2V5ISEhMTIzNDU2Nzg=");
             b.UseSetting("DataProtection:KeyPath", Path.Combine(tempDir, "keys"));
             b.UseSetting("Seed:AdminEmail", "");
+
+            // No sweeps. These tests call the scans themselves, and a hosted ErrorScanSweep claiming
+            // a cursor first would make a test's own scan find nothing to apply.
+            b.UseSetting(EntKube.Web.Modules.HostedWork.RunSingletonWorkKey, "false");
         });
 
         IServiceProvider services = Factory.Services;
@@ -155,6 +159,24 @@ public sealed class LogPipelineLiveTests(LogPipelineLiveFixture host) : IClassFi
         LogPipelineOutcome outcome = await host.RunAsync("logs | summarize n = count(), pods = dcount(pod) by namespace | sort by n desc");
 
         outcome.Result!.Rows.Select(r => (r[0], r[1], r[2])).Should().Equal(("shop", 4d, 2d), ("jobs", 2d, 1d));
+    }
+
+    /// <summary>
+    /// ⚠️ The native layer resolves the tenant from the cluster, so without the check in
+    /// LogPipelineService this returns the other tenant's real lines. A dashboard's cluster id
+    /// comes from a browser.
+    /// </summary>
+    [Fact]
+    public async Task Another_tenant_naming_this_cluster_reads_nothing()
+    {
+        using IServiceScope scope = host.Factory.Services.CreateScope();
+        LogPipelineOutcome outcome = await scope.ServiceProvider.GetRequiredService<LogPipelineService>()
+            .RunAsync(Guid.NewGuid(), host.ClusterId, "logs", host.Now.AddHours(-1), host.Now.AddMinutes(1));
+
+        outcome.Result.Should().BeNull();
+        outcome.Failure.Should().Contain("does not exist");
+
+        (await RowsAsync("logs")).Should().Be(6, "the owner still reads them");
     }
 
     [Fact]

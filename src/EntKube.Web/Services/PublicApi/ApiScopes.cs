@@ -208,6 +208,9 @@ public static class ApiScopes
             // Carries what anonymous visitors wrote and any address they typed.
             new("in-app feedback, including messages and contact addresses", ["GET /feedback"]),
             new("synthetic checks and their uptime", ["GET /synthetic-checks"]),
+            new("service level objectives and their error budgets", ["GET /slos"]),
+            // Carries a sample of the log line, so this scope does reach log text for error lines.
+            new("error issues, including a sample of each error's message", ["GET /error-issues"]),
             // customerId and customer per deployment, beside achieved availability and breach
             // state — the figure a support agreement is invoiced against.
             new("per-customer SLA attainment and error budgets", ["GET /error-budgets"]),

@@ -446,6 +446,43 @@ public static class PublicApiEndpoints
                 : TypedResults.StatusCode(StatusCodes.Status503ServiceUnavailable);
         }).RequireApiScope(ApiScopes.LogsRead);
 
+        // As on /feedback: an unknown status answers 400 here rather than reaching Enum.Parse.
+        api.MapGet("/error-issues", async Task<Results<Ok<IEnumerable<ErrorIssueResponse>>, BadRequest<string>>> (
+            HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry,
+            string? status, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+
+            if (status is not null
+                && !Enum.GetNames<EntKube.Web.Data.ErrorIssueStatus>().Contains(status, StringComparer.OrdinalIgnoreCase))
+            {
+                return TypedResults.BadRequest($"Unknown status '{status}'.");
+            }
+
+            IReadOnlyList<EntKube.Contracts.Telemetry.ErrorIssueSummary> issues =
+                await telemetry.GetErrorIssuesAsync(tenantId, status, limit: 200, ct);
+
+            return TypedResults.Ok<IEnumerable<ErrorIssueResponse>>(issues
+                .Select(i => new ErrorIssueResponse(
+                    i.Id, i.Source, i.Scope, i.Namespace, i.Workload, i.Title, i.SampleMessage, i.Occurrences,
+                    i.CountIsPartial, i.Status, i.Regressions, i.FirstSeenAt, i.LastSeenAt))
+                .ToList());
+        }).RequireApiScope(ApiScopes.OpsRead);
+
+        api.MapGet("/slos", async Task<Ok<IEnumerable<SloResponse>>> (
+            HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+
+            IReadOnlyList<EntKube.Contracts.Telemetry.SloSummary> slos = await telemetry.GetSlosAsync(tenantId, ct);
+
+            return TypedResults.Ok<IEnumerable<SloResponse>>(slos
+                .Select(s => new SloResponse(
+                    s.Id, s.Name, s.Kind, s.TargetPercent, s.WindowDays, s.Good, s.Total, s.AttainedPercent,
+                    s.BudgetSpentFraction, s.BurnRate, s.IsBreached))
+                .ToList());
+        }).RequireApiScope(ApiScopes.OpsRead);
+
         api.MapGet("/synthetic-checks", async Task<Ok<IEnumerable<SyntheticCheckResponse>>> (
             HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry, CancellationToken ct) =>
         {

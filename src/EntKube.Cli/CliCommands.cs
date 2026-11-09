@@ -151,6 +151,22 @@ public static class CliCommands
         },
         new CliCommand
         {
+            Path = ["errors"],
+            Description = "Error issues (--status Open|Resolved|Ignored)",
+            BuildPath = a => "/api/v1/error-issues" + Query(("status", a.Optional("status"))),
+            Columns = [("LAST SEEN", "lastSeenAt"), ("STATUS", "status"), ("EVENTS", "occurrences"),
+                       ("WHERE", "scope"), ("ISSUE", "title")],
+        },
+        new CliCommand
+        {
+            Path = ["slos"],
+            Description = "Service level objectives and their error budgets",
+            BuildPath = _ => "/api/v1/slos",
+            Columns = [("NAME", "name"), ("TARGET", "targetPercent"), ("ATTAINED", "attainedPercent"),
+                       ("SPENT", "budgetSpentFraction"), ("BURN", "burnRate"), ("BREACHED", "isBreached")],
+        },
+        new CliCommand
+        {
             Path = ["incidents"],
             Description = "Alert incidents (--open for unresolved only)",
             BuildPath = a => "/api/v1/incidents" + Query(("open", a.Flag("open") ? "true" : null)),

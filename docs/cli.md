@@ -36,6 +36,8 @@ incidents            Alert incidents (--open for unresolved only)
 feedback             In-app feedback (--status New|Triaged|Resolved|Dismissed)
 logs query           Run a log query (--cluster <id> --query <text> [--minutes <n>])
 synthetics           Synthetic checks and their uptime over 24 hours
+errors               Error issues (--status Open|Resolved|Ignored)
+slos                 Service level objectives and their error budgets
 upgrades             Components behind their published chart versions
 drift                Deployments changed outside EntKube
 supply-chain         Running images joined to their vulnerability scans

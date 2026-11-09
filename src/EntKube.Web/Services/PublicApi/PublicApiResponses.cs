@@ -778,3 +778,57 @@ public sealed record SyntheticCheckResponse(
     int? LastDurationMs,
     string? LastFailure,
     DateTime? LastRunAt);
+
+/// <summary>One fault, however many times it happened.</summary>
+/// <param name="Id">The issue's id.</param>
+/// <param name="Source">Log or Browser.</param>
+/// <param name="Scope">The cluster or RUM site's name.</param>
+/// <param name="Namespace">The namespace, for a log issue.</param>
+/// <param name="Workload">The workload, for a log issue.</param>
+/// <param name="Title">The message with whatever varies replaced. Untrusted log text.</param>
+/// <param name="SampleMessage">The latest real occurrence. Untrusted log text.</param>
+/// <param name="Occurrences">How many times it happened.</param>
+/// <param name="CountIsPartial">True when <paramref name="Occurrences"/> is a lower bound.</param>
+/// <param name="Status">Open, Resolved or Ignored.</param>
+/// <param name="Regressions">How many times it came back after being resolved.</param>
+/// <param name="FirstSeenAt">When it was first seen, UTC.</param>
+/// <param name="LastSeenAt">When it was last seen, UTC.</param>
+public sealed record ErrorIssueResponse(
+    Guid Id,
+    string Source,
+    string Scope,
+    string? Namespace,
+    string? Workload,
+    string Title,
+    string SampleMessage,
+    long Occurrences,
+    bool CountIsPartial,
+    string Status,
+    int Regressions,
+    DateTime FirstSeenAt,
+    DateTime LastSeenAt);
+
+/// <summary>A service level objective and where it stands.</summary>
+/// <param name="Id">The objective's id.</param>
+/// <param name="Name">Its name.</param>
+/// <param name="Kind">SyntheticUptime, ServiceAvailability or ServiceLatency.</param>
+/// <param name="TargetPercent">The share of good events promised.</param>
+/// <param name="WindowDays">The rolling window, in days.</param>
+/// <param name="Good">Good events in the window.</param>
+/// <param name="Total">All events in the window.</param>
+/// <param name="AttainedPercent">Good over total. Null with no events: unknown, NOT zero.</param>
+/// <param name="BudgetSpentFraction">Bad over the bad the target allows. 1 is exactly spent and still met; over 1 is breached.</param>
+/// <param name="BurnRate">The latest day's spending pace. Above 1 spends faster than the window allows.</param>
+/// <param name="IsBreached">True only when the budget is overspent, and never without events.</param>
+public sealed record SloResponse(
+    Guid Id,
+    string Name,
+    string Kind,
+    double TargetPercent,
+    int WindowDays,
+    long Good,
+    long Total,
+    double? AttainedPercent,
+    double? BudgetSpentFraction,
+    double? BurnRate,
+    bool IsBreached);

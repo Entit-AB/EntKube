@@ -1,0 +1,232 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Data.Modules
+@using EntKube.Web.Services
+@using Microsoft.EntityFrameworkCore
+@inject IDbContextFactory<TelemetryDbContext> DbFactory
+@inject SloService Slos
+
+<div class="d-flex justify-content-between align-items-center mb-3">
+    <div>
+        <h6 class="mb-0">Service level objectives</h6>
+        <small class="text-muted">Promise a share of good events over a window, and watch the error budget that leaves.</small>
+    </div>
+    <button class="btn btn-sm btn-primary" disabled="@(clusters.Count == 0)" @onclick="StartNew"><span class="bi bi-plus-lg me-1"></span>New objective</button>
+</div>
+
+@if (editing is not null)
+{
+    <div class="card card-body mb-3">
+        <div class="row g-2">
+            <div class="col-md-4">
+                <label class="form-label small mb-1" for="slo-name">Name</label>
+                <input id="slo-name" class="form-control form-control-sm" @bind="editing.Name" placeholder="e.g. Checkout availability" />
+            </div>
+            <div class="col-md-4">
+                <label class="form-label small mb-1" for="slo-kind">Measures</label>
+                <select id="slo-kind" class="form-select form-select-sm" @bind="editing.Kind">
+                    <option value="@SloKind.ServiceAvailability">Service availability: requests without errors</option>
+                    <option value="@SloKind.ServiceLatency">Service latency: 5-minute slices under a p95</option>
+                    <option value="@SloKind.SyntheticUptime">Synthetic uptime: check runs that passed</option>
+                </select>
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1" for="slo-target">Target %</label>
+                <input id="slo-target" type="number" step="any" class="form-control form-control-sm" @bind="editing.TargetPercent" />
+            </div>
+            <div class="col-md-2">
+                <label class="form-label small mb-1" for="slo-window">Window</label>
+                <select id="slo-window" class="form-select form-select-sm" @bind="editing.WindowDays">
+                    <option value="7">7 days</option>
+                    <option value="28">28 days</option>
+                    <option value="30">30 days</option>
+                    <option value="90">90 days</option>
+                </select>
+            </div>
+
+            @if (editing.Kind == SloKind.SyntheticUptime)
+            {
+                <div class="col-md-6">
+                    <label class="form-label small mb-1" for="slo-check">Synthetic check</label>
+                    <select id="slo-check" class="form-select form-select-sm" @bind="checkIdStr">
+                        <option value="">— choose a check —</option>
+                        @foreach (CheckOption c in checks)
+                        {
+                            <option value="@c.Id">@c.Name</option>
+                        }
+                    </select>
+                </div>
+            }
+            else
+            {
+                <div class="col-md-3">
+                    <label class="form-label small mb-1" for="slo-cluster">Cluster</label>
+                    <select id="slo-cluster" class="form-select form-select-sm" @bind="editing.ClusterId">
+                        @foreach (ClusterOption c in clusters)
+                        {
+                            <option value="@c.Id">@c.Name</option>
+                        }
+                    </select>
+                </div>
+                <div class="col-md-3">
+                    <label class="form-label small mb-1" for="slo-service">Service</label>
+                    <input id="slo-service" class="form-control form-control-sm font-monospace" @bind="editing.Service" placeholder="service.name" />
+                </div>
+                @if (editing.Kind == SloKind.ServiceLatency)
+                {
+                    <div class="col-md-3">
+                        <label class="form-label small mb-1" for="slo-latency">p95 at or under (ms)</label>
+                        <input id="slo-latency" type="number" min="1" class="form-control form-control-sm" @bind="editing.LatencyThresholdMs" />
+                    </div>
+                }
+            }
+
+            <div class="col-md-3">
+                <label class="form-label small mb-1" for="slo-alert">Alert when budget spent (%)</label>
+                <input id="slo-alert" type="number" step="any" class="form-control form-control-sm" @bind="editing.AlertAtBudgetSpentPercent" placeholder="no alert" />
+            </div>
+            <div class="col-md-3">
+                <label class="form-label small mb-1" for="slo-severity">Severity</label>
+                <select id="slo-severity" class="form-select form-select-sm" @bind="editing.Severity">
+                    <option value="critical">critical</option>
+                    <option value="warning">warning</option>
+                    <option value="info">info</option>
+                </select>
+            </div>
+            <div class="col-12 d-flex align-items-center gap-2 mt-2">
+                <button class="btn btn-sm btn-primary" @onclick="SaveAsync">Save</button>
+                <button class="btn btn-sm btn-outline-secondary" @onclick="() => editing = null">Cancel</button>
+                @if (problem is not null)
+                {
+                    <span class="small text-danger" role="alert">@problem</span>
+                }
+            </div>
+        </div>
+    </div>
+}
+
+@if (rows.Count == 0 && editing is null)
+{
+    <div class="text-center py-5 text-muted">
+        <span class="bi bi-bullseye display-6 d-block mb-2 opacity-25"></span>
+        No objectives yet. Figures appear within a few minutes of creating one.
+    </div>
+}
+else if (rows.Count > 0)
+{
+    <div class="table-responsive">
+        <table class="table table-sm align-middle small">
+            <thead><tr><th>Objective</th><th class="text-end">Target</th><th class="text-end">Attained</th><th style="min-width:180px">Budget spent</th><th class="text-end">Burn rate</th><th></th></tr></thead>
+            <tbody>
+                @foreach (SloRow row in rows)
+                {
+                    ServiceLevelObjective s = row.Slo;
+                    SloStatus st = row.Status;
+                    <tr>
+                        <td>
+                            <div class="fw-semibold">@s.Name</div>
+                            <div class="text-muted">@Describe(s) · @s.WindowDays days</div>
+                        </td>
+                        <td class="text-end">@Percent(s.TargetPercent)</td>
+                        <td class="text-end">@(st.AttainedPercent is { } a ? Percent(a) : "—")</td>
+                        <td>
+                            @if (st.BudgetSpentFraction is { } spent)
+                            {
+                                <div class="progress" style="height:8px" title="@Percent(spent * 100) of the budget">
+                                    <div class="progress-bar @(st.IsBreached ? "bg-danger" : spent > 0.75 ? "bg-warning" : "bg-success")" style="width:@(Math.Min(100, spent * 100).ToString("0.##", Invariant))%"></div>
+                                </div>
+                                <div class="@(st.IsBreached ? "text-danger fw-semibold" : "text-muted")">@Percent(spent * 100)@(st.IsBreached ? " · breached" : "")</div>
+                            }
+                            else
+                            {
+                                <span class="text-muted">No events yet</span>
+                            }
+                        </td>
+                        <td class="text-end @(st.BurnRate > 1 ? "text-danger" : "")">@(st.BurnRate is { } b ? b.ToString("0.##", Invariant) + "×" : "—")</td>
+                        <td class="text-end text-nowrap">
+                            <button class="btn btn-sm btn-link p-0 me-2" @onclick="() => StartEdit(s)">Edit</button>
+                            <button class="btn btn-sm btn-link text-danger p-0" @onclick="() => DeleteAsync(s)">Delete</button>
+                        </td>
+                    </tr>
+                }
+            </tbody>
+        </table>
+    </div>
+    <div class="small text-muted">A burn rate above 1× spends the budget faster than the window allows. Spending exactly 100% still meets the target.</div>
+}
+
+@code {
+    [Parameter] public required Guid TenantId { get; set; }
+
+    private static readonly System.Globalization.CultureInfo Invariant = System.Globalization.CultureInfo.InvariantCulture;
+
+    private List<SloRow> rows = [];
+    private List<ClusterOption> clusters = [];
+    private List<CheckOption> checks = [];
+    private ServiceLevelObjective? editing;
+    private string checkIdStr = "";
+    private string? problem;
+
+    protected override async Task OnInitializedAsync()
+    {
+        await using TelemetryDbContext db = await DbFactory.CreateDbContextAsync();
+        clusters = await db.KubernetesClusters.Where(c => c.TenantId == TenantId).OrderBy(c => c.Name)
+            .Select(c => new ClusterOption(c.Id, c.Name)).ToListAsync();
+        checks = await db.SyntheticChecks.Where(c => c.TenantId == TenantId).OrderBy(c => c.Name)
+            .Select(c => new CheckOption(c.Id, c.Name)).ToListAsync();
+
+        await ReloadAsync();
+    }
+
+    private async Task ReloadAsync() => rows = await Slos.ListAsync(TenantId, DateTime.UtcNow);
+
+    private void StartNew()
+    {
+        problem = null;
+        checkIdStr = "";
+        editing = new ServiceLevelObjective { Kind = SloKind.ServiceAvailability, ClusterId = clusters[0].Id };
+    }
+
+    private void StartEdit(ServiceLevelObjective s)
+    {
+        problem = null;
+        checkIdStr = s.CheckId?.ToString() ?? "";
+        editing = new ServiceLevelObjective
+        {
+            Id = s.Id, Name = s.Name, Kind = s.Kind, TargetPercent = s.TargetPercent, WindowDays = s.WindowDays,
+            CheckId = s.CheckId, ClusterId = s.ClusterId, Service = s.Service, LatencyThresholdMs = s.LatencyThresholdMs,
+            AlertAtBudgetSpentPercent = s.AlertAtBudgetSpentPercent, Severity = s.Severity,
+        };
+    }
+
+    private async Task SaveAsync()
+    {
+        if (editing is null) return;
+
+        editing.CheckId = Guid.TryParse(checkIdStr, out Guid checkId) ? checkId : null;
+        problem = await Slos.SaveAsync(TenantId, editing);
+
+        if (problem is null)
+        {
+            editing = null;
+            await ReloadAsync();
+        }
+    }
+
+    private async Task DeleteAsync(ServiceLevelObjective s)
+    {
+        await Slos.DeleteAsync(TenantId, s.Id);
+        await ReloadAsync();
+    }
+
+    private string Describe(ServiceLevelObjective s) => s.Kind switch
+    {
+        SloKind.SyntheticUptime => "Synthetic: " + (checks.FirstOrDefault(c => c.Id == s.CheckId)?.Name ?? "(check)"),
+        SloKind.ServiceLatency => $"{s.Service} p95 ≤ {s.LatencyThresholdMs?.ToString("0.##", Invariant)} ms",
+        _ => $"{s.Service} availability",
+    };
+
+    private static string Percent(double value) => value.ToString("0.###", Invariant) + "%";
+
+    private sealed record ClusterOption(Guid Id, string Name);
+    private sealed record CheckOption(Guid Id, string Name);
+}

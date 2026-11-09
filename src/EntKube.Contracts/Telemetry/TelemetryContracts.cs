@@ -181,6 +181,65 @@ public sealed record SyntheticCheckSummary(
     string? LastFailure,
     DateTime? LastRunAt);
 
+/// <summary>
+/// One fault, however many times it happened.
+///
+/// <para>⚠️ Title and SampleMessage are log text, and a browser error's message can be set by whoever
+/// can run script on the page. Treat both as untrusted.</para>
+/// </summary>
+/// <param name="Id">The issue's id.</param>
+/// <param name="Source">Log or Browser.</param>
+/// <param name="Scope">The cluster or RUM site's name.</param>
+/// <param name="Namespace">The namespace, for a log issue.</param>
+/// <param name="Workload">The workload, for a log issue.</param>
+/// <param name="Title">The message with whatever varies replaced.</param>
+/// <param name="SampleMessage">The latest real occurrence.</param>
+/// <param name="Occurrences">How many times it happened.</param>
+/// <param name="CountIsPartial">True when Occurrences is a lower bound.</param>
+/// <param name="Status">Open, Resolved or Ignored.</param>
+/// <param name="Regressions">How many times it came back after being resolved.</param>
+/// <param name="FirstSeenAt">When it was first seen.</param>
+/// <param name="LastSeenAt">When it was last seen.</param>
+public sealed record ErrorIssueSummary(
+    Guid Id,
+    string Source,
+    string Scope,
+    string? Namespace,
+    string? Workload,
+    string Title,
+    string SampleMessage,
+    long Occurrences,
+    bool CountIsPartial,
+    string Status,
+    int Regressions,
+    DateTime FirstSeenAt,
+    DateTime LastSeenAt);
+
+/// <summary>A service level objective and where it stands.</summary>
+/// <param name="Id">The objective's id.</param>
+/// <param name="Name">Its name.</param>
+/// <param name="Kind">SyntheticUptime, ServiceAvailability or ServiceLatency.</param>
+/// <param name="TargetPercent">The share of good events promised.</param>
+/// <param name="WindowDays">The rolling window.</param>
+/// <param name="Good">Good events in the window.</param>
+/// <param name="Total">All events in the window.</param>
+/// <param name="AttainedPercent">Good over total, or null with no events.</param>
+/// <param name="BudgetSpentFraction">Bad over allowed bad: 1 is exactly spent and still met. Null with no events.</param>
+/// <param name="BurnRate">The latest day's spending pace: above 1 is too fast. Null when that day had no events.</param>
+/// <param name="IsBreached">True only when the budget is overspent.</param>
+public sealed record SloSummary(
+    Guid Id,
+    string Name,
+    string Kind,
+    double TargetPercent,
+    int WindowDays,
+    long Good,
+    long Total,
+    double? AttainedPercent,
+    double? BudgetSpentFraction,
+    double? BurnRate,
+    bool IsBreached);
+
 public interface ITelemetryApi
 {
     /// <summary>
@@ -221,6 +280,16 @@ public interface ITelemetryApi
     /// </summary>
     Task<LogQueryOutcome> QueryLogsAsync(
         Guid tenantId, Guid clusterId, string query, DateTime from, DateTime to, CancellationToken ct = default);
+    /// <summary>
+    /// One tenant's error issues, most recently seen first. <paramref name="status"/> is a status name
+    /// or null for all. The route validates it, so an unknown name here is a programming error.
+    /// </summary>
+    Task<IReadOnlyList<ErrorIssueSummary>> GetErrorIssuesAsync(
+        Guid tenantId, string? status = null, int limit = 200, CancellationToken ct = default);
+
+    /// <summary>One tenant's service level objectives and where each stands.</summary>
+    Task<IReadOnlyList<SloSummary>> GetSlosAsync(Guid tenantId, CancellationToken ct = default);
+
     /// <summary>One tenant's synthetic checks and how each has done.</summary>
     Task<IReadOnlyList<SyntheticCheckSummary>> GetSyntheticChecksAsync(
         Guid tenantId, CancellationToken ct = default);

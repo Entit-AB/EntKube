@@ -141,6 +141,10 @@ public class TenantService(
         await db.SavedLogQueries.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         // Their results go by cascade. A check holds no foreign key to its tenant or cluster.
         await db.SyntheticChecks.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.ErrorIssues.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+        await db.ErrorScanCursors.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
+        // Tallies go with their objective by cascade.
+        await db.ServiceLevelObjectives.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.RumSites.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.TelemetrySegments.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);
         await db.TelemetryStorageSettings.Where(x => x.TenantId == id).ExecuteDeleteAsync(ct);

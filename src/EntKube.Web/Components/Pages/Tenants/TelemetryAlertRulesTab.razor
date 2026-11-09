@@ -31,6 +31,7 @@
                     <option value="@TelemetryAlertKind.TraceErrorRate">Trace: service error rate (%)</option>
                     <option value="@TelemetryAlertKind.LogErrorRate">Log: error rate (per min)</option>
                     <option value="@TelemetryAlertKind.LogQuery">Log: query result</option>
+                    <option value="@TelemetryAlertKind.NewErrorIssues">Errors: new or regressed issues</option>
                     <option value="@TelemetryAlertKind.RumErrorRate">RUM: browser error rate (per min)</option>
                     <option value="@TelemetryAlertKind.RumLcpP75">RUM: LCP p75 (ms)</option>
                 </select>
@@ -192,9 +193,9 @@ else if (rules.Count > 0)
         await Reload();
     }
 
-    // A synthetic check's rule is the check's own, edited on its page, so it would only confuse here.
+    // A synthetic check's or objective's rule is that thing's own, edited on its page, so it would only confuse here.
     private async Task Reload() =>
-        rules = [.. (await Rules.ListAsync(TenantId)).Where(r => r.Kind != TelemetryAlertKind.SyntheticCheck)];
+        rules = [.. (await Rules.ListAsync(TenantId)).Where(r => r.Kind is not (TelemetryAlertKind.SyntheticCheck or TelemetryAlertKind.SloBudget))];
 
     private void StartNew() => StartEdit(new TelemetryAlertRule { Name = "", TenantId = TenantId });
 
@@ -244,6 +245,7 @@ else if (rules.Count > 0)
     private string ThresholdUnit => editing?.Kind switch
     {
         TelemetryAlertKind.LogQuery => "value",
+        TelemetryAlertKind.NewErrorIssues => "issues",
         TelemetryAlertKind.TraceLatencyP95 or TelemetryAlertKind.RumLcpP75 => "ms",
         TelemetryAlertKind.TraceErrorRate => "%",
         _ => "per min"
@@ -252,6 +254,7 @@ else if (rules.Count > 0)
     private static string UnitFor(TelemetryAlertKind k) => k switch
     {
         TelemetryAlertKind.LogQuery => "",
+        TelemetryAlertKind.NewErrorIssues => " issues",
         TelemetryAlertKind.TraceLatencyP95 or TelemetryAlertKind.RumLcpP75 => "ms",
         TelemetryAlertKind.TraceErrorRate => "%",
         _ => "/min"
@@ -263,6 +266,7 @@ else if (rules.Count > 0)
         TelemetryAlertKind.TraceErrorRate => "error rate",
         TelemetryAlertKind.LogErrorRate => "log error rate",
         TelemetryAlertKind.LogQuery => "log query",
+        TelemetryAlertKind.NewErrorIssues => "new error issues",
         TelemetryAlertKind.RumErrorRate => "RUM error rate",
         TelemetryAlertKind.RumLcpP75 => "RUM LCP p75",
         _ => k.ToString()
@@ -272,6 +276,7 @@ else if (rules.Count > 0)
     {
         TelemetryAlertKind.LogErrorRate => r.Namespace is null ? "all namespaces" : r.Namespace,
         TelemetryAlertKind.LogQuery => r.Query ?? "—",
+        TelemetryAlertKind.NewErrorIssues => "all issues",
         TelemetryAlertKind.RumErrorRate or TelemetryAlertKind.RumLcpP75 =>
             rumSites.FirstOrDefault(s => s.Id == r.SiteId)?.Name ?? "(site)",
         _ => r.Service ?? "—"

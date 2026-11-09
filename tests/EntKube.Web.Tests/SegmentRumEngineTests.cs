@@ -83,6 +83,24 @@ public sealed class SegmentRumEngineTests : IDisposable
         o.AvgLoadMs.Should().BeApproximately(150, 0.1);
     }
 
+    /// <summary>
+    /// ⚠️ The error scan moves a cursor past whatever this answers, so a failed read has to be
+    /// distinguishable from a quiet site. A cancelled read is the failure a test can cause on the
+    /// real store. The dashboards' method goes on showing an empty table.
+    /// </summary>
+    [Fact]
+    public async Task A_failed_read_of_top_errors_is_null_and_never_an_empty_list()
+    {
+        var (_, svc, from, to) = Scenario();
+        using CancellationTokenSource cancelled = new();
+        cancelled.Cancel();
+
+        (await svc.TryGetTopErrorsAsync(_tenantId, _siteId, from, to)).Should().ContainSingle("a healthy read still answers");
+
+        (await svc.TryGetTopErrorsAsync(_tenantId, _siteId, from, to, ct: cancelled.Token)).Should().BeNull();
+        (await svc.GetTopErrorsAsync(_tenantId, _siteId, from, to, ct: cancelled.Token)).Should().BeEmpty();
+    }
+
     [Fact]
     public async Task TopPages_And_TopErrors()
     {

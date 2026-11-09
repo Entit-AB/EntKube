@@ -37,7 +37,12 @@ public sealed record LogAggregate(string Alias, string? Column);
 
 /// <param name="Column">The grouped column.</param>
 /// <param name="Bin">The bucket width when grouping time, else null.</param>
-public sealed record LogGroupKey(string Column, TimeSpan? Bin);
+/// <param name="Pattern">True to group by the column's shape, with whatever varies replaced.</param>
+public sealed record LogGroupKey(string Column, TimeSpan? Bin, bool Pattern = false)
+{
+    /// <summary>The output column. A pattern is not the text it came from, so it does not share a name.</summary>
+    public string OutputName => Pattern ? "pattern" : Column;
+}
 
 /// <summary>A parsed, type-checked query. Every column it names exists where it is used.</summary>
 public sealed record LogPipelineQuery(IReadOnlyList<LogStage> Stages)

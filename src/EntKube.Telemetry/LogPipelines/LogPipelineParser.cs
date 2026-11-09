@@ -282,7 +282,9 @@ public static class LogPipelineParser
             List<LogColumn> output = [];
             foreach (LogGroupKey key in keys)
             {
-                output.Add(columns.First(c => c.Name == key.Column));
+                output.Add(key.Pattern
+                    ? new LogColumn(key.OutputName, LogColumnType.Text)
+                    : columns.First(c => c.Name == key.Column));
             }
             output.AddRange(aggregates.Select(a => new LogColumn(a.Alias, LogColumnType.Number)));
 
@@ -325,6 +327,18 @@ public static class LogPipelineParser
 
         private LogGroupKey ParseGroupKey()
         {
+            if (TakeWord("pattern"))
+            {
+                ExpectSymbol("(");
+                int at = Current.Position;
+                LogColumn text = ParseColumn();
+                if (text.Type != LogColumnType.Text)
+                    throw new SyntaxError($"pattern() needs a text column, and '{text.Name}' is not one.", at);
+
+                ExpectSymbol(")");
+                return new LogGroupKey(text.Name, null, Pattern: true);
+            }
+
             if (!TakeWord("bin")) return new LogGroupKey(ParseColumn().Name, null);
 
             ExpectSymbol("(");

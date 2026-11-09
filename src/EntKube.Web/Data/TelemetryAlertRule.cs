@@ -16,7 +16,11 @@ public enum TelemetryAlertKind
     /// <summary>A log query's answer over the window: its single value, or else how many rows it returned.</summary>
     LogQuery,
     /// <summary>A synthetic check's failure streak. Managed by its check, and never edited as a rule.</summary>
-    SyntheticCheck
+    SyntheticCheck,
+    /// <summary>How many issues in a cluster are new, or came back, within the window.</summary>
+    NewErrorIssues,
+    /// <summary>An objective's spent error budget, in percent. Managed by its objective.</summary>
+    SloBudget
 }
 
 /// <summary>
@@ -38,6 +42,9 @@ public class TelemetryAlertRule
 
     /// <summary>The check this rule belongs to, for the SyntheticCheck kind.</summary>
     public Guid? CheckId { get; set; }
+
+    /// <summary>The objective this rule belongs to, for the SloBudget kind.</summary>
+    public Guid? SloId { get; set; }
 
     public required string Name { get; set; }
     public TelemetryAlertKind Kind { get; set; }
