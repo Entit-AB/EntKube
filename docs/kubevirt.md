@@ -48,6 +48,7 @@ The section lists the VMs on the environment's clusters and acts on them:
 | Start / Stop | A merge patch setting `spec.runStrategy` to `Always` / `Halted`. The patch also clears the deprecated `spec.running`, because KubeVirt rejects a VM that sets both. |
 | Restart | Deletes the `VirtualMachineInstance`. KubeVirt boots a fresh one. Refused unless the run strategy is `Always` or `RerunOnFailure`; under `Manual` the same delete would just stop the VM. |
 | Pause / Unpause | `PUT` to the instance's `pause` / `unpause` subresource. The guest is frozen in memory, not shut down, and carries on where it was. |
+| Live migrate | Applies a `VirtualMachineInstanceMigration` naming the instance. KubeVirt picks the target node. Offered only when the instance's `LiveMigratable` condition is true. Otherwise the button names KubeVirt's reason, most often a ReadWriteOnce disk. Each request is a new object, so a finished one is never updated in place. |
 | Delete | Deletes the `VirtualMachine`. Disks it imported are owned by it and go with it. |
 
 Every action goes through the cluster change gate, so the operator sees and acknowledges it first, and
@@ -175,5 +176,3 @@ place. The app and component routes behave the same way when their last one goes
 
 - **API, CLI and MCP.** The section is UI-only for now, as Search is. Adding routes brings in the API
   scope, tenant-reach, CLI-parity and MCP-parity ratchets.
-- **Live migration** from the page. The KubeVirt resource still asks for VMs to be live-migrated across
-  KubeVirt upgrades, which works when the VM's storage allows it (container disks, or RWX volumes).

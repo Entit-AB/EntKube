@@ -251,7 +251,7 @@ else
                             <th style="width:11rem">Node</th>
                             <th style="width:9rem">IP</th>
                             <th style="width:5rem" class="text-end">Age</th>
-                            <th style="width:20rem" class="text-end"></th>
+                            <th style="width:22rem" class="text-end"></th>
                         </tr>
                     </thead>
                     <tbody>
@@ -322,6 +322,11 @@ else
                                                         title="@(vm.IsRunning ? "Pause (freeze in memory)" : "Pause needs a running VM")"
                                                         @onclick="() => ActAsync(vm, VmAction.Pause)"><i class="bi bi-pause-fill"></i></button>
                                             }
+                                            <button class="btn btn-outline-secondary" disabled="@(acting || vm.LiveMigratable != true)"
+                                                    title="@(vm.LiveMigratable == true ? "Live-migrate to another node"
+                                                            : vm.MigrationBlocker is string why ? $"Cannot live-migrate: {why}"
+                                                            : "Live migration needs a running VM")"
+                                                    @onclick="() => ActAsync(vm, VmAction.Migrate)"><i class="bi bi-arrow-left-right"></i></button>
                                             <button class="btn btn-outline-secondary" disabled="@(acting || !vm.CanRestart)"
                                                     title="@(vm.CanRestart ? "Restart" : "Restart needs a running VM with runStrategy Always")"
                                                     @onclick="() => ActAsync(vm, VmAction.Restart)"><i class="bi bi-arrow-clockwise"></i></button>
@@ -341,6 +346,11 @@ else
                                             <tbody>
                                                 <tr><th class="text-muted fw-normal small" style="width:30%">Root disk</th><td class="small"><code>@(vm.DiskSource ?? "—")</code></td></tr>
                                                 <tr><th class="text-muted fw-normal small">Run strategy</th><td class="small">@vm.RunStrategy</td></tr>
+                                                @if (vm.LiveMigratable is bool migratable)
+                                                {
+                                                    <tr><th class="text-muted fw-normal small">Live migration</th>
+                                                        <td class="small">@(migratable ? "possible" : $"not possible — {vm.MigrationBlocker}")</td></tr>
+                                                }
                                                 @if (vm.GuestOs is not null)
                                                 {
                                                     <tr><th class="text-muted fw-normal small">Guest OS</th><td class="small">@vm.GuestOs</td></tr>
@@ -485,7 +495,7 @@ else
           + "This is a wiring mistake in the page hosting it, not a problem with the cluster."
         : null;
 
-    private enum VmAction { Start, Stop, Restart, Pause, Unpause }
+    private enum VmAction { Start, Stop, Restart, Pause, Unpause, Migrate }
 
     private static readonly string[] ContainerDiskSuggestions =
     [
@@ -813,6 +823,10 @@ else
                 case VmAction.Pause:
                     await Vms.PauseAsync(TenantId, clusterId, vm.Namespace, vm.Name, actor);
                     Toasts.Success($"Paused \"{vm.Name}\".");
+                    break;
+                case VmAction.Migrate:
+                    await Vms.MigrateAsync(TenantId, clusterId, vm.Namespace, vm.Name, actor);
+                    Toasts.Success($"Migrating \"{vm.Name}\" — its status shows Migrating until it lands on another node.");
                     break;
                 case VmAction.Unpause:
                     await Vms.UnpauseAsync(TenantId, clusterId, vm.Namespace, vm.Name, actor);

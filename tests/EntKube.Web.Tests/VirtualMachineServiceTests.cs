@@ -491,6 +491,59 @@ public class VirtualMachineServiceTests : IDisposable
             "web-01", "vms", subresource, It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()), Times.Once);
     }
 
+    [Theory]
+    [InlineData("True", null, true, null)]
+    [InlineData("False", "DisksNotLiveMigratable: PVC root-disk is not shared, live migration requires that all PVCs must be shared (using ReadWriteMany access mode)", false, "ReadWriteMany")]
+    public void Kubevirts_live_migration_verdict_is_read_from_the_instance(
+        string status, string? message, bool migratable, string? blockerMentions)
+    {
+        string vmi = RunningVmi.Replace("\"status\": {", $$"""
+            "status": {
+              "conditions": [{ "type": "LiveMigratable", "status": "{{status}}", "reason": "DisksNotLiveMigratable"{{(message is null ? "" : $", \"message\": \"{message}\"")}} }],
+            """);
+
+        VirtualMachineView vm = VirtualMachineService.Parse(Wrap(RunningVm), Wrap(vmi), null).Single();
+
+        vm.LiveMigratable.Should().Be(migratable);
+        if (blockerMentions is null) vm.MigrationBlocker.Should().BeNull();
+        else vm.MigrationBlocker.Should().Contain(blockerMentions, "the page says WHY it cannot move, not just that it cannot");
+    }
+
+    [Fact]
+    public void A_stopped_vm_has_no_migration_verdict_at_all()
+    {
+        VirtualMachineService.Parse(Wrap(LegacyStoppedVm), null, null).Single().LiveMigratable.Should().BeNull();
+    }
+
+    [Fact]
+    public void Each_migration_request_is_its_own_object_named_within_a_dns_label()
+    {
+        string longName = new string('a', 58);
+        YamlMappingNode first = Load(VirtualMachineService.BuildMigrationManifest("vms", longName, new DateTime(2026, 11, 10, 12, 0, 0)));
+        YamlMappingNode second = Load(VirtualMachineService.BuildMigrationManifest("vms", longName, new DateTime(2026, 11, 10, 12, 0, 1)));
+
+        Scalar(first, "kind").Should().Be("VirtualMachineInstanceMigration");
+        Scalar(first, "spec", "vmiName").Should().Be(longName);
+        Scalar(first, "metadata", "name").Length.Should().BeLessThanOrEqualTo(63);
+        Scalar(first, "metadata", "name").Should().NotBe(Scalar(second, "metadata", "name"),
+            "applying the same name again would update a finished migration in place, and nothing would move");
+    }
+
+    [Fact]
+    public async Task Migrating_applies_the_request_into_the_vms_namespace()
+    {
+        KubernetesCluster cluster = await SeedClusterAsync();
+        string? applied = null;
+        k8s.Setup(f => f.ApplyManifestInNamespaceAsync(
+                It.IsAny<string>(), "vms", It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()))
+            .Callback<string, string, string, string?, CancellationToken>((m, _, _, _, _) => applied = m)
+            .ReturnsAsync("created");
+
+        await sut.MigrateAsync(cluster.TenantId, cluster.Id, "vms", "web-01", "alice");
+
+        Scalar(Load(applied!), "spec", "vmiName").Should().Be("web-01");
+    }
+
     [Fact]
     public async Task Another_tenant_cannot_change_a_vm()
     {

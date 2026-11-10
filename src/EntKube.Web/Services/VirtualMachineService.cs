@@ -86,6 +86,15 @@ public record VirtualMachineView
     /// <summary>The condition message explaining a failure or a wait.</summary>
     public string? Message { get; init; }
 
+    /// <summary>
+    /// KubeVirt's own verdict on the running instance (its <c>LiveMigratable</c> condition): null without
+    /// an instance. False most often means a ReadWriteOnce disk, which only one node can mount.
+    /// </summary>
+    public bool? LiveMigratable { get; init; }
+
+    /// <summary>Why the instance cannot be live-migrated, in KubeVirt's words.</summary>
+    public string? MigrationBlocker { get; init; }
+
     public DateTime? CreatedAt { get; init; }
 
     public bool IsRunning => Status == "Running";
@@ -360,6 +369,39 @@ public class VirtualMachineService(
         return socket;
     }
 
+    /// <summary>
+    /// Moves the running guest to another node without stopping it, by creating a
+    /// <c>VirtualMachineInstanceMigration</c>. KubeVirt picks the target node and refuses on its own if the
+    /// instance cannot move; the page offers this only when KubeVirt says it can.
+    /// </summary>
+    public async Task MigrateAsync(Guid tenantId, Guid clusterId, string ns, string name, string performedBy,
+        CancellationToken ct = default)
+    {
+        Clusters.IClusterClient client = await ClusterFor(tenantId, clusterId, ct);
+        await client.ApplyManifestInNamespaceAsync(
+            BuildMigrationManifest(ns, name, DateTime.UtcNow), ns,
+            $"Live-migrate virtual machine {ns}/{name} to another node", ct);
+        await AuditAsync("vm.migrate", ns, name, null, performedBy, ct);
+    }
+
+    /// <summary>
+    /// One migration request. Named per request, because apply would otherwise update a finished
+    /// migration in place and nothing would move. The VM name is cut so the whole name stays a DNS label.
+    /// </summary>
+    public static string BuildMigrationManifest(string ns, string name, DateTime now) =>
+        Yaml.Serialize(new Dictionary<string, object>
+        {
+            ["apiVersion"] = "kubevirt.io/v1",
+            ["kind"] = "VirtualMachineInstanceMigration",
+            ["metadata"] = new Dictionary<string, object>
+            {
+                ["name"] = $"{name[..Math.Min(name.Length, 40)].TrimEnd('-')}-mig-{now:yyyyMMddHHmmss}",
+                ["namespace"] = ns,
+                ["labels"] = new Dictionary<string, object> { ["app.kubernetes.io/managed-by"] = "entkube" }
+            },
+            ["spec"] = new Dictionary<string, object> { ["vmiName"] = name }
+        });
+
     /// <summary>Deletes the VM. Disks it imported (its DataVolume templates) are owned by it and go too.</summary>
     public async Task DeleteAsync(Guid tenantId, Guid clusterId, string ns, string name, string performedBy,
         CancellationToken ct = default)
@@ -619,6 +661,9 @@ public class VirtualMachineService(
                 GuestOs = hasVmi && Path(vmi, "status", "guestOSInfo") is { } os ? Str(os, "prettyName") : null,
                 ImportProgress = progress,
                 Message = ConditionMessage(vm),
+                LiveMigratable = hasVmi ? Condition(vmi, "LiveMigratable") is { } lm ? lm.Status == "True" : null : null,
+                MigrationBlocker = hasVmi && Condition(vmi, "LiveMigratable") is { Status: "False" } blocked
+                    ? blocked.Message ?? blocked.Reason : null,
                 CreatedAt = Str(meta, "creationTimestamp") is { } ts
                     && DateTime.TryParse(ts, null, System.Globalization.DateTimeStyles.AdjustToUniversal
                         | System.Globalization.DateTimeStyles.AssumeUniversal, out DateTime created)
@@ -708,6 +753,23 @@ public class VirtualMachineService(
             if (string.IsNullOrWhiteSpace(message)) continue;
             if ((type == "Failure" && state == "True") || (type == "Ready" && state == "False"))
                 return message;
+        }
+
+        return null;
+    }
+
+    private sealed record ConditionView(string? Status, string? Reason, string? Message);
+
+    private static ConditionView? Condition(JsonElement obj, string type)
+    {
+        if (Path(obj, "status") is not { } st || !st.TryGetProperty("conditions", out JsonElement conditions)
+            || conditions.ValueKind != JsonValueKind.Array)
+            return null;
+
+        foreach (JsonElement c in conditions.EnumerateArray())
+        {
+            if (Str(c, "type") == type)
+                return new ConditionView(Str(c, "status"), Str(c, "reason"), Str(c, "message"));
         }
 
         return null;
