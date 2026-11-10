@@ -158,9 +158,9 @@ rebuilds read it. Tests pin each one.
 **One owner per hostname and per port.** Every route generator names its HTTPRoute after the hostname,
 so a hostname already served on the cluster by a component, an app or another VM is refused. The
 component route form also refuses a VM's hostname. A TCP port is one LoadBalancer listener, so app and
-VM TCP routes check each other in both directions. The one gap is that an *app* route's hostname
-attaches to a cluster only later, when a deployment route links it, so it is not checked against VM
-hostnames when the app route is added.
+VM TCP routes check each other in both directions. An *app* route's hostname belongs to no cluster
+until a deployment route links it, so it is checked against VM hostnames at that point, and again
+when an already linked route's hostname is edited.
 
 **The Service selects `kubevirt.io/vm: <name>`**, which EntKube puts on every VM it creates. Publishing
 is refused for a VM whose pod template lacks it, because the Service would select nothing. Add the
@@ -189,6 +189,33 @@ Routes go through `IFleetApi`, not the VM service. A request has no circuit, so 
 change unattended in the token's name, and the token's name is what the audit log records. A cluster
 that is not the token's tenant's gives a 404. A refusal, such as a restart under `Manual` or a
 cluster that cannot be reached, gives a 422 with KubeVirt's or EntKube's reason.
+
+## Testing against a real cluster
+
+Everything above is unit-tested against a mocked kubectl. `KubeVirtLiveTests` is the one test that
+uses a real cluster, and it does nothing unless pointed at one:
+
+```bash
+# A cluster with the four Virtualization components installed (Software emulation on where nodes
+# have no /dev/kvm). A throwaway kind cluster is enough.
+export ENTKUBE_KUBEVIRT_TEST_KUBECONFIG=~/.kube/kubevirt-test.yaml
+dotnet test tests/EntKube.Web.Tests --filter FullyQualifiedName~KubeVirtLiveTests
+```
+
+It runs one VM through its whole life with the production objects and only the database in
+memory:
+
+1. Create from a container disk. The run checks that KubeVirt accepts the manifest EntKube writes,
+   and that the parser finds the node, IP, cores and `LiveMigratable` in real JSON.
+2. Send a newline on the serial console and expect bytes back.
+3. Expect the VNC console's first frame to be the `RFB ` handshake.
+4. Pause and unpause through the subresource verb.
+5. Restart, and check it produced a new instance.
+6. Stop, then delete.
+
+`ENTKUBE_KUBEVIRT_TEST_NAMESPACE` and `ENTKUBE_KUBEVIRT_TEST_IMAGE` override the defaults: namespace
+`entkube-kubevirt-test`, and KubeVirt's multi-arch cirros demo disk. The VM is deleted at the end;
+the namespace is left.
 
 ## Not yet
 

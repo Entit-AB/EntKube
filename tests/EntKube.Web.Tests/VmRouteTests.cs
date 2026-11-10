@@ -522,6 +522,47 @@ public class VmRouteTests : IDisposable
             "the reverse check: an app may not take a port a VM already publishes");
     }
 
+    private AppRouteService AppRoutes() =>
+        new(testDb.Factory, new EntKube.Web.Modules.Api.CatalogApi(testDb.Factory), NullLogger<AppRouteService>.Instance);
+
+    [Fact]
+    public async Task An_app_route_may_not_bring_a_vms_hostname_onto_its_cluster()
+    {
+        await SeedAsync();
+        await PublishHttpAsync("vm.example.com");
+        AppDeployment deployment = db.AppDeployments.First(d => d.Id == deploymentId);
+
+        // The app route on its own is fine: it belongs to no cluster yet.
+        AppRoute appRoute = await AppRoutes().AddRouteAsync(tenantId, deployment.AppId,
+            new AppRouteRequest { Hostname = "vm.example.com", ClusterIssuerName = "letsencrypt-prod" });
+
+        Func<Task> link = () => AppRoutes().AddDeploymentRouteAsync(tenantId, appRoute.Id, deploymentId,
+            new AppDeploymentRouteRequest { ServiceName = "billing-api" });
+
+        await link.Should().ThrowAsync<InvalidOperationException>().WithMessage("*published by a virtual machine*");
+    }
+
+    [Fact]
+    public async Task A_linked_app_route_may_not_be_renamed_onto_a_vms_hostname()
+    {
+        await SeedAsync();
+        await PublishHttpAsync("vm.example.com");
+        AppDeployment deployment = db.AppDeployments.First(d => d.Id == deploymentId);
+        AppRoute appRoute = await AppRoutes().AddRouteAsync(tenantId, deployment.AppId,
+            new AppRouteRequest { Hostname = "billing.example.com", ClusterIssuerName = "letsencrypt-prod" });
+        await AppRoutes().AddDeploymentRouteAsync(tenantId, appRoute.Id, deploymentId,
+            new AppDeploymentRouteRequest { ServiceName = "billing-api" });
+
+        Func<Task> rename = () => AppRoutes().UpdateRouteAsync(tenantId, appRoute.Id,
+            new AppRouteRequest { Hostname = "vm.example.com", ClusterIssuerName = "letsencrypt-prod" });
+
+        await rename.Should().ThrowAsync<InvalidOperationException>().WithMessage("*published by a virtual machine*");
+
+        // And an edit that keeps the hostname is not refused by it.
+        await AppRoutes().UpdateRouteAsync(tenantId, appRoute.Id,
+            new AppRouteRequest { Hostname = "billing.example.com", ClusterIssuerName = "letsencrypt-prod" });
+    }
+
     [Fact]
     public async Task A_component_route_may_not_take_a_vms_hostname()
     {
