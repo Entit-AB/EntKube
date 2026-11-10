@@ -1131,6 +1131,10 @@ public class Program
         }).AllowAnonymous();
 
         app.MapAgentEndpoint();
+
+        // VM consoles: a cookie-authenticated websocket bridged to KubeVirt's vnc/console subresource.
+        // Checks Origin and tenant membership itself — see VirtualMachineConsoleEndpoint.
+        app.MapVirtualMachineConsole();
         EntKube.Web.Services.PublicApi.PublicApiEndpoints.MapPublicApi(app);
 
         // ⚠️ THE DOCUMENT IS BEHIND THE SAME TOKEN AS THE API IT DESCRIBES. It is not a

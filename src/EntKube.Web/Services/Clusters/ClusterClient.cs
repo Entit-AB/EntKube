@@ -109,6 +109,16 @@ public sealed class ClusterClient(
         => inner.DrainNodeAsync(nodeName, kubeconfig, gracePeriodSeconds, ignoreDaemonSets,
             deleteEmptyDirData, summary, ct);
 
+    public Task InvokeSubresourceAsync(
+        string groupVersion, string plural, string name, string ns, string subresource,
+        string? summary = null, CancellationToken ct = default)
+        => inner.InvokeSubresourceAsync(groupVersion, plural, name, ns, subresource, kubeconfig, summary, ct);
+
+    public Task<System.Net.WebSockets.WebSocket> ConnectSubresourceAsync(
+        string groupVersion, string plural, string name, string ns, string subresource,
+        string webSocketSubProtocol, CancellationToken ct = default)
+        => inner.ConnectSubresourceAsync(groupVersion, plural, name, ns, subresource, webSocketSubProtocol, kubeconfig, ct);
+
     public Task<WorkloadUndoResult> UndoDeploymentsAsync(
         string ns, string? summary = null, CancellationToken ct = default)
         => inner.UndoDeploymentsAsync(ns, kubeconfig, summary, ct);

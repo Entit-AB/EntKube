@@ -159,6 +159,22 @@ public interface IClusterClient
         bool deleteEmptyDirData = false, string? summary = null, CancellationToken ct = default);
 
     /// <summary>
+    /// Calls an action subresource on a namespaced object, acknowledged first. See
+    /// <see cref="IKubernetesClientFactory.InvokeSubresourceAsync"/>.
+    /// </summary>
+    Task InvokeSubresourceAsync(
+        string groupVersion, string plural, string name, string ns, string subresource,
+        string? summary = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// Opens a websocket to a streaming subresource. Not gated; the caller audits it. See
+    /// <see cref="IKubernetesClientFactory.ConnectSubresourceAsync"/>.
+    /// </summary>
+    Task<System.Net.WebSockets.WebSocket> ConnectSubresourceAsync(
+        string groupVersion, string plural, string name, string ns, string subresource,
+        string webSocketSubProtocol, CancellationToken ct = default);
+
+    /// <summary>
     /// Rolls every Deployment in a namespace back to the revision Kubernetes last recorded for it.
     /// See <see cref="IKubernetesClientFactory.UndoDeploymentsAsync"/> for why the namespace is
     /// the unit and why a partial result is returned rather than thrown.

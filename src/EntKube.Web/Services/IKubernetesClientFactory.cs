@@ -230,6 +230,39 @@ public interface IKubernetesClientFactory
         string? summary = null, CancellationToken ct = default);
 
     /// <summary>
+    /// PUTs to an action subresource of a namespaced object —
+    /// <c>/apis/{groupVersion}/namespaces/{ns}/{plural}/{name}/{subresource}</c> — as one acknowledged
+    /// change (<see cref="ClusterChanges.ChangeVerb.Invoke"/>).
+    ///
+    /// <para>Its own verb because neither kubectl nor the typed SDK can reach these. KubeVirt's pause
+    /// and unpause exist only as subresources, and the only other way to send the request is the SDK's
+    /// raw <c>HttpClient</c>, which the gate cannot see. Every segment is validated as a DNS name, so
+    /// a caller cannot steer the request to another path.</para>
+    /// </summary>
+    Task InvokeSubresourceAsync(
+        string groupVersion, string plural, string name, string ns, string subresource,
+        string kubeconfig, string? summary = null, CancellationToken ct = default);
+
+    /// <summary>
+    /// Opens a websocket to a streaming subresource of a namespaced object — KubeVirt's
+    /// <c>virtualmachineinstances/{name}/vnc</c> or <c>/console</c> — authenticated with the cluster's
+    /// own credential. The caller owns the returned socket and must dispose it.
+    ///
+    /// <para><b>Not gated.</b> A console changes no cluster state; it is a session with a guest that
+    /// already runs, the same standing as <c>ProxyServiceAsync</c>. It is also opened from an HTTP
+    /// request rather than a circuit, where no acknowledgment dialog exists to ask. What it is instead
+    /// is <b>audited</b>, by the caller, with the person's name.</para>
+    ///
+    /// <para>Built here, from the kubeconfig, through the client library's own websocket connect —
+    /// which applies every credential a kubeconfig can carry (client certificate, bearer token, exec
+    /// plugin) — so that no caller ever holds the credential. Paths are validated exactly as
+    /// <see cref="InvokeSubresourceAsync"/> validates them.</para>
+    /// </summary>
+    Task<System.Net.WebSockets.WebSocket> ConnectSubresourceAsync(
+        string groupVersion, string plural, string name, string ns, string subresource,
+        string webSocketSubProtocol, string kubeconfig, CancellationToken ct = default);
+
+    /// <summary>
     /// Rolls every Deployment in a namespace back to the revision Kubernetes last recorded for
     /// it (<c>kubectl rollout undo</c>), as one acknowledged change.
     ///

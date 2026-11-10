@@ -96,6 +96,11 @@ public record VirtualMachineView
     /// </summary>
     public bool CanRestart => IsRunning && RunStrategy is "Always" or "RerunOnFailure";
 
+    public bool IsPaused => Status == "Paused";
+
+    /// <summary>A console needs a running instance to attach to; a paused one still has its screen.</summary>
+    public bool HasInstance => IsRunning || IsPaused;
+
     public string Key => $"{Namespace}/{Name}";
 }
 
@@ -140,6 +145,9 @@ public class VirtualMachineService(
     private const string VmResource = "virtualmachines.kubevirt.io";
     private const string VmiResource = "virtualmachineinstances.kubevirt.io";
     private const string DataVolumeResource = "datavolumes.cdi.kubevirt.io";
+
+    /// <summary>KubeVirt's aggregated API for actions on VMs and their instances.</summary>
+    public const string SubresourcesGroupVersion = "subresources.kubevirt.io/v1";
 
     /// <summary>DNS-1123 label. The DataVolume is named "{name}-root", so the VM name leaves room for it.</summary>
     private static readonly Regex VmName = new("^[a-z0-9]([-a-z0-9]{0,56}[a-z0-9])?$", RegexOptions.Compiled);
@@ -295,6 +303,61 @@ public class VirtualMachineService(
 
         await client.DeleteManifestAsync("virtualmachineinstance.kubevirt.io", name, ns, ct);
         await AuditAsync("vm.restart", ns, name, null, performedBy, ct);
+    }
+
+    /// <summary>
+    /// Freezes the running guest in place: its memory and CPU state are kept, nothing runs. Unlike stop,
+    /// nothing is shut down, and unpausing carries on exactly where it was.
+    /// </summary>
+    public Task PauseAsync(Guid tenantId, Guid clusterId, string ns, string name, string performedBy,
+        CancellationToken ct = default) =>
+        InvokeOnInstanceAsync(tenantId, clusterId, ns, name, "pause", "vm.pause", performedBy, ct);
+
+    public Task UnpauseAsync(Guid tenantId, Guid clusterId, string ns, string name, string performedBy,
+        CancellationToken ct = default) =>
+        InvokeOnInstanceAsync(tenantId, clusterId, ns, name, "unpause", "vm.unpause", performedBy, ct);
+
+    /// <summary>Pause and unpause exist only as subresources of the running instance, not of the VM.</summary>
+    private async Task InvokeOnInstanceAsync(
+        Guid tenantId, Guid clusterId, string ns, string name, string subresource, string action,
+        string performedBy, CancellationToken ct)
+    {
+        Clusters.IClusterClient client = await ClusterFor(tenantId, clusterId, ct);
+        await client.InvokeSubresourceAsync(
+            SubresourcesGroupVersion, "virtualmachineinstances", name, ns, subresource,
+            $"{char.ToUpperInvariant(subresource[0])}{subresource[1..]} virtual machine {ns}/{name}", ct);
+        await AuditAsync(action, ns, name, null, performedBy, ct);
+    }
+
+    /// <summary>
+    /// Connects to one of the running instance's consoles and records who did. The caller bridges the
+    /// returned socket to the browser and disposes it. Not acknowledged — a console changes nothing in
+    /// the cluster — but always audited, because it is interactive access to a machine.
+    /// </summary>
+    public async Task<System.Net.WebSockets.WebSocket> OpenConsoleAsync(
+        Guid tenantId, Guid clusterId, string ns, string name, VirtualMachineConsoleKind kind,
+        string performedBy, CancellationToken ct = default)
+    {
+        Clusters.IClusterClient client = await ClusterFor(tenantId, clusterId, ct);
+
+        // Both consoles speak raw bytes under the subprotocol KubeVirt's own virtctl uses.
+        System.Net.WebSockets.WebSocket socket = await client.ConnectSubresourceAsync(
+            SubresourcesGroupVersion, "virtualmachineinstances", name, ns,
+            kind == VirtualMachineConsoleKind.Vnc ? "vnc" : "console", "plain.kubevirt.io", ct);
+
+        try
+        {
+            await AuditAsync("vm.console", ns, name,
+                kind == VirtualMachineConsoleKind.Vnc ? "VNC console opened" : "serial console opened", performedBy, ct);
+        }
+        catch
+        {
+            // A session nobody can account for is not one to hand over.
+            socket.Dispose();
+            throw;
+        }
+
+        return socket;
     }
 
     /// <summary>Deletes the VM. Disks it imported (its DataVolume templates) are owned by it and go too.</summary>

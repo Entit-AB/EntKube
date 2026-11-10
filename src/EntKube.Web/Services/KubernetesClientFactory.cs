@@ -1423,6 +1423,126 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             config.SkipTlsVerify);
     }
 
+    /// <summary>Calls an action subresource. See <see cref="IKubernetesClientFactory.InvokeSubresourceAsync"/>.</summary>
+    public async Task InvokeSubresourceAsync(
+        string groupVersion, string plural, string name, string ns, string subresource,
+        string kubeconfig, string? summary = null, CancellationToken ct = default)
+    {
+        string path = BuildSubresourcePath(groupVersion, plural, name, ns, subresource);
+
+        await _gate.AcknowledgeAsync(new PlannedClusterChange
+        {
+            Verb = ChangeVerb.Invoke,
+            Kind = plural,
+            Name = name,
+            Namespace = ns,
+            Resource = $"{plural}/{subresource}",
+            Kubeconfig = kubeconfig,
+            Summary = summary ?? $"{subresource} {plural}/{name} in {ns}",
+        }, ct);
+
+        k8s.Kubernetes client = _proxies.Get(kubeconfig);
+
+        using HttpRequestMessage request = new(HttpMethod.Put, client.BaseUri.ToString().TrimEnd('/') + path)
+        {
+            // KubeVirt's action endpoints take an options object; an empty one means the defaults.
+            Content = new StringContent("{}", System.Text.Encoding.UTF8, "application/json"),
+        };
+
+        using HttpResponseMessage response = await client.HttpClient.SendAsync(request, ct);
+
+        if (!response.IsSuccessStatusCode)
+        {
+            string body = await response.Content.ReadAsStringAsync(ct);
+            throw new InvalidOperationException(
+                $"{subresource} {plural}/{name} failed ({(int)response.StatusCode}): {SubresourceError(body)}");
+        }
+    }
+
+    public async Task<System.Net.WebSockets.WebSocket> ConnectSubresourceAsync(
+        string groupVersion, string plural, string name, string ns, string subresource,
+        string webSocketSubProtocol, string kubeconfig, CancellationToken ct = default)
+    {
+        string path = BuildSubresourcePath(groupVersion, plural, name, ns, subresource);
+
+        using MemoryStream stream = new(System.Text.Encoding.UTF8.GetBytes(kubeconfig));
+        using SubresourceStreamClient client = new(
+            k8s.KubernetesClientConfiguration.BuildConfigFromConfigFile(stream));
+
+        // The socket outlives the client: it is a connected ClientWebSocket of its own, and the client
+        // only lent it the credential while connecting.
+        return await client.ConnectAsync(path, webSocketSubProtocol, ct);
+    }
+
+    /// <summary>
+    /// The library's websocket connect is protected; its public callers only build pod exec, attach
+    /// and port-forward paths. This exposes it for one already-validated path and nothing else.
+    /// </summary>
+    private sealed class SubresourceStreamClient(k8s.KubernetesClientConfiguration config)
+        : k8s.Kubernetes(config)
+    {
+        public Task<System.Net.WebSockets.WebSocket> ConnectAsync(
+            string path, string subProtocol, CancellationToken ct) =>
+            StreamConnectAsync(ToWebSocketUri(BaseUri, path), subProtocol, null, ct);
+    }
+
+    /// <summary>
+    /// The API server's address as a websocket URI. The library's own exec and attach callers make this
+    /// conversion before connecting, so its connect does not — given https:// it fails the handshake.
+    /// A server URL with a path prefix (a proxy in front of the API server) keeps it.
+    /// </summary>
+    public static Uri ToWebSocketUri(Uri apiServer, string path)
+    {
+        UriBuilder builder = new(apiServer)
+        {
+            Scheme = apiServer.Scheme == Uri.UriSchemeHttps ? "wss" : "ws",
+            Port = apiServer.IsDefaultPort ? -1 : apiServer.Port,
+        };
+        builder.Path = builder.Path.TrimEnd('/') + "/" + path.TrimStart('/');
+        return builder.Uri;
+    }
+
+    /// <summary>
+    /// The request path for <see cref="InvokeSubresourceAsync"/>. Every segment must be a DNS label or
+    /// subdomain (the group version may carry one '/'), so nothing a caller passes can add a segment,
+    /// a query or a traversal.
+    /// </summary>
+    public static string BuildSubresourcePath(
+        string groupVersion, string plural, string name, string ns, string subresource)
+    {
+        string[] gv = groupVersion.Split('/');
+        if (gv.Length != 2 || !IsDnsName(gv[0]) || !IsDnsName(gv[1]))
+            throw new ArgumentException($"'{groupVersion}' is not a group/version.", nameof(groupVersion));
+
+        foreach ((string value, string param) in new[]
+                 { (plural, nameof(plural)), (name, nameof(name)), (ns, nameof(ns)), (subresource, nameof(subresource)) })
+        {
+            if (!IsDnsName(value))
+                throw new ArgumentException($"'{value}' is not a valid {param}.", param);
+        }
+
+        return $"/apis/{groupVersion}/namespaces/{ns}/{plural}/{name}/{subresource}";
+
+        static bool IsDnsName(string s) =>
+            s.Length is > 0 and <= 253
+            && System.Text.RegularExpressions.Regex.IsMatch(s, "^[a-z0-9]([-a-z0-9.]*[a-z0-9])?$");
+    }
+
+    /// <summary>The API server's Status message when the body is one, otherwise the body itself.</summary>
+    private static string SubresourceError(string body)
+    {
+        try
+        {
+            using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(body);
+            if (doc.RootElement.TryGetProperty("message", out System.Text.Json.JsonElement m)
+                && m.GetString() is { Length: > 0 } message)
+                return message;
+        }
+        catch (System.Text.Json.JsonException) { }
+
+        return body.Length > 500 ? body[..500] : body;
+    }
+
     /// <summary>
     /// One HTTP request to an in-cluster Service, through the API server's proxy endpoint.
     ///

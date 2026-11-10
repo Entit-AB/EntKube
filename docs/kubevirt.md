@@ -47,6 +47,7 @@ The section lists the VMs on the environment's clusters and acts on them:
 | Create | The namespace if it is missing, then a `VirtualMachine`. Acknowledged once, as one operation. |
 | Start / Stop | A merge patch setting `spec.runStrategy` to `Always` / `Halted`. The patch also clears the deprecated `spec.running`, because KubeVirt rejects a VM that sets both. |
 | Restart | Deletes the `VirtualMachineInstance`. KubeVirt boots a fresh one. Refused unless the run strategy is `Always` or `RerunOnFailure`; under `Manual` the same delete would just stop the VM. |
+| Pause / Unpause | `PUT` to the instance's `pause` / `unpause` subresource. The guest is frozen in memory, not shut down, and carries on where it was. |
 | Delete | Deletes the `VirtualMachine`. Disks it imported are owned by it and go with it. |
 
 Every action goes through the cluster change gate, so the operator sees and acknowledges it first, and
@@ -59,12 +60,54 @@ record, and the section reads it live. A copy in EntKube's database would be a s
 for the one property that matters, whether the VM is running, and it would drift the first time
 someone used `virtctl`. VMs created outside EntKube show up and can be operated like any other.
 
-### Power actions without subresources
+### Power actions and subresources
 
-KubeVirt's own start, stop and restart endpoints are subresource `PUT`s (`/apis/subresources.kubevirt.io/…`),
-and the cluster seam has no verb for an arbitrary API path. The same effects are reachable
-declaratively, through verbs the gate already covers, so no new un-gated path was added. Pause,
-unpause and the VNC/serial console are subresource-only and not offered.
+Start, stop and restart stay declarative: they go through verbs the gate already covers, and the
+dialog can show the patch.
+
+Pause and unpause exist only as subresource `PUT`s (`/apis/subresources.kubevirt.io/v1/…/pause`).
+They go through `InvokeSubresourceAsync`, a seam verb added for them with its own gate verb,
+`ChangeVerb.Invoke`. The alternative was the k8s SDK's raw `HttpClient`, which neither the gate nor any
+ratchet can see. Every path segment is validated as a DNS name, so a caller cannot steer the request
+to another path. An invocation always reaches the dialog, because there is nothing to diff, so it
+can never be read as "no change".
+
+### Console
+
+Each running (or paused) VM has two consoles, opened from its row:
+
+| Console | Subresource | In the browser |
+| --- | --- | --- |
+| Screen | `virtualmachineinstances/{name}/vnc` | noVNC 1.7.0, with Ctrl+Alt+Del |
+| Serial | `virtualmachineinstances/{name}/console` | xterm.js 6.0.0 |
+
+The browser connects to EntKube at `/vm-console/{tenant}/{cluster}/{namespace}/{vm}/{vnc|serial}`.
+EntKube connects to KubeVirt with the cluster's credential under the `plain.kubevirt.io` subprotocol,
+and copies bytes both ways. The credential never leaves `KubernetesClientFactory`: the socket is opened
+there through the client library's own websocket connect, so a client certificate, a token or an exec
+plugin all work.
+
+The endpoint is the security boundary, and it checks everything itself. It is a websocket upgrade,
+not a Blazor circuit, so none of the tenant page's checks have run for it:
+
+1. **Signed in.** The cookie, through `RequireAuthorization`.
+2. **Same origin.** A websocket handshake carries cookies but is exempt from CORS and antiforgery,
+   so without this check a page on another site could open a console as whoever visits it. A
+   missing `Origin` is refused.
+3. **A member of the tenant in the URL**, through `UserAccessService.HasTenantAccessAsync`. The URL is
+   the caller's to write. A stranger gets a 404.
+4. **The cluster is that tenant's**, through `ForAsync`, as everywhere else.
+
+A console is **not acknowledged**, because it changes no cluster state and an HTTP request has no
+circuit to ask in. It **is audited**: every session that connects writes `vm.console` with the
+person's name. If the audit cannot be written, the session is closed rather than handed over.
+Closing the panel or leaving the page ends the session.
+
+It sits outside `/api/v1`, so it carries no API token, scope, CLI verb or MCP tool.
+
+The libraries are vendored under `wwwroot/lib/novnc` and `wwwroot/lib/xterm`, with their licences
+beside them: MPL-2.0 for noVNC, MIT for its bundled pako, and MIT for xterm.js. They load from the
+same origin, so the default CSP needs no change.
 
 ### Root disks
 
@@ -96,6 +139,5 @@ a Service in front of it, selected by the `kubevirt.io/vm: <name>` label the tem
 
 - **API, CLI and MCP.** The section is UI-only for now, as Search is. Adding routes brings in the API
   scope, tenant-reach, CLI-parity and MCP-parity ratchets.
-- **Console.** VNC and serial are websocket subresources the seam cannot reach.
 - **Live migration** from the page. The KubeVirt resource still asks for VMs to be live-migrated across
   KubeVirt upgrades, which works when the VM's storage allows it (container disks, or RWX volumes).

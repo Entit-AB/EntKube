@@ -197,6 +197,13 @@ else
         </div>
     }
 
+    @if (console is { } open)
+    {
+        <VmConsole @key="@($"{open.Vm.Key}/{open.Kind}")" TenantId="TenantId" ClusterId="clusterId"
+                   Namespace="@open.Vm.Namespace" Name="@open.Vm.Name" Kind="open.Kind"
+                   OnClose="() => console = null" />
+    }
+
     @if (snapshot is null && loading)
     {
         <div class="text-center py-5 text-muted">
@@ -241,7 +248,7 @@ else
                             <th style="width:11rem">Node</th>
                             <th style="width:9rem">IP</th>
                             <th style="width:5rem" class="text-end">Age</th>
-                            <th style="width:13rem" class="text-end"></th>
+                            <th style="width:20rem" class="text-end"></th>
                         </tr>
                     </thead>
                     <tbody>
@@ -274,6 +281,14 @@ else
                                     }
                                     else
                                     {
+                                        <div class="btn-group btn-group-sm me-1">
+                                            <button class="btn btn-outline-secondary" disabled="@(!vm.HasInstance)"
+                                                    title="@(vm.HasInstance ? "Screen (VNC)" : "Start the VM to see its screen")"
+                                                    @onclick="() => OpenConsole(vm, VirtualMachineConsoleKind.Vnc)"><i class="bi bi-display"></i></button>
+                                            <button class="btn btn-outline-secondary" disabled="@(!vm.HasInstance)"
+                                                    title="@(vm.HasInstance ? "Serial console" : "Start the VM to use its serial console")"
+                                                    @onclick="() => OpenConsole(vm, VirtualMachineConsoleKind.Serial)"><i class="bi bi-terminal"></i></button>
+                                        </div>
                                         <div class="btn-group btn-group-sm">
                                             @if (vm.RunStrategy == "Halted" || vm.Status == "Stopped")
                                             {
@@ -284,6 +299,17 @@ else
                                             {
                                                 <button class="btn btn-outline-secondary" disabled="@acting" title="Stop"
                                                         @onclick="() => ActAsync(vm, VmAction.Stop)"><i class="bi bi-stop-fill"></i></button>
+                                            }
+                                            @if (vm.IsPaused)
+                                            {
+                                                <button class="btn btn-outline-success" disabled="@acting" title="Unpause"
+                                                        @onclick="() => ActAsync(vm, VmAction.Unpause)"><i class="bi bi-play-circle"></i></button>
+                                            }
+                                            else
+                                            {
+                                                <button class="btn btn-outline-secondary" disabled="@(acting || !vm.IsRunning)"
+                                                        title="@(vm.IsRunning ? "Pause (freeze in memory)" : "Pause needs a running VM")"
+                                                        @onclick="() => ActAsync(vm, VmAction.Pause)"><i class="bi bi-pause-fill"></i></button>
                                             }
                                             <button class="btn btn-outline-secondary" disabled="@(acting || !vm.CanRestart)"
                                                     title="@(vm.CanRestart ? "Restart" : "Restart needs a running VM with runStrategy Always")"
@@ -337,7 +363,7 @@ else
           + "This is a wiring mistake in the page hosting it, not a problem with the cluster."
         : null;
 
-    private enum VmAction { Start, Stop, Restart }
+    private enum VmAction { Start, Stop, Restart, Pause, Unpause }
 
     private static readonly string[] ContainerDiskSuggestions =
     [
@@ -363,6 +389,9 @@ else
     private string? expandedKey;
     private string? confirmDeleteKey;
     private string? actingOn;
+
+    /// <summary>The console panel open above the table, if any. One at a time: each is an audited session.</summary>
+    private (VirtualMachineView Vm, VirtualMachineConsoleKind Kind)? console;
 
     private bool showCreate;
     private bool busy;
@@ -446,6 +475,7 @@ else
         snapshot = null;
         expandedKey = confirmDeleteKey = null;
         showCreate = false;
+        console = null;
         await LoadAsync();
     }
 
@@ -512,6 +542,10 @@ else
         }
     }
 
+    // ── Console ──────────────────────────────────────────────────
+
+    private void OpenConsole(VirtualMachineView vm, VirtualMachineConsoleKind kind) => console = (vm, kind);
+
     // ── Power and delete ─────────────────────────────────────────
 
     private async Task ActAsync(VirtualMachineView vm, VmAction action)
@@ -533,6 +567,14 @@ else
                 case VmAction.Restart:
                     await Vms.RestartAsync(TenantId, clusterId, vm.Namespace, vm.Name, actor);
                     Toasts.Success($"Restarting \"{vm.Name}\".");
+                    break;
+                case VmAction.Pause:
+                    await Vms.PauseAsync(TenantId, clusterId, vm.Namespace, vm.Name, actor);
+                    Toasts.Success($"Paused \"{vm.Name}\".");
+                    break;
+                case VmAction.Unpause:
+                    await Vms.UnpauseAsync(TenantId, clusterId, vm.Namespace, vm.Name, actor);
+                    Toasts.Success($"Unpaused \"{vm.Name}\".");
                     break;
             }
             await RefreshQuietlyAsync();

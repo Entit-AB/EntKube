@@ -477,6 +477,20 @@ public class VirtualMachineServiceTests : IDisposable
             It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Never);
     }
 
+    [Theory]
+    [InlineData(true, "pause")]
+    [InlineData(false, "unpause")]
+    public async Task Pause_and_unpause_act_on_the_running_instance(bool pause, string subresource)
+    {
+        KubernetesCluster cluster = await SeedClusterAsync();
+
+        if (pause) await sut.PauseAsync(cluster.TenantId, cluster.Id, "vms", "web-01", "alice");
+        else await sut.UnpauseAsync(cluster.TenantId, cluster.Id, "vms", "web-01", "alice");
+
+        k8s.Verify(f => f.InvokeSubresourceAsync("subresources.kubevirt.io/v1", "virtualmachineinstances",
+            "web-01", "vms", subresource, It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
     [Fact]
     public async Task Another_tenant_cannot_change_a_vm()
     {

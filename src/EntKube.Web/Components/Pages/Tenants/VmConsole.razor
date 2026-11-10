@@ -1,0 +1,147 @@
+@using EntKube.Web.Services
+@implements IAsyncDisposable
+@inject IJSRuntime JS
+
+@* ═══════════════════════════════════════════════════════════════════
+   VmConsole — one VM's screen (noVNC) or serial port (xterm.js),
+   connected through EntKube's /vm-console websocket endpoint. The
+   endpoint checks tenant membership and Origin itself and audits every
+   session; this component only draws it.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+<div class="card border-0 shadow-sm mb-3">
+    <div class="card-header d-flex align-items-center gap-2 py-2">
+        <i class="bi @(Kind == VirtualMachineConsoleKind.Vnc ? "bi-display" : "bi-terminal")"></i>
+        <span class="fw-semibold">@Name</span>
+        <span class="text-muted small">@(Kind == VirtualMachineConsoleKind.Vnc ? "screen" : "serial console")</span>
+        <span class="badge @StateBadge ms-1">@StateLabel</span>
+        <div class="ms-auto d-flex gap-2">
+            @if (Kind == VirtualMachineConsoleKind.Vnc)
+            {
+                <button class="btn btn-sm btn-outline-secondary" disabled="@(state != "connected")" @onclick="CtrlAltDelAsync"
+                        title="Send Ctrl+Alt+Del to the guest">Ctrl+Alt+Del</button>
+            }
+            <button class="btn btn-sm btn-outline-secondary" @onclick="ReconnectAsync" title="Reconnect">
+                <i class="bi bi-arrow-repeat"></i>
+            </button>
+            <button class="btn btn-sm btn-outline-secondary" @onclick="CloseAsync" title="Close console">
+                <i class="bi bi-x-lg"></i>
+            </button>
+        </div>
+    </div>
+    <div class="card-body p-0" style="background:#000">
+        <div @ref="container" style="height:min(70vh,640px);width:100%;overflow:hidden"></div>
+    </div>
+    @if (state == "refused")
+    {
+        <div class="card-footer small text-danger">
+            The console could not be opened. The VM must be running (a stopped VM has no screen or serial port), and
+            you must belong to this tenant.
+        </div>
+    }
+</div>
+
+@code {
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+    [Parameter, EditorRequired] public Guid ClusterId { get; set; }
+    [Parameter, EditorRequired] public string Namespace { get; set; } = "";
+    [Parameter, EditorRequired] public string Name { get; set; } = "";
+    [Parameter] public VirtualMachineConsoleKind Kind { get; set; }
+    [Parameter] public EventCallback OnClose { get; set; }
+
+    private ElementReference container;
+    private IJSObjectReference? module;
+    private DotNetObjectReference<VmConsole>? selfRef;
+    private int? sessionId;
+    private string state = "connecting";
+
+    /// <summary>The endpoint path. Built here so the page and the endpoint cannot disagree on its shape.</summary>
+    public static string PathFor(Guid tenantId, Guid clusterId, string ns, string name, VirtualMachineConsoleKind kind) =>
+        $"{VirtualMachineConsoleEndpoint.RoutePrefix}/{tenantId}/{clusterId}/{Uri.EscapeDataString(ns)}/{Uri.EscapeDataString(name)}/"
+        + (kind == VirtualMachineConsoleKind.Vnc ? "vnc" : "serial");
+
+    protected override async Task OnAfterRenderAsync(bool firstRender)
+    {
+        if (!firstRender) return;
+
+        selfRef = DotNetObjectReference.Create(this);
+        module = await JS.InvokeAsync<IJSObjectReference>("import", "./Components/Pages/Tenants/VmConsole.razor.js");
+        await ConnectAsync();
+    }
+
+    private async Task ConnectAsync()
+    {
+        if (module is null || selfRef is null) return;
+
+        state = "connecting";
+        string path = PathFor(TenantId, ClusterId, Namespace, Name, Kind);
+        sessionId = await module.InvokeAsync<int>(
+            Kind == VirtualMachineConsoleKind.Vnc ? "openVnc" : "openSerial", container, path, selfRef);
+    }
+
+    [JSInvokable]
+    public Task OnConsoleState(string newState)
+    {
+        state = newState;
+        return InvokeAsync(StateHasChanged);
+    }
+
+    private async Task ReconnectAsync()
+    {
+        await CloseSessionAsync();
+        await ConnectAsync();
+    }
+
+    private async Task CtrlAltDelAsync()
+    {
+        if (module is not null && sessionId is int id)
+            await module.InvokeVoidAsync("sendCtrlAltDel", id);
+    }
+
+    private async Task CloseAsync()
+    {
+        await CloseSessionAsync();
+        await OnClose.InvokeAsync();
+    }
+
+    private async Task CloseSessionAsync()
+    {
+        if (module is not null && sessionId is int id)
+        {
+            sessionId = null;
+            try { await module.InvokeVoidAsync("close", id); }
+            catch (JSDisconnectedException) { }
+        }
+    }
+
+    private string StateLabel => state switch
+    {
+        "connected" => "connected",
+        "connecting" => "connecting…",
+        "closed" => "closed",
+        "lost" => "connection lost",
+        _ => "could not connect"
+    };
+
+    private string StateBadge => state switch
+    {
+        "connected" => "bg-success",
+        "connecting" => "bg-secondary",
+        "closed" => "bg-secondary",
+        _ => "bg-danger"
+    };
+
+    public async ValueTask DisposeAsync()
+    {
+        // Leaving the page must end the session: an open console is audited access, and one left
+        // running behind a closed panel is access nobody is looking at.
+        try
+        {
+            await CloseSessionAsync();
+            if (module is not null) await module.DisposeAsync();
+        }
+        catch (JSDisconnectedException) { }
+
+        selfRef?.Dispose();
+    }
+}
