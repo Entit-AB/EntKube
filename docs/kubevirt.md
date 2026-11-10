@@ -31,12 +31,20 @@ CDI is optional. Without it, VMs can only boot from container disks.
 ### Nodes need hardware virtualization
 
 virt-handler runs VMs through `/dev/kvm`. Bare metal has it. A cloud VM has it only when the provider
-enables nested virtualization; most OpenStack flavours do not. Without it, every VM stays in
-`ErrorUnschedulable` with `Insufficient devices.kubevirt.io/kvm`. The page shows that message on the
-VM's row.
+enables nested virtualization; most OpenStack flavours do not.
 
-The **Software emulation** toggle on the KubeVirt component makes KubeVirt fall back to QEMU's TCG.
-VMs then run, but several times slower. Use it for trying things out, not for production.
+The **Software emulation** toggle on the KubeVirt component makes KubeVirt fall back to QEMU's TCG, and
+what that buys depends on the node's architecture:
+
+| Nodes | Without `/dev/kvm` |
+| --- | --- |
+| x86 (amd64) | Emulation runs VMs, several times slower. Fine for trying things out, not for production. |
+| ARM (arm64) | **Nothing runs.** KubeVirt 1.9 allows only `host-passthrough` CPUs on arm64 (its admission webhook says *"host-passthrough is the only model supported on Arm64"*). Under emulation, libvirt then refuses the domain: *"CPU mode 'host-passthrough' for aarch64 qemu domain … is not supported by hypervisor"*. Setting a CPU model does not help, cluster-wide or per VM. arm64 nodes need `/dev/kvm`. |
+
+Both failures were found on a real cluster: KubeVirt 1.9.1 on arm64 kind nodes without KVM (see
+*Testing against a real cluster*). The VM page shows the reason on the VM's row. It reads
+`Failure` and `Synchronized` before the generic `Ready` condition, which only ever says *"Guest VM is
+not reported as running"*.
 
 ## Services › Virtual Machines
 

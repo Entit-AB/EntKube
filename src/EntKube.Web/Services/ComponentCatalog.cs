@@ -4125,7 +4125,7 @@ public static class ComponentCatalog
         {
             Key = "kubevirt",
             DisplayName = "KubeVirt",
-            Description = "Deploys KubeVirt itself — virt-api, virt-controller and the virt-handler DaemonSet on every node — by applying the KubeVirt resource the operator watches. Nodes need hardware virtualization (/dev/kvm): bare metal, or cloud VMs with nested virtualization enabled. Without it, turn on software emulation, which works but is slow. Virtual machines are then created under Services › Virtual Machines.",
+            Description = "Deploys KubeVirt itself — virt-api, virt-controller and the virt-handler DaemonSet on every node — by applying the KubeVirt resource the operator watches. Nodes need hardware virtualization (/dev/kvm): bare metal, or cloud VMs with nested virtualization enabled. Without it, x86 nodes can use software emulation, which works but is slow; ARM (arm64) nodes cannot, because KubeVirt supports only host-passthrough CPUs there, and that needs /dev/kvm. Virtual machines are then created under Services › Virtual Machines.",
             Icon = "bi-pc-display-horizontal",
             Category = "Virtualization",
             ComponentType = "Manifest",
@@ -4146,7 +4146,7 @@ public static class ComponentCatalog
                     YamlPath = "spec.configuration.developerConfiguration.useEmulation",
                     Type = FormFieldType.Toggle,
                     DefaultValue = "false",
-                    HelpText = "Run VMs without /dev/kvm (QEMU TCG). Needed on cloud nodes without nested virtualization; expect VMs to be several times slower."
+                    HelpText = "Run VMs without /dev/kvm (QEMU TCG). x86 nodes only: on ARM (arm64) nodes KubeVirt allows only host-passthrough CPUs, which need /dev/kvm, so VMs never start. Expect VMs to be several times slower."
                 }
             ],
             DefaultValues = """

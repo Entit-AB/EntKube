@@ -51,6 +51,74 @@ public sealed class KubeVirtLiveTests : IDisposable
         testDb.Dispose();
     }
 
+    /// <summary>
+    /// Everything that does not need a guest to boot, so it runs on any cluster with KubeVirt and CDI —
+    /// including arm64 nodes without /dev/kvm, where no VM can start at all (see docs/kubevirt.md).
+    /// Halted VMs are enough to prove the manifests are accepted and the real JSON reads back.
+    /// </summary>
+    [Fact]
+    public async Task The_manifests_entkube_writes_are_accepted_and_read_back()
+    {
+        if (!Enabled) return;
+
+        string kubeconfig = await File.ReadAllTextAsync(KubeconfigPath!);
+        (VirtualMachineService vms, KubernetesClientFactory k8s, Guid tenantId, Guid clusterId) = await BuildAsync(kubeconfig);
+        string imported = vmName[..^1] + "i";
+        const string url = "https://download.cirros-cloud.net/0.6.2/cirros-0.6.2-x86_64-disk.img";
+
+        try
+        {
+            await vms.CreateAsync(tenantId, clusterId, new VirtualMachineRequest
+            {
+                Name = vmName, Namespace = Namespace, Cores = 1, Memory = "256Mi", Image = Image,
+                SshPublicKey = "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIGxpdmUtdGVzdA live: true # test", StartImmediately = false,
+            }, "live-test");
+            await vms.CreateAsync(tenantId, clusterId, new VirtualMachineRequest
+            {
+                Name = imported, Namespace = Namespace, Cores = 2, Memory = "512Mi",
+                DiskSource = VirtualMachineDiskSource.ImportUrl, Image = url, DiskSize = "1Gi", StartImmediately = false,
+            }, "live-test");
+
+            VirtualMachineSnapshot snapshot = await vms.LoadAsync(tenantId, clusterId);
+            snapshot.Error.Should().BeNull();
+
+            VirtualMachineView disk = snapshot.Machines.Single(v => v.Name == vmName);
+            disk.Status.Should().Be("Stopped");
+            disk.RunStrategy.Should().Be("Halted");
+            (disk.Cores, disk.Memory, disk.DiskSource).Should().Be((1, "256Mi", Image));
+            disk.LiveMigratable.Should().BeNull("a halted VM has no instance to judge");
+
+            VirtualMachineView import = snapshot.Machines.Single(v => v.Name == imported);
+            (import.Cores, import.Memory, import.DiskSource).Should().Be((2, "512Mi", url),
+                "the import URL is read back from the VM's own DataVolume template");
+
+            // CDI accepted the DataVolume the VM owns.
+            (await k8s.GetJsonAsync($"datavolume.cdi.kubevirt.io/{imported}-root", Namespace, kubeconfig))
+                .Should().Contain(url);
+
+            // The Service a published port puts in front of the VM.
+            await k8s.ApplyManifestAsync(
+                VmRouteService.BuildServiceYaml(Namespace, vmName, VmRouteKind.Tcp, [22, 3389]), kubeconfig);
+            using JsonDocument service = JsonDocument.Parse(await k8s.GetJsonAsync(
+                $"service/{VmRouteService.ServiceName(vmName, VmRouteKind.Tcp)}", Namespace, kubeconfig));
+            service.RootElement.GetProperty("spec").GetProperty("selector").GetProperty(VmRouteService.VmLabel)
+                .GetString().Should().Be(vmName);
+            service.RootElement.GetProperty("spec").GetProperty("ports").EnumerateArray()
+                .Select(port => port.GetProperty("name").GetString()).Should().Equal("tcp-22", "tcp-3389");
+        }
+        finally
+        {
+            await k8s.DeleteManifestAsync("service", VmRouteService.ServiceName(vmName, VmRouteKind.Tcp), Namespace, kubeconfig);
+            await vms.DeleteAsync(tenantId, clusterId, Namespace, vmName, "live-test");
+            await vms.DeleteAsync(tenantId, clusterId, Namespace, imported, "live-test");
+        }
+    }
+
+    /// <summary>
+    /// A running guest end to end. Needs a node that can boot one: KubeVirt advertising
+    /// devices.kubevirt.io/kvm, or an x86 node with software emulation. arm64 nodes without KVM cannot run
+    /// a VM in KubeVirt 1.9, so on those this returns after saying nothing — as it does with no cluster.
+    /// </summary>
     [Fact]
     public async Task A_vm_lives_its_whole_life_through_the_service()
     {
@@ -58,6 +126,7 @@ public sealed class KubeVirtLiveTests : IDisposable
 
         string kubeconfig = await File.ReadAllTextAsync(KubeconfigPath!);
         (VirtualMachineService vms, KubernetesClientFactory k8s, Guid tenantId, Guid clusterId) = await BuildAsync(kubeconfig);
+        if (!await SomeNodeCanBootAVmAsync(k8s, kubeconfig)) return;
 
         try
         {
@@ -181,6 +250,17 @@ public sealed class KubeVirtLiveTests : IDisposable
         throw new TimeoutException(
             $"VM {Namespace}/{vmName} did not reach the expected state in {StateTimeout}; last seen "
             + $"{last?.Status ?? "absent"}{(last?.Message is string m ? $" — {m}" : "")}.");
+    }
+
+    private static async Task<bool> SomeNodeCanBootAVmAsync(KubernetesClientFactory k8s, string kubeconfig)
+    {
+        using JsonDocument nodes = JsonDocument.Parse(await k8s.GetJsonAsync("nodes", "", kubeconfig));
+
+        return nodes.RootElement.GetProperty("items").EnumerateArray().Any(n =>
+            (n.GetProperty("status").TryGetProperty("allocatable", out JsonElement alloc)
+                && alloc.TryGetProperty("devices.kubevirt.io/kvm", out JsonElement kvm)
+                && kvm.GetString() is string count && count != "0")
+            || n.GetProperty("status").GetProperty("nodeInfo").GetProperty("architecture").GetString() == "amd64");
     }
 
     private async Task<string?> InstanceUidAsync(KubernetesClientFactory k8s, string kubeconfig)

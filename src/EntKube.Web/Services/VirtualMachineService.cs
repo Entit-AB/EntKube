@@ -738,21 +738,19 @@ public class VirtualMachineService(
         return ifaces.EnumerateArray().Select(i => Str(i, "ipAddress")).FirstOrDefault(ip => !string.IsNullOrEmpty(ip));
     }
 
-    /// <summary>The message of a failing or not-yet-ready condition — why the status is what it is.</summary>
+    /// <summary>
+    /// Why the status is what it is, most specific first. Found against a real cluster: a VM that cannot
+    /// start carries <c>Ready=False</c> with the generic "Guest VM is not reported as running", while the
+    /// reason — libvirt refusing the domain, the pod network failing to wire — is on
+    /// <c>Synchronized=False</c>, and a VMI the admission webhook refused is on <c>Failure=True</c>.
+    /// Reading Ready first showed the generic line and hid both.
+    /// </summary>
     private static string? ConditionMessage(JsonElement vm)
     {
-        if (Path(vm, "status") is not { } st || !st.TryGetProperty("conditions", out JsonElement conditions)
-            || conditions.ValueKind != JsonValueKind.Array)
-            return null;
-
-        foreach (JsonElement c in conditions.EnumerateArray())
+        foreach ((string type, string status) in new[] { ("Failure", "True"), ("Synchronized", "False"), ("Ready", "False") })
         {
-            string? type = Str(c, "type");
-            string? state = Str(c, "status");
-            string? message = Str(c, "message");
-            if (string.IsNullOrWhiteSpace(message)) continue;
-            if ((type == "Failure" && state == "True") || (type == "Ready" && state == "False"))
-                return message;
+            if (Condition(vm, type) is { } c && c.Status == status && !string.IsNullOrWhiteSpace(c.Message))
+                return c.Message;
         }
 
         return null;

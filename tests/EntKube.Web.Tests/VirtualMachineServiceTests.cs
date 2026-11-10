@@ -201,6 +201,55 @@ public class VirtualMachineServiceTests : IDisposable
             "this is the message that says the nodes have no /dev/kvm — the most likely first failure");
     }
 
+    /// <summary>
+    /// Conditions exactly as KubeVirt 1.9.1 wrote them on a kind cluster: the generic Ready line, and the
+    /// real reason on Synchronized. The page showed the first and hid the second until this was read live.
+    /// </summary>
+    [Fact]
+    public void A_vm_stuck_starting_shows_the_synchronisation_error_not_the_generic_line()
+    {
+        const string stuck = """
+            {
+              "metadata": { "name": "web-01", "namespace": "vms" },
+              "spec": { "runStrategy": "Always", "template": { "spec": { "domain": {} } } },
+              "status": {
+                "printableStatus": "Starting",
+                "conditions": [
+                  { "type": "Ready", "status": "False", "reason": "GuestNotRunning", "message": "Guest VM is not reported as running" },
+                  { "type": "Synchronized", "status": "False", "reason": "Synchronizing with the Domain failed.",
+                    "message": "server error. command SyncVMI failed: \"LibvirtError(Code=67, Domain=10, Message='unsupported configuration: CPU mode 'host-passthrough' for aarch64 qemu domain on aarch64 host is not supported by hypervisor')\"" }
+                ]
+              }
+            }
+            """;
+
+        VirtualMachineView vm = VirtualMachineService.Parse(Wrap(stuck), null, null).Single();
+
+        vm.Message.Should().Contain("host-passthrough").And.NotContain("Guest VM is not reported as running");
+    }
+
+    [Fact]
+    public void An_instance_the_admission_webhook_refused_shows_the_refusal()
+    {
+        const string refused = """
+            {
+              "metadata": { "name": "web-01", "namespace": "vms" },
+              "spec": { "runStrategy": "Always", "template": { "spec": { "domain": {} } } },
+              "status": {
+                "printableStatus": "Stopped",
+                "conditions": [
+                  { "type": "Ready", "status": "False", "reason": "VMINotExists", "message": "VMI does not exist" },
+                  { "type": "Failure", "status": "True", "reason": "FailedCreate",
+                    "message": "Failure while starting VMI: admission webhook \"virtualmachineinstances-create-validator.kubevirt.io\" denied the request: currently, host-passthrough is the only model supported on Arm64" }
+                ]
+              }
+            }
+            """;
+
+        VirtualMachineService.Parse(Wrap(refused), null, null).Single().Message
+            .Should().Contain("only model supported on Arm64");
+    }
+
     [Fact]
     public async Task Load_reads_all_three_lists_on_the_tenants_own_cluster()
     {
