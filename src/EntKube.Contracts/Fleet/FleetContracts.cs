@@ -160,4 +160,18 @@ public interface IFleetApi
     /// <summary>A named subset, for callers holding a list of ids.</summary>
     Task<IReadOnlyList<ClusterSummary>> GetClustersAsync(
         Guid tenantId, IReadOnlyCollection<Guid> clusterIds, CancellationToken ct = default);
+
+    /// <summary>
+    /// The KubeVirt VMs on one cluster, read live. Null when the cluster is not this tenant's — a list
+    /// with <see cref="VirtualMachineList.Error"/> set means the cluster is but could not be read.
+    /// </summary>
+    Task<VirtualMachineList?> GetVirtualMachinesAsync(Guid tenantId, Guid clusterId, CancellationToken ct = default);
+
+    /// <summary>
+    /// Starts, stops, restarts, pauses, unpauses or live-migrates one VM, attributed to
+    /// <paramref name="performedBy"/>. The caller has declared how the change is acknowledged.
+    /// </summary>
+    Task<VirtualMachineActionOutcome> ActOnVirtualMachineAsync(
+        Guid tenantId, Guid clusterId, string ns, string name, VirtualMachineAction action, string performedBy,
+        CancellationToken ct = default);
 }

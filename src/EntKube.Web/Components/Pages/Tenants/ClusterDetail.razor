@@ -335,7 +335,17 @@ else if (section == "components")
                     </div>
 
                     <p class="text-muted small mb-3">@selectedCatalogEntry.Description</p>
-                    @if (selectedCatalogEntry.ConfiguredIn is { } configuredIn)
+                    @if (selectedCatalogEntry.ConfiguredIn is { RequiresApply: false } usedIn)
+                    {
+                        <div class="alert alert-info py-2 small d-flex align-items-start gap-2">
+                            <i class="bi bi-signpost-2-fill mt-1"></i>
+                            <div>
+                                This installs it on the cluster. What runs on it is created and managed from
+                                <a href="@ServicesLink(usedIn.Key)">@usedIn.Label</a>.
+                            </div>
+                        </div>
+                    }
+                    else if (selectedCatalogEntry.ConfiguredIn is { } configuredIn)
                     {
                         <div class="alert alert-info py-2 small d-flex align-items-start gap-2">
                             <i class="bi bi-signpost-2-fill mt-1"></i>
@@ -1157,7 +1167,17 @@ else if (section == "components")
 
                                 @if (compDetailTab == "config")
                                 {
-                                    @if (ResolveCatalog(comp)?.ConfiguredIn is { } configuredIn)
+                                    @if (ResolveCatalog(comp)?.ConfiguredIn is { RequiresApply: false } usedIn)
+                                    {
+                                        <div class="alert alert-info py-2 small d-flex align-items-start gap-2 mb-3">
+                                            <i class="bi bi-signpost-2-fill mt-1"></i>
+                                            <div>
+                                                The fields below configure the installation. What runs on it is
+                                                created and managed from <a href="@ServicesLink(usedIn.Key)">@usedIn.Label</a>.
+                                            </div>
+                                        </div>
+                                    }
+                                    else if (ResolveCatalog(comp)?.ConfiguredIn is { } configuredIn)
                                     {
                                         <div class="alert alert-warning py-2 small d-flex align-items-start gap-2 mb-3">
                                             <i class="bi bi-signpost-2-fill mt-1"></i>

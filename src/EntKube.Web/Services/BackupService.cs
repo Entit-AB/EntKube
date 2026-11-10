@@ -157,6 +157,7 @@ public class BackupService(
             AppRoutes = await db.AppRoutes.AsNoTracking().ToListAsync(),
             AppDeploymentRoutes = await db.AppDeploymentRoutes.AsNoTracking().ToListAsync(),
             AppL4Routes = await db.AppL4Routes.AsNoTracking().ToListAsync(),
+            VmRoutes = await db.VmRoutes.AsNoTracking().ToListAsync(),
             AppServicePorts = await db.AppServicePorts.AsNoTracking().ToListAsync(),
             ConnectivityRules = await db.ConnectivityRules.AsNoTracking().ToListAsync(),
             ExternalDependencies = await db.ExternalDependencies.AsNoTracking().ToListAsync(),
@@ -527,6 +528,7 @@ public class BackupService(
             // Routes/ports/bindings that reference AppDeployments (and AppRoutes/KafkaUsers inserted earlier).
             await InsertEntities(db, db.AppDeploymentRoutes, bundle.AppDeploymentRoutes);
             await InsertEntities(db, db.AppL4Routes, bundle.AppL4Routes);
+            await InsertEntities(db, db.VmRoutes, bundle.VmRoutes);   // after Tenants and KubernetesClusters
             await InsertEntities(db, db.AppServicePorts, bundle.AppServicePorts);
             await InsertEntities(db, db.KafkaBindings, bundle.KafkaBindings);
             await InsertEntities(db, db.ElasticsearchBindings, bundle.ElasticsearchBindings);

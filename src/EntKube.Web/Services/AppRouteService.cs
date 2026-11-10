@@ -176,6 +176,19 @@ public class AppRouteService(
 
         await ValidateClientCertificateAsync(db, tenantId, request, ct);
 
+        // A hostname edit moves every cluster this route is already linked to onto the new name.
+        if (hostname != route.Hostname)
+        {
+            List<Guid> linkedClusters = await db.AppDeploymentRoutes
+                .Where(dr => dr.AppRouteId == routeId)
+                .Select(dr => dr.AppDeployment.ClusterId)
+                .Distinct()
+                .ToListAsync(ct);
+
+            foreach (Guid clusterId in linkedClusters)
+                await EnsureNotAVmHostnameAsync(db, clusterId, hostname, ct);
+        }
+
         route.Hostname = hostname;
         route.TlsMode = request.TlsMode;
         route.ClusterIssuerName = request.ClusterIssuerName?.Trim();
@@ -187,6 +200,24 @@ public class AppRouteService(
         route.ClientCertificateOnly = request.RequireClientCertificate && request.ClientCertificateOnly;
 
         await db.SaveChangesAsync(ct);
+    }
+
+    /// <summary>
+    /// Refuses a hostname a virtual machine already publishes on this cluster. Every route generator
+    /// names its HTTPRoute after the hostname, so an app route here would be a second description of the
+    /// VM's route, and whichever applied last would win.
+    ///
+    /// <para>Checked when the hostname reaches a cluster — a deployment route linking it, or an edit of a
+    /// linked route — because an app route on its own belongs to no cluster yet. The VM side checks app
+    /// routes in return (<see cref="VmRouteService"/>).</para>
+    /// </summary>
+    private static async Task EnsureNotAVmHostnameAsync(
+        ApplicationDbContext db, Guid clusterId, string hostname, CancellationToken ct)
+    {
+        if (await db.VmRoutes.AnyAsync(r => r.ClusterId == clusterId && r.Hostname == hostname, ct))
+            throw new InvalidOperationException(
+                $"Hostname '{hostname}' is published by a virtual machine on this cluster. Withdraw it "
+                + "from the VM first, or choose another hostname.");
     }
 
     /// <summary>
@@ -271,6 +302,9 @@ public class AppRouteService(
         if (pathTaken)
             throw new InvalidOperationException(
                 $"Path prefix '{pathPrefix}' is already in use on this hostname. Choose a different path.");
+
+        // This is the moment the hostname arrives on a cluster, so the moment to ask who already serves it.
+        await EnsureNotAVmHostnameAsync(db, deployment.ClusterId, appRoute.Hostname.ToLowerInvariant(), ct);
 
         (string gatewayName, string gatewayNamespace) = ExternalRouteService.ResolveGateway(
             await catalog.GetComponentsForClusterAsync(tenantId, deployment.ClusterId, ct));

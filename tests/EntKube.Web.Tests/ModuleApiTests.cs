@@ -99,7 +99,7 @@ public class ModuleApiTests : IDisposable
     }
 
     private ICatalogApi Catalog => new CatalogApi(factory);
-    private IFleetApi Fleet => new FleetApi(factory);
+    private IFleetApi Fleet => TestServices.FleetApi(factory);
     private IDeliveryApi Delivery => new DeliveryApi(factory);
     private IDataServicesApi DataServices => new DataServicesApi(factory);
     // ErrorBudgetService composes Support's objectives with Delivery's health samples, so

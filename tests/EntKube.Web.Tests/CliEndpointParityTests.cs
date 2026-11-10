@@ -81,11 +81,13 @@ public class CliEndpointParityTests(GeneratedOpenApiDocumentFixture fixture)
             string built;
             try
             {
-                built = command.BuildPath(CliArgs.Parse(
+                // Unescaped because a command escapes a path segment it was handed (a VM's namespace
+                // and name), and "{}" escaped is "%7B%7D", which no route template spells.
+                built = Uri.UnescapeDataString(command.BuildPath(CliArgs.Parse(
                 [
                     "--cluster", "{}", "--id", "{}", "--app", "{}", "--query", "{}",
-                    "--workload", "{}", "--environment", "{}",
-                ]));
+                    "--workload", "{}", "--environment", "{}", "--namespace", "{}", "--name", "{}",
+                ])));
             }
             catch (CliUsageException)
             {

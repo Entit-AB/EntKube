@@ -33,8 +33,10 @@ public partial class ModuleBoundaryTests
         [(Module.Catalog, Module.Identity)] = 1,
         [(Module.Connectivity, Module.Catalog)] = 2,
         [(Module.Connectivity, Module.Delivery)] = 7,
-        [(Module.Connectivity, Module.Fleet)] = 1,
-        [(Module.Connectivity, Module.Identity)] = 1,
+        // +1 each for VmRoute (2026-11-10): a published VM port names its tenant and its cluster
+        // directly, because a VM has no app to reach them through as the app routes do.
+        [(Module.Connectivity, Module.Fleet)] = 2,
+        [(Module.Connectivity, Module.Identity)] = 2,
         [(Module.Cost, Module.Fleet)] = 3,
         [(Module.Cost, Module.Identity)] = 4,
         [(Module.DataServices, Module.Catalog)] = 4,

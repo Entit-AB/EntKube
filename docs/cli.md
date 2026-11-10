@@ -45,11 +45,27 @@ cost                 Cost run rate by namespace
 cost history         Cost actually incurred over a period (--from, --to, --group-by)
 rollouts             Recent release watches and their verdicts
 dr                   Backup and restore posture per cluster
+vms list             KubeVirt virtual machines on a cluster (--cluster <id>)
+vms start            Start a stopped VM (--cluster <id> --namespace <ns> --name <vm>)
+vms stop             Stop a VM; the guest is shut down
+vms restart          Restart a running VM
+vms pause            Freeze a running VM in memory
+vms unpause          Resume a paused VM where it was
+vms migrate          Live-migrate a running VM to another node
 ```
 
-Only `deployments sync` and `deployments restart` change anything; everything else
-is read-only. Both need the `apps:write` scope, so a read-only token cannot invoke
-them even by accident.
+These commands change something; everything else is read-only:
+
+| Commands | Scope |
+|---|---|
+| `deployments sync`, `deployments restart`, `secrets sync` | `apps:write` |
+| `vms start`, `stop`, `restart`, `pause`, `unpause`, `migrate` | `vms:write` |
+| `advisor ack` | `ops:write` |
+| `cost rates clear` | `config:write` |
+
+A read-only token cannot invoke any of them, even by accident. There is no `vms delete`:
+deleting a VM destroys the disks it imported, so it stays in the UI, which also refuses it
+while the VM has published ports.
 
 ## Output
 

@@ -99,6 +99,29 @@ public class TenantNavigationTests
     }
 
     /// <summary>
+    /// The Components tab links an installed component to the Services section it is used from
+    /// (<c>CatalogEntry.ConfiguredIn</c>). That key is written in the catalog, far from the router,
+    /// and a section can be named there before it exists — the Virtualization entries were, for a
+    /// commit — so the link must be checked the same way the tree and the top nav are.
+    /// </summary>
+    [Fact]
+    public void Every_section_the_component_catalog_links_to_opens_something()
+    {
+        HashSet<string> routed = RoutedKeys(Source());
+
+        List<string> linked = [.. EntKube.Web.Services.ComponentCatalog.Entries
+            .Select(e => e.ConfiguredIn?.Key)
+            .OfType<string>()
+            .Distinct()
+            .Order()];
+
+        linked.Should().Contain("virtual-machines", "the KubeVirt entries link there; matching nothing means this checks nothing");
+
+        string.Join(", ", linked.Where(key => !routed.Contains(key))).Should().BeEmpty(
+            "a component's 'used from' link the router does not know about opens a blank pane");
+    }
+
+    /// <summary>
     /// The same key in two groups highlights both when either is opened, because selection
     /// is by key. Harmless-looking and confusing to use.
     /// </summary>

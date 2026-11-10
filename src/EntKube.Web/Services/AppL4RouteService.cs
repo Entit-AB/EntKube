@@ -259,7 +259,10 @@ public class AppL4RouteService(
               && r.Protocol == protocol
               && r.ExternalPort == port
               && (excludeRouteId == null || r.Id != excludeRouteId),
-            ct);
+            ct)
+            // Virtual machines publish TCP ports on the same L4 gateway.
+            || (protocol == L4Protocol.Tcp && await db.VmRoutes.AnyAsync(
+                r => r.ClusterId == clusterId && r.Kind == VmRouteKind.Tcp && r.ExternalPort == port, ct));
 
         if (taken)
             throw new InvalidOperationException(

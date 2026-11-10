@@ -61,6 +61,16 @@ public static class TestServices
     public static EntKube.Web.Services.Clusters.IClusterClientFactory NoClusterAccess { get; } =
         new NoClusterAccessFactory();
 
+    /// <summary>
+    /// Fleet's contract over one test database, with a VM service that can reach no cluster — which is
+    /// what a test about clusters, maintenance windows or reports wants from it.
+    /// </summary>
+    public static EntKube.Web.Modules.Api.FleetApi FleetApi(TestDbContextFactory factory) =>
+        new(factory, new EntKube.Web.Services.VirtualMachineService(
+            factory, NoClusterAccess, new EntKube.Web.Modules.Api.CatalogApi(factory), NewGate(),
+            new AuditService(factory, new EntKube.Web.Modules.Api.DeliveryApi(factory)),
+            Microsoft.Extensions.Logging.Abstractions.NullLogger<EntKube.Web.Services.VirtualMachineService>.Instance));
+
     private sealed class NoClusterAccessFactory : EntKube.Web.Services.Clusters.IClusterClientFactory
     {
         public Task<EntKube.Web.Services.Clusters.IClusterClient?> ForAsync(

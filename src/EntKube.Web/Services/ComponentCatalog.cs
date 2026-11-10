@@ -173,7 +173,13 @@ public sealed record RouteBackend(
 /// </summary>
 /// <param name="Key">The TenantExplorer section key (its <c>?section=</c> value), e.g. "mail".</param>
 /// <param name="Label">What to call it in a sentence, e.g. "Services › Mail".</param>
-public sealed record ServicesSection(string Key, string Label);
+/// <param name="RequiresApply">
+/// True when the installed pod does nothing useful until configuration is applied from that section
+/// (the mail server, the directory). False when the section is simply where the component is USED —
+/// where Elasticsearch clusters or virtual machines are created — and the install is complete as it is.
+/// The Components tab warns about the first and only points at the second.
+/// </param>
+public sealed record ServicesSection(string Key, string Label, bool RequiresApply = false);
 
 /// <summary>
 /// Identifies a cluster-scoped custom resource whose live instances signal that a
@@ -2924,7 +2930,7 @@ public static class ComponentCatalog
         {
             Key = "openldap",
             DisplayName = "OpenLDAP",
-            ConfiguredIn = new ServicesSection("ldap", "Services › Directory (LDAP)"),
+            ConfiguredIn = new ServicesSection("ldap", "Services › Directory (LDAP)", RequiresApply: true),
             Description = "Managed LDAP directory (openldap-stack-ha). Provides a central directory of users, groups and service accounts over LDAP/LDAPS with optional multi-master replication. The directory (OUs, users, groups) is authored in EntKube's Directory (LDAP) tab and seeded declaratively via the chart's customLdifFiles.",
             Icon = "bi-person-vcard",
             Category = "Identity",
@@ -3036,7 +3042,7 @@ public static class ComponentCatalog
         {
             Key = "stalwart",
             DisplayName = "Stalwart Mail Server",
-            ConfiguredIn = new ServicesSection("mail", "Services › Mail"),
+            ConfiguredIn = new ServicesSection("mail", "Services › Mail", RequiresApply: true),
             Description = "All-in-one mail server: SMTP, IMAP, JMAP, POP3, ManageSieve, CalDAV and CardDAV in one process. "
                 + "Installing only starts the pod: domains, mailboxes, the directory and the administrator are authored "
                 + "in Services › Mail and written to the server by Apply configuration there. Runs as a single replica "
@@ -4086,6 +4092,141 @@ public static class ComponentCatalog
                   # Metrics are off by default; set a port and scrape it if you want operator metrics.
                   metrics:
                     port: "0"
+                """
+        },
+
+        // ── Virtualization ──
+        //
+        // KubeVirt ships no official Helm chart. Upstream installs it as two release assets — the
+        // operator, then a KubeVirt resource telling the operator to deploy — and CDI the same way.
+        // So each is a pinned ManifestUrl for the operator plus a Manifest for its custom resource,
+        // which is also where the knobs an operator actually turns live.
+
+        new CatalogEntry
+        {
+            Key = "kubevirt-operator",
+            DisplayName = "KubeVirt Operator",
+            Description = "Installs the KubeVirt CRDs and virt-operator, which runs virtual machines as pods next to containers. Install this first, then add the 'KubeVirt' component that tells the operator to deploy. Installed from the official GitHub release manifest.",
+            Icon = "bi-pc-display",
+            Category = "Virtualization",
+            ComponentType = "ManifestUrl",
+            // Pinned: for a ManifestUrl the URL is the version (see ComponentLifecycleService), so
+            // bumping KubeVirt is bumping this tag.
+            HelmRepoUrl = "https://github.com/kubevirt/kubevirt/releases/download/v1.9.1/kubevirt-operator.yaml",
+            HelmChartName = "",
+            DefaultNamespace = "kubevirt",
+            DefaultReleaseName = "kubevirt-operator",
+            DetectionCrds = ["kubevirts.kubevirt.io"],
+            FormFields = [],
+            DefaultValues = ""
+        },
+
+        new CatalogEntry
+        {
+            Key = "kubevirt",
+            DisplayName = "KubeVirt",
+            Description = "Deploys KubeVirt itself — virt-api, virt-controller and the virt-handler DaemonSet on every node — by applying the KubeVirt resource the operator watches. Nodes need hardware virtualization (/dev/kvm): bare metal, or cloud VMs with nested virtualization enabled. Without it, x86 nodes can use software emulation, which works but is slow; ARM (arm64) nodes cannot, because KubeVirt supports only host-passthrough CPUs there, and that needs /dev/kvm. Virtual machines are then created under Services › Virtual Machines.",
+            Icon = "bi-pc-display-horizontal",
+            Category = "Virtualization",
+            ComponentType = "Manifest",
+            HelmRepoUrl = "",
+            HelmChartName = "",
+            DefaultNamespace = "kubevirt",
+            DefaultReleaseName = "kubevirt",
+            Dependencies = ["kubevirt-operator"],
+            // kubevirts.kubevirt.io ships with the operator, so CRD presence would report KubeVirt
+            // deployed before anything has been. A live KubeVirt instance is what says it has.
+            DetectionResource = new DetectionResource("kubevirt.io", "v1", "kubevirts"),
+            ConfiguredIn = new ServicesSection("virtual-machines", "Services › Virtual Machines"),
+            FormFields =
+            [
+                new ComponentFormField
+                {
+                    Key = "use-emulation", Label = "Software emulation",
+                    YamlPath = "spec.configuration.developerConfiguration.useEmulation",
+                    Type = FormFieldType.Toggle,
+                    DefaultValue = "false",
+                    HelpText = "Run VMs without /dev/kvm (QEMU TCG). x86 nodes only: on ARM (arm64) nodes KubeVirt allows only host-passthrough CPUs, which need /dev/kvm, so VMs never start. Expect VMs to be several times slower."
+                }
+            ],
+            DefaultValues = """
+                apiVersion: kubevirt.io/v1
+                kind: KubeVirt
+                metadata:
+                  name: kubevirt
+                  namespace: kubevirt
+                spec:
+                  certificateRotateStrategy: {}
+                  configuration:
+                    developerConfiguration:
+                      useEmulation: false
+                      featureGates: []
+                  customizeComponents: {}
+                  imagePullPolicy: IfNotPresent
+                  # Removing this component deletes this resource, which tears KubeVirt down. Refuse
+                  # while any VirtualMachine or VirtualMachineInstance still exists, rather than
+                  # stopping every VM on the cluster as a side effect of an uninstall.
+                  uninstallStrategy: BlockUninstallIfWorkloadsExist
+                  # Move running VMs onto the new virt-launcher during a KubeVirt upgrade instead of
+                  # leaving them on the old one until somebody restarts them.
+                  workloadUpdateStrategy:
+                    workloadUpdateMethods:
+                      - LiveMigrate
+                """
+        },
+
+        new CatalogEntry
+        {
+            Key = "kubevirt-cdi-operator",
+            DisplayName = "Containerized Data Importer (CDI) Operator",
+            Description = "Installs the CDI CRDs and cdi-operator. CDI fills a VM's disk from an HTTP URL, a container registry or another volume, so a virtual machine can boot from a cloud image without anyone preparing a PersistentVolume by hand. Install this, then the 'Containerized Data Importer' component.",
+            Icon = "bi-device-hdd",
+            Category = "Virtualization",
+            ComponentType = "ManifestUrl",
+            HelmRepoUrl = "https://github.com/kubevirt/containerized-data-importer/releases/download/v1.66.1/cdi-operator.yaml",
+            HelmChartName = "",
+            DefaultNamespace = "cdi",
+            DefaultReleaseName = "kubevirt-cdi-operator",
+            DetectionCrds = ["cdis.cdi.kubevirt.io"],
+            FormFields = [],
+            DefaultValues = ""
+        },
+
+        new CatalogEntry
+        {
+            Key = "kubevirt-cdi",
+            DisplayName = "Containerized Data Importer (CDI)",
+            Description = "Deploys CDI's API server, controller and upload proxy by applying the CDI resource the operator watches. Required to give a virtual machine a disk imported from a cloud image under Services › Virtual Machines.",
+            Icon = "bi-device-hdd-fill",
+            Category = "Virtualization",
+            ComponentType = "Manifest",
+            HelmRepoUrl = "",
+            HelmChartName = "",
+            DefaultNamespace = "cdi",
+            DefaultReleaseName = "kubevirt-cdi",
+            Dependencies = ["kubevirt-cdi-operator"],
+            // Same reasoning as KubeVirt: the CRD comes with the operator, the instance is the deploy.
+            DetectionResource = new DetectionResource("cdi.kubevirt.io", "v1beta1", "cdis"),
+            ConfiguredIn = new ServicesSection("virtual-machines", "Services › Virtual Machines"),
+            FormFields = [],
+            DefaultValues = """
+                apiVersion: cdi.kubevirt.io/v1beta1
+                kind: CDI
+                metadata:
+                  name: cdi
+                spec:
+                  config:
+                    featureGates:
+                      # Bind an imported disk where its VM is scheduled, not wherever the importer
+                      # pod happened to land — matters for WaitForFirstConsumer StorageClasses.
+                      - HonorWaitForFirstConsumer
+                  imagePullPolicy: IfNotPresent
+                  infra:
+                    nodeSelector:
+                      kubernetes.io/os: linux
+                  workload:
+                    nodeSelector:
+                      kubernetes.io/os: linux
                 """
         },
 

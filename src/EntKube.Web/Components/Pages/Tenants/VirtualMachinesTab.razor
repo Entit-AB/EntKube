@@ -1,0 +1,898 @@
+@using EntKube.Web.Data
+@using EntKube.Web.Services
+@inject VirtualMachineService Vms
+@inject VmRouteService Routes
+@inject KubernetesOperationsService K8sOps
+@inject ComponentLifecycleService Lifecycle
+@inject CurrentActor Actor
+@inject ToastService Toasts
+
+@* ═══════════════════════════════════════════════════════════════════
+   VirtualMachinesTab — Services › Virtual Machines. KubeVirt VMs on
+   the environment's clusters, read live from the cluster (there is no
+   table: the VirtualMachine object is the record). Create, start,
+   stop, restart and delete all go through the cluster change gate, so
+   each one is acknowledged before it reaches the cluster.
+   ═══════════════════════════════════════════════════════════════════ *@
+
+@if (ParameterError is not null)
+{
+    <div class="alert alert-danger small mb-0">
+        <i class="bi bi-exclamation-triangle me-1"></i>@ParameterError
+    </div>
+}
+else if (clusters is null)
+{
+    <div class="text-center py-5 text-muted">
+        <div class="spinner-border spinner-border-sm me-2"></div>Loading clusters…
+    </div>
+}
+else if (clusters.Count == 0)
+{
+    <div class="text-center text-muted py-5">
+        <i class="bi bi-hdd-rack fs-3 d-block mb-2"></i>
+        No clusters in this environment.
+    </div>
+}
+else
+{
+    <div class="d-flex flex-wrap align-items-center gap-2 mb-3">
+        @if (clusters.Count > 1)
+        {
+            <div class="input-group input-group-sm" style="width:14rem">
+                <span class="input-group-text"><i class="bi bi-hdd-rack"></i></span>
+                <select class="form-select" value="@clusterId" @onchange="OnClusterChangedAsync" aria-label="Cluster">
+                    @foreach (KubernetesCluster c in clusters)
+                    {
+                        <option value="@c.Id">@c.Name</option>
+                    }
+                </select>
+            </div>
+        }
+        else
+        {
+            <span class="text-muted small"><i class="bi bi-hdd-rack me-1"></i>@clusters[0].Name</span>
+        }
+
+        <div class="input-group input-group-sm" style="width:18rem">
+            <span class="input-group-text"><i class="bi bi-search"></i></span>
+            <input class="form-control" placeholder="Filter by name, namespace, node…"
+                   @bind="search" @bind:event="oninput" />
+        </div>
+
+        <div class="ms-auto d-flex align-items-center gap-2">
+            @if (snapshot is { IsSuccess: true })
+            {
+                <AutoRefresh OnRefresh="RefreshQuietlyAsync" IntervalSeconds="15" Enabled="false"
+                             LastRefreshed="snapshot.FetchedAt" />
+            }
+            <button class="btn btn-sm btn-primary" @onclick="OpenCreateForm" disabled="@(showCreate || !Available.KubeVirt)"
+                    title="@(Available.KubeVirt ? "" : "Install KubeVirt on this cluster first")">
+                <i class="bi bi-plus-lg me-1"></i>New virtual machine
+            </button>
+        </div>
+    </div>
+
+    @if (!Available.KubeVirt)
+    {
+        <div class="alert alert-info small">
+            <i class="bi bi-info-circle me-1"></i>
+            KubeVirt is not installed on <b>@SelectedClusterName</b>. Install the <b>KubeVirt Operator</b> and then
+            <b>KubeVirt</b> from the cluster's Components tab (Virtualization). Add the <b>Containerized Data Importer</b>
+            pair as well to boot VMs from cloud images on persistent disks.
+        </div>
+    }
+
+    @if (showCreate)
+    {
+        <div class="card border-0 shadow-sm mb-3">
+            <div class="card-body">
+                <h6 class="mb-3">New virtual machine on @SelectedClusterName</h6>
+                <div class="row g-3">
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted" for="vm-name">Name</label>
+                        <input id="vm-name" class="form-control form-control-sm" @bind="form.Name" placeholder="web-01" />
+                    </div>
+                    <div class="col-md-4">
+                        <label class="form-label small text-muted" for="vm-ns">Namespace</label>
+                        <input id="vm-ns" class="form-control form-control-sm" @bind="form.Namespace" />
+                        <div class="form-text">Created if it does not exist.</div>
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small text-muted" for="vm-cores">Cores</label>
+                        <input id="vm-cores" type="number" min="1" max="64" class="form-control form-control-sm" @bind="form.Cores" />
+                    </div>
+                    <div class="col-md-2">
+                        <label class="form-label small text-muted" for="vm-mem">Memory</label>
+                        <input id="vm-mem" class="form-control form-control-sm" @bind="form.Memory" placeholder="2Gi" />
+                    </div>
+
+                    <div class="col-12">
+                        <div class="btn-group btn-group-sm" role="group" aria-label="Root disk">
+                            <button type="button"
+                                    class="btn @(form.DiskSource == VirtualMachineDiskSource.ContainerDisk ? "btn-primary" : "btn-outline-secondary")"
+                                    @onclick="() => SetDiskSource(VirtualMachineDiskSource.ContainerDisk)">
+                                Container disk
+                            </button>
+                            <button type="button"
+                                    class="btn @(form.DiskSource == VirtualMachineDiskSource.ImportUrl ? "btn-primary" : "btn-outline-secondary")"
+                                    disabled="@(!Available.Cdi)"
+                                    title="@(Available.Cdi ? "" : "Needs the Containerized Data Importer on this cluster")"
+                                    @onclick="() => SetDiskSource(VirtualMachineDiskSource.ImportUrl)">
+                                Import cloud image (persistent)
+                            </button>
+                        </div>
+                        <div class="form-text">
+                            @if (form.DiskSource == VirtualMachineDiskSource.ContainerDisk)
+                            {
+                                <span><i class="bi bi-exclamation-circle me-1"></i>A container disk is <b>ephemeral</b>: every restart boots the pristine image and anything written to it is lost.</span>
+                            }
+                            else
+                            {
+                                <span>CDI downloads the image into a volume the VM owns. It survives restarts and is deleted with the VM.</span>
+                            }
+                        </div>
+                    </div>
+
+                    @if (form.DiskSource == VirtualMachineDiskSource.ContainerDisk)
+                    {
+                        <div class="col-md-8">
+                            <label class="form-label small text-muted" for="vm-image">Container disk image</label>
+                            <input id="vm-image" class="form-control form-control-sm" list="vm-containerdisks"
+                                   @bind="form.Image" placeholder="quay.io/containerdisks/ubuntu:24.04" />
+                            <datalist id="vm-containerdisks">
+                                @foreach (string image in ContainerDiskSuggestions)
+                                {
+                                    <option value="@image"></option>
+                                }
+                            </datalist>
+                        </div>
+                    }
+                    else
+                    {
+                        <div class="col-md-6">
+                            <label class="form-label small text-muted" for="vm-url">Image URL (qcow2 or raw)</label>
+                            <input id="vm-url" class="form-control form-control-sm" list="vm-cloudimages"
+                                   @bind="form.Image" placeholder="https://cloud-images.ubuntu.com/…" />
+                            <datalist id="vm-cloudimages">
+                                @foreach (string url in CloudImageSuggestions)
+                                {
+                                    <option value="@url"></option>
+                                }
+                            </datalist>
+                        </div>
+                        <div class="col-md-2">
+                            <label class="form-label small text-muted" for="vm-disk">Disk size</label>
+                            <input id="vm-disk" class="form-control form-control-sm" @bind="form.DiskSize" placeholder="20Gi" />
+                        </div>
+                        <div class="col-md-4">
+                            <label class="form-label small text-muted" for="vm-sc">StorageClass</label>
+                            <input id="vm-sc" class="form-control form-control-sm" @bind="form.StorageClass" placeholder="cluster default" />
+                        </div>
+                    }
+
+                    <div class="col-12">
+                        <label class="form-label small text-muted" for="vm-ssh">SSH public key (optional)</label>
+                        <input id="vm-ssh" class="form-control form-control-sm font-monospace" @bind="form.SshPublicKey"
+                               placeholder="ssh-ed25519 AAAA… you@host" />
+                        <div class="form-text">Installed by cloud-init for the image's default user (ubuntu, debian, fedora, cloud-user…).</div>
+                    </div>
+
+                    <div class="col-12 d-flex align-items-center gap-3">
+                        <div class="form-check mb-0">
+                            <input class="form-check-input" type="checkbox" id="vm-start" @bind="form.StartImmediately" />
+                            <label class="form-check-label small" for="vm-start">Start it now</label>
+                        </div>
+                        @if (formError is not null)
+                        {
+                            <span class="text-danger small"><i class="bi bi-exclamation-triangle me-1"></i>@formError</span>
+                        }
+                        <div class="ms-auto d-flex gap-2">
+                            <button class="btn btn-sm btn-outline-secondary" @onclick="() => showCreate = false" disabled="@busy">Cancel</button>
+                            <button class="btn btn-sm btn-primary" @onclick="CreateAsync" disabled="@busy">
+                                @if (busy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                Create
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    }
+
+    @if (console is { } open)
+    {
+        <VmConsole @key="@($"{open.Vm.Key}/{open.Kind}")" TenantId="TenantId" ClusterId="clusterId"
+                   Namespace="@open.Vm.Namespace" Name="@open.Vm.Name" Kind="open.Kind"
+                   OnClose="() => console = null" />
+    }
+
+    @if (snapshot is null && loading)
+    {
+        <div class="text-center py-5 text-muted">
+            <div class="spinner-border spinner-border-sm me-2"></div>Listing virtual machines…
+        </div>
+    }
+    else if (snapshot is { IsSuccess: false })
+    {
+        <div class="alert alert-warning d-flex align-items-center gap-2">
+            <i class="bi bi-exclamation-triangle-fill"></i>
+            <span>@snapshot.Error</span>
+            <button class="btn btn-sm btn-outline-secondary ms-auto" @onclick="LoadAsync">Retry</button>
+        </div>
+    }
+    else if (snapshot is not null)
+    {
+        @if (snapshot.Warnings.Count > 0)
+        {
+            <div class="alert alert-warning py-2 small">
+                <i class="bi bi-exclamation-triangle me-1"></i>@string.Join(" · ", snapshot.Warnings)
+            </div>
+        }
+
+        @if (Filtered.Count == 0)
+        {
+            <div class="text-center text-muted py-5">
+                <i class="bi bi-pc-display fs-3 d-block mb-2"></i>
+                @(snapshot.Machines.Count == 0 ? "No virtual machines on this cluster yet." : "No virtual machines match the filter.")
+            </div>
+        }
+        else
+        {
+            <div class="table-responsive">
+                <table class="table table-sm align-middle mb-0">
+                    <thead>
+                        <tr class="text-muted small">
+                            <th style="width:2rem"></th>
+                            <th>Name</th>
+                            <th style="width:11rem">Namespace</th>
+                            <th style="width:11rem">Status</th>
+                            <th style="width:8rem">Size</th>
+                            <th style="width:11rem">Node</th>
+                            <th style="width:9rem">IP</th>
+                            <th style="width:5rem" class="text-end">Age</th>
+                            <th style="width:22rem" class="text-end"></th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        @foreach (VirtualMachineView vm in Filtered)
+                        {
+                            bool expanded = expandedKey == vm.Key;
+                            bool acting = actingOn == vm.Key;
+
+                            <tr style="cursor:pointer" @onclick="() => expandedKey = expanded ? null : vm.Key">
+                                <td><i class="bi @HealthIcon(vm.Health) @HealthClass(vm.Health)" title="@vm.Health"></i></td>
+                                <td class="fw-semibold text-truncate" style="max-width:18rem" title="@vm.Name">
+                                    @vm.Name
+                                    @if (RoutesFor(vm).Count is > 0 and int published)
+                                    {
+                                        <span class="badge bg-primary bg-opacity-10 text-primary border ms-1" title="Published ports">
+                                            <i class="bi bi-globe2 me-1"></i>@published
+                                        </span>
+                                    }
+                                </td>
+                                <td class="text-truncate" title="@vm.Namespace">@vm.Namespace</td>
+                                <td class="@HealthClass(vm.Health)">
+                                    @vm.Status
+                                    @if (vm.ImportProgress is not null)
+                                    {
+                                        <span class="text-muted small ms-1">importing @vm.ImportProgress</span>
+                                    }
+                                </td>
+                                <td class="small text-muted">@(vm.Cores?.ToString() ?? "?") vCPU · @(vm.Memory ?? "?")</td>
+                                <td class="small text-muted text-truncate">@(vm.Node ?? "—")</td>
+                                <td class="small"><code>@(vm.IpAddress ?? "—")</code></td>
+                                <td class="text-end text-muted small">@Age(vm.CreatedAt)</td>
+                                <td class="text-end" @onclick:stopPropagation="true">
+                                    @if (confirmDeleteKey == vm.Key)
+                                    {
+                                        <span class="small text-danger me-1">Delete with its disks?</span>
+                                        <button class="btn btn-sm btn-danger" disabled="@acting" @onclick="() => DeleteAsync(vm)">Delete</button>
+                                        <button class="btn btn-sm btn-outline-secondary" disabled="@acting" @onclick="() => confirmDeleteKey = null">Keep</button>
+                                    }
+                                    else
+                                    {
+                                        <div class="btn-group btn-group-sm me-1">
+                                            <button class="btn btn-outline-secondary" disabled="@(!vm.HasInstance)"
+                                                    title="@(vm.HasInstance ? "Screen (VNC)" : "Start the VM to see its screen")"
+                                                    @onclick="() => OpenConsole(vm, VirtualMachineConsoleKind.Vnc)"><i class="bi bi-display"></i></button>
+                                            <button class="btn btn-outline-secondary" disabled="@(!vm.HasInstance)"
+                                                    title="@(vm.HasInstance ? "Serial console" : "Start the VM to use its serial console")"
+                                                    @onclick="() => OpenConsole(vm, VirtualMachineConsoleKind.Serial)"><i class="bi bi-terminal"></i></button>
+                                        </div>
+                                        <div class="btn-group btn-group-sm">
+                                            @if (vm.RunStrategy == "Halted" || vm.Status == "Stopped")
+                                            {
+                                                <button class="btn btn-outline-success" disabled="@acting" title="Start"
+                                                        @onclick="() => ActAsync(vm, VmAction.Start)"><i class="bi bi-play-fill"></i></button>
+                                            }
+                                            else
+                                            {
+                                                <button class="btn btn-outline-secondary" disabled="@acting" title="Stop"
+                                                        @onclick="() => ActAsync(vm, VmAction.Stop)"><i class="bi bi-stop-fill"></i></button>
+                                            }
+                                            @if (vm.IsPaused)
+                                            {
+                                                <button class="btn btn-outline-success" disabled="@acting" title="Unpause"
+                                                        @onclick="() => ActAsync(vm, VmAction.Unpause)"><i class="bi bi-play-circle"></i></button>
+                                            }
+                                            else
+                                            {
+                                                <button class="btn btn-outline-secondary" disabled="@(acting || !vm.IsRunning)"
+                                                        title="@(vm.IsRunning ? "Pause (freeze in memory)" : "Pause needs a running VM")"
+                                                        @onclick="() => ActAsync(vm, VmAction.Pause)"><i class="bi bi-pause-fill"></i></button>
+                                            }
+                                            <button class="btn btn-outline-secondary" disabled="@(acting || vm.LiveMigratable != true)"
+                                                    title="@(vm.LiveMigratable == true ? "Live-migrate to another node"
+                                                            : vm.MigrationBlocker is string why ? $"Cannot live-migrate: {why}"
+                                                            : "Live migration needs a running VM")"
+                                                    @onclick="() => ActAsync(vm, VmAction.Migrate)"><i class="bi bi-arrow-left-right"></i></button>
+                                            <button class="btn btn-outline-secondary" disabled="@(acting || !vm.CanRestart)"
+                                                    title="@(vm.CanRestart ? "Restart" : "Restart needs a running VM with runStrategy Always")"
+                                                    @onclick="() => ActAsync(vm, VmAction.Restart)"><i class="bi bi-arrow-clockwise"></i></button>
+                                            <button class="btn btn-outline-danger" disabled="@(acting || RoutesFor(vm).Count > 0)"
+                                                    title="@(RoutesFor(vm).Count > 0 ? "Withdraw its published ports first" : "Delete")"
+                                                    @onclick="() => confirmDeleteKey = vm.Key"><i class="bi bi-trash"></i></button>
+                                        </div>
+                                    }
+                                </td>
+                            </tr>
+
+                            @if (expanded)
+                            {
+                                <tr class="bg-body-secondary">
+                                    <td colspan="9" class="p-3">
+                                        <table class="table table-sm table-borderless mb-0" style="max-width:48rem">
+                                            <tbody>
+                                                <tr><th class="text-muted fw-normal small" style="width:30%">Root disk</th><td class="small"><code>@(vm.DiskSource ?? "—")</code></td></tr>
+                                                <tr><th class="text-muted fw-normal small">Run strategy</th><td class="small">@vm.RunStrategy</td></tr>
+                                                @if (vm.LiveMigratable is bool migratable)
+                                                {
+                                                    <tr><th class="text-muted fw-normal small">Live migration</th>
+                                                        <td class="small">@(migratable ? "possible" : $"not possible — {vm.MigrationBlocker}")</td></tr>
+                                                }
+                                                @if (vm.GuestOs is not null)
+                                                {
+                                                    <tr><th class="text-muted fw-normal small">Guest OS</th><td class="small">@vm.GuestOs</td></tr>
+                                                }
+                                                <tr><th class="text-muted fw-normal small">Created</th><td class="small">@(vm.CreatedAt?.ToLocalTime().ToString("yyyy-MM-dd HH:mm") ?? "—")</td></tr>
+                                            </tbody>
+                                        </table>
+                                        @if (vm.Message is not null)
+                                        {
+                                            <div class="alert alert-warning py-2 small mt-2 mb-0">@vm.Message</div>
+                                        }
+
+                                        <div class="mt-3">
+                                            <div class="d-flex align-items-center mb-2">
+                                                <span class="small fw-semibold"><i class="bi bi-globe2 me-1"></i>Published ports</span>
+                                                @if (publishFor != vm.Key)
+                                                {
+                                                    <button class="btn btn-sm btn-outline-primary ms-auto" @onclick="() => OpenPublishForm(vm)">
+                                                        <i class="bi bi-plus-lg me-1"></i>Publish a port
+                                                    </button>
+                                                }
+                                            </div>
+
+                                            @if (RoutesFor(vm).Count == 0 && publishFor != vm.Key)
+                                            {
+                                                <div class="text-muted small">
+                                                    Not reachable from outside the cluster. Publish a web port on a hostname through the
+                                                    ingress gateway, or a TCP port such as SSH (22) or RDP (3389) on the L4 gateway.
+                                                </div>
+                                            }
+
+                                            @foreach (VmRoute r in RoutesFor(vm))
+                                            {
+                                                <div class="d-flex align-items-center gap-2 small py-1 border-bottom">
+                                                    @if (r.Kind == VmRouteKind.Http)
+                                                    {
+                                                        <span class="badge bg-light text-dark border">HTTPS</span>
+                                                        <code>https://@r.Hostname</code>
+                                                    }
+                                                    else
+                                                    {
+                                                        <span class="badge bg-light text-dark border">TCP</span>
+                                                        <code>@(routeEndpoints.GetValueOrDefault(r.Id) ?? $"L4 gateway :{r.ExternalPort}")</code>
+                                                    }
+                                                    <span class="text-muted">→ VM port @r.VmPort</span>
+                                                    @if (r.ClusterAppliedAt is null)
+                                                    {
+                                                        <span class="badge bg-warning text-dark">not on the cluster</span>
+                                                        <button class="btn btn-sm btn-link p-0" disabled="@routeBusy" @onclick="() => ApplyRouteAsync(r)">Apply again</button>
+                                                    }
+                                                    <button class="btn btn-sm btn-outline-danger ms-auto" disabled="@routeBusy"
+                                                            @onclick="() => WithdrawRouteAsync(r)" title="Withdraw">
+                                                        <i class="bi bi-x-lg"></i>
+                                                    </button>
+                                                </div>
+                                            }
+
+                                            @if (publishFor == vm.Key)
+                                            {
+                                                <div class="border rounded p-2 mt-2 bg-body">
+                                                    <div class="row g-2 align-items-end">
+                                                        <div class="col-auto">
+                                                            <label class="form-label small text-muted mb-0">Kind</label>
+                                                            <select class="form-select form-select-sm" @bind="publishForm.Kind">
+                                                                <option value="@VmRouteKind.Http">HTTPS hostname</option>
+                                                                <option value="@VmRouteKind.Tcp">TCP port</option>
+                                                            </select>
+                                                        </div>
+                                                        <div class="col-auto" style="width:7rem">
+                                                            <label class="form-label small text-muted mb-0">VM port</label>
+                                                            <input type="number" class="form-control form-control-sm" @bind="publishForm.VmPort" />
+                                                        </div>
+                                                        @if (publishForm.Kind == VmRouteKind.Http)
+                                                        {
+                                                            <div class="col">
+                                                                <label class="form-label small text-muted mb-0">Hostname</label>
+                                                                <input class="form-control form-control-sm" @bind="publishForm.Hostname" placeholder="vm.example.com" />
+                                                            </div>
+                                                            <div class="col-auto">
+                                                                <label class="form-label small text-muted mb-0">Certificate from</label>
+                                                                <select class="form-select form-select-sm" @bind="publishForm.ClusterIssuer">
+                                                                    <option value="">— ClusterIssuer —</option>
+                                                                    @foreach (string issuer in issuers)
+                                                                    {
+                                                                        <option value="@issuer">@issuer</option>
+                                                                    }
+                                                                </select>
+                                                            </div>
+                                                        }
+                                                        else
+                                                        {
+                                                            <div class="col-auto" style="width:8rem">
+                                                                <label class="form-label small text-muted mb-0">External port</label>
+                                                                <input type="number" class="form-control form-control-sm" @bind="publishForm.ExternalPort" />
+                                                            </div>
+                                                            <div class="col small text-muted">
+                                                                On the cluster's L4 gateway, which has its own address. Istio clusters only.
+                                                            </div>
+                                                        }
+                                                        <div class="col-auto d-flex gap-1">
+                                                            <button class="btn btn-sm btn-outline-secondary" disabled="@routeBusy" @onclick="() => publishFor = null">Cancel</button>
+                                                            <button class="btn btn-sm btn-primary" disabled="@routeBusy" @onclick="() => PublishAsync(vm)">
+                                                                @if (routeBusy) { <span class="spinner-border spinner-border-sm me-1"></span> }
+                                                                Publish
+                                                            </button>
+                                                        </div>
+                                                    </div>
+                                                    @if (publishForm.Kind == VmRouteKind.Http)
+                                                    {
+                                                        <div class="form-text">
+                                                            TLS is terminated at the gateway; the VM's port must serve plain HTTP. Point the hostname's DNS at
+                                                            the ingress gateway's address.
+                                                        </div>
+                                                    }
+                                                    @if (publishError is not null)
+                                                    {
+                                                        <div class="text-danger small mt-1"><i class="bi bi-exclamation-triangle me-1"></i>@publishError</div>
+                                                    }
+                                                </div>
+                                            }
+                                        </div>
+                                    </td>
+                                </tr>
+                            }
+                        }
+                    </tbody>
+                </table>
+            </div>
+        }
+    }
+}
+
+@code {
+    /// <summary>The tenant whose clusters are listed and acted on. Required, as in <see cref="WorkloadsTab"/>.</summary>
+    [Parameter, EditorRequired] public Guid TenantId { get; set; }
+
+    /// <summary>The environment the section was opened under; null lists every cluster of the tenant.</summary>
+    [Parameter] public Guid? EnvironmentId { get; set; }
+
+    private string? ParameterError => TenantId == Guid.Empty
+        ? "VirtualMachinesTab was mounted without a TenantId, so no cluster can be resolved. "
+          + "This is a wiring mistake in the page hosting it, not a problem with the cluster."
+        : null;
+
+    private enum VmAction { Start, Stop, Restart, Pause, Unpause, Migrate }
+
+    private static readonly string[] ContainerDiskSuggestions =
+    [
+        "quay.io/containerdisks/ubuntu:24.04",
+        "quay.io/containerdisks/debian:12",
+        "quay.io/containerdisks/fedora:44",
+        "quay.io/containerdisks/centos-stream:10",
+    ];
+
+    private static readonly string[] CloudImageSuggestions =
+    [
+        "https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img",
+        "https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-genericcloud-amd64.qcow2",
+    ];
+
+    private List<KubernetesCluster>? clusters;
+    private Dictionary<Guid, VirtualizationAvailability> availability = [];
+    private Guid clusterId;
+    private VirtualMachineSnapshot? snapshot;
+    private bool loading;
+    private int loadSequence;
+    private string search = "";
+    private string? expandedKey;
+    private string? confirmDeleteKey;
+    private string? actingOn;
+
+    private List<VmRoute> routes = [];
+    private readonly Dictionary<Guid, string> routeEndpoints = [];
+    private List<string> issuers = [];
+    private string? publishFor;
+    private PublishForm publishForm = new();
+    private string? publishError;
+    private bool routeBusy;
+
+    private sealed class PublishForm
+    {
+        public VmRouteKind Kind { get; set; } = VmRouteKind.Http;
+        public int VmPort { get; set; } = 80;
+        public string Hostname { get; set; } = "";
+        public string ClusterIssuer { get; set; } = "";
+        public int ExternalPort { get; set; } = 22;
+    }
+
+    private List<VmRoute> RoutesFor(VirtualMachineView vm) =>
+        [.. routes.Where(r => r.Namespace == vm.Namespace && r.VmName == vm.Name)];
+
+    /// <summary>The console panel open above the table, if any. One at a time: each is an audited session.</summary>
+    private (VirtualMachineView Vm, VirtualMachineConsoleKind Kind)? console;
+
+    private bool showCreate;
+    private bool busy;
+    private string? formError;
+    private CreateForm form = new();
+
+    /// <summary>Mutable twin of <see cref="VirtualMachineRequest"/>, for two-way binding.</summary>
+    private sealed class CreateForm
+    {
+        public string Name { get; set; } = "";
+        public string Namespace { get; set; } = "virtual-machines";
+        public int Cores { get; set; } = 2;
+        public string Memory { get; set; } = "2Gi";
+        public VirtualMachineDiskSource DiskSource { get; set; } = VirtualMachineDiskSource.ContainerDisk;
+        public string Image { get; set; } = "";
+        public string DiskSize { get; set; } = "20Gi";
+        public string? StorageClass { get; set; }
+        public string? SshPublicKey { get; set; }
+        public bool StartImmediately { get; set; } = true;
+
+        public VirtualMachineRequest ToRequest() => new()
+        {
+            Name = Name.Trim(), Namespace = Namespace.Trim(), Cores = Cores, Memory = Memory.Trim(),
+            DiskSource = DiskSource, Image = Image, DiskSize = DiskSize.Trim(),
+            StorageClass = StorageClass, SshPublicKey = SshPublicKey, StartImmediately = StartImmediately
+        };
+    }
+
+    private VirtualizationAvailability Available =>
+        availability.GetValueOrDefault(clusterId) ?? new VirtualizationAvailability(false, false);
+
+    private string SelectedClusterName => clusters?.FirstOrDefault(c => c.Id == clusterId)?.Name ?? "this cluster";
+
+    protected override async Task OnInitializedAsync()
+    {
+        if (TenantId == Guid.Empty) return;
+
+        Task<List<KubernetesCluster>> clustersTask = Vms.GetClustersAsync(TenantId, EnvironmentId);
+        Task<Dictionary<Guid, VirtualizationAvailability>> availabilityTask = Vms.GetAvailabilityAsync(TenantId);
+        await Task.WhenAll(clustersTask, availabilityTask);
+
+        clusters = clustersTask.Result;
+        availability = availabilityTask.Result;
+
+        // Open on a cluster that has KubeVirt when there is one, rather than on whichever sorts first.
+        clusterId = (clusters.FirstOrDefault(c => availability.GetValueOrDefault(c.Id)?.KubeVirt == true)
+                     ?? clusters.FirstOrDefault())?.Id ?? Guid.Empty;
+
+        if (clusterId != Guid.Empty)
+            await LoadAsync();
+    }
+
+    private async Task LoadAsync()
+    {
+        int request = ++loadSequence;
+        Guid cluster = clusterId;
+        loading = true;
+        StateHasChanged();
+        try
+        {
+            VirtualMachineSnapshot result = await Vms.LoadAsync(TenantId, cluster);
+            List<VmRoute> published = await Routes.GetForClusterAsync(TenantId, cluster);
+            if (request == loadSequence) { snapshot = result; routes = published; }
+        }
+        finally
+        {
+            if (request == loadSequence) loading = false;
+        }
+    }
+
+    private async Task RefreshQuietlyAsync()
+    {
+        int request = ++loadSequence;
+        VirtualMachineSnapshot result = await Vms.LoadAsync(TenantId, clusterId);
+        List<VmRoute> published = await Routes.GetForClusterAsync(TenantId, clusterId);
+        if (request == loadSequence) { snapshot = result; routes = published; }
+    }
+
+    private async Task OnClusterChangedAsync(ChangeEventArgs e)
+    {
+        if (!Guid.TryParse(e.Value?.ToString(), out Guid id)) return;
+        clusterId = id;
+        snapshot = null;
+        expandedKey = confirmDeleteKey = null;
+        showCreate = false;
+        console = null;
+        publishFor = null;
+        routeEndpoints.Clear();
+        await LoadAsync();
+    }
+
+    private List<VirtualMachineView> Filtered =>
+        [.. (snapshot?.Machines ?? []).Where(vm => string.IsNullOrWhiteSpace(search)
+            || vm.Name.Contains(search.Trim(), StringComparison.OrdinalIgnoreCase)
+            || vm.Namespace.Contains(search.Trim(), StringComparison.OrdinalIgnoreCase)
+            || (vm.Node?.Contains(search.Trim(), StringComparison.OrdinalIgnoreCase) ?? false)
+            || (vm.IpAddress?.Contains(search.Trim(), StringComparison.Ordinal) ?? false))];
+
+    // ── Create ───────────────────────────────────────────────────
+
+    private void OpenCreateForm()
+    {
+        form = new CreateForm();
+        formError = null;
+        showCreate = true;
+    }
+
+    private void SetDiskSource(VirtualMachineDiskSource source)
+    {
+        if (form.DiskSource == source) return;
+        form.DiskSource = source;
+        form.Image = "";   // an image reference is not a URL, and the reverse
+    }
+
+    private async Task CreateAsync()
+    {
+        formError = null;
+        VirtualMachineRequest request = form.ToRequest();
+
+        try
+        {
+            // Checked here too so a typo is a line under the form, not an acknowledgment dialog first.
+            VirtualMachineService.Validate(request);
+        }
+        catch (ArgumentException ex)
+        {
+            formError = ex.Message;
+            return;
+        }
+
+        busy = true;
+        try
+        {
+            await Vms.CreateAsync(TenantId, clusterId, request, await Actor.NameAsync());
+            showCreate = false;
+            Toasts.Success(request.DiskSource == VirtualMachineDiskSource.ImportUrl
+                ? $"Creating \"{request.Name}\" — its disk is imported first, which takes a few minutes."
+                : $"Created \"{request.Name}\".");
+            await LoadAsync();
+        }
+        catch (OperationCanceledException)
+        {
+            // Declined in the acknowledgment dialog: nothing was applied, and nothing needs saying.
+        }
+        catch (Exception ex)
+        {
+            formError = ex.Message;
+        }
+        finally
+        {
+            busy = false;
+        }
+    }
+
+    // ── Console ──────────────────────────────────────────────────
+
+    private void OpenConsole(VirtualMachineView vm, VirtualMachineConsoleKind kind) => console = (vm, kind);
+
+    // ── Published ports ──────────────────────────────────────────
+
+    private async Task OpenPublishForm(VirtualMachineView vm)
+    {
+        publishForm = new PublishForm();
+        publishError = null;
+        publishFor = vm.Key;
+        try { issuers = await Lifecycle.ListClusterIssuersAsync(TenantId, clusterId); }
+        catch { issuers = []; }
+        if (issuers.Count == 1) publishForm.ClusterIssuer = issuers[0];
+    }
+
+    private async Task PublishAsync(VirtualMachineView vm)
+    {
+        publishError = null;
+        VmRouteRequest request = new()
+        {
+            Kind = publishForm.Kind,
+            VmPort = publishForm.VmPort,
+            Hostname = publishForm.Kind == VmRouteKind.Http ? publishForm.Hostname : null,
+            ClusterIssuerName = publishForm.Kind == VmRouteKind.Http ? publishForm.ClusterIssuer : null,
+            ExternalPort = publishForm.Kind == VmRouteKind.Tcp ? publishForm.ExternalPort : null,
+        };
+
+        routeBusy = true;
+        try
+        {
+            VmRoute route = await Routes.AddAsync(TenantId, clusterId, vm.Namespace, vm.Name, request);
+            publishFor = null;
+            await ApplyRouteAsync(route);
+        }
+        catch (Exception ex) when (ex is ArgumentException or InvalidOperationException)
+        {
+            publishError = ex.Message;
+        }
+        finally
+        {
+            routeBusy = false;
+        }
+    }
+
+    /// <summary>
+    /// Stored first, applied second, so a publish the cluster refuses — or the operator declines — is
+    /// still listed, marked "not on the cluster", and can be applied again or withdrawn.
+    /// </summary>
+    private async Task ApplyRouteAsync(VmRoute route)
+    {
+        routeBusy = true;
+        try
+        {
+            KubernetesOperationResult<string> result = await K8sOps.ApplyVmRouteAsync(TenantId, route.Id);
+            if (result.IsSuccess)
+            {
+                if (route.Kind == VmRouteKind.Tcp && result.Data is string endpoint) routeEndpoints[route.Id] = endpoint;
+                Toasts.Success($"Published: {result.Data}");
+            }
+            else
+            {
+                Toasts.Error($"Saved but not applied: {result.Error}");
+            }
+        }
+        catch (OperationCanceledException)
+        {
+            Toasts.Warning("Saved but not applied — the change was declined. Apply it again or withdraw it.");
+        }
+        finally
+        {
+            routes = await Routes.GetForClusterAsync(TenantId, clusterId);
+            routeBusy = false;
+        }
+    }
+
+    private async Task WithdrawRouteAsync(VmRoute route)
+    {
+        routeBusy = true;
+        try
+        {
+            KubernetesOperationResult<string> result = await K8sOps.WithdrawVmRouteAsync(TenantId, route.Id);
+            if (result.IsSuccess)
+            {
+                routeEndpoints.Remove(route.Id);
+                Toasts.Success("Withdrawn.");
+            }
+            else
+            {
+                Toasts.Error(result.Error ?? "Could not withdraw the port.");
+            }
+        }
+        catch (OperationCanceledException) { }
+        finally
+        {
+            routes = await Routes.GetForClusterAsync(TenantId, clusterId);
+            routeBusy = false;
+        }
+    }
+
+    // ── Power and delete ─────────────────────────────────────────
+
+    private async Task ActAsync(VirtualMachineView vm, VmAction action)
+    {
+        actingOn = vm.Key;
+        try
+        {
+            string actor = await Actor.NameAsync();
+            switch (action)
+            {
+                case VmAction.Start:
+                    await Vms.StartAsync(TenantId, clusterId, vm.Namespace, vm.Name, actor);
+                    Toasts.Success($"Starting \"{vm.Name}\".");
+                    break;
+                case VmAction.Stop:
+                    await Vms.StopAsync(TenantId, clusterId, vm.Namespace, vm.Name, actor);
+                    Toasts.Success($"Stopping \"{vm.Name}\".");
+                    break;
+                case VmAction.Restart:
+                    await Vms.RestartAsync(TenantId, clusterId, vm.Namespace, vm.Name, actor);
+                    Toasts.Success($"Restarting \"{vm.Name}\".");
+                    break;
+                case VmAction.Pause:
+                    await Vms.PauseAsync(TenantId, clusterId, vm.Namespace, vm.Name, actor);
+                    Toasts.Success($"Paused \"{vm.Name}\".");
+                    break;
+                case VmAction.Migrate:
+                    await Vms.MigrateAsync(TenantId, clusterId, vm.Namespace, vm.Name, actor);
+                    Toasts.Success($"Migrating \"{vm.Name}\" — its status shows Migrating until it lands on another node.");
+                    break;
+                case VmAction.Unpause:
+                    await Vms.UnpauseAsync(TenantId, clusterId, vm.Namespace, vm.Name, actor);
+                    Toasts.Success($"Unpaused \"{vm.Name}\".");
+                    break;
+            }
+            await RefreshQuietlyAsync();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not {action.ToString().ToLowerInvariant()} \"{vm.Name}\": {ex.Message}");
+        }
+        finally
+        {
+            actingOn = null;
+        }
+    }
+
+    private async Task DeleteAsync(VirtualMachineView vm)
+    {
+        actingOn = vm.Key;
+        try
+        {
+            await Vms.DeleteAsync(TenantId, clusterId, vm.Namespace, vm.Name, await Actor.NameAsync());
+            confirmDeleteKey = null;
+            expandedKey = null;
+            Toasts.Success($"Deleted \"{vm.Name}\".");
+            await RefreshQuietlyAsync();
+        }
+        catch (OperationCanceledException) { }
+        catch (Exception ex)
+        {
+            Toasts.Error($"Could not delete \"{vm.Name}\": {ex.Message}");
+        }
+        finally
+        {
+            actingOn = null;
+        }
+    }
+
+    // ── Presentation ─────────────────────────────────────────────
+
+    private static string HealthIcon(HealthStatus h) => h switch
+    {
+        HealthStatus.Healthy => "bi-check-circle-fill",
+        HealthStatus.Degraded => "bi-x-circle-fill",
+        HealthStatus.Progressing => "bi-arrow-repeat",
+        HealthStatus.Suspended => "bi-pause-circle",
+        _ => "bi-question-circle"
+    };
+
+    private static string HealthClass(HealthStatus h) => h switch
+    {
+        HealthStatus.Healthy => "text-success",
+        HealthStatus.Degraded => "text-danger",
+        HealthStatus.Progressing => "text-primary",
+        _ => "text-muted"
+    };
+
+    private static string Age(DateTime? created)
+    {
+        if (created is null) return "—";
+        TimeSpan age = DateTime.UtcNow - created.Value;
+        return age.TotalDays >= 1 ? $"{(int)age.TotalDays}d"
+            : age.TotalHours >= 1 ? $"{(int)age.TotalHours}h"
+            : $"{Math.Max(0, (int)age.TotalMinutes)}m";
+    }
+}

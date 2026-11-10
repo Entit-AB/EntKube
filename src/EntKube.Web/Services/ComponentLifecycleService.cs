@@ -1808,10 +1808,19 @@ public class ComponentLifecycleService(
 
         string gatewayClass = ExternalRouteService.ResolveGatewayClass(component.Cluster.Components);
 
+        // Published VM hostnames: their listeners and certificates are the Gateway's, so they are listed
+        // here too, or re-applying component routes would take every VM hostname offline. Only the
+        // listener — their HTTPRoutes are not rendered by this method (see ApplyVmRouteAsync).
+        List<VmRoute> vmRoutes = await db.VmRoutes
+            .Where(r => r.TenantId == tenantId && r.ClusterId == component.Cluster.Id && r.Kind == VmRouteKind.Http)
+            .ToListAsync(ct);
+
         // Gateway resource (HTTPS listeners + HTTP redirect + per-hostname Certificates
         // in the gateway namespace so the Gateway's certificateRefs can resolve them).
         string gatewayYaml = ExternalRouteService.GenerateGatewayYaml(
-            gatewayName, gatewayNamespace, allRoutes, appRoutes, gatewayClass: gatewayClass);
+            gatewayName, gatewayNamespace,
+            [.. allRoutes, .. vmRoutes.Select(r => VmRouteService.ToGatewayRoute(r, gatewayName, gatewayNamespace))],
+            appRoutes, gatewayClass: gatewayClass);
 
         // A hostname can end up described twice: once as an AppRoute — one rule per path, with
         // the rewrites that put /gateway in front of one service and /engine in front of another —
@@ -1904,6 +1913,7 @@ public class ComponentLifecycleService(
         // window where the new listeners admit nothing and every hostname on the cluster 404s.
         // Additive and idempotent, so re-running costs nothing.
         HashSet<string> routeNamespaces = [
+            .. vmRoutes.Select(r => r.Namespace),
             .. allRoutes
                 .Select(r => r.Component?.Namespace)
                 .Where(ns => !string.IsNullOrWhiteSpace(ns))

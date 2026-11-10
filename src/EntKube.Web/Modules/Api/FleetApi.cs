@@ -12,8 +12,53 @@ namespace EntKube.Web.Modules.Api;
 /// the vault on materialisation, so merely selecting it would decrypt a credential for a
 /// caller that only wanted a cluster's name.</para>
 /// </summary>
-public sealed class FleetApi(IDbContextFactory<FleetDbContext> dbFactory) : IFleetApi
+public sealed class FleetApi(
+    IDbContextFactory<FleetDbContext> dbFactory, EntKube.Web.Services.VirtualMachineService virtualMachines) : IFleetApi
 {
+    public async Task<VirtualMachineList?> GetVirtualMachinesAsync(
+        Guid tenantId, Guid clusterId, CancellationToken ct = default)
+    {
+        // The existence check is the tenant's: a cluster that is not theirs is a null, which a route
+        // turns into a 404, not an error message about a kubeconfig.
+        if (await GetClusterAsync(tenantId, clusterId, ct) is null) return null;
+
+        EntKube.Web.Services.VirtualMachineSnapshot snapshot = await virtualMachines.LoadAsync(tenantId, clusterId, ct);
+        return new VirtualMachineList(
+            [.. snapshot.Machines.Select(v => new VirtualMachineSummary(
+                v.Namespace, v.Name, v.Status, v.RunStrategy, v.Cores, v.Memory, v.Node, v.IpAddress,
+                v.LiveMigratable, v.CreatedAt))],
+            snapshot.Warnings,
+            snapshot.Error);
+    }
+
+    public async Task<VirtualMachineActionOutcome> ActOnVirtualMachineAsync(
+        Guid tenantId, Guid clusterId, string ns, string name, VirtualMachineAction action, string performedBy,
+        CancellationToken ct = default)
+    {
+        try
+        {
+            Task act = action switch
+            {
+                VirtualMachineAction.Start => virtualMachines.StartAsync(tenantId, clusterId, ns, name, performedBy, ct),
+                VirtualMachineAction.Stop => virtualMachines.StopAsync(tenantId, clusterId, ns, name, performedBy, ct),
+                VirtualMachineAction.Restart => virtualMachines.RestartAsync(tenantId, clusterId, ns, name, performedBy, ct),
+                VirtualMachineAction.Pause => virtualMachines.PauseAsync(tenantId, clusterId, ns, name, performedBy, ct),
+                VirtualMachineAction.Unpause => virtualMachines.UnpauseAsync(tenantId, clusterId, ns, name, performedBy, ct),
+                VirtualMachineAction.Migrate => virtualMachines.MigrateAsync(tenantId, clusterId, ns, name, performedBy, ct),
+                _ => throw new ArgumentOutOfRangeException(nameof(action), action, null),
+            };
+            await act;
+            return new VirtualMachineActionOutcome(true, null);
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or ArgumentException
+                                       or System.Net.Http.HttpRequestException)
+        {
+            // Refusals (a restart under Manual, a cluster that is not the tenant's, an invalid name) and
+            // the cluster's own errors, as words. Anything else is a fault and propagates.
+            return new VirtualMachineActionOutcome(false, ex.Message);
+        }
+    }
+
     public async Task<ClusterSummary?> GetClusterAsync(
         Guid tenantId, Guid clusterId, CancellationToken ct = default)
     {

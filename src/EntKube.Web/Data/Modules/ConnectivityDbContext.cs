@@ -5,7 +5,7 @@ namespace EntKube.Web.Data.Modules;
 /// <summary>
 /// The Connectivity module's view of the database — routes, network policy, service mesh, mTLS and VPN.
 ///
-/// <para>Exposes only the 13 tables Connectivity owns, plus the shared hubs below. A service
+/// <para>Exposes only the 14 tables Connectivity owns, plus the shared hubs below. A service
 /// that takes this context cannot query another module's table, because the property is not
 /// there. See <see cref="ModuleDbContext"/> for what this does and does not enforce.</para>
 /// </summary>
@@ -24,6 +24,7 @@ public class ConnectivityDbContext(DbContextOptions<ConnectivityDbContext> optio
     public DbSet<VpnTunnel> VpnTunnels => Set<VpnTunnel>();
     public DbSet<VpnLocalEndpoint> VpnLocalEndpoints => Set<VpnLocalEndpoint>();
     public DbSet<VpnRemoteEndpoint> VpnRemoteEndpoints => Set<VpnRemoteEndpoint>();
+    public DbSet<VmRoute> VmRoutes => Set<VmRoute>();
 
     // ---- Hubs owned by other modules -------------------------------------------------
     // The measurement in docs/decomposition.md §4.0 found 70 of 164 cross-module foreign

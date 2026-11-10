@@ -134,7 +134,7 @@ public class OneAckPerActionRatchetTests
         "MergeSecretKeysAsync", "DeleteManifestAsync", "DeleteManifestSetAsync",
         "PatchJsonAsync", "PatchStrategicAsync", "ScaleDeploymentAsync", "DrainNodeAsync",
         "RunHelmAsync", "CreateJobFromCronJobAsync", "UndoDeploymentsAsync",
-        "ApplyManifestFromUrlAsync", "EnsureNamespaceAsync",
+        "ApplyManifestFromUrlAsync", "EnsureNamespaceAsync", "InvokeSubresourceAsync",
     ];
 
     /// <summary>

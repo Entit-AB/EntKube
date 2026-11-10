@@ -84,7 +84,7 @@ public class MonthlyReportTests : IDisposable
         reports = new MonthlyReportService(
             factory, tickets, time, contracts,
             new EntKube.Web.Modules.Api.DeliveryApi(factory),
-            new EntKube.Web.Modules.Api.FleetApi(factory));
+            TestServices.FleetApi(factory));
     }
 
     public void Dispose()

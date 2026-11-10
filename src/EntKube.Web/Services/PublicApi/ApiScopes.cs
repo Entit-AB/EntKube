@@ -124,6 +124,12 @@ public static class ApiScopes
     /// <summary>Deployment syncs and restarts — and secret delivery.</summary>
     public const string AppsWrite = "apps:write";
 
+    /// <summary>
+    /// Power actions on KubeVirt virtual machines. Its own scope: stopping a customer's VM is not what a
+    /// token minted to sync a deployment was asked to do, and apps:write is advertised as exactly that.
+    /// </summary>
+    public const string VmsWrite = "vms:write";
+
     /// <summary>The operational reports, cost among them.</summary>
     public const string OpsRead = "ops:read";
 
@@ -158,7 +164,7 @@ public static class ApiScopes
     // Declared before All: static field initializers run in declaration order, so
     // assigning All from a field declared below it would leave All null at runtime.
     private static readonly string[] AllScopes =
-        [FleetRead, AppsRead, AppsWrite, OpsRead, LogsRead, OpsWrite, ConfigRead, ConfigWrite, ScimProvision];
+        [FleetRead, AppsRead, AppsWrite, VmsWrite, OpsRead, LogsRead, OpsWrite, ConfigRead, ConfigWrite, ScimProvision];
 
     public static readonly IReadOnlyList<string> All = AllScopes;
 
@@ -177,6 +183,17 @@ public static class ApiScopes
         [FleetRead] = new("Read", [
             new("clusters", ["GET /clusters"]),
             new("the components installed on a cluster", ["GET /clusters/{}/components"]),
+            new("the virtual machines on a cluster and their state", ["GET /clusters/{}/virtual-machines"]),
+        ]),
+
+        // Deleting is not here and has no route: it destroys the VM's imported disks, and the page
+        // refuses it while the VM has published ports.
+        [VmsWrite] = new("Start, stop, restart, pause, unpause and live-migrate", [
+            new("virtual machines", [
+                "POST /clusters/{}/virtual-machines/{}/{}/start", "POST /clusters/{}/virtual-machines/{}/{}/stop",
+                "POST /clusters/{}/virtual-machines/{}/{}/restart", "POST /clusters/{}/virtual-machines/{}/{}/pause",
+                "POST /clusters/{}/virtual-machines/{}/{}/unpause", "POST /clusters/{}/virtual-machines/{}/{}/migrate",
+            ]),
         ]),
 
         // `/apps` returns `customer = a.CustomerName` for every app, so this scope enumerates the

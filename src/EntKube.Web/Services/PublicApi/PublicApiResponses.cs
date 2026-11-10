@@ -832,3 +832,48 @@ public sealed record SloResponse(
     double? BudgetSpentFraction,
     double? BurnRate,
     bool IsBreached);
+
+/// <summary>
+/// One KubeVirt virtual machine, as <c>GET /clusters/{clusterId}/virtual-machines</c> lists it — read
+/// live from the cluster, so it is as current as the request.
+///
+/// <para><c>ns</c> rather than <c>namespace</c>, as <see cref="ComponentResponse"/> spells it, and
+/// <c>ip</c> for the first address the guest reported.</para>
+/// </summary>
+public sealed record VirtualMachineResponse(
+    string Ns,
+    string Name,
+    string Status,
+    string RunStrategy,
+    int? Cores,
+    string? Memory,
+    string? Node,
+    string? Ip,
+    bool? LiveMigratable,
+    DateTime? CreatedAt)
+{
+    /// <summary>Named arguments: six of the ten are strings, several adjacent.</summary>
+    public static VirtualMachineResponse From(EntKube.Contracts.Fleet.VirtualMachineSummary v) =>
+        new(
+            Ns: v.Namespace,
+            Name: v.Name,
+            Status: v.Status,
+            RunStrategy: v.RunStrategy,
+            Cores: v.Cores,
+            Memory: v.Memory,
+            Node: v.Node,
+            Ip: v.IpAddress,
+            LiveMigratable: v.LiveMigratable,
+            CreatedAt: v.CreatedAt);
+}
+
+/// <summary>
+/// The VMs on one cluster, with any part of the read that failed. A failed instance read leaves
+/// <c>node</c> and <c>ip</c> empty and says so here rather than leaving a reader to wonder why.
+/// </summary>
+public sealed record VirtualMachineListResponse(
+    IEnumerable<VirtualMachineResponse> Machines,
+    IEnumerable<string> Warnings);
+
+/// <summary>An action that reached the cluster: which one, on which VM.</summary>
+public sealed record VirtualMachineActionResponse(string Action, string Ns, string Name);

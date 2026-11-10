@@ -33,6 +33,15 @@ public enum ChangeVerb
     /// <c>ClusterChangeGate.ComputeDiffAsync</c> gives it.</para>
     /// </summary>
     Drain,
+
+    /// <summary>
+    /// Calling an action endpoint on an object — a subresource such as KubeVirt's
+    /// <c>virtualmachineinstances/{name}/pause</c>. Nothing is written to the object, so there is
+    /// nothing to diff and nothing to read back. The honest preview is the summary, which is what the
+    /// fall-through in <c>ClusterChangeGate.ComputeDiffAsync</c> gives it. That fall-through also
+    /// reports a change, so an invocation is never let through as "no change".
+    /// </summary>
+    Invoke,
 }
 
 /// <summary>
@@ -136,6 +145,7 @@ public sealed class PlannedClusterChange
             ChangeVerb.EnsureNamespace => $"Ensure namespace {Namespace ?? Name}",
             ChangeVerb.Rollback => $"Roll back {Resource ?? "workloads"} in {Namespace}",
             ChangeVerb.Drain => $"Drain {Kind ?? "Node"}/{Name}",
+            ChangeVerb.Invoke => $"Invoke {Resource} on {Name} in {Namespace}",
             _ => $"{Verb} manifest",
         };
     }

@@ -86,13 +86,19 @@ ledger. Its figures carry a **completeness** fraction: a period the management p
 did not fully measure under-states cost, so anything below 1 makes the total a floor
 rather than the amount.
 
-Write, requiring `--allow-write` (3):
+Write, requiring `--allow-write` (9):
 
 | Tool | Effect |
 |---|---|
 | `entkube_acknowledge_finding` | Marks an advisor finding as handled. Changes no cluster. |
 | `entkube_sync_deployment` | **Applies manifests to a live cluster.** Overwrites out-of-band edits. |
 | `entkube_restart_workload` | **Rolling-restarts a Deployment on a live cluster.** |
+| `entkube_start_virtual_machine`, `entkube_stop_virtual_machine`, `entkube_restart_virtual_machine` | **Change a live VM's power state.** Stop and restart interrupt whatever the guest is running. |
+| `entkube_pause_virtual_machine`, `entkube_unpause_virtual_machine` | **Freeze a live VM in memory, or resume it.** |
+| `entkube_migrate_virtual_machine` | **Moves a running VM to another node.** |
+
+`entkube_list_virtual_machines` is read-only. There is no tool that deletes a VM: it
+destroys the VM's imported disks, which is not an action to hand to a model.
 
 ## Notes on behaviour
 
