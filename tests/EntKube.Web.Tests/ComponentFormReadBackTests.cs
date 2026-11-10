@@ -107,6 +107,11 @@ public class ComponentFormReadBackTests
             entry.ConfiguredIn.Should().NotBeNull($"{key} is configured from a Services tab, not the Components tab");
             entry.ConfiguredIn!.Label.Should().StartWith("Services ›");
             entry.ConfiguredIn.Key.Should().NotBeNullOrWhiteSpace();
+
+            // The flag that keeps the "this only starts the pod" warning. ConfiguredIn also points
+            // ECK and KubeVirt at where they are used; losing the flag here would quietly downgrade
+            // the warning these two exist for to that neutral pointer.
+            entry.ConfiguredIn.RequiresApply.Should().BeTrue($"{key} does nothing until applied from its Services tab");
         }
     }
 

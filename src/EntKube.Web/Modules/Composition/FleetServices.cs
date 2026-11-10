@@ -38,6 +38,7 @@ internal static class FleetServices
         services.AddScoped<KubernetesOperationsService>();
         services.AddScoped<NodeManagementService>();
         services.AddScoped<WorkloadService>();
+        services.AddScoped<VirtualMachineService>();
         services.AddSingleton<KubernetesProxyClientPool>();
         services.AddScoped<ClusterTenantResolver>();
         services.AddScoped<EntKube.Web.Services.ClusterChanges.IClusterChangeRecorder,

@@ -80,6 +80,7 @@ public static partial class ModuleMap
         [typeof(RemediationService)] = Module.Fleet,
         [typeof(EntKube.Web.Services.Dr.VeleroService)] = Module.Fleet,
         [typeof(WorkloadService)] = Module.Fleet,
+        [typeof(VirtualMachineService)] = Module.Fleet,
 
         // ---- Catalog ---------------------------------------------------------------
         [typeof(Api.CatalogApi)] = Module.Catalog,

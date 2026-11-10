@@ -173,7 +173,13 @@ public sealed record RouteBackend(
 /// </summary>
 /// <param name="Key">The TenantExplorer section key (its <c>?section=</c> value), e.g. "mail".</param>
 /// <param name="Label">What to call it in a sentence, e.g. "Services › Mail".</param>
-public sealed record ServicesSection(string Key, string Label);
+/// <param name="RequiresApply">
+/// True when the installed pod does nothing useful until configuration is applied from that section
+/// (the mail server, the directory). False when the section is simply where the component is USED —
+/// where Elasticsearch clusters or virtual machines are created — and the install is complete as it is.
+/// The Components tab warns about the first and only points at the second.
+/// </param>
+public sealed record ServicesSection(string Key, string Label, bool RequiresApply = false);
 
 /// <summary>
 /// Identifies a cluster-scoped custom resource whose live instances signal that a
@@ -2924,7 +2930,7 @@ public static class ComponentCatalog
         {
             Key = "openldap",
             DisplayName = "OpenLDAP",
-            ConfiguredIn = new ServicesSection("ldap", "Services › Directory (LDAP)"),
+            ConfiguredIn = new ServicesSection("ldap", "Services › Directory (LDAP)", RequiresApply: true),
             Description = "Managed LDAP directory (openldap-stack-ha). Provides a central directory of users, groups and service accounts over LDAP/LDAPS with optional multi-master replication. The directory (OUs, users, groups) is authored in EntKube's Directory (LDAP) tab and seeded declaratively via the chart's customLdifFiles.",
             Icon = "bi-person-vcard",
             Category = "Identity",
@@ -3036,7 +3042,7 @@ public static class ComponentCatalog
         {
             Key = "stalwart",
             DisplayName = "Stalwart Mail Server",
-            ConfiguredIn = new ServicesSection("mail", "Services › Mail"),
+            ConfiguredIn = new ServicesSection("mail", "Services › Mail", RequiresApply: true),
             Description = "All-in-one mail server: SMTP, IMAP, JMAP, POP3, ManageSieve, CalDAV and CardDAV in one process. "
                 + "Installing only starts the pod: domains, mailboxes, the directory and the administrator are authored "
                 + "in Services › Mail and written to the server by Apply configuration there. Runs as a single replica "
