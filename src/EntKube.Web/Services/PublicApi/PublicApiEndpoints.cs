@@ -109,6 +109,75 @@ public static class PublicApiEndpoints
             return TypedResults.Ok<IEnumerable<ComponentResponse>>(components);
         }).RequireApiScope(ApiScopes.FleetRead);
 
+        // ── Virtual machines ──
+
+        api.MapGet("/clusters/{clusterId:guid}/virtual-machines",
+            async Task<Results<Ok<VirtualMachineListResponse>, NotFound, ProblemHttpResult>> (
+            Guid clusterId, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet, CancellationToken ct) =>
+        {
+            Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
+
+            // Null is "not this tenant's cluster" and a 404; a list with an error is a cluster that
+            // is theirs but could not be read (no KubeVirt, unreachable) and a 422 that says which.
+            if (await fleet.GetVirtualMachinesAsync(tenantId, clusterId, ct) is not { } list)
+            {
+                return TypedResults.NotFound();
+            }
+
+            if (list.Error is not null)
+            {
+                return TypedResults.Problem(list.Error, statusCode: StatusCodes.Status422UnprocessableEntity);
+            }
+
+            return TypedResults.Ok(new VirtualMachineListResponse(
+                [.. list.Machines.Select(VirtualMachineResponse.From)], list.Warnings));
+        }).RequireApiScope(ApiScopes.FleetRead);
+
+        // Six routes rather than one with an {action} parameter: each is its own operation in the
+        // document and its own line in the scope's grant, and the CLI's six commands each build one.
+        // The principal is read in each route and handed to the shared handler.
+        api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/start",
+            (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
+             EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
+            ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
+                EntKube.Contracts.Fleet.VirtualMachineAction.Start, fleet, gate, ct))
+            .RequireApiScope(ApiScopes.VmsWrite);
+
+        api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/stop",
+            (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
+             EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
+            ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
+                EntKube.Contracts.Fleet.VirtualMachineAction.Stop, fleet, gate, ct))
+            .RequireApiScope(ApiScopes.VmsWrite);
+
+        api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/restart",
+            (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
+             EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
+            ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
+                EntKube.Contracts.Fleet.VirtualMachineAction.Restart, fleet, gate, ct))
+            .RequireApiScope(ApiScopes.VmsWrite);
+
+        api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/pause",
+            (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
+             EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
+            ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
+                EntKube.Contracts.Fleet.VirtualMachineAction.Pause, fleet, gate, ct))
+            .RequireApiScope(ApiScopes.VmsWrite);
+
+        api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/unpause",
+            (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
+             EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
+            ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
+                EntKube.Contracts.Fleet.VirtualMachineAction.Unpause, fleet, gate, ct))
+            .RequireApiScope(ApiScopes.VmsWrite);
+
+        api.MapPost("/clusters/{clusterId:guid}/virtual-machines/{ns}/{name}/migrate",
+            (Guid clusterId, string ns, string name, HttpContext ctx, EntKube.Contracts.Fleet.IFleetApi fleet,
+             EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate, CancellationToken ct) =>
+            ActOnVirtualMachineAsync(ctx.GetApiPrincipal()!, clusterId, ns, name,
+                EntKube.Contracts.Fleet.VirtualMachineAction.Migrate, fleet, gate, ct))
+            .RequireApiScope(ApiScopes.VmsWrite);
+
         // ── Apps and deployments ──
 
         api.MapGet("/apps", async Task<Ok<IEnumerable<AppResponse>>> (
@@ -921,6 +990,33 @@ public static class PublicApiEndpoints
           // belongs to the typing programme rather than to this fix. `.Produces` for a status
           // with no body adds no 2xx entry, so every banked count stays where it is.
           .Produces(StatusCodes.Status404NotFound);
+    }
+
+    /// <summary>
+    /// The six VM action routes' shared body. The tenant is the principal's, read by the route itself.
+    /// </summary>
+    private static async Task<Results<Ok<VirtualMachineActionResponse>, NotFound, ProblemHttpResult>> ActOnVirtualMachineAsync(
+        ApiTokenPrincipal principal, Guid clusterId, string ns, string name,
+        EntKube.Contracts.Fleet.VirtualMachineAction action,
+        EntKube.Contracts.Fleet.IFleetApi fleet, EntKube.Web.Services.ClusterChanges.IClusterChangeGate gate,
+        CancellationToken ct)
+    {
+        // No circuit, so nobody for the gate to ask — but the token is answerable, and is named.
+        using IDisposable unattended = gate.DeclareUnattended($"api-token:{principal.TokenName}");
+
+        if (await fleet.GetClusterAsync(principal.TenantId, clusterId, ct) is null)
+        {
+            return TypedResults.NotFound();
+        }
+
+        EntKube.Contracts.Fleet.VirtualMachineActionOutcome outcome = await fleet.ActOnVirtualMachineAsync(
+            principal.TenantId, clusterId, ns, name, action, $"api-token:{principal.TokenName}", ct);
+
+        string verb = action.ToString().ToLowerInvariant();
+        return outcome.Succeeded
+            ? TypedResults.Ok(new VirtualMachineActionResponse(verb, ns, name))
+            : TypedResults.Problem(outcome.Error ?? $"Could not {verb} the VM.",
+                statusCode: StatusCodes.Status422UnprocessableEntity);
     }
 
     /// <summary>

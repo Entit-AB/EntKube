@@ -243,6 +243,50 @@ public sealed class CrossTenantProbeTests : IDisposable
                 + "tenant predicate");
     }
 
+    /// <summary>
+    /// ⚠️ <b>The owner arm is a 422, and that is what makes the stranger's 404 mean something.</b>
+    /// This shared host stores no kubeconfigs, so the owner's request passes the tenant check and then
+    /// fails to reach the cluster. The stranger's never gets that far. A route that refused everyone
+    /// would give both the same status; these two differ only by whose cluster it is.
+    /// </summary>
+    [Fact]
+    public async Task A_stranger_s_virtual_machines_cannot_be_listed()
+    {
+        (await GetAsync($"/api/v1/clusters/{ownerClusterId}/virtual-machines", ApiScopes.FleetRead))
+            .Should().Be(HttpStatusCode.UnprocessableEntity,
+                "the owner's cluster is found and then cannot be read — no kubeconfig in this host");
+
+        (await GetAsync($"/api/v1/clusters/{strangerClusterId}/virtual-machines", ApiScopes.FleetRead))
+            .Should().Be(HttpStatusCode.NotFound, "the cluster exists, so a 404 can only be the tenant predicate");
+    }
+
+    [Theory]
+    [InlineData("start")]
+    [InlineData("stop")]
+    [InlineData("restart")]
+    [InlineData("pause")]
+    [InlineData("unpause")]
+    [InlineData("migrate")]
+    public async Task A_stranger_s_virtual_machine_cannot_be_acted_on(string action)
+    {
+        (await fixture.SendRawAsync("POST",
+                $"/api/v1/clusters/{ownerClusterId}/virtual-machines/vms/web-01/{action}", ApiScopes.VmsWrite, null))
+            .Should().Be(HttpStatusCode.UnprocessableEntity,
+                "the owner's cluster is found, and the action then fails at the cluster seam");
+
+        (await fixture.SendRawAsync("POST",
+                $"/api/v1/clusters/{strangerClusterId}/virtual-machines/vms/web-01/{action}", ApiScopes.VmsWrite, null))
+            .Should().Be(HttpStatusCode.NotFound, "stopping another tenant's VM would be reach across tenants");
+    }
+
+    [Fact]
+    public async Task Acting_on_a_virtual_machine_needs_the_vms_scope_not_fleet_read()
+    {
+        (await fixture.SendRawAsync("POST",
+                $"/api/v1/clusters/{ownerClusterId}/virtual-machines/vms/web-01/stop", ApiScopes.FleetRead, null))
+            .Should().Be(HttpStatusCode.Forbidden, "a token that may read the fleet may not stop a machine in it");
+    }
+
     [Fact]
     public async Task A_stranger_s_price_sheet_cannot_be_read()
     {

@@ -41,7 +41,7 @@ public class ApiMaintenanceKindTests : IDisposable
             new DbContextOptionsBuilder<ApplicationDbContext>().UseSqlite(connection).Options);
         db.Database.EnsureCreated();
         factory = new TestDbContextFactory(connection);
-        fleet = new FleetApi(factory);
+        fleet = TestServices.FleetApi(factory);
 
         db.Tenants.Add(new Tenant { Id = tenantId, Name = "ENTIT", Slug = "entit" });
         db.SaveChanges();

@@ -323,7 +323,35 @@ public static class CliCommands
             Columns = [("KIND", "kind"), ("SECRET", "secret"), ("ERROR", "error")],
             RowsProperty = "bindings",
         },
+        new CliCommand
+        {
+            Path = ["vms", "list"],
+            Description = "List KubeVirt virtual machines on a cluster (--cluster <id>)",
+            BuildPath = a => $"/api/v1/clusters/{a.Required("cluster")}/virtual-machines",
+            RowsProperty = "machines",
+            Columns = [("NAMESPACE", "ns"), ("NAME", "name"), ("STATUS", "status"), ("NODE", "node"),
+                       ("IP", "ip"), ("CORES", "cores"), ("MEMORY", "memory")],
+        },
+        VmAction("start", "Start a stopped VM"),
+        VmAction("stop", "Stop a VM (shuts the guest down)"),
+        VmAction("restart", "Restart a running VM"),
+        VmAction("pause", "Freeze a running VM in memory"),
+        VmAction("unpause", "Resume a paused VM where it was"),
+        VmAction("migrate", "Live-migrate a running VM to another node"),
     ];
+
+    /// <summary>
+    /// One power action on a VM. Six commands rather than one with an --action flag, so each is its own
+    /// line in the help and a typo is an unknown command rather than a request the server refuses.
+    /// </summary>
+    private static CliCommand VmAction(string action, string description) => new()
+    {
+        Path = ["vms", action],
+        Description = $"{description} (--cluster <id> --namespace <ns> --name <vm>)",
+        BuildPath = a => $"/api/v1/clusters/{a.Required("cluster")}/virtual-machines/"
+                         + $"{Uri.EscapeDataString(a.Required("namespace"))}/{Uri.EscapeDataString(a.Required("name"))}/{action}",
+        Verb = CliVerb.Post,
+    };
 
     /// <summary>
     /// Resolves the longest matching command, so "deployments sync" wins over a

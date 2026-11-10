@@ -382,6 +382,25 @@ public static class EntKubeTools
 
         new McpTool
         {
+            Name = "entkube_list_virtual_machines",
+            Description = "List the KubeVirt virtual machines on one cluster, read live: status, run "
+                        + "strategy, node, IP, size, and whether each can be live-migrated.",
+            InputSchema = ObjectSchema(
+                new JsonObject { ["clusterId"] = StringProp("Cluster id (GUID) from entkube_list_clusters.") },
+                "clusterId"),
+            Handler = (api, args, ct) => api.GetAsync(
+                $"/api/v1/clusters/{EntKubeApiClient.RequireString(args, "clusterId")}/virtual-machines", ct),
+        },
+
+        VmActionTool("start", "Start a stopped virtual machine."),
+        VmActionTool("stop", "Stop a virtual machine: the guest is shut down and stays down."),
+        VmActionTool("restart", "Restart a running virtual machine; refused when its run strategy would not bring it back."),
+        VmActionTool("pause", "Freeze a running virtual machine in memory; nothing runs until it is unpaused."),
+        VmActionTool("unpause", "Resume a paused virtual machine exactly where it was."),
+        VmActionTool("migrate", "Live-migrate a running virtual machine to another node without stopping it."),
+
+        new McpTool
+        {
             Name = "entkube_sync_deployment",
             Description = "Apply a deployment's manifests to its cluster. THIS CHANGES A LIVE "
                         + "CLUSTER — it will overwrite any out-of-band edits to the deployment's "
@@ -413,6 +432,29 @@ public static class EntKubeTools
                 + EntKubeApiClient.QueryString(("workload", EntKubeApiClient.RequireString(args, "workload"))), ct),
         },
     ];
+
+    /// <summary>
+    /// One power action on a VM. A tool per action, as the deployment actions are, so a model sees six
+    /// plainly named capabilities rather than one tool whose meaning hangs on an argument.
+    /// </summary>
+    private static McpTool VmActionTool(string action, string description) => new()
+    {
+        Name = $"entkube_{action}_virtual_machine",
+        Description = description + " THIS CHANGES A LIVE CLUSTER. Find the VM with entkube_list_virtual_machines first.",
+        IsWrite = true,
+        InputSchema = ObjectSchema(
+            new JsonObject
+            {
+                ["clusterId"] = StringProp("Cluster id (GUID) from entkube_list_clusters."),
+                ["namespace"] = StringProp("The VM's namespace."),
+                ["name"] = StringProp("The VM's name."),
+            },
+            "clusterId", "namespace", "name"),
+        Handler = (api, args, ct) => api.PostAsync(
+            $"/api/v1/clusters/{EntKubeApiClient.RequireString(args, "clusterId")}/virtual-machines/"
+            + $"{Uri.EscapeDataString(EntKubeApiClient.RequireString(args, "namespace"))}/"
+            + $"{Uri.EscapeDataString(EntKubeApiClient.RequireString(args, "name"))}/{action}", ct),
+    };
 
     /// <summary>
     /// The tools visible for this server's configuration. Write tools are omitted entirely

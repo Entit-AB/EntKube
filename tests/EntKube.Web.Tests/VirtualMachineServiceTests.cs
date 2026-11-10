@@ -545,6 +545,39 @@ public class VirtualMachineServiceTests : IDisposable
     }
 
     [Fact]
+    public async Task The_fleet_contract_maps_each_action_to_its_own_cluster_call()
+    {
+        KubernetesCluster cluster = await SeedClusterAsync();
+        EntKube.Web.Modules.Api.FleetApi fleet = new(testDb.Factory, sut);
+
+        (await fleet.ActOnVirtualMachineAsync(cluster.TenantId, cluster.Id, "vms", "web-01",
+            EntKube.Contracts.Fleet.VirtualMachineAction.Pause, "api-token:ci")).Succeeded.Should().BeTrue();
+        (await fleet.ActOnVirtualMachineAsync(cluster.TenantId, cluster.Id, "vms", "web-01",
+            EntKube.Contracts.Fleet.VirtualMachineAction.Stop, "api-token:ci")).Succeeded.Should().BeTrue();
+
+        k8s.Verify(f => f.InvokeSubresourceAsync(It.IsAny<string>(), "virtualmachineinstances", "web-01", "vms",
+            "pause", It.IsAny<string>(), It.IsAny<string?>(), It.IsAny<CancellationToken>()), Times.Once);
+        k8s.Verify(f => f.PatchJsonAsync("virtualmachine.kubevirt.io", "web-01", "vms",
+            VirtualMachineService.RunStrategyPatch("Halted"), It.IsAny<string>(), It.IsAny<CancellationToken>()), Times.Once);
+    }
+
+    [Fact]
+    public async Task A_refusal_comes_back_through_the_contract_as_words_not_as_an_exception()
+    {
+        // A CLI exits non-zero with the message, and an MCP tool hands it to the model; neither can
+        // do that with an exception that became a 500.
+        KubernetesCluster cluster = await SeedClusterAsync();
+        VmIs("vms", "web-01", RunningVm.Replace("\"Always\"", "\"Manual\""));
+        EntKube.Web.Modules.Api.FleetApi fleet = new(testDb.Factory, sut);
+
+        EntKube.Contracts.Fleet.VirtualMachineActionOutcome outcome = await fleet.ActOnVirtualMachineAsync(
+            cluster.TenantId, cluster.Id, "vms", "web-01", EntKube.Contracts.Fleet.VirtualMachineAction.Restart, "api-token:ci");
+
+        outcome.Succeeded.Should().BeFalse();
+        outcome.Error.Should().Contain("Manual");
+    }
+
+    [Fact]
     public async Task Another_tenant_cannot_change_a_vm()
     {
         KubernetesCluster cluster = await SeedClusterAsync("owner");

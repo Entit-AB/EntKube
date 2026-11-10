@@ -67,6 +67,10 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
     /// <c>/scim/v2/Users</c> the same key, and the whole point of this table is that those two
     /// groups do not behave alike.</para>
     /// </summary>
+    /// <summary>The six VM action routes share one handler, so they share one reason.</summary>
+    private const string VmActionReach =
+        "The cluster is resolved through FleetApi.Scoped (tenant ANDed with id) before the action, and the VM service asks the seam with the same tenant, which refuses a cluster that is not the tenant's.";
+
     private static readonly Dictionary<string, (TenantReach Reach, string Why)> Reaches =
         new(StringComparer.Ordinal)
         {
@@ -80,6 +84,23 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
                  "The tenant clause is ANDed with the id clause in one query, and the component "
                  + "read carries its own predicate through Cluster.TenantId, so deleting the 404 "
                  + "guard would yield an empty list rather than another tenant's components."),
+
+            ["GET /api/v1/clusters/{clusterId}/virtual-machines"] =
+                (TenantReach.ConfinedToTheTokenTenant,
+                 "FleetApi returns null for a cluster that is not the tenant's (a 404) before any cluster "
+                 + "is read, and the read itself goes through ForAsync with the same tenant."),
+            ["POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/start"] =
+                (TenantReach.ConfinedToTheTokenTenant, VmActionReach),
+            ["POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/stop"] =
+                (TenantReach.ConfinedToTheTokenTenant, VmActionReach),
+            ["POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/restart"] =
+                (TenantReach.ConfinedToTheTokenTenant, VmActionReach),
+            ["POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/pause"] =
+                (TenantReach.ConfinedToTheTokenTenant, VmActionReach),
+            ["POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/unpause"] =
+                (TenantReach.ConfinedToTheTokenTenant, VmActionReach),
+            ["POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/migrate"] =
+                (TenantReach.ConfinedToTheTokenTenant, VmActionReach),
 
             ["GET /api/v1/apps"] =
                 (TenantReach.ConfinedToTheTokenTenant, "Tenant predicate in the delivery service."),
@@ -216,7 +237,7 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
     /// How many times <c>PublicApiEndpoints.cs</c> reads the API principal: once per /api/v1
     /// operation. Measured, not bounded — see the assertion for why a bound was not enough.
     /// </summary>
-    private const int ApiV1PrincipalReads = 29;
+    private const int ApiV1PrincipalReads = 36;
 
     private IReadOnlyList<string> DocumentedOperations()
     {
@@ -285,7 +306,7 @@ public class ApiTenantConfinementTests(GeneratedOpenApiDocumentFixture fixture)
          + "from every assertion in this file");
 
         Reaches.Values.Count(v => v.Reach == TenantReach.ConfinedToTheTokenTenant)
-            .Should().Be(28, "the three counts have to add up to the operation count, or a row "
+            .Should().Be(35, "the three counts have to add up to the operation count, or a row "
                 + "has gone missing from the arithmetic");
     }
 

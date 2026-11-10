@@ -71,7 +71,7 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
     };
 
     /// <summary>Commands that render a table — the only ones with a column list to check.</summary>
-    private const int CommandsWithColumns = 21;
+    private const int CommandsWithColumns = 22;
 
     /// <summary>
     /// Whether this command is banked as unverifiable. Exposed so

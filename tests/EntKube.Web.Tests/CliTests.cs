@@ -140,6 +140,12 @@ public class CliTests
                 "cost rates clear",
                 "advisor ack",
                 "secrets sync",
+                "vms start",
+                "vms stop",
+                "vms restart",
+                "vms pause",
+                "vms unpause",
+                "vms migrate",
             ]);
     }
 

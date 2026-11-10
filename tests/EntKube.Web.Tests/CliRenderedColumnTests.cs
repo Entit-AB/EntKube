@@ -391,6 +391,26 @@ public class CliRenderedColumnTests
     }
 
     /// <summary>
+    /// The rows sit under <c>machines</c>, beside a <c>warnings</c> list the table does not show; a
+    /// RowsProperty that pointed at the wrong one would render the warnings as rows.
+    /// </summary>
+    [Fact]
+    public void The_vms_list_renders_every_column()
+    {
+        VirtualMachineListResponse list = new(
+            Machines:
+            [
+                new VirtualMachineResponse(
+                    Ns: "vms", Name: "web-01", Status: "Running", RunStrategy: "Always", Cores: 2, Memory: "4Gi",
+                    Node: "worker-2", Ip: "10.42.1.17", LiveMigratable: true,
+                    CreatedAt: new DateTime(2026, 11, 1, 6, 30, 0, DateTimeKind.Utc)),
+            ],
+            Warnings: []);
+
+        EveryColumnRenders(Command("vms", "list"), JsonSerializer.Serialize(list, AsTheApiSerialises));
+    }
+
+    /// <summary>
     /// ⚠️ The measure. The facts above are exactly the commands
     /// <see cref="CliColumnParityTests"/> can check against a schema, and they must stay in step:
     /// if a route gains a response type and no rendering fact is added for its command, this fails
@@ -403,6 +423,7 @@ public class CliRenderedColumnTests
         [
             "cost", "cost history", "cost months", "cost rates list",
             "clusters list", "components list", "apps list", "deployments list", "feedback", "synthetics", "errors", "slos",
+            "vms list",
         ];
 
         IEnumerable<string> describable =

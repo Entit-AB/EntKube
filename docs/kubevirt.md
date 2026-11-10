@@ -172,7 +172,26 @@ and listener would be left pointing at nothing.
 Withdrawing the last route of *any* kind on a cluster leaves that hostname's Gateway listener in
 place. The app and component routes behave the same way when their last one goes.
 
+## API, CLI and MCP
+
+| Operation | Route | Scope | CLI | MCP |
+| --- | --- | --- | --- | --- |
+| List | `GET /api/v1/clusters/{clusterId}/virtual-machines` | `fleet:read` | `vms list` | `entkube_list_virtual_machines` |
+| Start, stop, restart, pause, unpause, migrate | `POST /api/v1/clusters/{clusterId}/virtual-machines/{ns}/{name}/{start…}` | `vms:write` | `vms start` … | `entkube_start_virtual_machine` … |
+
+Each action has its own route, CLI command and MCP tool, rather than one each taking an action
+argument. That way every operation is its own entry in the OpenAPI document and in the scope's grant.
+
+`vms:write` is a scope of its own. Stopping a customer's VM is not what a token minted to sync a
+deployment was asked to do.
+
+Routes go through `IFleetApi`, not the VM service. A request has no circuit, so the route declares the
+change unattended in the token's name, and the token's name is what the audit log records. A cluster
+that is not the token's tenant's gives a 404. A refusal, such as a restart under `Manual` or a
+cluster that cannot be reached, gives a 422 with KubeVirt's or EntKube's reason.
+
 ## Not yet
 
-- **API, CLI and MCP.** The section is UI-only for now, as Search is. Adding routes brings in the API
-  scope, tenant-reach, CLI-parity and MCP-parity ratchets.
+- **Creating and deleting through the API.** Creating needs a request body, which the CLI cannot
+  send. Deleting destroys the VM's imported disks and is guarded by its published ports. Both stay in
+  the UI.
