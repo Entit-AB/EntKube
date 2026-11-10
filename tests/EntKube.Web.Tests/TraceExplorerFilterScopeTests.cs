@@ -104,6 +104,32 @@ public class TraceExplorerFilterScopeTests : BunitContext
         quiet.FindAll("[data-test=services-error]").Should().BeEmpty("a quiet hour is not a failure");
     }
 
+    // ── The dropdown is bounded: an unbounded one froze the browser tab with no error ─────────────
+
+    [Fact]
+    public void A_huge_service_list_renders_at_most_the_cap_and_says_how_many_there_are()
+    {
+        traces.Services[ClusterA] = [.. Enumerable.Range(0, 5000).Select(i => $"svc-{i:D5}")];
+
+        IRenderedComponent<TraceExplorer> cut = Mount(ClusterA);
+
+        cut.FindAll("select")[0].QuerySelectorAll("option").Length
+            .Should().Be(TraceExplorer.MaxServiceOptions + 1, "the cap plus the 'All services' option");
+        cut.Find("[data-test=services-capped]").TextContent
+            .Should().Contain($"first {TraceExplorer.MaxServiceOptions} of 5000");
+    }
+
+    [Fact]
+    public void A_list_under_the_cap_renders_whole_and_says_nothing()
+    {
+        traces.Services[ClusterA] = ["billing", "checkout"];
+
+        IRenderedComponent<TraceExplorer> cut = Mount(ClusterA);
+
+        cut.FindAll("select")[0].QuerySelectorAll("option").Length.Should().Be(3);
+        cut.FindAll("[data-test=services-capped]").Should().BeEmpty();
+    }
+
     // ── A cluster switch must not keep a service filter the new cluster's dropdown cannot show ────
 
     /// <summary>

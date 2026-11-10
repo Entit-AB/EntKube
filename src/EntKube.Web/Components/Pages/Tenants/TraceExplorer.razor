@@ -1,6 +1,7 @@
 @using EntKube.Web.Services
 @using EntKube.Web.Services.Telemetry
 @inject ITelemetryBackends Backends
+@inject ILogger<TraceExplorer> Logger
 
 @if (!available && !isLoading)
 {
@@ -44,6 +45,12 @@ else
                     <option value="@s">@s</option>
                 }
             </select>
+            @if (servicesTotal > services.Count)
+            {
+                <div class="small text-muted mt-1" data-test="services-capped">
+                    Showing the first @services.Count of @servicesTotal services. Narrow the time range to see fewer.
+                </div>
+            }
             @if (servicesError is not null)
             {
                 <div class="small text-danger mt-1" data-test="services-error">Couldn't list services: @servicesError</div>
@@ -346,6 +353,15 @@ ERROR checkout failed trace-id: 4bf92f35…</pre>
     private bool servicesLoading;
     private List<string> services = [];
     private string? servicesError;
+    private int servicesTotal;
+
+    /// <summary>
+    /// The most services the dropdown renders. Every one is an &lt;option&gt; the server diffs and the browser
+    /// lays out, and the list had no limit: read from the management plane's store, which holds every
+    /// cluster's spans, it could be tens of thousands long, and rendering it froze the browser tab outright —
+    /// no scrolling, no clicks, no error. Five hundred is more than anyone scrolls through.
+    /// </summary>
+    public const int MaxServiceOptions = 500;
 
     private string selectedService = "";
     private int timeRangeMinutes = 60;
@@ -400,10 +416,19 @@ ERROR checkout failed trace-id: 4bf92f35…</pre>
     private async Task LoadServicesAsync()
     {
         servicesError = null;
+        servicesTotal = 0;
         if (!available) { services = []; return; }
         KubernetesOperationResult<List<string>> svc = await Traces.GetServicesAsync(
             ClusterId, namespaces: Namespaces, podPattern: PodPattern, windowMinutes: timeRangeMinutes);
-        services = svc.IsSuccess ? svc.Data ?? [] : [];
+        List<string> all = svc.IsSuccess ? svc.Data ?? [] : [];
+        servicesTotal = all.Count;
+        services = all.Count > MaxServiceOptions ? all.GetRange(0, MaxServiceOptions) : all;
+        if (all.Count > MaxServiceOptions)
+        {
+            Logger.LogWarning(
+                "Trace service list for cluster {ClusterId} has {Count} services in the last {Minutes} minutes; "
+                + "the dropdown shows the first {Shown}.", ClusterId, all.Count, timeRangeMinutes, MaxServiceOptions);
+        }
         // A failed read and a quiet window both leave the list empty, and only one of them is about the
         // cluster. Saying which is the difference between "nothing traced this hour" and "go and look".
         if (!svc.IsSuccess) servicesError = svc.Error ?? "the trace store did not answer";

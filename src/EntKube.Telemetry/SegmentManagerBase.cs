@@ -411,10 +411,7 @@ public abstract class SegmentManagerBase : IDisposable
         ActiveSegmentIndex active = _active;
         IndexSearcher? activeSearcher = null;
         if (scope != SegmentScope.Sealed)
-        {
-            active.Refresh();
-            activeSearcher = active.Acquire();
-        }
+            activeSearcher = await RefreshAndAcquireAsync(active, ct);
 
         // Cached, immutable sealed-segment readers — reused across queries (opened once). Each is
         // IncRef'd for the life of this query so retention eviction can't close it mid-search.
@@ -455,6 +452,24 @@ public abstract class SegmentManagerBase : IDisposable
     }
 
     /// <summary>
+    /// Refreshes the active index and acquires a searcher on it, OFF the caller's thread.
+    ///
+    /// <para>Both calls used to run inline, before the first <c>await</c>, so on a Blazor Server circuit
+    /// they ran on the page's own thread. A refresh reopens the near-real-time reader, which flushes
+    /// whatever the writer has buffered since the last one, and with every cluster's telemetry ingested
+    /// here that is not a small amount. While it ran the page ignored every click and said nothing. The
+    /// search itself was already moved off the caller for exactly that reason, and this half was missed.
+    /// <c>ct</c> only stops it starting; once the searcher is acquired it is returned, so a cancelled
+    /// caller cannot leak an acquire it never sees.</para>
+    /// </summary>
+    private static Task<IndexSearcher> RefreshAndAcquireAsync(ActiveSegmentIndex active, CancellationToken ct)
+        => Task.Run(() =>
+        {
+            active.Refresh();
+            return active.Acquire();
+        }, ct);
+
+    /// <summary>
     /// Answers "does this index hold anything matching?" without opening the whole window at once.
     ///
     /// <see cref="QueryAsync{T}(SegmentScope,DateTime?,DateTime?,Func{IndexSearcher,T},CancellationToken)"/>
@@ -474,8 +489,7 @@ public abstract class SegmentManagerBase : IDisposable
         if (scope != SegmentScope.Sealed)
         {
             ActiveSegmentIndex active = _active;
-            active.Refresh();
-            IndexSearcher activeSearcher = active.Acquire();
+            IndexSearcher activeSearcher = await RefreshAndAcquireAsync(active, ct);
             try
             {
                 if (await Task.Run(() => match(activeSearcher), ct)) return true;
@@ -592,8 +606,10 @@ public abstract class SegmentManagerBase : IDisposable
     private async Task<DirectoryReader> OpenSegmentReaderAsync(TelemetrySegment seg, CancellationToken ct)
     {
         string dir = await _cache.EnsureLocalAsync(seg, ct);
+        // Opened off the caller's thread too: EnsureLocalAsync completes synchronously for a segment already
+        // on disk, so without this the open ran on whichever thread asked, which can be a page's.
         FSDirectory fsd = FSDirectory.Open(dir);
-        DirectoryReader reader = DirectoryReader.Open(fsd);
+        DirectoryReader reader = await Task.Run(() => DirectoryReader.Open(fsd), ct);
         // Dispose the Directory exactly when the reader is truly closed (refcount → 0), never while an
         // in-flight query still holds it. Reader starts at refcount 1 — the cache's own reference.
         reader.AddReaderClosedListener(new DirectoryCloser(fsd));
