@@ -4106,7 +4106,7 @@ public static class ComponentCatalog
         {
             Key = "kubevirt-operator",
             DisplayName = "KubeVirt Operator",
-            Description = "Installs the KubeVirt CRDs and virt-operator, which runs virtual machines as pods next to containers. Install this first, then add the 'KubeVirt' component that tells the operator to deploy. Installed from the official GitHub release manifest.",
+            Description = "Installs virt-operator, which runs virtual machines as pods next to containers. Install this first, then add the 'KubeVirt' component that tells the operator to deploy: the VirtualMachine resource types appear only once that deploy is under way, a few minutes after. Installed from the official GitHub release manifest.",
             Icon = "bi-pc-display",
             Category = "Virtualization",
             ComponentType = "ManifestUrl",
