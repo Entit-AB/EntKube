@@ -1443,7 +1443,7 @@ public class KubernetesOperationsService(
     /// </param>
     private async Task<KubernetesOperationResult<string>> ApplyGatewayForClusterAsync(
         Guid tenantId, IClusterClient clusterAccess, Guid clusterId, ApplicationDbContext db,
-        CancellationToken ct)
+        CancellationToken ct, Guid? excludeVmRouteId = null)
     {
         if (!await db.KubernetesClusters.AnyAsync(c => c.Id == clusterId && c.TenantId == tenantId, ct))
             return KubernetesOperationResult<string>.Failure("Cluster not found.");
@@ -1481,7 +1481,17 @@ public class KubernetesOperationsService(
                 dr.IsEnabled && dr.AppDeployment.ClusterId == clusterId))
             .ToListAsync(ct);
 
-        if (externalRoutes.Count == 0 && appRoutes.Count == 0)
+        // Published VM ports. Only their listeners and certificates belong to the Gateway; their
+        // HTTPRoutes are applied by ApplyVmRouteAsync. Without these, applying any app route would
+        // regenerate the Gateway without the VM's listener and take its hostname offline.
+        List<VmRoute> vmRoutes = await db.VmRoutes
+            .Where(r => r.TenantId == tenantId && r.ClusterId == clusterId && r.Kind == VmRouteKind.Http
+                && (excludeVmRouteId == null || r.Id != excludeVmRouteId))
+            .ToListAsync(ct);
+        List<ExternalRoute> vmListeners =
+            [.. vmRoutes.Select(r => VmRouteService.ToGatewayRoute(r, gatewayName, gatewayNamespace))];
+
+        if (externalRoutes.Count == 0 && appRoutes.Count == 0 && vmListeners.Count == 0)
             return KubernetesOperationResult<string>.Success("No routes to apply.");
 
         string gatewayClass = ExternalRouteService.ResolveGatewayClass(components);
@@ -1500,9 +1510,11 @@ public class KubernetesOperationsService(
         // that lands before the labels do detaches every route on the cluster for as long as the
         // gap lasts — the ordering here is the difference between a policy change and an outage.
         await LabelRouteNamespacesAsync(
-            clusterAccess, externalRoutes, componentsById, appRoutes, clusterId, ct);
+            clusterAccess, externalRoutes, componentsById, appRoutes, clusterId, ct,
+            extraNamespaces: vmRoutes.Select(r => r.Namespace));
 
-        string yaml = ExternalRouteService.GenerateGatewayYaml(gatewayName, gatewayNamespace, externalRoutes, appRoutes, gatewayClass: gatewayClass);
+        string yaml = ExternalRouteService.GenerateGatewayYaml(
+            gatewayName, gatewayNamespace, [.. externalRoutes, .. vmListeners], appRoutes, gatewayClass: gatewayClass);
         KubernetesOperationResult<string> applyResult = await ApplyRawYamlAsync(clusterAccess, yaml, ct);
         if (!applyResult.IsSuccess) return applyResult;
 
@@ -1948,29 +1960,8 @@ public class KubernetesOperationsService(
         // apply to UDP, so this step is skipped for UDP routes.
         if (route.Protocol == L4Protocol.Tcp)
         {
-            string peerAuthYaml =
-                $"apiVersion: security.istio.io/v1beta1\n" +
-                $"kind: PeerAuthentication\n" +
-                $"metadata:\n" +
-                $"  name: entkube-permissive\n" +
-                $"  namespace: {backendNs}\n" +
-                $"spec:\n" +
-                $"  mtls:\n" +
-                $"    mode: PERMISSIVE\n";
-            await ApplyRawYamlAsync(clusterAccess, peerAuthYaml, ct);
-
-            string destinationRuleYaml =
-                $"apiVersion: networking.istio.io/v1beta1\n" +
-                $"kind: DestinationRule\n" +
-                $"metadata:\n" +
-                $"  name: entkube-disable-mtls-{route.ServiceName}\n" +
-                $"  namespace: {gwNamespace}\n" +
-                $"spec:\n" +
-                $"  host: {route.ServiceName}.{backendNs}.svc.cluster.local\n" +
-                $"  trafficPolicy:\n" +
-                $"    tls:\n" +
-                $"      mode: DISABLE\n";
-            await ApplyRawYamlAsync(clusterAccess, destinationRuleYaml, ct);
+            await ApplyRawYamlAsync(clusterAccess, L4PeerAuthenticationYaml(backendNs), ct);
+            await ApplyRawYamlAsync(clusterAccess, L4DestinationRuleYaml(route.ServiceName, backendNs, gwNamespace), ct);
         }
 
         string yaml = AppL4RouteService.GenerateRouteYaml(route, backendNs);
@@ -1987,6 +1978,269 @@ public class KubernetesOperationsService(
             : $"(LoadBalancer address pending):{route.ExternalPort}/{proto}";
         return KubernetesOperationResult<string>.Success($"{proto} route applied. External endpoint: {endpoint}");
     }
+
+    // ──────── Published virtual machine ports ────────
+
+    /// <summary>
+    /// Publishes a stored <see cref="VmRoute"/>: the Service in front of the VM, the Gateway listener,
+    /// and the HTTPRoute or TCPRoute. One acknowledgment for all of it — the operator chose "publish
+    /// this port". Returns where the port can now be reached.
+    /// </summary>
+    public async Task<KubernetesOperationResult<string>> ApplyVmRouteAsync(
+        Guid tenantId, Guid vmRouteId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        VmRoute? route = await db.VmRoutes.FirstOrDefaultAsync(r => r.Id == vmRouteId && r.TenantId == tenantId, ct);
+        if (route is null)
+            return KubernetesOperationResult<string>.Failure("Published port not found, or it is not this tenant's.");
+
+        IClusterClient? clusterAccess = await clusterClients.ForAsync(tenantId, route.ClusterId, ct);
+        if (clusterAccess is null)
+            return KubernetesOperationResult<string>.Failure(
+                "The VM's cluster is not this tenant's, or has no kubeconfig configured.");
+
+        if (await VmLabelProblemAsync(clusterAccess, route, ct) is string labelProblem)
+            return KubernetesOperationResult<string>.Failure(labelProblem);
+
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> components =
+            await catalog.GetComponentsForClusterAsync(tenantId, route.ClusterId, ct);
+        string gatewayClass = ExternalRouteService.ResolveGatewayClass(components);
+
+        // Every route of this kind on this VM shares one Service, so the Service is rebuilt from all of them.
+        List<int> ports = await db.VmRoutes
+            .Where(r => r.TenantId == tenantId && r.ClusterId == route.ClusterId && r.Namespace == route.Namespace
+                && r.VmName == route.VmName && r.Kind == route.Kind)
+            .Select(r => r.VmPort)
+            .ToListAsync(ct);
+        string serviceName = VmRouteService.ServiceName(route.VmName, route.Kind);
+        string serviceYaml = VmRouteService.BuildServiceYaml(route.Namespace, route.VmName, route.Kind, ports);
+
+        string endpoint;
+
+        if (route.Kind == VmRouteKind.Http)
+        {
+            (string gwName, string gwNamespace) = ExternalRouteService.ResolveGateway(components);
+
+            // Opened before the first gated change, so the whole publish is one dialog.
+            using IDisposable operation = gate.BeginOperation(
+                $"publish https://{route.Hostname} for virtual machine {route.Namespace}/{route.VmName}");
+
+            KubernetesOperationResult<string> applied = await ApplyRawYamlAsync(clusterAccess, serviceYaml, ct);
+            if (!applied.IsSuccess) return applied;
+
+            // The listener and its certificate. This also labels the VM's namespace so the listener admits
+            // its route, and must land before the route does.
+            applied = await ApplyGatewayForClusterAsync(tenantId, clusterAccess, route.ClusterId, db, ct);
+            if (!applied.IsSuccess) return applied;
+
+            if (gatewayClass == "istio")
+            {
+                // The virt-launcher pod has no sidecar, so the gateway must not originate mesh mTLS to it.
+                applied = await ApplyRawYamlAsync(clusterAccess, ExternalRouteService.GenerateBackendDestinationRuleYaml(
+                    serviceName, route.Namespace, gwNamespace,
+                    ports.Distinct().Select(p => new KubeServicePort($"http-{p}", p, "TCP")), alwaysEmit: true), ct);
+                if (!applied.IsSuccess) return applied;
+            }
+
+            applied = await ApplyRawYamlAsync(clusterAccess, ExternalRouteService.GenerateHttpRouteYaml(
+                VmRouteService.ToGatewayRoute(route, gwName, gwNamespace),
+                new VmRouteService.RouteNamespace(route.Namespace)), ct);
+            if (!applied.IsSuccess) return applied;
+
+            endpoint = $"https://{route.Hostname} — point its DNS at the ingress gateway's address.";
+        }
+        else
+        {
+            if (gatewayClass != "istio")
+                return KubernetesOperationResult<string>.Failure(
+                    "TCP ports need an Istio ingress gateway on this cluster. Traefik clusters can publish HTTP hostnames only.");
+
+            string crdName = AppL4RouteService.RouteCrdName(L4Protocol.Tcp);
+            if (!await CrdInstalledAsync(clusterAccess, crdName, ct))
+                return KubernetesOperationResult<string>.Failure(
+                    $"The TCPRoute CRD ({crdName}) is not installed on this cluster. Install the experimental " +
+                    "channel of the Gateway API CRDs to publish TCP ports.");
+
+            (_, string gwNamespace) = ExternalRouteService.ResolveL4Gateway(components);
+
+            using IDisposable operation = gate.BeginOperation(
+                $"publish TCP port {route.ExternalPort} for virtual machine {route.Namespace}/{route.VmName}");
+
+            KubernetesOperationResult<string> applied = await ApplyRawYamlAsync(clusterAccess, serviceYaml, ct);
+            if (!applied.IsSuccess) return applied;
+
+            applied = await ApplyL4GatewayForClusterAsync(clusterAccess, route.ClusterId, db, components, null, ct);
+            if (!applied.IsSuccess) return applied;
+
+            await ApplyRawYamlAsync(clusterAccess, L4PeerAuthenticationYaml(route.Namespace), ct);
+            await ApplyRawYamlAsync(clusterAccess, L4DestinationRuleYaml(serviceName, route.Namespace, gwNamespace), ct);
+
+            applied = await ApplyRawYamlAsync(clusterAccess,
+                AppL4RouteService.GenerateRouteYaml(VmRouteService.ToL4Route(route, gwNamespace), route.Namespace), ct);
+            if (!applied.IsSuccess) return applied;
+
+            string? address = await GetL4GatewayAddressAsync(clusterAccess, gwNamespace, ct);
+            endpoint = $"{address ?? "(LoadBalancer address pending)"}:{route.ExternalPort}";
+        }
+
+        VmRoute tracked = await db.VmRoutes.FirstAsync(r => r.Id == route.Id, ct);
+        tracked.ClusterAppliedAt = DateTime.UtcNow;
+        await db.SaveChangesAsync(ct);
+
+        return KubernetesOperationResult<string>.Success(endpoint);
+    }
+
+    /// <summary>
+    /// Takes a published port off the cluster and deletes the stored route: its HTTPRoute or TCPRoute,
+    /// its port on the shared Service (the Service itself once no port remains), and its Gateway
+    /// listener. One acknowledgment for the whole withdrawal.
+    /// </summary>
+    public async Task<KubernetesOperationResult<string>> WithdrawVmRouteAsync(
+        Guid tenantId, Guid vmRouteId, CancellationToken ct = default)
+    {
+        using ApplicationDbContext db = dbFactory.CreateDbContext();
+
+        VmRoute? route = await db.VmRoutes.FirstOrDefaultAsync(r => r.Id == vmRouteId && r.TenantId == tenantId, ct);
+        if (route is null)
+            return KubernetesOperationResult<string>.Failure("Published port not found, or it is not this tenant's.");
+
+        IClusterClient? clusterAccess = await clusterClients.ForAsync(tenantId, route.ClusterId, ct);
+        if (clusterAccess is null)
+            return KubernetesOperationResult<string>.Failure(
+                "The VM's cluster is not this tenant's, or has no kubeconfig configured.");
+
+        IReadOnlyList<EntKube.Contracts.Catalog.InstalledComponent> components =
+            await catalog.GetComponentsForClusterAsync(tenantId, route.ClusterId, ct);
+
+        List<int> remainingPorts = await db.VmRoutes
+            .Where(r => r.TenantId == tenantId && r.ClusterId == route.ClusterId && r.Namespace == route.Namespace
+                && r.VmName == route.VmName && r.Kind == route.Kind && r.Id != route.Id)
+            .Select(r => r.VmPort)
+            .ToListAsync(ct);
+        string serviceName = VmRouteService.ServiceName(route.VmName, route.Kind);
+
+        try
+        {
+            using IDisposable operation = gate.BeginOperation(
+                $"withdraw {(route.Kind == VmRouteKind.Http ? $"https://{route.Hostname}" : $"TCP port {route.ExternalPort}")} "
+                + $"from virtual machine {route.Namespace}/{route.VmName}");
+
+            if (route.Kind == VmRouteKind.Http)
+            {
+                (string gwName, string gwNamespace) = ExternalRouteService.ResolveGateway(components);
+
+                await clusterAccess.DeleteManifestAsync("httproute.gateway.networking.k8s.io",
+                    ExternalRouteService.ToListenerName(route.Hostname!) + "-route", route.Namespace, ct);
+
+                if (remainingPorts.Count == 0)
+                {
+                    await clusterAccess.DeleteManifestAsync("service", serviceName, route.Namespace, ct);
+                    await clusterAccess.DeleteManifestAsync("destinationrule.networking.istio.io",
+                        $"entkube-disable-mtls-{serviceName}", gwNamespace, ct);
+                }
+                else
+                {
+                    await ApplyRawYamlAsync(clusterAccess,
+                        VmRouteService.BuildServiceYaml(route.Namespace, route.VmName, route.Kind, remainingPorts), ct);
+                }
+
+                // Rebuilt without this hostname. When it was the last route of any kind on the cluster the
+                // Gateway is left as it was — the same as the app and component routes' last delete.
+                KubernetesOperationResult<string> gateway = await ApplyGatewayForClusterAsync(
+                    tenantId, clusterAccess, route.ClusterId, db, ct, excludeVmRouteId: route.Id);
+                if (!gateway.IsSuccess) return gateway;
+            }
+            else
+            {
+                (_, string gwNamespace) = ExternalRouteService.ResolveL4Gateway(components);
+
+                await clusterAccess.DeleteManifestAsync(AppL4RouteService.RouteResourceType(L4Protocol.Tcp),
+                    AppL4RouteService.RouteResourceName(VmRouteService.ToL4Route(route, gwNamespace)), route.Namespace, ct);
+
+                if (remainingPorts.Count == 0)
+                {
+                    await clusterAccess.DeleteManifestAsync("service", serviceName, route.Namespace, ct);
+                    await clusterAccess.DeleteManifestAsync("destinationrule.networking.istio.io",
+                        $"entkube-disable-mtls-{serviceName}", gwNamespace, ct);
+                }
+                else
+                {
+                    await ApplyRawYamlAsync(clusterAccess,
+                        VmRouteService.BuildServiceYaml(route.Namespace, route.VmName, route.Kind, remainingPorts), ct);
+                }
+
+                // Rebuilt without this port — and removed, releasing its LoadBalancer, if nothing else uses it.
+                KubernetesOperationResult<string> gateway = await ApplyL4GatewayForClusterAsync(
+                    clusterAccess, route.ClusterId, db, components, route.Id, ct);
+                if (!gateway.IsSuccess) return gateway;
+            }
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return KubernetesOperationResult<string>.Failure($"Could not withdraw the port: {ex.Message}");
+        }
+
+        db.VmRoutes.Remove(route);
+        await db.SaveChangesAsync(ct);
+        return KubernetesOperationResult<string>.Success("Withdrawn.");
+    }
+
+    /// <summary>
+    /// Why a VM's published Service would select nothing, or null when it will select the VM. The Service
+    /// selects the <c>kubevirt.io/vm</c> label, which EntKube puts on every VM it creates; a VM created
+    /// elsewhere may lack it, and a Service with no endpoints publishes a port that answers nothing.
+    /// </summary>
+    private static async Task<string?> VmLabelProblemAsync(IClusterClient clusterAccess, VmRoute route, CancellationToken ct)
+    {
+        string json;
+        try
+        {
+            json = await clusterAccess.GetJsonAsync($"virtualmachine.kubevirt.io/{route.VmName}", route.Namespace, ct: ct);
+        }
+        catch (Exception ex) when (ex is not OperationCanceledException)
+        {
+            return $"Could not read virtual machine {route.Namespace}/{route.VmName}: {ex.Message}";
+        }
+
+        using JsonDocument doc = JsonDocument.Parse(json);
+        bool labelled = doc.RootElement.TryGetProperty("spec", out JsonElement spec)
+            && spec.TryGetProperty("template", out JsonElement template)
+            && template.TryGetProperty("metadata", out JsonElement metadata)
+            && metadata.TryGetProperty("labels", out JsonElement labels)
+            && labels.TryGetProperty(VmRouteService.VmLabel, out JsonElement value)
+            && value.GetString() == route.VmName;
+
+        return labelled
+            ? null
+            : $"Virtual machine {route.VmName} has no '{VmRouteService.VmLabel}: {route.VmName}' label on its pod "
+              + "template, so a Service cannot select it. VMs created in EntKube carry it; add it to this VM's "
+              + "spec.template.metadata.labels and restart the VM.";
+    }
+
+    /// <summary>PERMISSIVE in a TCP backend's namespace, so the gateway's plaintext hop is accepted.</summary>
+    private static string L4PeerAuthenticationYaml(string backendNs) =>
+        $"apiVersion: security.istio.io/v1beta1\n" +
+        $"kind: PeerAuthentication\n" +
+        $"metadata:\n" +
+        $"  name: entkube-permissive\n" +
+        $"  namespace: {backendNs}\n" +
+        $"spec:\n" +
+        $"  mtls:\n" +
+        $"    mode: PERMISSIVE\n";
+
+    /// <summary>tls DISABLE from the gateway to a TCP backend that has no sidecar to speak mesh mTLS.</summary>
+    private static string L4DestinationRuleYaml(string serviceName, string backendNs, string gwNamespace) =>
+        $"apiVersion: networking.istio.io/v1beta1\n" +
+        $"kind: DestinationRule\n" +
+        $"metadata:\n" +
+        $"  name: entkube-disable-mtls-{serviceName}\n" +
+        $"  namespace: {gwNamespace}\n" +
+        $"spec:\n" +
+        $"  host: {serviceName}.{backendNs}.svc.cluster.local\n" +
+        $"  trafficPolicy:\n" +
+        $"    tls:\n" +
+        $"      mode: DISABLE\n";
 
     /// <summary>
     /// Deletes the TCPRoute/UDPRoute for a route from its cluster and regenerates the dedicated L4
@@ -2054,6 +2308,15 @@ public class KubernetesOperationsService(
                      && r.AppDeployment.ClusterId == clusterId
                      && (excludeRouteId == null || r.Id != excludeRouteId))
             .ToListAsync(ct);
+
+        // VM TCP ports share this Gateway. Leaving them out would drop their listeners whenever an app
+        // L4 route changes, and delete the Gateway — and its LoadBalancer address — when the last app
+        // route goes while VMs still use it. The exclusion id is shared: route ids are Guids.
+        routes.AddRange((await db.VmRoutes
+                .Where(r => r.ClusterId == clusterId && r.Kind == VmRouteKind.Tcp
+                         && (excludeRouteId == null || r.Id != excludeRouteId))
+                .ToListAsync(ct))
+            .Select(r => VmRouteService.ToL4Route(r, gwNamespace)));
 
         string yaml = ExternalRouteService.GenerateL4GatewayYaml(gwNamespace, routes, gatewayClass);
         if (string.IsNullOrEmpty(yaml))
@@ -2273,9 +2536,11 @@ public class KubernetesOperationsService(
         IReadOnlyDictionary<Guid, EntKube.Contracts.Catalog.InstalledComponent> componentsById,
         IEnumerable<AppRoute> appRoutes,
         Guid clusterId,
-        CancellationToken ct)
+        CancellationToken ct,
+        IEnumerable<string>? extraNamespaces = null)
     {
         HashSet<string> namespaces = [
+            .. extraNamespaces ?? [],
             .. externalRoutes
                 .Select(r => componentsById.TryGetValue(r.ComponentId,
                     out EntKube.Contracts.Catalog.InstalledComponent? c) ? c.Namespace : null)

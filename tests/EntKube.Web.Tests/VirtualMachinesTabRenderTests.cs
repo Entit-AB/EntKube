@@ -70,6 +70,21 @@ public class VirtualMachinesTabRenderTests : BunitContext, IDisposable
                 NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance),
             new AuditService(testDb.Factory, new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory)),
             NullLogger<VirtualMachineService>.Instance));
+        EntKube.Web.Services.ClusterChanges.ClusterChangeGate gate = new(
+            new Microsoft.Extensions.Configuration.ConfigurationBuilder().Build(),
+            NullLogger<EntKube.Web.Services.ClusterChanges.ClusterChangeGate>.Instance);
+        EntKube.Web.Services.Clusters.ClusterClientFactory clusters = new(testDb.Factory, k8s.Object);
+        EntKube.Web.Modules.Api.CatalogApi catalog = new(testDb.Factory);
+        Services.AddSingleton(new VmRouteService(testDb.Factory, catalog));
+        Services.AddSingleton(new KubernetesOperationsService(
+            testDb.Factory,
+            new AuditService(testDb.Factory, new EntKube.Web.Modules.Api.DeliveryApi(testDb.Factory)),
+            new KyvernoPolicyService(testDb.Factory, k8s.Object, clusters, gate, catalog,
+                NullLogger<KyvernoPolicyService>.Instance),
+            gate, clusters, catalog,
+            new EntKube.Web.Services.Rollouts.NoOpRolloutStarter(),
+            NullLogger<KubernetesOperationsService>.Instance));
+        Services.AddSingleton(TestServices.BuildLifecycle(testDb, k8s.Object));
         Services.AddSingleton(new ToastService());
         Services.AddSingleton<AuthenticationStateProvider>(new SignedInAs("nils"));
         Services.AddScoped<CurrentActor>();
@@ -125,6 +140,25 @@ public class VirtualMachinesTabRenderTests : BunitContext, IDisposable
         tab.WaitForAssertion(() => tab.Markup.Should().Contain("KubeVirt is not installed on <b>a-plain</b>"));
         tab.FindAll("button").Single(b => b.TextContent.Contains("New virtual machine"))
             .HasAttribute("disabled").Should().BeTrue();
+    }
+
+    [Fact]
+    public void A_vm_with_a_published_port_shows_it_and_cannot_be_deleted_until_it_is_withdrawn()
+    {
+        InstallKubeVirt(virtualized);
+        db.VmRoutes.Add(new VmRoute
+        {
+            Id = Guid.NewGuid(), TenantId = tenantId, ClusterId = virtualized, Namespace = "vms", VmName = "web-01",
+            Kind = VmRouteKind.Tcp, VmPort = 22, ExternalPort = 2222,
+        });
+        db.SaveChanges();
+
+        IRenderedComponent<VirtualMachinesTab> tab = RenderTab();
+
+        tab.WaitForAssertion(() => tab.Markup.Should().Contain("web-01"));
+        tab.Find("span[title='Published ports']").TextContent.Trim().Should().Be("1");
+        tab.Find("button[title='Withdraw its published ports first']").HasAttribute("disabled").Should().BeTrue(
+            "deleting the VM would leave its Service, route and gateway listener pointing at nothing");
     }
 
     [Fact]

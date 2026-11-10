@@ -139,6 +139,7 @@ public static partial class ModuleMap
         // ---- Connectivity -------------------------------------------------------------
         [typeof(AppRoute)] = Module.Connectivity,
         [typeof(AppL4Route)] = Module.Connectivity,
+        [typeof(VmRoute)] = Module.Connectivity,
         [typeof(AppNetworkPolicy)] = Module.Connectivity,
         [typeof(ConnectivityRule)] = Module.Connectivity,
         [typeof(ExternalRoute)] = Module.Connectivity,

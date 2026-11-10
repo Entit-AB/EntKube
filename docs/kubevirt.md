@@ -53,12 +53,15 @@ The section lists the VMs on the environment's clusters and acts on them:
 Every action goes through the cluster change gate, so the operator sees and acknowledges it first, and
 each one is written to the audit log with the actor's name.
 
-### There is no table
+### There is no VM table
 
 A `VirtualMachine` is already a declarative object that KubeVirt reconciles. The cluster is the
 record, and the section reads it live. A copy in EntKube's database would be a second source of truth
 for the one property that matters, whether the VM is running, and it would drift the first time
 someone used `virtctl`. VMs created outside EntKube show up and can be operated like any other.
+
+Published ports are the exception, and are stored (`VmRoutes`). They are EntKube's own intent rather
+than a copy of the cluster's; see *Networking and publishing* for why they must be stored.
 
 ### Power actions and subresources
 
@@ -129,11 +132,44 @@ The manifest and the cloud-config are built as data and serialized, never interp
 reference, the URL and the SSH key are typed by a person, so they must stay values whatever
 characters they contain.
 
-### Networking
+### Networking and publishing
 
-Each VM has one interface on the pod network, using `masquerade`. It is reachable from inside the
-cluster at the IP the row shows. Exposing it outside the cluster, for example for SSH, means putting
-a Service in front of it, selected by the `kubevirt.io/vm: <name>` label the template carries.
+Each VM has one interface on the pod network, using `masquerade`. Inside the cluster it is reachable at
+the IP its row shows. Outside the cluster it is reachable only through a port published from the VM's
+row:
+
+| Kind | What reaches the cluster | Where it is reached |
+| --- | --- | --- |
+| HTTPS hostname | Service `<vm>-web`, a listener and Certificate on the ingress Gateway, an HTTPRoute in the VM's namespace, and (Istio) a DestinationRule | `https://<hostname>`. Point its DNS at the ingress gateway. TLS ends at the gateway, so the VM's port must serve **plain HTTP**. |
+| TCP port | Service `<vm>-tcp`, a listener on the dedicated L4 Gateway, a TCPRoute, a PERMISSIVE PeerAuthentication and an mTLS-off DestinationRule | `<L4 gateway address>:<external port>`, e.g. SSH on `:2222`. **Istio only**; the L4 gateway has its own LoadBalancer address. |
+
+Publishing and withdrawing are each one acknowledged operation. A published port is stored first and
+applied second. One the cluster refuses, or the operator declines, stays listed as "not on the cluster"
+and can be applied again or withdrawn.
+
+**Why published ports are a table when VMs are not.** Both Gateways are regenerated wholesale from the
+database, from two places: app routes (`KubernetesOperationsService`) and component routes
+(`ComponentLifecycleService`). A VM hostname that existed only on the cluster would lose its listener
+the next time anyone applied an unrelated route. The L4 gateway, and its LoadBalancer address, would
+be deleted outright when the last *app* TCP route went. So `VmRoutes` stores the intent, and all three
+rebuilds read it. Tests pin each one.
+
+**One owner per hostname and per port.** Every route generator names its HTTPRoute after the hostname,
+so a hostname already served on the cluster by a component, an app or another VM is refused. The
+component route form also refuses a VM's hostname. A TCP port is one LoadBalancer listener, so app and
+VM TCP routes check each other in both directions. The one gap is that an *app* route's hostname
+attaches to a cluster only later, when a deployment route links it, so it is not checked against VM
+hostnames when the app route is added.
+
+**The Service selects `kubevirt.io/vm: <name>`**, which EntKube puts on every VM it creates. Publishing
+is refused for a VM whose pod template lacks it, because the Service would select nothing. Add the
+label to `spec.template.metadata.labels` and restart the VM.
+
+**A VM with published ports cannot be deleted** until they are withdrawn. Otherwise its Service, route
+and listener would be left pointing at nothing.
+
+Withdrawing the last route of *any* kind on a cluster leaves that hostname's Gateway listener in
+place. The app and component routes behave the same way when their last one goes.
 
 ## Not yet
 

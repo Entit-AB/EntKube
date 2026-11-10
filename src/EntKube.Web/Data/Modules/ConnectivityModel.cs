@@ -38,6 +38,7 @@ internal static class ConnectivityModel
         builder.Entity<VpnLocalEndpoint>().ToTable("VpnLocalEndpoints");
         builder.Entity<VpnRemoteEndpoint>().ToTable("VpnRemoteEndpoints");
         builder.Entity<VpnTunnel>().ToTable("VpnTunnels");
+        builder.Entity<VmRoute>().ToTable("VmRoutes");
 
         // ExternalRoute — exposes a component via Gateway API HTTPRoute.
         // Hostname must be unique within a cluster (enforced via component→cluster).
@@ -254,6 +255,32 @@ internal static class ConnectivityModel
             entity.HasOne(r => r.AppDeployment)
                 .WithMany()
                 .HasForeignKey(r => r.AppDeploymentId)
+                .OnDelete(DeleteBehavior.Cascade);
+        });
+
+        // VmRoute — a KubeVirt VM's port published on the HTTPS or L4 gateway. VMs have no table, so the
+        // route carries its own tenant and cluster. Cascades from both: a route outlives neither.
+        builder.Entity<VmRoute>(entity =>
+        {
+            entity.HasKey(r => r.Id);
+            entity.Property(r => r.Namespace).HasMaxLength(63).IsRequired();
+            entity.Property(r => r.VmName).HasMaxLength(63).IsRequired();
+            entity.Property(r => r.Kind).HasConversion<string>().HasMaxLength(10);
+            entity.Property(r => r.Hostname).HasMaxLength(253);
+            entity.Property(r => r.ClusterIssuerName).HasMaxLength(253);
+            entity.HasIndex(r => r.TenantId);
+            entity.HasIndex(r => new { r.ClusterId, r.Namespace, r.VmName });
+
+            entity.HasOne(r => r.Tenant)
+                .WithMany()
+                .HasForeignKey(r => r.TenantId)
+                .OnDelete(DeleteBehavior.Cascade);
+
+            // Both cascade, as ElasticsearchCluster's do. The second path is SQL Server's problem, and
+            // SqlServerApplicationDbContext already rewrites such paths to NO ACTION for that provider.
+            entity.HasOne(r => r.Cluster)
+                .WithMany()
+                .HasForeignKey(r => r.ClusterId)
                 .OnDelete(DeleteBehavior.Cascade);
         });
 

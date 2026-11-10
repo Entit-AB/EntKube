@@ -38,6 +38,7 @@ internal static class ConnectivityServices
         services.AddScoped<ExternalRouteService>();
         services.AddScoped<AppRouteService>();
         services.AddScoped<AppL4RouteService>();
+        services.AddScoped<VmRouteService>();
         services.AddScoped<ConnectivityGraphService>();
         services.AddScoped<IngressDashboardService>();
         services.AddScoped<TailscaleService>();

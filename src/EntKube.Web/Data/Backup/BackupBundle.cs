@@ -2,6 +2,7 @@ namespace EntKube.Web.Data.Backup;
 
 public class BackupBundle
 {
+    // Version 13 added published virtual machine ports (VmRoutes).
     // Version 11 added the audit trail, within a retention window — see
     // BackupService.AuditRetention for why a window rather than all of it.
     // Version 8 added the inbound ticket bridge: the customers' own ticketing systems and
@@ -29,7 +30,7 @@ public class BackupBundle
     /// literal here and a second literal in the import's guard, which is how a bundle
     /// this very code wrote came to be rejected by it.</para>
     /// </summary>
-    public const int CurrentVersion = 12;
+    public const int CurrentVersion = 13;
 
     public int Version { get; set; } = CurrentVersion;
     public DateTime CreatedAt { get; set; } = DateTime.UtcNow;
@@ -72,6 +73,7 @@ public class BackupBundle
     public List<AppRoute> AppRoutes { get; set; } = [];
     public List<AppDeploymentRoute> AppDeploymentRoutes { get; set; } = [];
     public List<AppL4Route> AppL4Routes { get; set; } = [];
+    public List<VmRoute> VmRoutes { get; set; } = [];
     public List<AppServicePort> AppServicePorts { get; set; } = [];
     public List<ConnectivityRule> ConnectivityRules { get; set; } = [];
     public List<ExternalDependency> ExternalDependencies { get; set; } = [];

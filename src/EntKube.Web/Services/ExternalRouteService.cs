@@ -122,6 +122,10 @@ public class ExternalRouteService(
         List<Guid> clusterComponentIds = clusterSiblings.Select(c => c.Id).ToList();
         bool duplicateHostname = await db.ExternalRoutes
             .AnyAsync(r => clusterComponentIds.Contains(r.ComponentId)
+                && r.Hostname == normalizedHostname, ct)
+            // A virtual machine's published hostname is the same object on the cluster: every route
+            // generator names its HTTPRoute after the hostname.
+            || await db.VmRoutes.AnyAsync(r => r.ClusterId == component.ClusterId
                 && r.Hostname == normalizedHostname, ct);
 
         if (duplicateHostname)

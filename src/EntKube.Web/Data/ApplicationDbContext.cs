@@ -134,6 +134,7 @@ public class ApplicationDbContext(DbContextOptions options) : IdentityDbContext<
     public DbSet<AppRoute> AppRoutes => Set<AppRoute>();
     public DbSet<AppDeploymentRoute> AppDeploymentRoutes => Set<AppDeploymentRoute>();
     public DbSet<AppL4Route> AppL4Routes => Set<AppL4Route>();
+    public DbSet<VmRoute> VmRoutes => Set<VmRoute>();
     public DbSet<AppAllowedDatabase> AppAllowedDatabases => Set<AppAllowedDatabase>();
     public DbSet<AppAllowedCache> AppAllowedCaches => Set<AppAllowedCache>();
     public DbSet<AppAllowedStorage> AppAllowedStorages => Set<AppAllowedStorage>();

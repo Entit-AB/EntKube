@@ -150,6 +150,7 @@ public static partial class ModuleMap
         // ---- Connectivity ----------------------------------------------------------
         [typeof(AppL4RouteHealthService)] = Module.Connectivity,
         [typeof(AppL4RouteService)] = Module.Connectivity,
+        [typeof(VmRouteService)] = Module.Connectivity,
         [typeof(AppRouteService)] = Module.Connectivity,
         [typeof(ConnectivityGraphService)] = Module.Connectivity,
         [typeof(ExternalRouteHealthService)] = Module.Connectivity,
