@@ -18,6 +18,13 @@ operator and a `Manifest` for the resource that switches it on. Installing an op
 deploys nothing. The resource entries depend on their operator, and they are detected by a live
 instance rather than by the CRD, because the operator brings that CRD with it.
 
+That means `kubevirt` reads **Installed** before KubeVirt can run anything. The operator manifest
+brings only the `kubevirts` type; `virtualmachines`, `virtualmachineinstances` and the rest are
+created by virt-operator while it deploys, a few minutes later — or never, when the operator or the
+install-strategy job it starts cannot run. When the VM list fails, Services › Virtual Machines
+reads the `KubeVirt` resource's `status.phase` and conditions and says which of these it is, instead
+of kubectl's bare "no resource type".
+
 CDI is optional. Without it, VMs can only boot from container disks.
 
 ### What the KubeVirt resource sets

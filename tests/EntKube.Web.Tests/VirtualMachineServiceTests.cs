@@ -285,10 +285,93 @@ public class VirtualMachineServiceTests : IDisposable
         k8s.Setup(f => f.GetJsonAllNamespacesAsync(
                 "virtualmachines.kubevirt.io", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
             .ThrowsAsync(new InvalidOperationException("the server doesn't have a resource type \"virtualmachines\""));
+        k8s.Setup(f => f.GetJsonAllNamespacesAsync(
+                "kubevirts.kubevirt.io", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("the server doesn't have a resource type \"kubevirts\""));
 
         VirtualMachineSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
 
-        snapshot.Error.Should().Contain("doesn't have a resource type");
+        snapshot.Error.Should().Contain("doesn't have a resource type \"virtualmachines\"");
+    }
+
+    /// <summary>
+    /// What an operator saw right after installing the component: the KubeVirt resource exists, so the
+    /// component says Installed, but virt-operator has not yet created the VirtualMachine types.
+    /// </summary>
+    [Fact]
+    public async Task While_kubevirt_is_still_deploying_the_page_says_so_instead_of_kubectls_error()
+    {
+        KubernetesCluster cluster = await SeedClusterAsync();
+        k8s.Setup(f => f.GetJsonAllNamespacesAsync(
+                "virtualmachines.kubevirt.io", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+            .ThrowsAsync(new InvalidOperationException("the server doesn't have a resource type \"virtualmachines\""));
+        Lists("kubevirts.kubevirt.io", Wrap(DeployingKubeVirt));
+
+        VirtualMachineSnapshot snapshot = await sut.LoadAsync(cluster.TenantId, cluster.Id);
+
+        snapshot.Error.Should().Contain("still deploying")
+            .And.Contain("Deploying version v1.9.1")
+            .And.Contain("namespace 'kubevirt'")
+            .And.NotContain("doesn't have a resource type");
+    }
+
+    private const string DeployingKubeVirt = """
+        {
+          "metadata": { "name": "kubevirt", "namespace": "kubevirt" },
+          "status": {
+            "phase": "Deploying",
+            "conditions": [
+              { "type": "Available", "status": "False", "reason": "DeploymentInProgress",
+                "message": "Deploying version v1.9.1 with registry quay.io/kubevirt" },
+              { "type": "Degraded", "status": "False", "reason": "DeploymentInProgress", "message": "" }
+            ]
+          }
+        }
+        """;
+
+    [Fact]
+    public void A_degraded_kubevirt_reports_the_degradation_rather_than_the_progress()
+    {
+        string? problem = VirtualMachineService.DeploymentProblem(Wrap("""
+            {
+              "metadata": { "name": "kubevirt", "namespace": "kubevirt" },
+              "status": {
+                "phase": "Deploying",
+                "conditions": [
+                  { "type": "Available", "status": "False", "message": "Deploying version v1.9.1" },
+                  { "type": "Degraded", "status": "True", "message": "install strategy job failed" }
+                ]
+              }
+            }
+            """));
+
+        problem.Should().Contain("install strategy job failed").And.NotContain("Deploying version");
+    }
+
+    [Fact]
+    public void A_kubevirt_the_operator_never_touched_says_the_operator_has_not_picked_it_up()
+    {
+        string? problem = VirtualMachineService.DeploymentProblem(Wrap("""
+            { "metadata": { "name": "kubevirt", "namespace": "virt" } }
+            """));
+
+        problem.Should().Contain("has not picked up").And.Contain("namespace 'virt'");
+    }
+
+    [Fact]
+    public void No_kubevirt_resource_at_all_points_at_the_component()
+    {
+        VirtualMachineService.DeploymentProblem("""{"items":[]}""")
+            .Should().Contain("No KubeVirt resource exists").And.Contain("'KubeVirt' component");
+    }
+
+    /// <summary>Deployed, yet the types are missing: KubeVirt has nothing to explain, so kubectl's words stand.</summary>
+    [Theory]
+    [InlineData("""{"items":[{"metadata":{"name":"kubevirt","namespace":"kubevirt"},"status":{"phase":"Deployed"}}]}""")]
+    [InlineData(null)]
+    public void A_deployed_or_unreadable_kubevirt_leaves_the_original_error(string? json)
+    {
+        VirtualMachineService.DeploymentProblem(json).Should().BeNull();
     }
 
     [Fact]

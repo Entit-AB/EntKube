@@ -154,6 +154,7 @@ public class VirtualMachineService(
     private const string VmResource = "virtualmachines.kubevirt.io";
     private const string VmiResource = "virtualmachineinstances.kubevirt.io";
     private const string DataVolumeResource = "datavolumes.cdi.kubevirt.io";
+    private const string KubeVirtResource = "kubevirts.kubevirt.io";
 
     /// <summary>KubeVirt's aggregated API for actions on VMs and their instances.</summary>
     public const string SubresourcesGroupVersion = "subresources.kubevirt.io/v1";
@@ -233,10 +234,19 @@ public class VirtualMachineService(
         }
         catch (Exception ex) when (ex is not OperationCanceledException)
         {
-            // Without the VirtualMachine list there is nothing to show. The usual cause is that the CRD
-            // is absent, and kubectl says so in words worth passing on.
+            // Without the VirtualMachine list there is nothing to show. The usual cause is that the CRD is
+            // absent — and it is absent long after the KubeVirt component says Installed, because that
+            // component applies only the KubeVirt resource: virt-operator creates the VirtualMachine types
+            // while it deploys, which takes minutes, or never happens when the operator is stuck. kubectl's
+            // "no resource type" says none of that, so ask KubeVirt's own resource where it has got to.
             logger.LogInformation(ex, "Could not list virtual machines on cluster {ClusterId}", clusterId);
-            return VirtualMachineSnapshot.Failure($"Could not list virtual machines: {ex.Message}");
+
+            string? kubeVirtJson = null;
+            try { kubeVirtJson = await client.GetJsonAllNamespacesAsync(KubeVirtResource, ct: ct); }
+            catch (Exception) when (!ct.IsCancellationRequested) { }
+
+            return VirtualMachineSnapshot.Failure(
+                DeploymentProblem(kubeVirtJson) ?? $"Could not list virtual machines: {ex.Message}");
         }
 
         List<string> warnings = [];
@@ -672,6 +682,53 @@ public class VirtualMachineService(
         }
 
         return [.. result.OrderBy(v => v.Namespace, StringComparer.Ordinal).ThenBy(v => v.Name, StringComparer.Ordinal)];
+    }
+
+    /// <summary>
+    /// Why the VirtualMachine types are missing, read from the KubeVirt resource the operator reconciles —
+    /// or null when that resource says nothing useful (deployed, or unreadable), and kubectl's own error
+    /// is the better account.
+    /// </summary>
+    public static string? DeploymentProblem(string? kubeVirtJson)
+    {
+        if (string.IsNullOrWhiteSpace(kubeVirtJson)) return null;
+
+        using JsonDocument doc = JsonDocument.Parse(kubeVirtJson);
+        if (!doc.RootElement.TryGetProperty("items", out JsonElement items)
+            || items.ValueKind != JsonValueKind.Array)
+            return null;
+
+        // KubeVirt admits one per cluster; a second is refused by its webhook.
+        JsonElement? kubeVirt = items.EnumerateArray().Select(i => (JsonElement?)i).FirstOrDefault();
+        if (kubeVirt is not { } kv)
+            return "No KubeVirt resource exists on this cluster, so virt-operator has deployed nothing and the "
+                + "VirtualMachine types do not exist. Install the 'KubeVirt' component from the cluster's "
+                + "Components tab.";
+
+        string ns = Path(kv, "metadata") is { } meta ? Str(meta, "namespace") ?? "kubevirt" : "kubevirt";
+        string? phase = Path(kv, "status") is { } st ? Str(st, "phase") : null;
+        string stuckHint = $" If it stays like this, look at the pods in namespace '{ns}': virt-operator, and the "
+            + "install-strategy job it starts, must both run before the types appear.";
+
+        string? said = null;
+        foreach ((string type, string status) in new[] { ("Degraded", "True"), ("Available", "False"), ("Progressing", "True") })
+        {
+            if (Condition(kv, type) is { } c && c.Status == status && !string.IsNullOrWhiteSpace(c.Message))
+            {
+                said = $" KubeVirt says: \"{c.Message}\".";
+                break;
+            }
+        }
+
+        return phase switch
+        {
+            "Deployed" => null,
+            null or "" => "virt-operator has not picked up the KubeVirt resource yet, and it creates the "
+                + "VirtualMachine types only once it does." + stuckHint,
+            "Deploying" => "KubeVirt is still deploying. virt-operator creates the VirtualMachine types as part "
+                + "of that, which usually takes a few minutes; retry shortly." + said + stuckHint,
+            _ => $"KubeVirt is {phase}, so the VirtualMachine types are gone or going." + said
+        };
     }
 
     public static HealthStatus HealthOf(string status) => status switch
