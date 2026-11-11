@@ -3,6 +3,7 @@ using System.Text;
 using System.Text.Json;
 using EntKube.ApiClient;
 using EntKube.Cli;
+using EntKube.Web.Services.PublicApi;
 using FluentAssertions;
 using Xunit;
 
@@ -29,14 +30,34 @@ namespace EntKube.Web.Tests;
 /// </summary>
 public class CliPartialFailureTests
 {
-    /// <summary>The body the secrets-sync route sends with its 207, shortened but shaped the same.</summary>
-    private const string PartialBody =
-        """
-        {"failed":true,"output":"2 of 3 delivered","bindings":[
-        {"kind":"Database","secret":"billing-db","error":null},
-        {"kind":"OAuthClient","secret":"billing-sso","error":"the namespace does not exist"}],
-        "unlistedFamilies":[],"fatalError":null}
-        """;
+    /// <summary>
+    /// The body the secrets-sync route sends with its 207 — <b>built by the same record the route
+    /// now serialises</b>, not hand-written.
+    ///
+    /// <para>⚠️ It WAS hand-written, and it was wrong in a way nothing could catch: it carried
+    /// <c>"kind":"OAuthClient"</c>, which is not a member of <c>SecretBindingKind</c>
+    /// (Database, Cache, Messaging, Storage, Identity), so the API could never have sent it. The
+    /// comment above it claimed the body was "shaped the same" as the route's. A literal string is
+    /// a third copy of the contract, free to drift from both the server and the client — and until
+    /// the route was typed there was no schema to check it against. Now there is a record, so the
+    /// fixture is generated and the drift is not expressible.</para>
+    ///
+    /// <para>⚠️ <c>failed</c> is NOT set here: it is computed from the binding that carries an
+    /// error, which is what makes the <c>Replace</c> in the 200 cases below a deliberate lie about
+    /// the body rather than a second way of building one.</para>
+    /// </summary>
+    private static readonly string PartialBody = JsonSerializer.Serialize(
+        AppSecretSyncResponse.From(new EntKube.Contracts.Secrets.AppSecretSyncResult(
+            Output: "2 of 3 delivered",
+            Bindings:
+            [
+                new(EntKube.Contracts.Secrets.SecretBindingKind.Database, "billing-db", null),
+                new(EntKube.Contracts.Secrets.SecretBindingKind.Identity, "billing-sso",
+                    "the namespace does not exist"),
+            ],
+            UnlistedFamilies: [],
+            FatalError: null)),
+        new JsonSerializerOptions(JsonSerializerDefaults.Web));
 
     private static CliCommand SecretsSync() =>
         CliCommands.All.Single(c => c.Path.SequenceEqual(new[] { "secrets", "sync" }));

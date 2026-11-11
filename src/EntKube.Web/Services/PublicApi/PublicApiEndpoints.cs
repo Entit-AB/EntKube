@@ -245,7 +245,8 @@ public static class PublicApiEndpoints
                 .ToList());
         }).RequireApiScope(ApiScopes.AppsRead);
 
-        api.MapPost("/deployments/{deploymentId:guid}/sync", async (
+        api.MapPost("/deployments/{deploymentId:guid}/sync",
+            async Task<Results<Ok<DeploymentSyncResponse>, ProblemHttpResult, NotFound>> (
             Guid deploymentId, HttpContext ctx,
             EntKube.Contracts.Delivery.IDeliveryApi delivery,
             KubernetesOperationsService operations,
@@ -265,7 +266,7 @@ public static class PublicApiEndpoints
             // hand-written version goes wrong.
             if (await delivery.GetDeploymentAsync(principal.TenantId, deploymentId, ct) is null)
             {
-                return Results.NotFound();
+                return TypedResults.NotFound();
             }
 
             // Attributed to the token, not to a user: an audit trail that says "CI pipeline"
@@ -275,14 +276,15 @@ public static class PublicApiEndpoints
                 performedBy: $"api-token:{principal.TokenName}", ct: ct);
 
             return result.IsSuccess
-                ? Results.Ok(new { ok = true, output = result.Data })
-                : Results.Problem(result.Error ?? "Sync failed.", statusCode: StatusCodes.Status422UnprocessableEntity);
+                ? TypedResults.Ok(DeploymentSyncResponse.From(result))
+                : TypedResults.Problem(result.Error ?? "Sync failed.", statusCode: StatusCodes.Status422UnprocessableEntity);
         }).RequireApiScope(ApiScopes.AppsWrite);
 
         // A restart targets one Kubernetes Deployment, not the whole EntKube deployment,
         // so the workload name is required rather than guessed. Guessing here would mean
         // restarting the wrong workload in a namespace that hosts several.
-        api.MapPost("/deployments/{deploymentId:guid}/restart", async (
+        api.MapPost("/deployments/{deploymentId:guid}/restart",
+            async Task<Results<Ok<OkResponse>, ProblemHttpResult, NotFound>> (
             Guid deploymentId, string workload, HttpContext ctx,
             EntKube.Contracts.Delivery.IDeliveryApi delivery,
             KubernetesOperationsService operations,
@@ -296,7 +298,7 @@ public static class PublicApiEndpoints
 
             if (string.IsNullOrWhiteSpace(workload))
             {
-                return Results.Problem(
+                return TypedResults.Problem(
                     "A 'workload' query parameter naming the Kubernetes Deployment is required.",
                     statusCode: StatusCodes.Status400BadRequest);
             }
@@ -306,7 +308,7 @@ public static class PublicApiEndpoints
             // hand-written version goes wrong.
             if (await delivery.GetDeploymentAsync(principal.TenantId, deploymentId, ct) is null)
             {
-                return Results.NotFound();
+                return TypedResults.NotFound();
             }
 
             // The ownership check above is on the APP's tenant; the seam then checks the
@@ -317,8 +319,8 @@ public static class PublicApiEndpoints
                 performedBy: $"api-token:{principal.TokenName}", ct: ct);
 
             return result.IsSuccess
-                ? Results.Ok(new { ok = true })
-                : Results.Problem(result.Error ?? "Restart failed.", statusCode: StatusCodes.Status422UnprocessableEntity);
+                ? TypedResults.Ok(OkResponse.Succeeded)
+                : TypedResults.Problem(result.Error ?? "Restart failed.", statusCode: StatusCodes.Status422UnprocessableEntity);
         }).RequireApiScope(ApiScopes.AppsWrite);
 
         // ── Operations ──
@@ -352,7 +354,8 @@ public static class PublicApiEndpoints
         // 207 rather than 200 when something failed: the request was handled, the work was not
         // wholly done, and a pipeline that treats any 2xx as "fine" should at least have to opt
         // into that reading.
-        api.MapPost("/apps/{appId:guid}/secrets/sync", async (
+        api.MapPost("/apps/{appId:guid}/secrets/sync",
+            async Task<Results<Ok<AppSecretSyncResponse>, JsonHttpResult<AppSecretSyncResponse>, NotFound>> (
             Guid appId, Guid? environmentId, HttpContext ctx,
             EntKube.Contracts.Delivery.IDeliveryApi delivery,
             EntKube.Contracts.Secrets.ISecretsApi secrets,
@@ -373,29 +376,31 @@ public static class PublicApiEndpoints
             // foreign app id would otherwise come back as an empty success rather than a 404.
             if (await delivery.GetAppAsync(principal.TenantId, appId, ct) is null)
             {
-                return Results.NotFound();
+                return TypedResults.NotFound();
             }
 
             EntKube.Contracts.Secrets.AppSecretSyncResult result =
                 await secrets.SyncAppSecretsAsync(principal.TenantId, appId, environmentId, ct);
 
-            object body = new
-            {
-                failed = result.AnythingFailed,
-                output = result.Output,
-                bindings = result.Bindings
-                    .Select(b => new { kind = b.Kind.ToString(), secret = b.SecretName, error = b.Error })
-                    .ToList(),
-                unlistedFamilies = result.UnlistedFamilies
-                    .Select(f => new { kind = f.Kind.ToString(), error = f.Error })
-                    .ToList(),
-                fatalError = result.FatalError,
-            };
+            AppSecretSyncResponse body = AppSecretSyncResponse.From(result);
 
-            return result.AnythingFailed
-                ? Results.Json(body, statusCode: StatusCodes.Status207MultiStatus)
-                : Results.Ok(body);
-        }).RequireApiScope(ApiScopes.AppsWrite);
+            return SecretSyncAnswer(body);
+        }).RequireApiScope(ApiScopes.AppsWrite)
+          // ⚠️ THE ONE PLACE ON THIS API WHERE A RESPONSE IS DECLARED AS WELL AS RETURNED, and
+          // the exception to the "returned, not declared" rule on PublicApiResponses — written
+          // here rather than left to contradict it silently.
+          //
+          // It is declared because it cannot be derived, which was MEASURED and not assumed:
+          // with the union alone, the generated document carried 200/404/401/403 and NO 207 at
+          // all. `JsonHttpResult<T>` as a union member contributes nothing to the document — not
+          // the 207 it is constructed with, and not even a 200. (Two earlier readings of this
+          // disagreed with each other and both were wrong: one expected a spurious 200, the other
+          // expected the 207 to appear by itself.)
+          //
+          // Without this line a generated client is never told the route can answer 207, which is
+          // the NORMAL outcome of a partial sync — and since IsSuccessStatusCode is true for 207,
+          // such a client would read a partial failure as a clean success.
+          .Produces<AppSecretSyncResponse>(StatusCodes.Status207MultiStatus);
 
         api.MapGet("/advisor/findings", async (
             HttpContext ctx, EntKube.Contracts.Advisor.IAdvisorApi advisor, CancellationToken ct) =>
@@ -946,7 +951,8 @@ public static class PublicApiEndpoints
         // IAdvisorApi.AcknowledgeAsync has always existed; this route reached past it to the
         // service that backs it, which is how a contract ends up with no consumers while the
         // product does the thing it describes.
-        api.MapPost("/advisor/findings/{findingId}/acknowledge", async (
+        api.MapPost("/advisor/findings/{findingId}/acknowledge",
+            async Task<Results<Ok<OkResponse>, NotFound>> (
             string findingId, HttpContext ctx,
             EntKube.Contracts.Advisor.IAdvisorApi advisor, CancellationToken ct) =>
         {
@@ -978,19 +984,43 @@ public static class PublicApiEndpoints
 
             if (!findings.Any(f => f.Id == findingId))
             {
-                return Results.NotFound();
+                return TypedResults.NotFound();
             }
 
             await advisor.AcknowledgeAsync(
                 principal.TenantId, findingId, $"api-token:{principal.TokenName}", ct);
-            return Results.Ok(new { ok = true });
-        }).RequireApiScope(ApiScopes.OpsWrite)
-          // ⚠️ The 404 only. Typing the 200 would move UndescribedSuccessBodies and force the
-          // three companion ratchet edits that come with it (docs/decomposition.md §6.9), which
-          // belongs to the typing programme rather than to this fix. `.Produces` for a status
-          // with no body adds no 2xx entry, so every banked count stays where it is.
-          .Produces(StatusCodes.Status404NotFound);
+            return TypedResults.Ok(OkResponse.Succeeded);
+            // ⚠️ The `.Produces(404)` this route used to carry is GONE, and deliberately: the
+            // NotFound arm of the declared union now puts the same 404 in the document. Keeping
+            // both would be the two-copies-of-one-fact the class comment on PublicApiResponses
+            // warns about, and the declared one cannot drift out of step with the handler.
+        }).RequireApiScope(ApiScopes.OpsWrite);
     }
+
+    /// <summary>
+    /// The 200-or-207 decision for an app secret sync, named so it can be asserted without an
+    /// HTTP call.
+    ///
+    /// <para>⚠️ <b>Nothing asserted the SERVER half of this 207 before.</b>
+    /// <c>CliPartialFailureTests</c> pins what the CLI does when handed a 207, from a body it
+    /// builds itself — so the client's half was covered while "does the route actually answer 207"
+    /// was covered nowhere. A handler returning <c>TypedResults.Ok</c> on both branches would
+    /// have passed the whole suite, and every pipeline would have read a partial sync as clean
+    /// because <c>IsSuccessStatusCode</c> is true for 207.</para>
+    ///
+    /// <para>⚠️ Branched on <paramref name="body"/>'s own <c>Failed</c> rather than asking
+    /// <c>result.AnythingFailed</c> a second time. Same bit, but reading it off the body means the
+    /// status and the flag the caller sees cannot disagree — a 200 carrying <c>"failed":true</c>
+    /// would be the worse of the two answers.</para>
+    ///
+    /// <para>The BODY is identical either way. The status is the machine-readable half of one
+    /// answer, not a different answer.</para>
+    /// </summary>
+    public static Results<Ok<AppSecretSyncResponse>, JsonHttpResult<AppSecretSyncResponse>, NotFound>
+        SecretSyncAnswer(AppSecretSyncResponse body) =>
+        body.Failed
+            ? TypedResults.Json(body, statusCode: StatusCodes.Status207MultiStatus)
+            : TypedResults.Ok(body);
 
     /// <summary>
     /// The six VM action routes' shared body. The tenant is the principal's, read by the route itself.

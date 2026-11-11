@@ -67,7 +67,6 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
         "supply-chain",
         "rollouts",
         "dr",
-        "secrets sync",
     };
 
     /// <summary>Commands that render a table — the only ones with a column list to check.</summary>

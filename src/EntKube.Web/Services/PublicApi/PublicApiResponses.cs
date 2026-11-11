@@ -877,3 +877,175 @@ public sealed record VirtualMachineListResponse(
 
 /// <summary>An action that reached the cluster: which one, on which VM.</summary>
 public sealed record VirtualMachineActionResponse(string Action, string Ns, string Name);
+
+/// <summary>
+/// The whole body of an operation whose success has nothing to report: <c>{"ok":true}</c>.
+///
+/// <para>⚠️ <b>One record, two operations, on purpose.</b>
+/// <c>POST /deployments/{deploymentId}/restart</c> and
+/// <c>POST /advisor/findings/{findingId}/acknowledge</c> emitted byte-identical
+/// <c>new { ok = true }</c> literals. Two records would be two names for one wire shape, and two
+/// places for a later field to be added to only one of them.</para>
+///
+/// <para>⚠️ <b><see cref="DeploymentSyncResponse"/> deliberately does NOT share this record.</b>
+/// <c>POST /deployments/{deploymentId}/sync</c> emits <c>{ ok, output }</c>, a superset, so the
+/// obvious economy is to give this record a nullable <c>Output</c> and let restart and
+/// acknowledge leave it null. That is a WIRE CHANGE, not a refactor: minimal APIs serialise with
+/// <c>JsonSerializerDefaults.Web</c>, which sets no <c>DefaultIgnoreCondition</c>, so a null
+/// member is WRITTEN. Restart and acknowledge would begin answering
+/// <c>{"ok":true,"output":null}</c>, and a consumer validating the keys it has always received
+/// breaks for the sake of one fewer type. One duplicated <c>bool</c> is the cheaper mistake.</para>
+///
+/// <para>There is no <c>From</c> factory because there is no source object: neither handler reads
+/// <c>ok</c> off anything, it asserts it. <see cref="Succeeded"/> is that assertion named once, so
+/// a handler has one obvious thing to return rather than a literal to retype.
+/// ⚠️ It is a convenience and <b>not</b> an enforcement — the primary constructor is public, so
+/// <c>new OkResponse(false)</c> compiles and would ship an <c>ok:false</c> under a 200, a body
+/// contradicting its own status. Making that unrepresentable would mean a private constructor, and
+/// a record with a private primary constructor cannot be deserialised by a generated client. The
+/// guard is the <b>handler</b>: both routes return this only on their success branch, and a
+/// failure on either is a 4xx carrying <c>ProblemDetails</c>, never this shape.</para>
+/// </summary>
+/// <param name="Ok">Always true on the wire; see remarks for why that is a handler property.</param>
+public sealed record OkResponse(bool Ok)
+{
+    /// <summary>The only value this shape has ever had on the wire.</summary>
+    public static OkResponse Succeeded { get; } = new(Ok: true);
+}
+
+/// <summary>
+/// What applying a deployment's manifests printed — the body the CI pipeline that triggered the
+/// sync reads back.
+///
+/// <para>⚠️ <b>Not <see cref="OkResponse"/> with one extra member.</b> See that record's remarks:
+/// sharing one record would add an <c>"output":null</c> key to the restart and acknowledge
+/// responses, because <c>JsonSerializerDefaults.Web</c> writes nulls rather than omitting them.
+/// The duplicated <c>ok</c> here is deliberate.</para>
+///
+/// <para>⚠️ <c>Output</c> stays nullable, and null is a value a caller may already be branching
+/// on. It is <c>KubernetesOperationResult&lt;string&gt;.Data</c>, declared <c>T?</c>, so a sync
+/// that applied cleanly and printed nothing answers <c>"output":null</c>. Do not substitute
+/// <c>""</c> to make the schema tidier — that is a different answer.</para>
+///
+/// <para><c>Ok</c> is mapped from <c>IsSuccess</c> rather than hard-coded <c>true</c> as the
+/// anonymous object did. Identical on the wire, because the handler only reaches this on the
+/// success branch — but it makes an <c>ok:true</c> built from a FAILED result unwriteable rather
+/// than merely unwritten, which is the enforcement <see cref="OkResponse"/> cannot have.</para>
+/// </summary>
+/// <param name="Ok">True. From <c>IsSuccess</c>, so it cannot contradict the result it came from.</param>
+/// <param name="Output">Whatever the apply printed, or null when it printed nothing.</param>
+public sealed record DeploymentSyncResponse(bool Ok, string? Output)
+{
+    public static DeploymentSyncResponse From(
+        EntKube.Web.Services.KubernetesOperationResult<string> result) =>
+        new(
+            Ok: result.IsSuccess,
+            Output: result.Data);
+}
+
+/// <summary>
+/// What a whole-app secret sync did, binding by binding.
+///
+/// <para>⚠️ <b>This one body is answered under TWO statuses, 200 and 207.</b> Partial success is
+/// the normal case — one binding failing must not stop its siblings and one unlistable family must
+/// not stop the others — so the handler answers <c>207 MultiStatus</c> with THIS SAME SHAPE
+/// whenever <see cref="Failed"/> is true, and 200 otherwise. Nothing in the body changes between
+/// the two; the status is the machine-readable half of the same answer, so that a pipeline
+/// treating any 2xx as "fine" has to opt into that reading. ⚠️ <c>HttpResponseMessage</c>
+/// <c>.IsSuccessStatusCode</c> is <b>true</b> for 207, which is why the CLI renders the bindings
+/// table rather than erroring.</para>
+///
+/// <para>⚠️ <b><c>Failed</c> is COMPUTED and cannot be set independently.</b> It is
+/// <c>AppSecretSyncResult.AnythingFailed</c>, which is true when there is a fatal error, OR any
+/// family could not be listed, OR any binding carries an error. A fixture cannot hand it a value:
+/// it falls out of the other three members, so the wire-shape test builds the disjuncts rather
+/// than assigning the flag. It is read off the source here rather than recomputed, because a
+/// second copy of "what counts as failed" is a second rule.</para>
+///
+/// <para>⚠️ <b>The two nested lists' <c>error</c> members have DIFFERENT nullability.</b>
+/// <c>bindings[].error</c> is <c>string?</c> — null is how a binding says it synced — while
+/// <c>unlistedFamilies[].error</c> is non-nullable, because a family only appears in that list
+/// BECAUSE listing it failed. (<c>SecretSyncOutcome.Error</c> is <c>string?</c>;
+/// <c>SecretSyncFamilyFailure.Error</c> is <c>string</c>.) That is why they are two records and
+/// not one: a single nested shape with an optional error would invite a reader to read a null in
+/// the families list as success.</para>
+///
+/// <para><c>Output</c> and <c>FatalError</c> are both nullable free text and are not the same
+/// thing. <c>Output</c> is whatever the vault-side sync printed. <c>FatalError</c> is set only
+/// when the sync stopped before reaching the bindings, in which case <c>bindings</c> is empty — so
+/// an empty <c>bindings</c> array with a null <c>fatalError</c> means the app has no bindings, not
+/// that the sync died.</para>
+/// </summary>
+/// <param name="Failed">Computed; see remarks. Also decides 200 versus 207.</param>
+/// <param name="Output">What the sync printed, when it printed anything.</param>
+/// <param name="Bindings">Every binding attempted, in the order attempted.</param>
+/// <param name="UnlistedFamilies">Families that could not be listed, so none of their bindings were tried.</param>
+/// <param name="FatalError">Set when the sync stopped before reaching the bindings.</param>
+public sealed record AppSecretSyncResponse(
+    bool Failed,
+    string? Output,
+    IReadOnlyList<SecretBindingSyncResponse> Bindings,
+    IReadOnlyList<SecretFamilySyncFailureResponse> UnlistedFamilies,
+    string? FatalError)
+{
+    public static AppSecretSyncResponse From(EntKube.Contracts.Secrets.AppSecretSyncResult result) =>
+        new(
+            Failed: result.AnythingFailed,
+            Output: result.Output,
+            Bindings: [.. result.Bindings.Select(SecretBindingSyncResponse.From)],
+            UnlistedFamilies: [.. result.UnlistedFamilies.Select(SecretFamilySyncFailureResponse.From)],
+            FatalError: result.FatalError);
+}
+
+/// <summary>
+/// One binding's outcome — the rows the CLI's <c>secrets sync</c> table renders.
+///
+/// <para>⚠️ <b>Two of the three fields are renamed or reshaped.</b> <c>secret</c> comes from
+/// <c>SecretName</c>, and <c>kind</c> is <c>ToString()</c> on the <c>SecretBindingKind</c> enum —
+/// a client reads <c>"Database"</c>, not <c>0</c>. <c>CliCommands</c> reads <c>kind</c>,
+/// <c>secret</c> and <c>error</c> by exactly these names out of the <c>bindings</c> array, so both
+/// are the wire contract.</para>
+///
+/// <para>⚠️ <b>Named arguments, and the reason is here rather than inherited.</b> All three
+/// members are strings, so a positional call that swapped <c>Kind</c> and <c>Secret</c> would
+/// compile and would print the Kubernetes secret's name in the KIND column and the family name in
+/// the SECRET column — a table that reads as data rather than as a bug.</para>
+///
+/// <para><c>Error</c> is null when the binding synced; that is the only thing distinguishing a
+/// synced binding from a failed one, so it stays nullable and must keep being WRITTEN rather than
+/// omitted. <c>SecretSyncOutcome.Succeeded</c> is deliberately not projected — the anonymous
+/// object never sent it, and <c>error == null</c> already says it.</para>
+/// </summary>
+/// <param name="Kind">The family the binding belongs to, as the enum's name.</param>
+/// <param name="Secret">The Kubernetes secret the binding writes — the NAME, never a value.</param>
+/// <param name="Error">Why it failed, or null when it synced.</param>
+public sealed record SecretBindingSyncResponse(string Kind, string Secret, string? Error)
+{
+    public static SecretBindingSyncResponse From(
+        EntKube.Contracts.Secrets.SecretSyncOutcome outcome) =>
+        new(
+            // ⚠️ By NAME, not by value: a client reads "Database", never 0.
+            Kind: outcome.Kind.ToString(),
+            Secret: outcome.SecretName,
+            Error: outcome.Error);
+}
+
+/// <summary>
+/// A whole family that could not be listed, so none of its bindings were attempted.
+///
+/// <para>⚠️ <b><c>Error</c> is NOT nullable here, unlike
+/// <see cref="SecretBindingSyncResponse.Error"/>.</b> A family is in this list precisely because
+/// listing it failed, so there is always a reason — <c>SecretSyncFamilyFailure.Error</c> is a
+/// non-nullable <c>string</c> on the contract. Widening it to <c>string?</c> to match its sibling
+/// would let a reader take a null for success in a list where every entry is a failure.</para>
+/// </summary>
+/// <param name="Kind">Which family, as the enum's name.</param>
+/// <param name="Error">Why it could not be listed.</param>
+public sealed record SecretFamilySyncFailureResponse(string Kind, string Error)
+{
+    public static SecretFamilySyncFailureResponse From(
+        EntKube.Contracts.Secrets.SecretSyncFamilyFailure failure) =>
+        new(
+            Kind: failure.Kind.ToString(),
+            Error: failure.Error);
+}

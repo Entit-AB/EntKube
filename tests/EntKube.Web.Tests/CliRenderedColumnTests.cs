@@ -411,6 +411,39 @@ public class CliRenderedColumnTests
     }
 
     /// <summary>
+    /// ⚠️ <b>Every binding in the fixture carries an ERROR.</b> <c>TableWriter</c> renders a null
+    /// as <c>"-"</c>, and this fact's whole job is that no column renders a dash — but
+    /// <c>bindings[].error</c> is null for a binding that SYNCED, which is the normal case. So a
+    /// fixture of successful bindings would fail this assertion while the CLI was working
+    /// perfectly. The honest reading is that the ERROR column is dash-by-design on success, and
+    /// what this fact can prove is that the column RESOLVES when there is an error to show.
+    ///
+    /// <para>⚠️ That makes this the one rendering fact in the file whose fixture is deliberately
+    /// a failure case rather than a populated happy path — stated here because the class summary's
+    /// "the fixtures below populate every field" does not hold for it.</para>
+    /// </summary>
+    [Fact]
+    public void The_secrets_sync_renders_every_column()
+    {
+        EntKube.Contracts.Secrets.AppSecretSyncResult result = new(
+            Output: "synced 2 of 3",
+            Bindings:
+            [
+                new(EntKube.Contracts.Secrets.SecretBindingKind.Database, "billing-db", "connection refused"),
+                new(EntKube.Contracts.Secrets.SecretBindingKind.Cache, "billing-redis", "no such namespace"),
+            ],
+            UnlistedFamilies:
+            [
+                new(EntKube.Contracts.Secrets.SecretBindingKind.Storage, "the storage family could not be listed"),
+            ],
+            FatalError: null);
+
+        EveryColumnRenders(
+            Command("secrets", "sync"),
+            JsonSerializer.Serialize(AppSecretSyncResponse.From(result), AsTheApiSerialises));
+    }
+
+    /// <summary>
     /// ⚠️ The measure. The facts above are exactly the commands
     /// <see cref="CliColumnParityTests"/> can check against a schema, and they must stay in step:
     /// if a route gains a response type and no rendering fact is added for its command, this fails
@@ -422,7 +455,8 @@ public class CliRenderedColumnTests
         string[] rendered =
         [
             "cost", "cost history", "cost months", "cost rates list",
-            "clusters list", "components list", "apps list", "deployments list", "feedback", "synthetics", "errors", "slos",
+            "clusters list", "components list", "apps list", "deployments list",
+            "secrets sync", "feedback", "synthetics", "errors", "slos",
             "vms list",
         ];
 
