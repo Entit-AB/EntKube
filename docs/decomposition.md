@@ -2203,8 +2203,8 @@ schema, so its command's columns cannot be checked at all.
 |---|---|
 | CLI commands | 23 |
 | commands rendering a table | 17 |
-| whose route describes its success body — checked on every run | **8** |
-| banked (named, not counted) | **9** |
+| whose route describes its success body — checked on every run | **9** |
+| banked (named, not counted) | **8** |
 
 ⚠️ All thirteen were read by hand on this date and their columns matched the anonymous objects
 their handlers return. That is an observation on one day, **not an assertion** — it stops being
@@ -2236,16 +2236,16 @@ Counted by generating the real document and walking it, not by reading the const
 |---|---|
 | paths | 25 |
 | operations | 31 |
-| success body described | 11 |
+| success body described | 15 |
 | bodyless by design (one 204) | 1 |
-| **undescribed** | **19** — 12 handlers in `PublicApiEndpoints.cs`, **7 SCIM** |
+| **undescribed** | **15** — 8 handlers in `PublicApiEndpoints.cs`, **7 SCIM** |
 
 ⚠️ Only the last two of those are pinned by a test (`UndescribedSuccessBodies` and
 `BodylessSuccesses`). The operation total is asserted merely as "more than fifteen", so 31 is a
 measurement taken today rather than a number the suite defends — if it matters to a later reader,
 pin it.
 
-#### The 16 are transcribed and adversarially verified — 4 applied, 12 banked
+#### The 16 are transcribed and adversarially verified — 8 applied, 8 banked
 
 One agent per route group produced the record in house style, the handler's replacement signature
 and return, and the **anonymous-object oracle cut verbatim from the handler**; a second agent then
@@ -2366,6 +2366,54 @@ about what the mutations had shown — and both drafts would have shipped readin
 The rule that keeps surviving: **write the claim, then run the mutation, then write the claim
 again.**
 
+#### ⚠️ One response on this API is declared, not derived — and three readings of why were wrong
+
+Typing `POST /apps/{appId}/secrets/sync` broke the file's own rule, and the exception is written
+down here because the alternative is contradicting it silently.
+
+That route answers **one body under two statuses**: 200 when every binding synced, **207
+Multi-Status** when any did not. Partial success is the normal case by design — one binding
+failing must not stop its siblings — so the status is the machine-readable half of one answer
+rather than a different answer.
+
+Three positions were held on how to document it, and **all three were wrong**:
+
+| position | what the document actually did |
+|---|---|
+| the transcription: `JsonHttpResult<T>` contributes a spurious **200**, so declare the 207 to correct it | it contributes **nothing at all** |
+| the banked plan: drop the `.Produces`, the 207 appears anyway now that references dedupe | the 207 was **absent entirely** — 200/404/401/403 and nothing else |
+| the earlier worry: `ProblemHttpResult` in a union declares a false **500** | no 500 appeared; the six shipped VM routes prove it, and the real 422 is simply **undocumented** |
+
+Generating the document settled it in one run. `JsonHttpResult<T>` as a union member contributes
+no response, so the 207 needs `.Produces<AppSecretSyncResponse>(207)` — and
+`SecretSyncDocumentedStatusTests` now asserts the document carries it with the **same component
+id** as the 200, because a declaration nothing asserts is precisely the two-copies-of-one-fact the
+rule exists to prevent. Deleting that line has exactly one symptom: a generated client is never
+told about the normal outcome of a partial sync. Since `IsSuccessStatusCode` is true for 207, such
+a client reads a partial failure as clean — the defect the shipped CLI actually had (§6.8).
+
+⚠️ **Still undocumented, measured and deliberately not fixed here:** `/sync` answers 422, `/restart`
+answers 400 and 422, and the document declares none of them. That is not new and not a lie — the
+document is silent, not wrong — and it matches six VM routes and `GET /cost`, which answers 503
+and declares nothing. Declaring them means an explicit `.ProducesProblem` per route, which is a
+decision for every route group at once rather than for the two that happen to be in this change.
+
+#### ⚠️ A typed route makes a hand-written test fixture checkable, and one was wrong
+
+`CliPartialFailureTests` pinned the CLI's handling of a 207 against a literal JSON body described
+in its own comment as "shaped the same" as the route's. It carried `"kind":"OAuthClient"` — not a
+member of `SecretBindingKind`, which is Database, Cache, Messaging, Storage, Identity. The API
+could never have sent it, and nothing could notice: a literal string is a third copy of the
+contract, free to drift from both the server and the client, and until the route was typed there
+was no schema to check it against. The fixture is now **generated** from `AppSecretSyncResponse`,
+so that drift is no longer expressible.
+
+⚠️ The same test also showed where the coverage really sat: it pinned what the CLI does when
+*handed* a 207, so the client half was covered while **"does the route answer 207 at all" was
+covered nowhere**. A handler returning `TypedResults.Ok` on both branches passed the entire suite.
+The decision is now a named function with a fact of its own, and the mutation that flattens it
+fails.
+
 #### What this changes about the sequence
 
 Item 8 is no longer blocked on a question, only on work, and the work has an order:
@@ -2376,7 +2424,7 @@ Item 8 is no longer blocked on a question, only on work, and the work has an ord
 3. **Type SCIM last**, deliberately, carrying the media type and the capital-R member rather than
    letting `TypedResults.Ok` decide them.
 4. Then generate the clients — at which point the two ratchets that count this debt both read 0,
-   and the CLI's rendering is verifiable for every command rather than eight of seventeen.
+   and the CLI's rendering is verifiable for every command rather than nine of seventeen.
 
 ## 7. What not to do
 

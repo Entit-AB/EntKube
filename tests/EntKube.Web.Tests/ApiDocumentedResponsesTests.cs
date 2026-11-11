@@ -31,7 +31,7 @@ public class ApiDocumentedResponsesTests(GeneratedOpenApiDocumentFixture fixture
     /// Operations answering a 2xx with no schema for it. Lower this as handlers are typed; it
     /// reaching 0 is the precondition for generating the clients.
     /// </summary>
-    private const int UndescribedSuccessBodies = 19;
+    private const int UndescribedSuccessBodies = 15;
 
     /// <summary>Operations whose success is a 204 and so has nothing to describe.</summary>
     private const int BodylessSuccesses = 1;
