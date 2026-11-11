@@ -14,6 +14,9 @@ public sealed class SegmentSealService(
     SegmentEngineOptions options,
     ILogger<SegmentSealService> logger) : BackgroundService
 {
+    /// <summary>The signal registry this loop seals: one loop per signal, so this is how a test tells them apart.</summary>
+    public ISegmentManagerRegistry Registry => registry;
+
     /// <summary>
     /// How long the shutdown seal may take before the process gives up and exits.
     ///
