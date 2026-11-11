@@ -210,7 +210,8 @@ public interface IClusterClient
     /// <see cref="IKubernetesClientFactory.ApplyManifestFromUrlAsync"/>.
     /// </summary>
     Task<HelmExecutionResult> ApplyManifestFromUrlAsync(
-        string manifestUrl, string? summary = null, CancellationToken ct = default);
+        string manifestUrl, string? summary = null, CancellationToken ct = default,
+        IReadOnlyList<ManifestPatch>? patches = null);
 
     Task<string> GetJsonAllNamespacesAsync(string resource, string labelSelector = "", CancellationToken ct = default);
 

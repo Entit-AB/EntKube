@@ -339,9 +339,14 @@ public interface IKubernetesClientFactory
     /// whole manifest into an annotation and large CRD bundles exceed the 256 KB ceiling, and the
     /// first server-side apply over a client-side-managed resource is otherwise rejected as a
     /// field-manager conflict — which is the state every existing install is in.</para>
+    ///
+    /// <para><paramref name="patches"/>, when given, are applied by kustomize to what kubectl
+    /// fetched (<c>apply -k</c> over a kustomization naming the URL), so the cluster still does the
+    /// fetching and never sees the unpatched objects. The acknowledgment names each patch.</para>
     /// </summary>
     Task<HelmExecutionResult> ApplyManifestFromUrlAsync(
-        string manifestUrl, string kubeconfig, string? summary = null, CancellationToken ct = default);
+        string manifestUrl, string kubeconfig, string? summary = null, CancellationToken ct = default,
+        IReadOnlyList<ManifestPatch>? patches = null);
 
     /// <summary>
     /// Lists a resource type across all namespaces (kubectl get {resource} -A -o json).
