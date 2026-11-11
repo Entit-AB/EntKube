@@ -92,7 +92,8 @@ public static class HostedWork
         this IServiceCollection services, Func<IServiceProvider, T> factory)
         where T : class, IHostedService
     {
-        services.AddHostedService(sp => new SingletonWorkHost<T>(
+        // Add, never AddHostedService: see AddFactoryHostedService.
+        AddFactoryHostedService(services, sp => new SingletonWorkHost<T>(
             factory(sp),
             sp.GetRequiredService<IConfiguration>(),
             sp.GetRequiredService<ILogger<SingletonWorkHost<T>>>()));
@@ -116,9 +117,26 @@ public static class HostedWork
         this IServiceCollection services, Func<IServiceProvider, T> factory)
         where T : class, IHostedService
     {
-        services.AddHostedService(factory);
+        AddFactoryHostedService(services, factory);
         return services;
     }
+
+    /// <summary>
+    /// Registers one hosted service per CALL, including a second instance of a type already registered.
+    ///
+    /// <para>⚠️ <c>AddHostedService(factory)</c> cannot do that. It registers through
+    /// <c>TryAddEnumerable</c>, which keys on the implementation type and silently drops any later
+    /// registration of the same one. The five <c>SegmentSealService</c> loops are five instances of one
+    /// type, so only the first ever existed: logs sealed, while spans, verbose logs, RUM and trace
+    /// summaries never did. Their active indexes grew from the day the store shipped, every query searched
+    /// all of it, and on the management plane spans reached 625 million unsealed documents and 125 GB.
+    /// Nothing failed and nothing logged, because a registration that does not exist cannot. The comment
+    /// above this method's callers said each registration "gates independently", which was the intent and
+    /// was never true. <c>HostedWorkPlacementTests</c> now registers two of one type and counts them.</para>
+    /// </summary>
+    private static void AddFactoryHostedService<T>(IServiceCollection services, Func<IServiceProvider, T> factory)
+        where T : class, IHostedService
+        => services.Add(ServiceDescriptor.Singleton<IHostedService, T>(factory));
 }
 
 /// <summary>
