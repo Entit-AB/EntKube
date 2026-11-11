@@ -221,6 +221,52 @@ public class PlannedChangeSeamTests
     }
 
     /// <summary>
+    /// A patched apply changes what the release URL alone would have applied, so the person asked must
+    /// be told: the acknowledgment names each patch and why, next to the URL.
+    /// </summary>
+    [Fact]
+    public async Task A_patched_apply_from_a_url_names_its_patches_in_the_acknowledgment()
+    {
+        ClusterChangeGate gate = new(
+            new ConfigurationBuilder().Build(), NullLogger<ClusterChangeGate>.Instance);
+        RecordingSink sink = new();
+        using IDisposable registration = gate.RegisterSink(sink);
+
+        KubernetesClientFactory factory = new(gate, new KubernetesProxyClientPool(Microsoft.Extensions.Logging.Abstractions.NullLogger<KubernetesProxyClientPool>.Instance));
+
+        Func<Task> act = () => factory.ApplyManifestFromUrlAsync(
+            "https://example.test/operator.yaml", TestKubeconfig.Valid, patches:
+            [new ManifestPatch("apps", "v1", "Deployment", "op", "[]", "runs on any node")]);
+
+        await act.Should().ThrowAsync<OperationCanceledException>();
+
+        sink.Asked.Should().ContainSingle().Which.Summary.Should()
+            .Contain("https://example.test/operator.yaml").And.Contain("Deployment op — runs on any node");
+    }
+
+    [Fact]
+    public void A_kustomization_names_the_url_as_its_resource_and_each_patch_by_its_target()
+    {
+        string kustomization = KubernetesClientFactory.BuildKustomization(
+            "https://example.test/operator.yaml",
+            [new ManifestPatch("apps", "v1", "Deployment", "op", "- op: remove\n  path: /spec/x", "why")]);
+
+        using System.Text.Json.JsonDocument doc = System.Text.Json.JsonDocument.Parse(kustomization);
+        System.Text.Json.JsonElement root = doc.RootElement;
+
+        root.GetProperty("kind").GetString().Should().Be("Kustomization");
+        root.GetProperty("resources").EnumerateArray().Select(r => r.GetString())
+            .Should().Equal("https://example.test/operator.yaml");
+        System.Text.Json.JsonElement patch = root.GetProperty("patches")[0];
+        patch.GetProperty("target").GetProperty("kind").GetString().Should().Be("Deployment");
+        patch.GetProperty("target").GetProperty("name").GetString().Should().Be("op");
+        patch.GetProperty("patch").GetString().Should().Be("- op: remove\n  path: /spec/x");
+
+        KubernetesClientFactory.BuildApplyKustomizationArguments("/tmp/k", "/tmp/kc.yaml")
+            .Should().Be("apply --server-side --force-conflicts -k /tmp/k --kubeconfig=/tmp/kc.yaml");
+    }
+
+    /// <summary>
     /// The drain verb: the command line it builds, and that it is always acknowledged.
     ///
     /// <para><b>This test earned its keep immediately.</b> The drain was first written as

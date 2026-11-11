@@ -45,6 +45,8 @@ public class HelmCommand
     public string? ValuesYaml { get; set; }
     /// <summary>For kubectl-apply-url: the remote manifest URL passed directly to kubectl apply -f.</summary>
     public string? ManifestUrl { get; set; }
+    /// <summary>For kubectl-apply-url: the catalog's corrections to that manifest, applied with it.</summary>
+    public IReadOnlyList<ManifestPatch> ManifestPatches { get; set; } = [];
     /// <summary>When true, skips --wait so Helm returns immediately after applying values.</summary>
     public bool NoWait { get; set; }
     /// <summary>Helm --wait timeout (Go duration, e.g. "10m0s"). Heavier components can extend it.</summary>
@@ -700,7 +702,9 @@ public class ComponentLifecycleService(
             {
                 Operation = "kubectl-apply-url",
                 ReleaseName = component.ReleaseName ?? component.Name,
-                ManifestUrl = catalogUrl ?? component.HelmRepoUrl
+                ManifestUrl = catalogUrl ?? component.HelmRepoUrl,
+                // From the catalog, like the URL: the patches are written against the URL it pins.
+                ManifestPatches = catalogUrl is not null ? urlCatalog!.ManifestPatches : []
             };
         }
 
@@ -2027,7 +2031,8 @@ public class ComponentLifecycleService(
         // it, the first server-side apply over a client-side-managed resource is rejected as a
         // field-manager conflict — which is exactly the state every existing install is in.
         return await clusterAccess.ApplyManifestFromUrlAsync(
-            command.ManifestUrl!, $"Apply {command.ReleaseName} from {command.ManifestUrl}", ct);
+            command.ManifestUrl!, $"Apply {command.ReleaseName} from {command.ManifestUrl}", ct,
+            command.ManifestPatches);
     }
 
     /// <summary>

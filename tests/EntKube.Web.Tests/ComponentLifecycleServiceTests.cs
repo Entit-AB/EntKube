@@ -528,6 +528,29 @@ public class ComponentLifecycleServiceTests : IDisposable
         command.ManifestUrl.Should().NotContain("v1.2.1");
     }
 
+    [Fact]
+    public async Task GetInstallCommandAsync_ManifestUrl_CarriesTheCatalogsPatchesForThatUrl()
+    {
+        // Without the patch, virt-operator is applied requiring a control-plane node, and on a managed
+        // cluster it never schedules.
+        ComponentRegistration registration = new()
+        {
+            Name = "kubevirt-operator",
+            ComponentType = "ManifestUrl",
+            Namespace = "kubevirt",
+            HelmRepoUrl = ComponentCatalog.GetByKey("kubevirt-operator")!.HelmRepoUrl,
+            HelmChartName = "",
+            ReleaseName = "kubevirt-operator"
+        };
+
+        ClusterComponent component = await sut.RegisterComponentAsync(tenantId, clusterId, registration);
+
+        HelmCommand command = await sut.GetInstallCommandAsync(tenantId, component.Id);
+
+        command.ManifestPatches.Should().ContainSingle()
+            .Which.Name.Should().Be("virt-operator");
+    }
+
     // ──────── UpdateConfigurationAsync — Helm identity fields ────────
 
     private async Task<ClusterComponent> RegisterAsync(string name = "prom", string ns = "monitoring") =>

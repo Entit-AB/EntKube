@@ -1338,23 +1338,44 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// report their output into a component's install log either way.</para>
     /// </summary>
     public async Task<HelmExecutionResult> ApplyManifestFromUrlAsync(
-        string manifestUrl, string kubeconfig, string? summary = null, CancellationToken ct = default)
+        string manifestUrl, string kubeconfig, string? summary = null, CancellationToken ct = default,
+        IReadOnlyList<ManifestPatch>? patches = null)
     {
+        patches ??= [];
+        string described = summary ?? $"Apply {manifestUrl}";
+        if (patches.Count > 0)
+            described += "; patched: " + string.Join("; ", patches.Select(p => $"{p.Kind} {p.Name} — {p.Reason}"));
+
         await _gate.AcknowledgeAsync(new PlannedClusterChange
         {
             Verb = ChangeVerb.Apply,
             Kubeconfig = kubeconfig,
-            Summary = summary ?? $"Apply {manifestUrl}",
+            Summary = described,
         }, ct);
 
         string kubeconfigPath = Path.GetTempFileName();
+        DirectoryInfo? kustomizeDir = null;
 
         try
         {
             await SecretFile.WriteAsync(kubeconfigPath, kubeconfig, ct);
 
-            (int code, string stdout, string stderr) = await RunKubectlRawAsync(
-                BuildApplyFromUrlArguments(manifestUrl, kubeconfigPath), ct);
+            string arguments;
+            if (patches.Count == 0)
+            {
+                arguments = BuildApplyFromUrlArguments(manifestUrl, kubeconfigPath);
+            }
+            else
+            {
+                // Holds no secret: the URL and the catalog's patches. kubectl still fetches the URL.
+                kustomizeDir = Directory.CreateTempSubdirectory("entkube-kustomize-");
+                await File.WriteAllTextAsync(
+                    Path.Combine(kustomizeDir.FullName, "kustomization.yaml"),
+                    BuildKustomization(manifestUrl, patches), ct);
+                arguments = BuildApplyKustomizationArguments(kustomizeDir.FullName, kubeconfigPath);
+            }
+
+            (int code, string stdout, string stderr) = await RunKubectlRawAsync(arguments, ct);
 
             string output = string.IsNullOrWhiteSpace(stdout) ? stderr : stdout;
             return new HelmExecutionResult { Success = code == 0, Output = output.TrimEnd() };
@@ -1362,12 +1383,34 @@ public class KubernetesClientFactory : IKubernetesClientFactory
         finally
         {
             File.Delete(kubeconfigPath);
+            kustomizeDir?.Delete(recursive: true);
         }
     }
 
     /// <summary>The command line for a server-side apply of a manifest fetched by URL.</summary>
     public static string BuildApplyFromUrlArguments(string manifestUrl, string kubeconfigPath)
         => $"apply --server-side --force-conflicts -f {manifestUrl} --kubeconfig={kubeconfigPath}";
+
+    /// <summary>The same apply, of a kustomization directory that fetches the URL and patches it.</summary>
+    public static string BuildApplyKustomizationArguments(string directory, string kubeconfigPath)
+        => $"apply --server-side --force-conflicts -k {directory} --kubeconfig={kubeconfigPath}";
+
+    /// <summary>
+    /// A kustomization taking <paramref name="resource"/> (a URL, or a file beside it) and applying each
+    /// patch to its one target. Written as JSON, which YAML reads as it is, so no value needs escaping.
+    /// </summary>
+    public static string BuildKustomization(string resource, IReadOnlyList<ManifestPatch> patches) =>
+        JsonSerializer.Serialize(new
+        {
+            apiVersion = "kustomize.config.k8s.io/v1beta1",
+            kind = "Kustomization",
+            resources = new[] { resource },
+            patches = patches.Select(p => new
+            {
+                target = new { group = p.Group, version = p.Version, kind = p.Kind, name = p.Name },
+                patch = p.JsonPatch
+            })
+        }, new JsonSerializerOptions { WriteIndented = true });
 
     /// <summary>
     /// The command line for listing a resource as JSON, optionally by label.

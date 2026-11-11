@@ -50,6 +50,14 @@ public class CatalogEntry
     public string? HelmChartVersion { get; init; }
 
     /// <summary>
+    /// ManifestUrl only: corrections applied to objects of the release manifest on its way to the
+    /// cluster. kubectl still fetches the URL; kustomize patches what it fetched, so the cluster never
+    /// sees the uncorrected object. Each patch is written against the pinned URL and is reviewed with
+    /// it when the URL is bumped.
+    /// </summary>
+    public IReadOnlyList<ManifestPatch> ManifestPatches { get; init; } = [];
+
+    /// <summary>
     /// Overrides the Helm <c>--wait</c> timeout (Go duration, e.g. "30m0s"). Null uses the
     /// default 10m. Extend it for heavy charts or DaemonSets that roll out node-by-node and
     /// may take longer to become Ready on busy/constrained clusters.
@@ -193,6 +201,21 @@ public sealed record ServicesSection(string Key, string Label, bool RequiresAppl
 /// <param name="Plural">Resource plural, e.g. "clusterissuers".</param>
 /// <param name="Matches">Optional case-insensitive substring an instance's JSON must contain to count.</param>
 public sealed record DetectionResource(string Group, string Version, string Plural, string? Matches = null);
+
+/// <summary>
+/// A JSON Patch (RFC 6902) for one object of a ManifestUrl release manifest, applied by kustomize as
+/// kubectl applies the URL. JSON Patch rather than a merge patch on purpose: its operations name exact
+/// paths, so a release that moved or dropped the field fails the apply instead of silently not
+/// patching it.
+/// </summary>
+/// <param name="Group">API group of the object, "" for the core group.</param>
+/// <param name="Version">API version, e.g. "v1".</param>
+/// <param name="Kind">Kind, e.g. "Deployment".</param>
+/// <param name="Name">The object's name in the manifest.</param>
+/// <param name="JsonPatch">The operations, as YAML or JSON.</param>
+/// <param name="Reason">Why, in a phrase — shown in the acknowledgment next to the URL.</param>
+public sealed record ManifestPatch(
+    string Group, string Version, string Kind, string Name, string JsonPatch, string Reason);
 
 /// <summary>
 /// A dependency requirement where any one of several components can satisfy it.
@@ -4117,6 +4140,33 @@ public static class ComponentCatalog
             DefaultNamespace = "kubevirt",
             DefaultReleaseName = "kubevirt-operator",
             DetectionCrds = ["kubevirts.kubevirt.io"],
+            // The release REQUIRES virt-operator on a node labelled control-plane or master. A managed
+            // cluster (Gardener, EKS, AKS, GKE) runs its control plane elsewhere and has no such node,
+            // so the operator stayed Pending and nothing else of KubeVirt ever deployed. Keep the
+            // preference — a self-managed cluster still puts it on the control plane, whose taints the
+            // manifest already tolerates — and drop the requirement.
+            ManifestPatches =
+            [
+                new ManifestPatch("apps", "v1", "Deployment", "virt-operator",
+                    """
+                    - op: remove
+                      path: /spec/template/spec/affinity/nodeAffinity/requiredDuringSchedulingIgnoredDuringExecution
+                    - op: replace
+                      path: /spec/template/spec/affinity/nodeAffinity/preferredDuringSchedulingIgnoredDuringExecution
+                      value:
+                        - weight: 100
+                          preference:
+                            matchExpressions:
+                              - key: node-role.kubernetes.io/control-plane
+                                operator: Exists
+                        - weight: 50
+                          preference:
+                            matchExpressions:
+                              - key: node-role.kubernetes.io/worker
+                                operator: DoesNotExist
+                    """,
+                    "virt-operator prefers control-plane nodes instead of requiring them")
+            ],
             FormFields = [],
             DefaultValues = ""
         },
@@ -4163,6 +4213,24 @@ public static class ComponentCatalog
                       featureGates: []
                   customizeComponents: {}
                   imagePullPolicy: IfNotPresent
+                  # Without this, virt-operator REQUIRES a control-plane node for virt-api and
+                  # virt-controller, and a managed cluster (Gardener, EKS, AKS, GKE) has none: the
+                  # operator runs, the rest stays Pending. Stating any placement replaces that default,
+                  # so this states KubeVirt's own preference without the requirement.
+                  infra:
+                    nodePlacement:
+                      affinity:
+                        nodeAffinity:
+                          preferredDuringSchedulingIgnoredDuringExecution:
+                            - weight: 100
+                              preference:
+                                matchExpressions:
+                                  - key: node-role.kubernetes.io/control-plane
+                                    operator: Exists
+                      tolerations:
+                        - key: node-role.kubernetes.io/control-plane
+                          operator: Exists
+                          effect: NoSchedule
                   # Removing this component deletes this resource, which tears KubeVirt down. Refuse
                   # while any VirtualMachine or VirtualMachineInstance still exists, rather than
                   # stopping every VM on the cluster as a side effect of an uninstall.

@@ -79,8 +79,9 @@ public sealed class ClusterClient(
         => inner.RunHelmAsync(invocation, kubeconfig, ct);
 
     public Task<HelmExecutionResult> ApplyManifestFromUrlAsync(
-        string manifestUrl, string? summary = null, CancellationToken ct = default)
-        => inner.ApplyManifestFromUrlAsync(manifestUrl, kubeconfig, summary, ct);
+        string manifestUrl, string? summary = null, CancellationToken ct = default,
+        IReadOnlyList<ManifestPatch>? patches = null)
+        => inner.ApplyManifestFromUrlAsync(manifestUrl, kubeconfig, summary, ct, patches);
 
     public Task<HelmExecutionResult> GetResourceJsonAsync(
         string resource, string name, string ns, CancellationToken ct = default)

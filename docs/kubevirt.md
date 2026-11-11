@@ -27,6 +27,26 @@ of kubectl's bare "no resource type".
 
 CDI is optional. Without it, VMs can only boot from container disks.
 
+### Managed clusters: no control-plane node
+
+Upstream KubeVirt **requires** a node labelled `node-role.kubernetes.io/control-plane` (or `master`)
+in two places: the virt-operator Deployment in `kubevirt-operator.yaml`, and, by virt-operator's own
+default, virt-api and virt-controller. A managed cluster (Gardener, EKS, AKS, GKE) runs its control
+plane outside the cluster and has no such node, so virt-operator stays Pending and nothing else of
+KubeVirt deploys. EntKube relaxes both to a *preference*, so a self-managed cluster still uses its
+control plane and a managed one uses its workers:
+
+- `kubevirt-operator` carries a `ManifestPatch`: kubectl applies the pinned URL through a
+  kustomization (`apply --server-side -k`) that removes the requirement from virt-operator. kubectl
+  still fetches the URL; the acknowledgment names the patch. Re-check the patch whenever the URL is
+  bumped — it is a JSON Patch, so a release that moved the field fails the apply rather than
+  silently installing the requirement again.
+- The `KubeVirt` resource sets `spec.infra.nodePlacement`. Any placement there replaces
+  virt-operator's control-plane default.
+
+A `kubevirt` component installed before this change keeps its stored manifest. Add the
+`spec.infra` block from the catalog's default to it, or remove and re-add the component.
+
 ### What the KubeVirt resource sets
 
 | Setting | Value | Why |
