@@ -2201,10 +2201,10 @@ schema, so its command's columns cannot be checked at all.
 
 | | count |
 |---|---|
-| CLI commands | 23 |
-| commands rendering a table | 17 |
-| whose route describes its success body — checked on every run | **9** |
-| banked (named, not counted) | **8** |
+| CLI commands | 29 |
+| commands rendering a table | 22 |
+| whose route describes its success body — checked on every run | **17** |
+| banked (named, not counted) | **5** |
 
 ⚠️ All thirteen were read by hand on this date and their columns matched the anonymous objects
 their handlers return. That is an observation on one day, **not an assertion** — it stops being
@@ -2236,16 +2236,16 @@ Counted by generating the real document and walking it, not by reading the const
 |---|---|
 | paths | 25 |
 | operations | 31 |
-| success body described | 15 |
+| success body described | 18 |
 | bodyless by design (one 204) | 1 |
-| **undescribed** | **15** — 8 handlers in `PublicApiEndpoints.cs`, **7 SCIM** |
+| **undescribed** | **12** — 5 handlers in `PublicApiEndpoints.cs`, **7 SCIM** |
 
 ⚠️ Only the last two of those are pinned by a test (`UndescribedSuccessBodies` and
 `BodylessSuccesses`). The operation total is asserted merely as "more than fifteen", so 31 is a
 measurement taken today rather than a number the suite defends — if it matters to a later reader,
 pin it.
 
-#### The 16 are transcribed and adversarially verified — 8 applied, 8 banked
+#### The 16 are transcribed and adversarially verified — 11 applied, 5 banked
 
 One agent per route group produced the record in house style, the handler's replacement signature
 and return, and the **anonymous-object oracle cut verbatim from the handler**; a second agent then
@@ -2424,7 +2424,7 @@ Item 8 is no longer blocked on a question, only on work, and the work has an ord
 3. **Type SCIM last**, deliberately, carrying the media type and the capital-R member rather than
    letting `TypedResults.Ok` decide them.
 4. Then generate the clients — at which point the two ratchets that count this debt both read 0,
-   and the CLI's rendering is verifiable for every command rather than nine of seventeen.
+   and the CLI's rendering is verifiable for every command rather than seventeen of twenty-two.
 
 ## 7. What not to do
 
