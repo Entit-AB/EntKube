@@ -337,7 +337,11 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
         }
 
         int days = (int)(end - start).TotalDays + 1;
-        DateTime previousStart = start.AddDays(-days);
+
+        // ⚠️ Clamped, not AddDays: `start` can be the first day DateTime can represent, because
+        // the route parses `from` out of the query string. The previous window is only ever a
+        // comparison, so a clamp costs nothing — there is no cost data before year one.
+        DateTime previousStart = CostAccrual.ShiftDays(start, -days);
 
         await using CostDbContext db = await dbFactory.CreateDbContextAsync(ct);
 
@@ -405,8 +409,14 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
             ExpectedCoverage(coverage, openedOn, now);
 
         List<CostHistoryPoint> daily = [];
-        for (DateTime day = start; day <= end; day = day.AddDays(1))
+        // ⚠️ Indexed rather than `for (day = start; day <= end; day = day.AddDays(1))`. That form
+        // increments PAST `end` before re-testing the condition, so a window ending on
+        // 9999-12-31 — an ordinary thirty-day request with `?to=9999-12-31` — threw on its last
+        // iteration. Walking by offset never leaves the window at all.
+        for (int offset = 0; offset < days; offset++)
         {
+            DateTime day = CostAccrual.ShiftDays(start, offset);
+
             (decimal covered, decimal expected, decimal nominal) = byDay.GetValueOrDefault(day);
 
             daily.Add(new CostHistoryPoint

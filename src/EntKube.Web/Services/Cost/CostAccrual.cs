@@ -151,4 +151,39 @@ public static class CostAccrual
     /// </summary>
     public static DateTime DayOf(DateTime moment) =>
         DateTime.SpecifyKind(moment.Date, DateTimeKind.Utc);
+
+    /// <summary>The first and last days <see cref="DateTime"/> can represent.</summary>
+    public static DateTime FirstDay { get; } = DayOf(DateTime.MinValue);
+
+    /// <summary>See <see cref="FirstDay"/>.</summary>
+    public static DateTime LastDay { get; } = DayOf(DateTime.MaxValue);
+
+    /// <summary>
+    /// <paramref name="day"/> shifted by <paramref name="days"/>, <b>clamped</b> to the
+    /// representable range rather than throwing.
+    ///
+    /// <para>⚠️ <b>Why this exists at all.</b> <c>GET /cost/history</c> takes <c>from</c> and
+    /// <c>to</c> as free text off the query string, so a caller can name any day
+    /// <see cref="DateTime"/> can parse — including the first and last ones. Plain
+    /// <c>AddDays</c> then throws, and an <c>ArgumentOutOfRangeException</c> out of a GET handler
+    /// is a 500: the server reporting its own defect as though the request had been fine. Three
+    /// separate sites had this shape, two of them reachable from an ordinary thirty-day
+    /// request that merely happened to END on 9999-12-31.</para>
+    ///
+    /// <para>Clamping rather than refusing is right for these callers: every use here is widening
+    /// a window for comparison or walking it a day at a time, and there is no cost data outside
+    /// the representable range for the clamp to hide.</para>
+    /// </summary>
+    public static DateTime ShiftDays(DateTime day, int days)
+    {
+        DateTime from = DayOf(day);
+
+        if (days >= 0)
+        {
+            return days > (LastDay - from).TotalDays ? LastDay : from.AddDays(days);
+        }
+
+        // ⚠️ Negated into a long before the comparison: int.MinValue has no positive int.
+        return -(long)days > (from - FirstDay).TotalDays ? FirstDay : from.AddDays(days);
+    }
 }

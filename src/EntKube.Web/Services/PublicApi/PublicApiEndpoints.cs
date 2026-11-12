@@ -748,12 +748,34 @@ public static class PublicApiEndpoints
 
             DateTime now = DateTime.UtcNow;
             DateTime toDay = ParseDay(to) ?? now;
-            DateTime fromDay = ParseDay(from) ?? toDay.AddDays(-29);
+
+            // ⚠️ Clamped, not toDay.AddDays(-29): `to` is free text, so `?to=0001-01-01` asked
+            // for twenty-nine days before the first day DateTime can represent and threw —
+            // answering a 500 to a request that was merely unusual.
+            DateTime fromDay = ParseDay(from) ?? CostAccrual.ShiftDays(toDay, -29);
+
+            // ⚠️ THE ENDS ARE PUT IN ORDER BEFORE THE CAP IS MEASURED, and that ordering is the
+            // whole fix. The cap is a subtraction, so for a reversed pair it is NEGATIVE and
+            // sails past `> 400` — and CostLedgerService swaps the ends itself, so the oversized
+            // window was then served in full. Exchanging two query parameters bypassed the limit
+            // completely: `from=2020&to=2026` was refused, `from=2026&to=2020` was answered.
+            //
+            // Normalising rather than refusing keeps the forgiving behaviour the service already
+            // had; what changes is only that the cap now sees the span the caller will get.
+            if (fromDay > toDay)
+            {
+                (fromDay, toDay) = (toDay, fromDay);
+            }
 
             if ((toDay - fromDay).TotalDays > 400)
             {
                 return TypedResults.Problem(
-                    "The window is limited to 400 days.", statusCode: StatusCodes.Status400BadRequest);
+                    // ⚠️ "at most 400 days apart", not "limited to 400 days": the test is on the
+                    // DIFFERENCE, so a window of 401 inclusive days passes. Saying what the code
+                    // does rather than tightening the accepted range, which would refuse requests
+                    // that work today.
+                    "`from` and `to` may be at most 400 days apart.",
+                    statusCode: StatusCodes.Status400BadRequest);
             }
 
             if (!Enum.TryParse(groupBy, ignoreCase: true, out CostGroupBy grouping))
