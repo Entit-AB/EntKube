@@ -1049,3 +1049,285 @@ public sealed record SecretFamilySyncFailureResponse(string Kind, string Error)
             Kind: failure.Kind.ToString(),
             Error: failure.Error);
 }
+
+/// <summary>
+/// One Operations Advisor finding, as <c>GET /advisor/findings</c> reports it.
+///
+/// <para>⚠️ <b><c>id</c> is a STRING, not a Guid.</b> Findings are computed on read and never
+/// stored, so there is no row to fetch one by — the id is a stable synthetic key like
+/// <c>cert:{secretId}</c>, which is also what
+/// <c>POST /advisor/findings/{findingId}/acknowledge</c> takes. A client that parsed it as a Guid
+/// would fail on every finding.</para>
+///
+/// <para>⚠️ <b>Four enums arrive as their NAMES, and this record holds all four as
+/// <c>string</c>.</b> <c>category</c>, <c>severity</c>, <c>horizon</c> and <c>state</c> are
+/// <c>.ToString()</c> of four different enum types, so a client reads <c>"Capacity"</c>,
+/// <c>"Warning"</c>, <c>"ThisWeek"</c>, <c>"Active"</c> — never a number and never a lowercased
+/// form, unlike <see cref="CostHistoryResponse.GroupBy"/>, which IS lowercased. On
+/// <c>FindingSummary</c> a transposition among the four would be a type error; here they are four
+/// <c>string</c>s and it would not be, which is why <see cref="From"/> uses named arguments and
+/// the wire-shape fixture gives each a different value.</para>
+///
+/// <para>⚠️ <b>Two different <c>FindingSeverity</c> enums exist and they publish different words
+/// at the same ordinal.</b> <c>EntKube.Web.Services.FindingSeverity</c> (the connectivity
+/// analyzer's) has <c>Error</c> at 0; the Advisor contract's has <c>Critical</c> at 0. A cast
+/// between them is silent mislabelling, which is why
+/// <c>AdvisorContractEnumTests.The_connectivity_severity_is_a_different_enum_and_must_not_be_mapped_onto_this_one</c>
+/// exists. This file fully qualifies every source type, so the collision cannot arise here — it
+/// arises in a file that imports only one of the two namespaces, where the compiler stays
+/// quiet.</para>
+///
+/// <para>⚠️ <b>What pins these four names is NOT enough on its own.</b>
+/// <c>AdvisorContractEnumTests</c> compares the contract and entity declarations <b>to each
+/// other</b> (<c>Enum.GetNames</c> equality, plus a cast round-trip by name), so a rename applied
+/// to BOTH sides stays green while every client's wire changes under it. The literal JSON
+/// assertions in <c>AdvisorWireShapeTests</c> are what stand in that gap.</para>
+///
+/// <para><c>scope</c> is renamed from <c>ScopeLabel</c> and <c>customer</c> from
+/// <c>CustomerName</c>. Both are names existing clients already read — <c>scope</c> is the CLI's
+/// <c>entkube advisor</c> SCOPE column — so neither is free to be "corrected".</para>
+///
+/// <para><c>detail</c>, <c>dueAt</c>, <c>remediation</c>, <c>clusterId</c> and <c>customer</c>
+/// stay nullable: a finding on the radar has no deadline, and an installation-wide finding
+/// belongs to no cluster and to no customer. <c>title</c>, <c>scope</c> and <c>source</c> are
+/// always present.</para>
+/// </summary>
+public sealed record AdvisorFindingResponse(
+    string Id,
+    string Category,
+    string Severity,
+    string Horizon,
+    string Title,
+    string? Detail,
+    string Scope,
+    DateTime? DueAt,
+    string? Remediation,
+    string Source,
+    string State,
+    Guid? ClusterId,
+    string? Customer)
+{
+    /// <summary>
+    /// The one place a finding becomes a response.
+    ///
+    /// <para>⚠️ <b>Named arguments, not positional.</b> Eleven of the thirteen parameters are
+    /// <c>string</c> or <c>string?</c>, broken only by <c>DueAt</c> and <c>ClusterId</c>, so a
+    /// positional call that swapped <c>Title</c> with <c>Scope</c>, or <c>Remediation</c> with
+    /// <c>Source</c>, would compile and would put the wrong text in front of the operator
+    /// deciding what to act on. Swapping <c>Severity</c> with <c>Horizon</c> would reorder the
+    /// whole queue.</para>
+    /// </summary>
+    public static AdvisorFindingResponse From(EntKube.Contracts.Advisor.FindingSummary finding) =>
+        new(
+            Id: finding.Id,
+            // ⚠️ All four by NAME. A number here would break the CLI's columns and the MCP server.
+            Category: finding.Category.ToString(),
+            Severity: finding.Severity.ToString(),
+            Horizon: finding.Horizon.ToString(),
+            Title: finding.Title,
+            Detail: finding.Detail,
+            Scope: finding.ScopeLabel,
+            DueAt: finding.DueAt,
+            Remediation: finding.Remediation,
+            Source: finding.Source,
+            State: finding.State.ToString(),
+            ClusterId: finding.ClusterId,
+            Customer: finding.CustomerName);
+}
+
+/// <summary>
+/// One alert incident, as <c>GET /incidents</c> reports it.
+///
+/// <para>⚠️ <b><c>severity</c> and <c>status</c> are both strings and only ONE of them is an
+/// enum.</b> <c>severity</c> is FREE TEXT on the contract (<c>IncidentSummary.Severity</c> is
+/// declared <c>string</c>), carried through exactly as the alert rule wrote it — there is no
+/// closed set to validate against and no casing to rely on, so a client must not switch on it.
+/// <c>status</c> is <c>IncidentStatus</c>'s NAME: <c>"Active"</c>, <c>"Acknowledged"</c> or
+/// <c>"Resolved"</c>. Typing the first as an enum, or dropping <c>ToString()</c> from the second,
+/// each breaks a client silently — and they sit next to each other in both the record and the
+/// factory.</para>
+///
+/// <para><c>ModuleApiTests</c> holds <c>IncidentStatus</c>'s members in order across the two enum
+/// declarations. ⚠️ As with the Advisor enums, that compares the two declarations to each other
+/// and so cannot catch a rename applied to both.</para>
+///
+/// <para>⚠️ <b>The cluster's ID is deliberately NOT on this shape.</b> <c>IncidentSummary</c>
+/// carries <c>ClusterId</c>, but the anonymous object never emitted it and this record is a
+/// transcription of what shipped, not an improvement on it. Adding the field here would change
+/// the document rather than describe it. <c>cluster</c> is renamed from <c>ClusterName</c> — the
+/// CLI's <c>entkube incidents</c> CLUSTER column reads that name.</para>
+///
+/// <para><c>resolvedAt</c>, <c>acknowledgedBy</c> and <c>runbookUrl</c> stay nullable: an open
+/// incident has not resolved, nobody may have acknowledged it, and the rule may not have named a
+/// runbook. A client must not read a missing <c>resolvedAt</c> as anything other than "still
+/// open".</para>
+/// </summary>
+public sealed record IncidentResponse(
+    Guid Id,
+    string AlertName,
+    string Summary,
+    string Severity,
+    string Status,
+    string Cluster,
+    DateTime StartsAt,
+    DateTime? ResolvedAt,
+    string? AcknowledgedBy,
+    string? RunbookUrl)
+{
+    /// <summary>
+    /// The one place an incident becomes a response.
+    ///
+    /// <para>⚠️ <b>Named arguments, not positional.</b> <c>AlertName</c>, <c>Summary</c>,
+    /// <c>Severity</c>, <c>Status</c> and <c>Cluster</c> are five adjacent <c>string</c>s, so a
+    /// positional call that put the summary where the severity belongs would compile and would
+    /// make every incident unsortable by urgency — and a swap of <c>Severity</c> and
+    /// <c>Status</c> would be invisible to the type system, because the enum has already been
+    /// flattened to its name by then.</para>
+    /// </summary>
+    public static IncidentResponse From(EntKube.Contracts.Telemetry.IncidentSummary incident) =>
+        new(
+            Id: incident.Id,
+            AlertName: incident.AlertName,
+            Summary: incident.Summary,
+            // ⚠️ Already a string on the contract. No ToString(), no enum — unlike Status below.
+            Severity: incident.Severity,
+            Status: incident.Status.ToString(),
+            Cluster: incident.ClusterName,
+            StartsAt: incident.StartsAt,
+            ResolvedAt: incident.ResolvedAt,
+            AcknowledgedBy: incident.AcknowledgedBy,
+            RunbookUrl: incident.RunbookUrl);
+}
+
+/// <summary>
+/// Every managed deployment's standing against its SLA, with the four counters a caller polling
+/// for trouble reads first — the envelope <c>GET /error-budgets</c> answers.
+///
+/// <para>⚠️ <b>All four counters are COMPUTED over the list and are read off nothing.</b>
+/// <c>deployments</c> is the row count, <c>withData</c> the rows with health samples in the
+/// window, <c>breached</c> the rows already past their objective, <c>atRisk</c> the rows still in
+/// credit but burning faster than sustainable. None can be set independently, which is why
+/// <see cref="From"/> takes the whole collection rather than four numbers: a factory accepting
+/// them would let a caller pass a count that disagreed with the list beside it.</para>
+///
+/// <para>⚠️ <b><c>atRisk</c> excludes what <c>breached</c> counts, and a null burn rate is not at
+/// risk.</b> The predicate is <c>!IsBreached &amp;&amp; BurnRateRecent &gt; 1.0</c> over a
+/// <c>double?</c> — a LIFTED comparison, which is <c>false</c> when the burn rate is null. So a
+/// deployment with no samples falls into NEITHER counter, the two sets are disjoint, and
+/// <c>deployments</c> is not their sum. ⚠️ A caller computing "healthy" as
+/// <c>deployments - breached - atRisk</c> is counting the unknowns as healthy;
+/// <c>withData</c> is the field that says how many rows were measurable at all.</para>
+///
+/// <para>⚠️ <b><c>breached</c> here is an <c>int</c>; <c>isBreached</c> on each budget is a
+/// <c>bool</c>.</b> Same word, different field, different type — and <c>deployments</c> (a count)
+/// against each budget's <c>deployment</c> (a name) is the same trap one level down. Both pairs
+/// are the wire names that shipped.</para>
+/// </summary>
+public sealed record ErrorBudgetReportResponse(
+    int Deployments,
+    int WithData,
+    int Breached,
+    int AtRisk,
+    IEnumerable<ErrorBudgetResponse> Budgets)
+{
+    /// <summary>
+    /// The one place the error-budget report becomes a response.
+    ///
+    /// <para>⚠️ <b>The parameter is <c>IReadOnlyList</c>, not <c>IEnumerable</c>, on purpose.</b>
+    /// <c>Deployments</c> is <c>budgets.Count</c> — the list's own property, exactly as the
+    /// handler had it. Against an <c>IEnumerable</c> the same text would silently become
+    /// <c>Enumerable.Count()</c>, a fourth walk of a sequence the three <c>Count(predicate)</c>
+    /// calls already walk three times, and a deferred source would then be enumerated four
+    /// times.</para>
+    ///
+    /// <para>⚠️ <b>Named arguments, not positional.</b> Four adjacent <c>int</c>s, every one a
+    /// count of the same list, where a positional swap would compile and would report the
+    /// breached total as the fleet size — a figure a support agreement is invoiced against.</para>
+    /// </summary>
+    public static ErrorBudgetReportResponse From(
+        IReadOnlyList<EntKube.Contracts.Telemetry.ErrorBudgetSummary> budgets) =>
+        new(
+            Deployments: budgets.Count,
+            WithData: budgets.Count(b => b.HasData),
+            Breached: budgets.Count(b => b.IsBreached),
+            // Burning faster than sustainable while still in credit — the set that answers
+            // "will we breach" rather than "have we". Reported separately because a caller
+            // polling for trouble wants it before the breach, not after.
+            AtRisk: budgets.Count(b => !b.IsBreached && b.BurnRateRecent > 1.0),
+            Budgets: budgets.Select(ErrorBudgetResponse.From));
+}
+
+/// <summary>
+/// One deployment's standing against its SLA over the objective's own window.
+///
+/// <para>⚠️ <b>Four members are deliberately nullable and 0 is NOT the fallback.</b>
+/// <c>achievedPercent</c>, <c>budgetConsumedFraction</c>, <c>burnRateRecent</c> and
+/// <c>hoursToExhaustion</c> are null when the deployment has no health samples in the window.
+/// That is UNKNOWN availability, not 0% — a client rendering a missing number as zero reports a
+/// total outage for a deployment that was merely registered yesterday, which is why the handler
+/// left them null rather than defaulting them. <c>hasData</c> is the question to ask first.
+/// <c>hoursToExhaustion</c> is additionally null for a budget not on track to exhaust, which
+/// includes one already breached, so it is not an ordering key.</para>
+///
+/// <para><c>deployment</c> is renamed from <c>DeploymentName</c>, <c>app</c> from <c>AppName</c>
+/// and <c>customer</c> from <c>CustomerName</c> — the names the CLI's
+/// <c>entkube error-budgets</c> columns read. <c>customerId</c> and <c>customer</c> stay nullable:
+/// a deployment not attributed to a customer has neither, and inventing one would put an SLA
+/// figure on a customer who is not owed it.</para>
+///
+/// <para>⚠️ <b><c>isBreached</c> keeps its <c>Is</c> prefix on the wire.</b> Elsewhere the
+/// <c>Is…</c> members were flattened as they were mapped (<see cref="CostNamespaceResponse"/>'s
+/// <c>Unattributed</c> from <c>IsUnattributed</c>), but this handler never did, and
+/// <see cref="ErrorBudgetReportResponse.Breached"/> already uses the flattened spelling for the
+/// envelope's COUNT. Flattening this one to match the house habit would collide with that and
+/// would break the CLI's BREACHED column. The source's own rule holds: breached is <b>strictly</b>
+/// greater than 1.0, so a budget exactly spent MEETS the objective — it was once <c>&gt;=</c> and
+/// reported a breach for availability exactly equal to its target.</para>
+/// </summary>
+public sealed record ErrorBudgetResponse(
+    Guid DeploymentId,
+    string Deployment,
+    string App,
+    Guid? CustomerId,
+    string? Customer,
+    Guid ClusterId,
+    double TargetPercent,
+    int WindowDays,
+    double? AchievedPercent,
+    double? BudgetConsumedFraction,
+    double? BurnRateRecent,
+    double? HoursToExhaustion,
+    bool HasData,
+    bool IsBreached)
+{
+    /// <summary>
+    /// The one place a budget becomes a response.
+    ///
+    /// <para>⚠️ <b>Named arguments, not positional.</b> <c>AchievedPercent</c>,
+    /// <c>BudgetConsumedFraction</c>, <c>BurnRateRecent</c> and <c>HoursToExhaustion</c> are four
+    /// adjacent <c>double?</c>s on four entirely different scales — a percentage, a fraction, a
+    /// ratio and a duration — with <c>TargetPercent</c> beside them making five. A positional
+    /// swap would compile and would report 99.95 hours to exhaustion for a deployment at 99.95%
+    /// availability. Wrong numbers in untested SLA figures are this repository's most frequent
+    /// defect, so the wire-shape fixture gives all fourteen fields distinct values.</para>
+    /// </summary>
+    public static ErrorBudgetResponse From(
+        EntKube.Contracts.Telemetry.ErrorBudgetSummary budget) =>
+        new(
+            DeploymentId: budget.DeploymentId,
+            Deployment: budget.DeploymentName,
+            App: budget.AppName,
+            CustomerId: budget.CustomerId,
+            Customer: budget.CustomerName,
+            ClusterId: budget.ClusterId,
+            TargetPercent: budget.TargetPercent,
+            WindowDays: budget.WindowDays,
+            // ⚠️ Left null rather than defaulted to 0. A deployment with no samples in the
+            // window has unknown availability, and 0 would read as a total outage.
+            AchievedPercent: budget.AchievedPercent,
+            BudgetConsumedFraction: budget.BudgetConsumedFraction,
+            BurnRateRecent: budget.BurnRateRecent,
+            HoursToExhaustion: budget.HoursToExhaustion,
+            HasData: budget.HasData,
+            IsBreached: budget.IsBreached);
+}

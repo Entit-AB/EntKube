@@ -402,32 +402,22 @@ public static class PublicApiEndpoints
           // such a client would read a partial failure as a clean success.
           .Produces<AppSecretSyncResponse>(StatusCodes.Status207MultiStatus);
 
-        api.MapGet("/advisor/findings", async (
+        api.MapGet("/advisor/findings",
+            async Task<Ok<IEnumerable<AdvisorFindingResponse>>> (
             HttpContext ctx, EntKube.Contracts.Advisor.IAdvisorApi advisor, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
             IReadOnlyList<EntKube.Contracts.Advisor.FindingSummary> findings =
                 await advisor.GetFindingsAsync(tenantId, ct);
 
-            return Results.Ok(findings.Select(f => new
-            {
-                id = f.Id,
-                category = f.Category.ToString(),
-                severity = f.Severity.ToString(),
-                horizon = f.Horizon.ToString(),
-                title = f.Title,
-                detail = f.Detail,
-                scope = f.ScopeLabel,
-                dueAt = f.DueAt,
-                remediation = f.Remediation,
-                source = f.Source,
-                state = f.State.ToString(),
-                clusterId = f.ClusterId,
-                customer = f.CustomerName,
-            }));
+            // ⚠️ The explicit type argument is required: inference gives Ok<List<T>>, which does
+            // not convert to the declared Ok<IEnumerable<T>>.
+            return TypedResults.Ok<IEnumerable<AdvisorFindingResponse>>(
+                [.. findings.Select(AdvisorFindingResponse.From)]);
         }).RequireApiScope(ApiScopes.OpsRead);
 
-        api.MapGet("/incidents", async (
+        api.MapGet("/incidents",
+            async Task<Ok<IEnumerable<IncidentResponse>>> (
             HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry,
             bool? open, CancellationToken ct) =>
         {
@@ -441,21 +431,10 @@ public static class PublicApiEndpoints
             IReadOnlyList<EntKube.Contracts.Telemetry.IncidentSummary> incidents =
                 await telemetry.GetIncidentsAsync(tenantId, openOnly: open == true, limit: 200, ct);
 
-            return Results.Ok(incidents
-                .Select(i => new
-                {
-                    id = i.Id,
-                    alertName = i.AlertName,
-                    summary = i.Summary,
-                    severity = i.Severity,
-                    status = i.Status.ToString(),
-                    cluster = i.ClusterName,
-                    startsAt = i.StartsAt,
-                    resolvedAt = i.ResolvedAt,
-                    acknowledgedBy = i.AcknowledgedBy,
-                    runbookUrl = i.RunbookUrl,
-                })
-                .ToList());
+            // The materialisation the anonymous version had is kept, so the typed route
+            // enumerates exactly where the untyped one did.
+            return TypedResults.Ok<IEnumerable<IncidentResponse>>(
+                [.. incidents.Select(IncidentResponse.From)]);
         }).RequireApiScope(ApiScopes.OpsRead);
 
         // A status the enum does not name answers 400 here rather than reaching Enum.Parse in the
@@ -575,7 +554,8 @@ public static class PublicApiEndpoints
         // ⚠️ The API could not answer "are we meeting the SLAs". A grep for budget, availability,
         //    uptime, sla and maintenance across this entire file returned nothing — the figure a
         //    support agreement is invoiced against was readable in a browser and nowhere else.
-        api.MapGet("/error-budgets", async (
+        api.MapGet("/error-budgets",
+            async Task<Ok<ErrorBudgetReportResponse>> (
             HttpContext ctx, EntKube.Contracts.Telemetry.ITelemetryApi telemetry,
             CancellationToken ct) =>
         {
@@ -584,35 +564,11 @@ public static class PublicApiEndpoints
             IReadOnlyList<EntKube.Contracts.Telemetry.ErrorBudgetSummary> budgets =
                 await telemetry.GetErrorBudgetsAsync(tenantId, ct);
 
-            return Results.Ok(new
-            {
-                deployments = budgets.Count,
-                withData = budgets.Count(b => b.HasData),
-                breached = budgets.Count(b => b.IsBreached),
-                // Burning faster than sustainable while still in credit — the set that answers
-                // "will we breach" rather than "have we". Reported separately because a caller
-                // polling for trouble wants it before the breach, not after.
-                atRisk = budgets.Count(b => !b.IsBreached && b.BurnRateRecent > 1.0),
-                budgets = budgets.Select(b => new
-                {
-                    deploymentId = b.DeploymentId,
-                    deployment = b.DeploymentName,
-                    app = b.AppName,
-                    customerId = b.CustomerId,
-                    customer = b.CustomerName,
-                    clusterId = b.ClusterId,
-                    targetPercent = b.TargetPercent,
-                    windowDays = b.WindowDays,
-                    // ⚠️ Left null rather than defaulted to 0. A deployment with no samples in
-                    // the window has unknown availability, and 0 would read as a total outage.
-                    achievedPercent = b.AchievedPercent,
-                    budgetConsumedFraction = b.BudgetConsumedFraction,
-                    burnRateRecent = b.BurnRateRecent,
-                    hoursToExhaustion = b.HoursToExhaustion,
-                    hasData = b.HasData,
-                    isBreached = b.IsBreached,
-                }),
-            });
+            // The four counters and the per-budget mapping now live on
+            // ErrorBudgetReportResponse, so they can be asserted against the anonymous object
+            // they replaced — including that atRisk's lifted `> 1.0` leaves a null burn rate out
+            // of BOTH counters.
+            return TypedResults.Ok(ErrorBudgetReportResponse.From(budgets));
         }).RequireApiScope(ApiScopes.OpsRead);
 
         api.MapGet("/upgrades", async (

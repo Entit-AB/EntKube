@@ -443,6 +443,94 @@ public class CliRenderedColumnTests
             JsonSerializer.Serialize(AppSecretSyncResponse.From(result), AsTheApiSerialises));
     }
 
+    [Fact]
+    public void The_advisor_renders_every_column()
+    {
+        EntKube.Contracts.Advisor.FindingSummary finding = new(
+            Id: "cert:11111111-1111-1111-1111-111111111111",
+            Category: EntKube.Contracts.Advisor.FindingCategory.Security,
+            Severity: EntKube.Contracts.Advisor.FindingSeverity.Warning,
+            Horizon: EntKube.Contracts.Advisor.FindingHorizon.ThisWeek,
+            Title: "A certificate expires in six days",
+            Detail: "wildcard.example.com",
+            ScopeLabel: "prod-north / istio-system",
+            DueAt: new DateTime(2026, 11, 18, 0, 0, 0, DateTimeKind.Utc),
+            Remediation: "Renew it, or let cert-manager renew it",
+            Source: "certificates",
+            State: EntKube.Contracts.Advisor.FindingStatus.Active,
+            ClusterId: Guid.NewGuid(),
+            CustomerName: "Acme AB");
+
+        EveryColumnRenders(
+            Command("advisor"),
+            JsonSerializer.Serialize(
+                new[] { AdvisorFindingResponse.From(finding) }, AsTheApiSerialises));
+    }
+
+    /// <summary>
+    /// ⚠️ The fixture's <c>severity</c> is free text as the alert rule wrote it, NOT an enum
+    /// member — see <see cref="IncidentResponse"/>. A fixture using a tidy
+    /// <c>"Critical"</c> would teach the next reader that this field is a closed set.
+    /// </summary>
+    [Fact]
+    public void The_incidents_render_every_column()
+    {
+        EntKube.Contracts.Telemetry.IncidentSummary incident = new(
+            Id: Guid.NewGuid(),
+            ClusterId: Guid.NewGuid(),
+            ClusterName: "prod-north",
+            AlertName: "KubePodCrashLooping",
+            Summary: "billing-api has restarted 14 times in 10 minutes",
+            Severity: "page",
+            Status: EntKube.Contracts.Telemetry.IncidentStatus.Active,
+            StartsAt: new DateTime(2026, 11, 12, 6, 30, 0, DateTimeKind.Utc),
+            ResolvedAt: null,
+            AcknowledgedBy: "nils",
+            RunbookUrl: "https://runbooks.example.com/crashloop");
+
+        EveryColumnRenders(
+            Command("incidents"),
+            JsonSerializer.Serialize(
+                new[] { IncidentResponse.From(incident) }, AsTheApiSerialises));
+    }
+
+    /// <summary>
+    /// ⚠️ <b>The fixture must have DATA.</b> Three of this command's seven columns —
+    /// <c>achievedPercent</c>, <c>budgetConsumedFraction</c>, <c>burnRateRecent</c> — are
+    /// <c>double?</c> and are null for a deployment with no health samples in the window, which
+    /// <c>TableWriter</c> renders as <c>"-"</c>. A no-data budget would therefore fail this fact
+    /// while the CLI was working correctly: for such a row the dashes are the honest answer, and
+    /// <c>hasData</c> is what says so. What this proves is that the columns RESOLVE when there is
+    /// a measurement to show.
+    ///
+    /// <para>⚠️ Also note the envelope is read through <c>RowsProperty = "budgets"</c>, so this
+    /// serialises the whole <see cref="ErrorBudgetReportResponse"/> rather than a bare array.</para>
+    /// </summary>
+    [Fact]
+    public void The_error_budgets_render_every_column()
+    {
+        EntKube.Contracts.Telemetry.ErrorBudgetSummary budget = new(
+            DeploymentId: Guid.NewGuid(),
+            DeploymentName: "billing-api-prod",
+            AppName: "billing",
+            CustomerId: Guid.NewGuid(),
+            CustomerName: "Acme AB",
+            ClusterId: Guid.NewGuid(),
+            TargetPercent: 99.9d,
+            WindowDays: 30,
+            AchievedPercent: 99.82d,
+            BudgetConsumedFraction: 1.8d,
+            BurnRateRecent: 2.4d,
+            HoursToExhaustion: null,
+            HasData: true,
+            IsBreached: true);
+
+        EveryColumnRenders(
+            Command("error-budgets"),
+            JsonSerializer.Serialize(
+                ErrorBudgetReportResponse.From([budget]), AsTheApiSerialises));
+    }
+
     /// <summary>
     /// ⚠️ The measure. The facts above are exactly the commands
     /// <see cref="CliColumnParityTests"/> can check against a schema, and they must stay in step:
@@ -457,6 +545,7 @@ public class CliRenderedColumnTests
             "cost", "cost history", "cost months", "cost rates list",
             "clusters list", "components list", "apps list", "deployments list",
             "secrets sync", "feedback", "synthetics", "errors", "slos",
+            "advisor", "incidents", "error-budgets",
             "vms list",
         ];
 

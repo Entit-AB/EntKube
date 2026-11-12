@@ -59,9 +59,6 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
     /// </summary>
     private static readonly HashSet<string> Unverifiable = new(StringComparer.Ordinal)
     {
-        "advisor",
-        "error-budgets",
-        "incidents",
         "upgrades",
         "drift",
         "supply-chain",
