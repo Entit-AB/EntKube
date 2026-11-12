@@ -571,7 +571,8 @@ public static class PublicApiEndpoints
             return TypedResults.Ok(ErrorBudgetReportResponse.From(budgets));
         }).RequireApiScope(ApiScopes.OpsRead);
 
-        api.MapGet("/upgrades", async (
+        api.MapGet("/upgrades",
+            async Task<Ok<UpgradeReportResponse>> (
             HttpContext ctx, EntKube.Contracts.Catalog.ICatalogApi catalog, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
@@ -582,26 +583,12 @@ public static class PublicApiEndpoints
             EntKube.Contracts.Catalog.UpgradeReportSummary report =
                 await catalog.GetUpgradeReportAsync(tenantId, DateTime.UtcNow, ct);
 
-            return Results.Ok(new
-            {
-                upgradeCount = report.UpgradeCount,
-                majorCount = report.MajorCount,
-                deprecatedCount = report.DeprecatedCount,
-                components = report.Components.Select(c => new
-                {
-                    cluster = c.ClusterName,
-                    component = c.DisplayName,
-                    chart = c.ChartName,
-                    installed = c.InstalledVersion,
-                    latest = c.LatestVersion,
-                    status = c.Status.ToString(),
-                    lag = c.Lag.ToString(),
-                    versionsBehind = c.VersionsBehind,
-                }),
-            });
+            return TypedResults.Ok(UpgradeReportResponse.From(report));
         }).RequireApiScope(ApiScopes.OpsRead);
 
-        api.MapGet("/drift", (HttpContext ctx, DriftScanCache cache) =>
+        api.MapGet("/drift",
+            Results<Ok<DriftReportResponse>, ProblemHttpResult> (
+            HttpContext ctx, DriftScanCache cache) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
             DriftReport? report = cache.Get(tenantId);
@@ -610,65 +597,29 @@ public static class PublicApiEndpoints
             // are different answers, and a caller polling this must not confuse them.
             if (report is null)
             {
-                return Results.Problem(
+                return TypedResults.Problem(
                     "No drift sweep has completed yet for this tenant.",
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
-            return Results.Ok(new
-            {
-                generatedAt = report.GeneratedAt,
-                driftedCount = report.DriftedCount,
-                unknownCount = report.UnknownCount,
-                inSyncCount = report.InSyncCount,
-                results = report.Results.Select(r => new
-                {
-                    deploymentId = r.DeploymentId,
-                    app = r.AppName,
-                    deployment = r.DeploymentName,
-                    cluster = r.ClusterName,
-                    ns = r.Namespace,
-                    state = r.State.ToString(),
-                    changedLines = r.ChangedLines,
-                    note = r.Note,
-                }),
-            });
+            return TypedResults.Ok(DriftReportResponse.FromReport(report));
         }).RequireApiScope(ApiScopes.OpsRead);
 
-        api.MapGet("/supply-chain", (HttpContext ctx, SupplyChainScanCache cache) =>
+        api.MapGet("/supply-chain",
+            Results<Ok<SupplyChainReportResponse>, ProblemHttpResult> (
+            HttpContext ctx, SupplyChainScanCache cache) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
             SupplyChainReport? report = cache.Get(tenantId);
 
             if (report is null)
             {
-                return Results.Problem(
+                return TypedResults.Problem(
                     "No supply-chain sweep has completed yet for this tenant.",
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
-            return Results.Ok(new
-            {
-                generatedAt = report.GeneratedAt,
-                vulnerableCount = report.VulnerableCount,
-                unscannedCount = report.UnscannedCount,
-                unmanagedCount = report.UnmanagedCount,
-                cleanCount = report.CleanCount,
-                totalCritical = report.TotalCritical,
-                totalHigh = report.TotalHigh,
-                warnings = report.Warnings,
-                images = report.Images.Select(i => new
-                {
-                    image = i.Image,
-                    cluster = i.ClusterName,
-                    state = i.State.ToString(),
-                    critical = i.CriticalCount,
-                    high = i.HighCount,
-                    fixable = i.FixableCount,
-                    digestPinned = i.IsDigestPinned,
-                    workloads = i.Workloads,
-                }),
-            });
+            return TypedResults.Ok(SupplyChainReportResponse.FromReport(report));
         }).RequireApiScope(ApiScopes.OpsRead);
 
         api.MapGet("/cost",
