@@ -532,6 +532,108 @@ public class CliRenderedColumnTests
     }
 
     /// <summary>
+    /// ⚠️ The fixture's component has a chart name, an installed AND a latest version. All three
+    /// are <c>string?</c> on the contract and render as <c>"-"</c> when absent — which is the
+    /// honest answer for a component whose chart could not be resolved, so a fixture leaving them
+    /// null would fail this fact while the CLI worked.
+    /// </summary>
+    [Fact]
+    public void The_upgrades_render_every_column()
+    {
+        EntKube.Contracts.Catalog.UpgradeReportSummary report = new(
+            Components:
+            [
+                new(
+                    ClusterId: Guid.NewGuid(),
+                    ClusterName: "prod-north",
+                    ComponentId: Guid.NewGuid(),
+                    DisplayName: "Prometheus stack",
+                    ChartName: "kube-prometheus-stack",
+                    InstalledVersion: "62.3.0",
+                    LatestVersion: "65.1.0",
+                    Status: EntKube.Contracts.Catalog.UpgradeAvailability.UpgradeAvailable,
+                    Lag: EntKube.Contracts.Catalog.UpgradeLag.Major,
+                    VersionsBehind: 3),
+            ],
+            UpgradeCount: 1,
+            MajorCount: 1,
+            DeprecatedCount: 0,
+            UnknownCount: 0);
+
+        EveryColumnRenders(
+            Command("upgrades"),
+            JsonSerializer.Serialize(UpgradeReportResponse.From(report), AsTheApiSerialises));
+    }
+
+    /// <summary>
+    /// ⚠️ The fixture's row is <c>Drifted</c> with a non-zero <c>changedLines</c>. An
+    /// <c>InSync</c> row has 0, which renders as <c>"0"</c> rather than a dash — so this fact
+    /// would pass either way, and the reason for choosing Drifted is that it is the row an
+    /// operator is looking at the table for.
+    /// </summary>
+    [Fact]
+    public void The_drift_renders_every_column()
+    {
+        EntKube.Web.Services.Upgrades.DriftReport report = new()
+        {
+            GeneratedAt = new DateTime(2026, 11, 12, 6, 0, 0, DateTimeKind.Utc),
+            Results =
+            [
+                new()
+                {
+                    DeploymentId = Guid.NewGuid(),
+                    DeploymentName = "billing-api-prod",
+                    AppName = "billing",
+                    ClusterId = Guid.NewGuid(),
+                    ClusterName = "prod-north",
+                    Namespace = "billing-prod",
+                    State = EntKube.Web.Services.Upgrades.DriftState.Drifted,
+                    ChangedLines = 14,
+                    Note = "image tag differs from the declared manifest",
+                },
+            ],
+        };
+
+        EveryColumnRenders(
+            Command("drift"),
+            JsonSerializer.Serialize(DriftReportResponse.FromReport(report), AsTheApiSerialises));
+    }
+
+    /// <summary>
+    /// ⚠️ <b>The fixture's image is SCANNED</b>, with non-zero findings. An <c>Unscanned</c> image
+    /// reports <c>critical: 0</c> because the counts are <c>Scan?.X ?? 0</c> — and that 0 means
+    /// UNKNOWN, not clean. It would still render (as <c>"0"</c>, not a dash), so this fact cannot
+    /// tell the two apart; what it proves is that every column resolves. The distinction itself is
+    /// pinned in <c>UpgradeScanWireShapeTests</c>, which is where it belongs.
+    /// </summary>
+    [Fact]
+    public void The_supply_chain_renders_every_column()
+    {
+        EntKube.Web.Services.SupplyChain.SupplyChainReport report = new()
+        {
+            GeneratedAt = new DateTime(2026, 11, 12, 6, 0, 0, DateTimeKind.Utc),
+            Images =
+            [
+                new()
+                {
+                    Image = "ghcr.io/acme/billing:1.4.2",
+                    ClusterId = Guid.NewGuid(),
+                    ClusterName = "prod-north",
+                    Workloads = ["deployment/billing-api"],
+                    State = EntKube.Web.Services.SupplyChain.ImageScanState.Vulnerable,
+                    IsDigestPinned = false,
+                    Scan = new() { Critical = 2, High = 7, Fixable = 5 },
+                },
+            ],
+        };
+
+        EveryColumnRenders(
+            Command("supply-chain"),
+            JsonSerializer.Serialize(
+                SupplyChainReportResponse.FromReport(report), AsTheApiSerialises));
+    }
+
+    /// <summary>
     /// ⚠️ The measure. The facts above are exactly the commands
     /// <see cref="CliColumnParityTests"/> can check against a schema, and they must stay in step:
     /// if a route gains a response type and no rendering fact is added for its command, this fails
@@ -546,6 +648,7 @@ public class CliRenderedColumnTests
             "clusters list", "components list", "apps list", "deployments list",
             "secrets sync", "feedback", "synthetics", "errors", "slos",
             "advisor", "incidents", "error-budgets",
+            "upgrades", "drift", "supply-chain",
             "vms list",
         ];
 

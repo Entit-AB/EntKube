@@ -1331,3 +1331,295 @@ public sealed record ErrorBudgetResponse(
             HasData: budget.HasData,
             IsBreached: budget.IsBreached);
 }
+
+/// <summary>
+/// Every installed component measured against its chart repository — the envelope
+/// <c>GET /upgrades</c> answers.
+///
+/// <para>⚠️ <b><c>UnknownCount</c> is on the source and is NOT emitted.</b>
+/// <c>UpgradeReportSummary</c> carries four counts; this route has only ever sent three. That is
+/// reproduced rather than corrected, because adding a field changes the document rather than
+/// describing it. A client that wants it can compute it: each component's <c>status</c> is on the
+/// wire, so <c>components.filter(c =&gt; c.status === "Unknown").length</c> is the same number —
+/// the omission costs a round of arithmetic, not information.</para>
+///
+/// <para>⚠️ The three counts are COMPUTED over the component list on the source
+/// (<c>UpgradeCount</c> is <c>Status == UpgradeAvailable</c>, <c>MajorCount</c> is that AND
+/// <c>Lag == Major</c>, <c>DeprecatedCount</c> is <c>Status == Deprecated</c>), so
+/// <c>upgradeCount</c> and <c>deprecatedCount</c> are disjoint while <c>majorCount</c> is a
+/// SUBSET of <c>upgradeCount</c>. They do not sum to the component total and were never meant
+/// to.</para>
+///
+/// <para>⚠️ This route can also answer <b>500</b> by throwing: <c>GetUpgradeReportAsync</c>
+/// raises <c>InvalidOperationException</c> when Catalog was constructed without
+/// <c>ComponentUpgradeService</c>, which was chosen over returning an empty report. That is a DI
+/// misconfiguration rather than a contract status, so it is not in the declared union — the
+/// signature is not a complete list of what a caller can receive.</para>
+/// </summary>
+public sealed record UpgradeReportResponse(
+    int UpgradeCount,
+    int MajorCount,
+    int DeprecatedCount,
+    IEnumerable<ComponentUpgradeResponse> Components)
+{
+    /// <summary>
+    /// ⚠️ <b>Named arguments.</b> Three adjacent <c>int</c>s, all counts of the same list, where a
+    /// positional swap would compile and would report the deprecated total as the number of
+    /// available upgrades — the figure an operator plans a maintenance window around.
+    /// </summary>
+    public static UpgradeReportResponse From(
+        EntKube.Contracts.Catalog.UpgradeReportSummary report) =>
+        new(
+            UpgradeCount: report.UpgradeCount,
+            MajorCount: report.MajorCount,
+            DeprecatedCount: report.DeprecatedCount,
+            Components: report.Components.Select(ComponentUpgradeResponse.From));
+}
+
+/// <summary>
+/// One installed component's standing against its chart repository.
+///
+/// <para>⚠️ <b><c>component</c> is renamed from <c>DisplayName</c> and <c>chart</c> from
+/// <c>ChartName</c>, and they are different things.</b> The display name is what an operator calls
+/// the component; the chart name is what Helm calls it. The CLI's <c>upgrades</c> command renders
+/// both, so a transposition would show each column the other's value and read as plausible.</para>
+///
+/// <para>⚠️ <b>Two enums arrive as their NAMES and both are published as <c>string</c>.</b>
+/// <c>status</c> is <c>UpgradeAvailability</c> and <c>lag</c> is <c>UpgradeLag</c>. Typing them as
+/// the enums would serialise the NUMERIC value under <c>JsonSerializerDefaults.Web</c>, which adds
+/// no string converter — and <c>UpgradeAvailable</c> and <c>Major</c> are both ordinal 0, so the
+/// wrong guess ships <c>0</c> for the two most common values and nothing fails.
+/// <c>CatalogUpgradeContractTests</c> holds these to the entity enums by comparing the two
+/// declarations <b>to each other</b>, so it cannot catch a rename applied to both; the literal
+/// JSON assertions in <c>UpgradeScanWireShapeTests</c> are what stand in that gap.</para>
+///
+/// <para><c>chart</c>, <c>installed</c> and <c>latest</c> stay nullable: a component whose chart
+/// could not be resolved has no chart name, and one never successfully queried has no latest
+/// version. <c>versionsBehind</c> is an <c>int</c> and is 0 in those cases, which is why it must
+/// not be read as "up to date" on its own — <c>status</c> is the field that says.</para>
+/// </summary>
+public sealed record ComponentUpgradeResponse(
+    string Cluster,
+    string Component,
+    string? Chart,
+    string? Installed,
+    string? Latest,
+    string Status,
+    string Lag,
+    int VersionsBehind)
+{
+    /// <summary>
+    /// ⚠️ <b>Named arguments.</b> Five adjacent <c>string</c>/<c>string?</c> parameters followed by
+    /// two more, where <c>Installed</c>/<c>Latest</c> and <c>Status</c>/<c>Lag</c> are both
+    /// same-typed adjacent pairs: transposing either compiles, and showing the installed version
+    /// as the latest one reads as "nothing to do".
+    /// </summary>
+    public static ComponentUpgradeResponse From(
+        EntKube.Contracts.Catalog.ComponentUpgradeSummary component) =>
+        new(
+            Cluster: component.ClusterName,
+            Component: component.DisplayName,
+            Chart: component.ChartName,
+            Installed: component.InstalledVersion,
+            Latest: component.LatestVersion,
+            // ⚠️ By NAME, not by value: UpgradeAvailable and Major are both ordinal 0.
+            Status: component.Status.ToString(),
+            Lag: component.Lag.ToString(),
+            VersionsBehind: component.VersionsBehind);
+}
+
+/// <summary>
+/// What the last drift sweep found — the envelope <c>GET /drift</c> answers.
+///
+/// <para>⚠️ <b>This route answers 503, not an empty 200, when no sweep has completed.</b> "No
+/// sweep has run" and "nothing has drifted" are different answers and a caller polling this must
+/// not confuse them. The 503 is in the declared union; it carries <c>ProblemDetails</c>.</para>
+///
+/// <para>⚠️ <b>The property is called <c>Results</c>, which shadows
+/// <c>Microsoft.AspNetCore.Http.Results</c></b> inside this record's body — that static class is
+/// in scope through the Web SDK's implicit usings. It compiles, and the wire key <c>results</c> is
+/// not negotiable, so the name stays. But a static member added to this record cannot write
+/// <c>Results.Ok(…)</c>; it would bind to this property. Same family of trap that forced
+/// <see cref="CostHistoryResponse"/>'s factory to be called <c>FromReport</c>.</para>
+///
+/// <para>⚠️ The three counts are computed over the result list by state
+/// (<c>Drifted</c>/<c>Unknown</c>/<c>InSync</c>), so unlike the upgrade envelope they ARE disjoint
+/// and DO sum to the row count — every result has exactly one state.</para>
+/// </summary>
+public sealed record DriftReportResponse(
+    DateTime GeneratedAt,
+    int DriftedCount,
+    int UnknownCount,
+    int InSyncCount,
+    IEnumerable<DriftResultResponse> Results)
+{
+    /// <summary>
+    /// ⚠️ <b>Named arguments.</b> Three adjacent <c>int</c>s over one list; a positional swap
+    /// would report the in-sync count as the drifted count, which is the number an operator acts
+    /// on and the direction that reads as "all fine".
+    /// </summary>
+    public static DriftReportResponse FromReport(
+        EntKube.Web.Services.Upgrades.DriftReport report) =>
+        new(
+            GeneratedAt: report.GeneratedAt,
+            DriftedCount: report.DriftedCount,
+            UnknownCount: report.UnknownCount,
+            InSyncCount: report.InSyncCount,
+            Results: report.Results.Select(DriftResultResponse.From));
+}
+
+/// <summary>
+/// One deployment's drift standing.
+///
+/// <para>⚠️ <b><c>ns</c> is NON-nullable here, unlike the <c>ns</c> on
+/// <see cref="DeploymentResponse"/>.</b> <c>DriftResult.Namespace</c> is a <c>required
+/// string</c> — a sweep only examines deployments that resolved to a namespace — while
+/// <c>DeploymentSummary.Namespace</c> is <c>string?</c>. Do not normalise the two: widening this
+/// one would invite a client to handle a null that cannot occur, and narrowing the other would
+/// make the contract's own member unassignable.</para>
+///
+/// <para>⚠️ <b><c>note</c> is published HERE and not on the supply-chain image</b>, although
+/// <c>RunningImage.Note</c> exists and serves the same purpose — saying why a row is
+/// <c>Unknown</c> or <c>Unmanaged</c>. The asymmetry is the shipped behaviour of two routes and is
+/// reproduced on both; it is not a tidy-up to make in a transcription.</para>
+///
+/// <para><c>DriftResult</c> also carries <c>ClusterId</c>, <c>EnvironmentName</c>,
+/// <c>CustomerId</c>, <c>CustomerName</c>, <c>DiffText</c>, <c>DeprecatedApis</c> and
+/// <c>CheckedAt</c>; none has ever been on this route's wire. ⚠️ <c>DiffText</c> especially: the
+/// diff of a deployment's manifests can contain anything the manifests do.</para>
+/// </summary>
+public sealed record DriftResultResponse(
+    Guid DeploymentId,
+    string App,
+    string Deployment,
+    string Cluster,
+    string Ns,
+    string State,
+    int ChangedLines,
+    string? Note)
+{
+    /// <summary>
+    /// ⚠️ <b>Named arguments.</b> <c>App</c>, <c>Deployment</c>, <c>Cluster</c> and <c>Ns</c> are
+    /// four adjacent non-nullable strings — a positional call that put the app where the
+    /// deployment belongs would compile and would misattribute every drifted row.
+    /// </summary>
+    public static DriftResultResponse From(
+        EntKube.Web.Services.Upgrades.DriftResult result) =>
+        new(
+            DeploymentId: result.DeploymentId,
+            App: result.AppName,
+            Deployment: result.DeploymentName,
+            Cluster: result.ClusterName,
+            Ns: result.Namespace,
+            // ⚠️ By NAME: Drifted is ordinal 0, so a number here would read as a drifted row for
+            // everything and as nothing at all for a reader expecting a word.
+            State: result.State.ToString(),
+            ChangedLines: result.ChangedLines,
+            Note: result.Note);
+}
+
+/// <summary>
+/// What the last supply-chain sweep found — the envelope <c>GET /supply-chain</c> answers.
+///
+/// <para>⚠️ <b>503, not an empty 200</b>, when no sweep has completed — same contract as
+/// <see cref="DriftReportResponse"/> and for the same reason.</para>
+///
+/// <para>⚠️ <b><c>MutableTagCount</c> is on the source and is NOT emitted.</b> It is
+/// <c>Images.Count(i =&gt; !i.IsDigestPinned &amp;&amp; i.State != Unmanaged)</c> — <b>two</b>
+/// conditions, not one. A client CAN reconstruct it, because both fields are on each image:
+/// <c>images.filter(i =&gt; !i.digestPinned &amp;&amp; i.state !== "Unmanaged").length</c>.
+/// ⚠️ Reading it as "not digest-pinned" alone gives a different, larger number, because unmanaged
+/// images are excluded — so a client that tries to recover this figure from <c>digestPinned</c>
+/// by itself will disagree with the UI, which shows the source's value.</para>
+///
+/// <para>⚠️ <b>The four state counts are disjoint and the two severity totals are not counts at
+/// all.</b> <c>vulnerableCount</c>, <c>unscannedCount</c>, <c>unmanagedCount</c> and
+/// <c>cleanCount</c> partition the images by state; <c>totalCritical</c> and <c>totalHigh</c> are
+/// SUMS of findings across images, so they can exceed the image count and say nothing about how
+/// many images are affected.</para>
+///
+/// <para><c>warnings</c> is a list of strings explaining why a sweep was partial — it is published
+/// and must stay published, because an empty warnings list is how a caller knows the counts are
+/// complete.</para>
+/// </summary>
+public sealed record SupplyChainReportResponse(
+    DateTime GeneratedAt,
+    int VulnerableCount,
+    int UnscannedCount,
+    int UnmanagedCount,
+    int CleanCount,
+    int TotalCritical,
+    int TotalHigh,
+    IReadOnlyList<string> Warnings,
+    IEnumerable<SupplyChainImageResponse> Images)
+{
+    /// <summary>
+    /// ⚠️ <b>Named arguments, and here there are SIX adjacent <c>int</c>s.</b> Four partition the
+    /// images by state and two sum severities across them, so a positional swap would compile and
+    /// would report a severity total as a number of images — the figure a security review reads
+    /// first.
+    /// </summary>
+    public static SupplyChainReportResponse FromReport(
+        EntKube.Web.Services.SupplyChain.SupplyChainReport report) =>
+        new(
+            GeneratedAt: report.GeneratedAt,
+            VulnerableCount: report.VulnerableCount,
+            UnscannedCount: report.UnscannedCount,
+            UnmanagedCount: report.UnmanagedCount,
+            CleanCount: report.CleanCount,
+            TotalCritical: report.TotalCritical,
+            TotalHigh: report.TotalHigh,
+            Warnings: report.Warnings,
+            Images: report.Images.Select(SupplyChainImageResponse.From));
+}
+
+/// <summary>
+/// One running image's scan standing.
+///
+/// <para>⚠️ <b>The three counts come from a NULLABLE scan and are 0 when there is none.</b>
+/// <c>CriticalCount</c>, <c>HighCount</c> and <c>FixableCount</c> are <c>Scan?.X ?? 0</c> on the
+/// source, so an image that was never scanned reports <c>critical: 0</c> — which is NOT "no
+/// critical vulnerabilities". <c>state</c> is the field that distinguishes them:
+/// <c>Unscanned</c> means unknown, <c>Clean</c> means measured and clear. A client that sorts by
+/// <c>critical</c> puts every unscanned image beside the genuinely clean ones.</para>
+///
+/// <para>⚠️ <b><c>note</c> is NOT published here</b>, although <c>RunningImage.Note</c> exists and
+/// explains why an image is <c>Unscanned</c> or <c>Unmanaged</c> — exactly what
+/// <see cref="DriftResultResponse"/> publishes its own <c>note</c> for. Reproduced as shipped. The
+/// consequence is that the one field which would explain a 0 is the one a caller cannot see.</para>
+///
+/// <para><c>RunningImage</c> also carries <c>ClusterId</c>, <c>Scan</c>, <c>Registry</c>,
+/// <c>Project</c>, <c>Repository</c> and <c>Reference</c>; none has ever been on the wire.</para>
+/// </summary>
+public sealed record SupplyChainImageResponse(
+    string Image,
+    string Cluster,
+    string State,
+    int Critical,
+    int High,
+    int Fixable,
+    bool DigestPinned,
+    IReadOnlyList<string> Workloads)
+{
+    /// <summary>
+    /// ⚠️ <b>Named arguments.</b> <c>Critical</c>, <c>High</c> and <c>Fixable</c> are three
+    /// adjacent <c>int</c>s on three different meanings — two severities and a remediability — so
+    /// a positional swap would compile and would report fixable findings as critical ones.
+    ///
+    /// <para>⚠️ <c>digestPinned</c> drops the <c>Is</c> prefix, which is the opposite of
+    /// <see cref="ErrorBudgetResponse.IsBreached"/> keeping it. Both are the shipped spellings;
+    /// the renames are per-route history, not a house rule.</para>
+    /// </summary>
+    public static SupplyChainImageResponse From(
+        EntKube.Web.Services.SupplyChain.RunningImage image) =>
+        new(
+            Image: image.Image,
+            Cluster: image.ClusterName,
+            // ⚠️ By NAME: Vulnerable is ordinal 0.
+            State: image.State.ToString(),
+            Critical: image.CriticalCount,
+            High: image.HighCount,
+            Fixable: image.FixableCount,
+            DigestPinned: image.IsDigestPinned,
+            Workloads: image.Workloads);
+}
