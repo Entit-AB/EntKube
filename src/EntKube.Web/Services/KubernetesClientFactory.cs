@@ -1828,13 +1828,8 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             // MongoDB Community Operator names StatefulSet pods {cluster}-0, {cluster}-1, ...
             string primaryPod = $"{clusterName}-0";
 
-            string mongoshArgs = !string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password)
-                ? $"--username {username} --password {password} --authenticationDatabase admin --quiet"
-                : "--quiet";
-
             return await RunKubectlWithStdinAsync(
-                $"exec -i {primaryPod} -n {ns} --kubeconfig={kubeconfigPath} -- mongosh {mongoshArgs}",
-                script, ct);
+                MongoshExecArgs(primaryPod, ns, kubeconfigPath, username, password), script, ct);
         }
         finally
         {
@@ -1898,22 +1893,7 @@ public class KubernetesClientFactory : IKubernetesClientFactory
             // kubectl's cache at /tmp. Auth uses embedded certs, so HOME doesn't affect it.
             startInfo.EnvironmentVariables["HOME"] = "/tmp";
 
-            startInfo.ArgumentList.Add("exec");
-            if (verbose) startInfo.ArgumentList.Add("--v=6");
-            startInfo.ArgumentList.Add(podName);
-            startInfo.ArgumentList.Add("-n");
-            startInfo.ArgumentList.Add(ns);
-            startInfo.ArgumentList.Add($"--kubeconfig={kubeconfigPath}");
-            startInfo.ArgumentList.Add("--");
-
-            if (envVars is { Count: > 0 })
-            {
-                startInfo.ArgumentList.Add("env");
-                foreach (KeyValuePair<string, string> kv in envVars)
-                    startInfo.ArgumentList.Add($"{kv.Key}={kv.Value}");
-            }
-
-            foreach (string arg in command)
+            foreach (string arg in PodCommandArgs(podName, ns, kubeconfigPath, command, envVars, verbose))
                 startInfo.ArgumentList.Add(arg);
 
             using Process process = new() { StartInfo = startInfo };
@@ -2076,27 +2056,8 @@ public class KubernetesClientFactory : IKubernetesClientFactory
                 CreateNoWindow = true
             };
 
-            startInfo.ArgumentList.Add("exec");
-            startInfo.ArgumentList.Add("-i");
-            startInfo.ArgumentList.Add(podName);
-            startInfo.ArgumentList.Add("-n");
-            startInfo.ArgumentList.Add(ns);
-            startInfo.ArgumentList.Add($"--kubeconfig={kubeconfigPath}");
-            startInfo.ArgumentList.Add("--");
-
-            if (!string.IsNullOrEmpty(password))
-            {
-                startInfo.ArgumentList.Add("env");
-                startInfo.ArgumentList.Add($"PGPASSWORD={password}");
-            }
-
-            startInfo.ArgumentList.Add("psql");
-            startInfo.ArgumentList.Add("-U");
-            startInfo.ArgumentList.Add(username);
-            // Force TCP so pg_hba host rules apply (not peer/local socket rules).
-            startInfo.ArgumentList.Add("-h");
-            startInfo.ArgumentList.Add("127.0.0.1");
-            startInfo.ArgumentList.Add("-t");
+            foreach (string arg in PsqlExecArgs(podName, ns, kubeconfigPath, username, password))
+                startInfo.ArgumentList.Add(arg);
 
             using Process process = new() { StartInfo = startInfo };
             process.Start();
@@ -2202,6 +2163,138 @@ public class KubernetesClientFactory : IKubernetesClientFactory
     /// where passing the content as command-line arguments would break due to
     /// shell escaping and argument splitting in Process.
     /// </summary>
+    /// <summary>
+    /// The argument vector for running a mongosh script on a replica set's primary.
+    ///
+    /// <para>⚠️ <b>Extracted so it can be asserted, and it replaced an <c>Arguments</c>
+    /// STRING.</b> The previous form interpolated the credentials into one command line, which
+    /// .NET then split on whitespace: a password containing a space arrived as two arguments and a
+    /// password containing a quote could corrupt the command line altogether — the hazard the
+    /// psql path's own comment says <c>ArgumentList</c> exists to avoid. It could not fire today,
+    /// because <c>GeneratePassword</c> yields base64 with <c>+</c> and <c>/</c> substituted, so
+    /// every password reaching here is <c>[A-Za-z0-9xy]{32}</c>. It was one generator change away
+    /// from firing, and a mis-split password produces a command that may still run — against the
+    /// wrong credentials — rather than an error.</para>
+    ///
+    /// <para>⚠️ <b>The password is STILL on this argument vector</b>, which is a separate and
+    /// unfixed problem — see <c>KubectlExecArgvTests</c>, which bounds the set of invocations that
+    /// do this. Passing it as an argument means it appears in the EntKube host's process table
+    /// (<c>ps</c>, <c>/proc/&lt;pid&gt;/cmdline</c>) for the life of the call, and in the database
+    /// pod's. Process command lines are routinely collected by security and observability agents,
+    /// so the value can leave the host entirely. Fixing it means getting the secret to the
+    /// in-pod process without an argument, which changes how admin scripts are executed and
+    /// cannot be verified without a cluster.</para>
+    /// </summary>
+    public static IReadOnlyList<string> MongoshExecArgs(
+        string primaryPod, string ns, string kubeconfigPath, string? username, string? password)
+    {
+        List<string> args =
+        [
+            "exec", "-i", primaryPod, "-n", ns, $"--kubeconfig={kubeconfigPath}", "--", "mongosh",
+        ];
+
+        if (!string.IsNullOrEmpty(username) && !string.IsNullOrEmpty(password))
+        {
+            // ⚠️ Each element added separately. Never one interpolated string: that is what
+            // reintroduces the splitting this method exists to have removed.
+            args.Add("--username");
+            args.Add(username);
+            args.Add("--password");
+            args.Add(password);
+            args.Add("--authenticationDatabase");
+            args.Add("admin");
+        }
+
+        args.Add("--quiet");
+        return args;
+    }
+
+    /// <summary>
+    /// The argument vector for running SQL on a Postgres pod through <c>psql</c>.
+    ///
+    /// <para>⚠️ <b>The interface's doc comment used to claim the password "never appears in the
+    /// process argument list". It does.</b> <c>env PGPASSWORD=…</c> as a command ARGUMENT puts the
+    /// value in argv — of the local <c>kubectl</c> process and of the in-pod <c>env</c> — which is
+    /// exactly what the comment said was being avoided. Using an environment variable rather than
+    /// <c>psql</c>'s own password options was the right instinct; delivering it through
+    /// <c>env</c> on the command line defeats it. See <c>KubectlExecArgvTests</c>.</para>
+    /// </summary>
+    public static IReadOnlyList<string> PsqlExecArgs(
+        string podName, string ns, string kubeconfigPath, string username, string? password)
+    {
+        List<string> args = ["exec", "-i", podName, "-n", ns, $"--kubeconfig={kubeconfigPath}", "--"];
+
+        if (!string.IsNullOrEmpty(password))
+        {
+            args.Add("env");
+            args.Add($"PGPASSWORD={password}");
+        }
+
+        args.Add("psql");
+        args.Add("-U");
+        args.Add(username);
+        // Force TCP so pg_hba host rules apply (not peer/local socket rules).
+        args.Add("-h");
+        args.Add("127.0.0.1");
+        args.Add("-t");
+        return args;
+    }
+
+    /// <summary>
+    /// The argument vector for an arbitrary command on a pod, with optional environment variables.
+    ///
+    /// <para>⚠️ Any value in <paramref name="envVars"/> lands in argv. <c>PGPASSWORD</c> for
+    /// <c>pg_dump</c> is the live case. See <c>KubectlExecArgvTests</c>.</para>
+    /// </summary>
+    public static IReadOnlyList<string> PodCommandArgs(
+        string podName, string ns, string kubeconfigPath, IReadOnlyList<string> command,
+        IReadOnlyDictionary<string, string>? envVars, bool verbose)
+    {
+        List<string> args = ["exec"];
+        if (verbose) args.Add("--v=6");
+        args.Add(podName);
+        args.Add("-n");
+        args.Add(ns);
+        args.Add($"--kubeconfig={kubeconfigPath}");
+        args.Add("--");
+
+        if (envVars is { Count: > 0 })
+        {
+            args.Add("env");
+            foreach (KeyValuePair<string, string> kv in envVars)
+                args.Add($"{kv.Key}={kv.Value}");
+        }
+
+        args.AddRange(command);
+        return args;
+    }
+
+    /// <summary>
+    /// ⚠️ Overload taking an argument VECTOR rather than a command line. The string overload
+    /// leaves .NET to split on whitespace, which is wrong for any value that might contain one.
+    /// </summary>
+    private static async Task<string> RunKubectlWithStdinAsync(
+        IReadOnlyList<string> arguments, string stdinContent, CancellationToken ct)
+    {
+        using Process process = new()
+        {
+            StartInfo = new ProcessStartInfo
+            {
+                FileName = "kubectl",
+                RedirectStandardInput = true,
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false,
+                CreateNoWindow = true,
+            },
+        };
+
+        foreach (string arg in arguments)
+            process.StartInfo.ArgumentList.Add(arg);
+
+        return await RunKubectlProcessWithStdinAsync(process, stdinContent, ct);
+    }
+
     private static async Task<string> RunKubectlWithStdinAsync(
         string arguments, string stdinContent, CancellationToken ct)
     {
@@ -2218,6 +2311,18 @@ public class KubernetesClientFactory : IKubernetesClientFactory
                 CreateNoWindow = true
             }
         };
+
+        return await RunKubectlProcessWithStdinAsync(process, stdinContent, ct);
+    }
+
+    /// <summary>
+    /// Starts a prepared <c>kubectl</c> process, writes <paramref name="stdinContent"/> and
+    /// returns its stdout. Shared by both <c>RunKubectlWithStdinAsync</c> overloads so the
+    /// deadlock-avoidance below exists once rather than twice.
+    /// </summary>
+    private static async Task<string> RunKubectlProcessWithStdinAsync(
+        Process process, string stdinContent, CancellationToken ct)
+    {
         // The container user's real HOME (/home/appuser) is not writable, so point
         // kubectl's cache at /tmp. Auth uses embedded certs, so HOME doesn't affect it.
         process.StartInfo.EnvironmentVariables["HOME"] = "/tmp";

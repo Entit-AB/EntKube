@@ -380,8 +380,19 @@ public interface IKubernetesClientFactory
 
     /// <summary>
     /// Executes SQL on an arbitrary Postgres pod via kubectl exec + psql.
-    /// The admin password is passed via the PGPASSWORD environment variable so it
-    /// never appears in the process argument list.
+    ///
+    /// <para>⚠️ <b>This comment used to say the password "never appears in the process argument
+    /// list". That was false.</b> The password is delivered as <c>env PGPASSWORD=…</c>, and
+    /// <c>env</c> is invoked as the in-pod COMMAND — so the value is an argument of the local
+    /// <c>kubectl</c> process and of the in-pod <c>env</c>. It is visible in <c>ps</c> and
+    /// <c>/proc/&lt;pid&gt;/cmdline</c> on the EntKube host for the life of the call, and process
+    /// command lines are routinely collected by security and observability agents, so it can
+    /// leave the host.</para>
+    ///
+    /// <para>Preferring an environment variable to <c>psql</c>'s own password options was the
+    /// right instinct; delivering it through <c>env</c> on the command line defeats it. See
+    /// <c>KubernetesClientFactory.PsqlExecArgs</c> and <c>KubectlExecArgvTests</c>, which bounds
+    /// the set of invocations that still do this.</para>
     /// </summary>
     Task ExecuteSqlOnPodAsync(string podName, string ns, string sql, string kubeconfig, ChangeIntent intent,
         string username = "postgres", string? password = null, CancellationToken ct = default);
@@ -397,7 +408,9 @@ public interface IKubernetesClientFactory
     /// Runs an arbitrary command on a pod (no stdin) and returns stdout.
     /// Used for pg_dump, which writes the dump to stdout.
     /// Environment variables (e.g. PGPASSWORD) are set via ArgumentList so
-    /// special characters in values are never misinterpreted.
+    /// special characters in values are never misinterpreted. ⚠️ That protects the QUOTING, not
+    /// the value: every envVar lands in the argument list and so in the process table. See
+    /// <c>KubectlExecArgvTests</c>.
     /// </summary>
     Task<string> RunCommandOnPodAsync(string podName, string ns, IReadOnlyList<string> command,
         string kubeconfig, ChangeIntent intent, IReadOnlyDictionary<string, string>? envVars = null,
