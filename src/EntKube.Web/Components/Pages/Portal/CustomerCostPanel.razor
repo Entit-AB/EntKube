@@ -41,12 +41,20 @@ else
                     {
                         <div class="display-6 fw-semibold">@Spent(spent.TotalCost)</div>
                         <div class="text-muted small">
-                            @if (spent.PreviousTotalCost > 0m)
+                            @*
+                                ⚠️ Keyed on ChangeFraction, not on PreviousTotalCost, and the figure is a
+                                DAILY RATE. This read `Change > 0` for its colour and sign — a
+                                difference between two totals the ledger measured to different
+                                extents — so a customer whose spending had not moved was shown a
+                                green saving on every visit, because this window always ends today
+                                and so holds a part day while the one before it does not.
+                            *@
+                            @if (spent.ChangeFraction is double changeFraction)
                             {
-                                <span class="@(spent.Change > 0m ? "text-danger" : spent.Change < 0m ? "text-success" : "")">
-                                    @($"{(spent.Change > 0m ? "+" : "")}{spent.ChangeFraction * 100:N0}%")
+                                <span class="@(changeFraction > 0d ? "text-danger" : changeFraction < 0d ? "text-success" : "")">
+                                    @($"{(changeFraction > 0d ? "+" : "")}{changeFraction * 100:N0}%")
                                 </span>
-                                <span>on the 30 days before</span>
+                                <span>a day on the 30 days before</span>
                             }
                             else
                             {

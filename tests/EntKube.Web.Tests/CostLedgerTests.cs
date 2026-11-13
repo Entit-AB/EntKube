@@ -329,6 +329,13 @@ public class CostLedgerTests : IDisposable
         // which reads as nothing having happened.
         await SeedDayAsync(Noon.AddDays(-3), cost: 40m, appName: "batch");
 
+        // ⚠️ A second app in THIS window, so the window is measured. Without it nothing in
+        // the requested window has a coverage row, and "batch is gone" is not something the
+        // ledger knows — it could be running and unwatched. `IsGone` now requires this window to
+        // have been measured, because otherwise an installation whose ledger had simply stopped
+        // retired every line it had and showed a −100% saving against each.
+        await SeedDayAsync(Noon.AddDays(-1), cost: 5m, appName: "web");
+
         CostHistoryReport report = await history.GetHistoryAsync(
             tenantId, Noon.AddDays(-1), Noon, CostGroupBy.App, Noon);
 
@@ -342,6 +349,12 @@ public class CostLedgerTests : IDisposable
     [Fact]
     public async Task A_line_that_is_new_this_period_has_no_percentage_change()
     {
+        // ⚠️ The earlier window has to have been MEASURED for "new" to mean anything, so
+        // something else is seeded into it. Without this the earlier window has no coverage row
+        // at all, and every line of every report was "new" — which is the state of any window
+        // wider than the installation is old.
+        await SeedDayAsync(Noon.AddDays(-2), cost: 5m, appName: "old-thing");
+
         await SeedDayAsync(Noon.AddDays(-1), cost: 15m, appName: "new-thing");
 
         CostHistoryReport report = await history.GetHistoryAsync(

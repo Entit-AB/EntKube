@@ -1,6 +1,7 @@
 using EntKube.Web.Data;
 using EntKube.Web.Data.Modules;
 using Microsoft.EntityFrameworkCore;
+using System.Globalization;
 
 namespace EntKube.Web.Services.Cost;
 
@@ -79,21 +80,71 @@ public sealed record CostHistoryGroup
     /// <summary>Cost in the window of the same length immediately before it.</summary>
     public decimal PreviousCost { get; init; }
 
+    /// <summary>
+    /// The difference in money recorded. ⚠️ Recorded, not incurred: the two windows are not
+    /// necessarily measured to the same extent, so this is a bookkeeping difference. The question
+    /// a reader means — "is this line costing more?" — is <see cref="ChangeFraction"/>.
+    /// </summary>
     public decimal Change => Cost - PreviousCost;
 
     /// <summary>
-    /// Relative change, or null when there is nothing to compare against — a line that
-    /// did not exist last period has no percentage, and reporting one as +100% or ∞
-    /// would invent a trend out of an appearance.
+    /// Whole days' worth of measurement in the requested window, and in the one before it. Both
+    /// are properties of the <em>window</em> rather than of this line — coverage is recorded per
+    /// cluster-day, not per customer or app — so every line in one report carries the same pair.
+    ///
+    /// <para>They are here because without them a line cannot tell a cheap window from an
+    /// unwatched one, which is the whole of this record's comparison.</para>
+    /// </summary>
+    public decimal MeasuredDays { get; init; }
+
+    /// <inheritdoc cref="MeasuredDays"/>
+    public decimal PreviousMeasuredDays { get; init; }
+
+    /// <summary>What this line cost per measured day in the requested window.</summary>
+    public decimal DailyAverage => MeasuredDays > 0m ? Cost / MeasuredDays : 0m;
+
+    /// <summary>What it cost per measured day in the window before it.</summary>
+    public decimal PreviousDailyAverage =>
+        PreviousMeasuredDays > 0m ? PreviousCost / PreviousMeasuredDays : 0m;
+
+    /// <summary>
+    /// Relative change, or null when there is nothing to compare against.
+    ///
+    /// <para>⚠️ <b>Daily rate against daily rate, not total against total, and that is the
+    /// correction.</b> The two windows are not measured to the same extent — the requested one
+    /// ends today and so holds a part day, and the earlier one may reach back before the ledger
+    /// was running at all — so dividing one total by the other reports the difference in
+    /// <em>watching</em> as a difference in <em>spending</em>. A line costing a steady 100 a day
+    /// came out as +133% when the earlier window had three measured days of seven, and as a 7%
+    /// saving on every ordinary render, because the window always ends mid-day.</para>
+    ///
+    /// <para>Null when there is no earlier rate to divide by — a line that did not exist last
+    /// window, or a window that was never measured. Reporting +100% or ∞ for either would invent
+    /// a trend out of an appearance.</para>
     /// </summary>
     public double? ChangeFraction =>
-        PreviousCost > 0m ? (double)(Change / PreviousCost) : null;
+        MeasuredDays > 0m && PreviousDailyAverage > 0m
+            ? (double)((DailyAverage - PreviousDailyAverage) / PreviousDailyAverage)
+            : null;
 
-    /// <summary>True when this line is new in this window.</summary>
-    public bool IsNew => PreviousCost == 0m && Cost > 0m;
+    /// <summary>
+    /// True when this line is new in this window.
+    ///
+    /// <para>⚠️ Requires the earlier window to have been measured at all. Without that every
+    /// line of every report was "new" whenever the window reached back before the ledger's first
+    /// day — which is every window wider than the installation is old.</para>
+    ///
+    /// <para>A residual remains and is not fixable from here: an earlier window measured in part
+    /// can hold a line only in its unmeasured days, and this will call that line new. Narrowing it
+    /// further would need per-line coverage, which the ledger does not record.</para>
+    /// </summary>
+    public bool IsNew => PreviousMeasuredDays > 0m && PreviousCost == 0m && Cost > 0m;
 
-    /// <summary>True when this line was there last window and is gone from this one.</summary>
-    public bool IsGone => Cost == 0m && PreviousCost > 0m;
+    /// <summary>
+    /// True when this line was there last window and is gone from this one — and, likewise, only
+    /// when this window was measured, or an unwatched window would retire every line in it.
+    /// </summary>
+    public bool IsGone => MeasuredDays > 0m && Cost == 0m && PreviousCost > 0m;
 
     public double CpuCoreHours { get; init; }
     public double MemoryGiBHours { get; init; }
@@ -121,10 +172,59 @@ public sealed record CostHistoryReport
     /// <summary>The same length of time immediately before <see cref="From"/>.</summary>
     public decimal PreviousTotalCost { get; init; }
 
+    /// <summary>
+    /// The difference in money recorded between the two windows.
+    ///
+    /// <para>⚠️ <b>Recorded, not incurred.</b> The two windows are not necessarily measured to
+    /// the same extent, so this subtracts two figures of different coverage and is a bookkeeping
+    /// difference rather than a trend. <see cref="ChangeFraction"/> is the one that answers "are
+    /// we spending more?", and it is deliberately on a different basis — see its own remarks.</para>
+    /// </summary>
     public decimal Change => TotalCost - PreviousTotalCost;
 
+    /// <summary>
+    /// How much more or less this window cost than the one before it, as a fraction — or null
+    /// when there is nothing sound to compare against.
+    ///
+    /// <para>⚠️ <b>Daily rate against daily rate, not total against total.</b> This divided
+    /// <see cref="TotalCost"/> by <see cref="PreviousTotalCost"/>, and the earlier window's
+    /// coverage was never even fetched — the coverage query stopped at <see cref="From"/>. So the
+    /// comparison was between two windows measured to unknown and unequal degrees, and reported
+    /// the difference in <em>watching</em> as a difference in <em>spending</em>:</para>
+    ///
+    /// <list type="bullet">
+    /// <item><b>A fabricated rise.</b> A tenant spending a steady 100 a day, whose ledger started
+    /// four days into the earlier window, had 700 against 300 — <b>+133%</b>, in red, on the Cost
+    /// tab and in <c>changeFraction</c> of <c>GET /api/v1/cost/history</c>.</item>
+    /// <item><b>A fabricated saving, on every render.</b> The window always ends today, so the
+    /// requested window holds a part day and the earlier one does not: seven days at 100 against
+    /// six days and a half-elapsed today came out as <b>−7.1%</b>, rendered green, for a tenant
+    /// whose spending had not moved at all.</item>
+    /// </list>
+    ///
+    /// <para>The second one was the worse of the two: it was there every time anybody looked, it
+    /// always pointed the same way, and the colour said the thing a reader wanted to believe. It
+    /// also contradicted this file's own rule, that an hour never measured is reported as
+    /// unmeasured rather than as free — and <c>CostCoverageResponse</c>'s own doc, which says
+    /// coverage travels beside every total because "a caller that cannot see the shortfall reads
+    /// it as a saving".</para>
+    ///
+    /// <para>Null when <see cref="PreviousDailyAverage"/> is zero — nothing was recorded in the
+    /// earlier window, or it was never measured — and null when this window was never measured
+    /// either, because 0 over a rate is a 100% saving and an unwatched window is not a free one.
+    /// <see cref="ComparableToPrevious"/> is the same condition, named, for a caller that wants to
+    /// know before it reads.</para>
+    /// </summary>
     public double? ChangeFraction =>
-        PreviousTotalCost > 0m ? (double)(Change / PreviousTotalCost) : null;
+        ComparableToPrevious && PreviousDailyAverage > 0m
+            ? (double)((DailyAverage - PreviousDailyAverage) / PreviousDailyAverage)
+            : null;
+
+    /// <summary>
+    /// True when both windows hold some measurement, so a comparison between them means
+    /// something. False for a window the ledger was not running in — at either end.
+    /// </summary>
+    public bool ComparableToPrevious => MeasuredDays > 0m && PreviousMeasuredDays > 0m;
 
     /// <summary>Cost that reached no customer.</summary>
     public decimal UnattributedCost { get; init; }
@@ -148,6 +248,62 @@ public sealed record CostHistoryReport
 
     /// <summary>Hours explicitly recorded as unmeasured — the plane was down, or a cluster could not be read.</summary>
     public decimal GapHours { get; init; }
+
+    /// <summary>
+    /// The same three figures for the window immediately before this one.
+    ///
+    /// <para>⚠️ <b>These used not to exist, and that is what made the comparison wrong.</b> The
+    /// coverage query ran from <see cref="From"/>, so the earlier window's money was fetched and
+    /// its measurement was not — leaving <see cref="PreviousTotalCost"/> as the one total in this
+    /// record with no coverage beside it, in a record whose every other total carries some.</para>
+    /// </summary>
+    public decimal PreviousCoveredHours { get; init; }
+
+    /// <inheritdoc cref="PreviousCoveredHours"/>
+    public decimal PreviousExpectedHours { get; init; }
+
+    /// <inheritdoc cref="PreviousCoveredHours"/>
+    public decimal PreviousGapHours { get; init; }
+
+    /// <summary>
+    /// Whole days' worth of measurement in the earlier window, a part day counting as its
+    /// fraction — <see cref="MeasuredDays"/> for the other window.
+    ///
+    /// <para>Set by the service rather than derived here, because the earlier window's days are
+    /// not shipped: it exists only to be compared against, and a second <see cref="Daily"/> would
+    /// double the size of every response for a number shown in a corner.</para>
+    /// </summary>
+    public decimal PreviousMeasuredDays { get; init; }
+
+    /// <summary>Days in the earlier window with no coverage record at all.</summary>
+    public int PreviousUnmeasuredDays { get; init; }
+
+    /// <summary>
+    /// Days the earlier window spans. Normally the same as this window's, and fewer only when the
+    /// subtraction was clamped at the first day <see cref="DateTime"/> can represent.
+    /// </summary>
+    public int PreviousDays { get; init; }
+
+    /// <summary>How much of the earlier window the ledger accounts for, 0–1.</summary>
+    public double PreviousCompleteness =>
+        PreviousExpectedHours > 0m
+            ? Math.Min(1d, (double)(PreviousCoveredHours / PreviousExpectedHours))
+            : 1d;
+
+    /// <summary>
+    /// True when the earlier window was measured essentially end to end — both tests, for the
+    /// reason <see cref="IsComplete"/> gives: completeness alone is 1.0 for a window that reaches
+    /// back before the ledger's first day.
+    /// </summary>
+    public bool PreviousIsComplete =>
+        PreviousCompleteness >= 0.99d && PreviousUnmeasuredDays == 0;
+
+    /// <summary>
+    /// What the earlier window cost per measured day — the figure
+    /// <see cref="ChangeFraction"/> compares <see cref="DailyAverage"/> against.
+    /// </summary>
+    public decimal PreviousDailyAverage =>
+        PreviousMeasuredDays > 0m ? PreviousTotalCost / PreviousMeasuredDays : 0m;
 
     /// <summary>
     /// How much of the window the ledger actually accounts for, 0–1. An incomplete window
@@ -387,9 +543,14 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
             .Where(e => clusterId == null || e.ClusterId == clusterId)
             .SumAsync(e => e.CpuCost + e.MemoryCost + e.StorageCost + e.NetworkCost, ct);
 
+        // ⚠️ `previousStart`, not `start`. This query used to begin where the window does, which
+        // left the earlier window's money fetched and its measurement not — so the comparison
+        // divided two totals of unequal coverage and reported the difference in watching as a
+        // difference in spending. The ledger rows above already span both windows in one pass for
+        // exactly this reason; the coverage rows had been left behind.
         List<CoverageRow> coverage = await db.CostLedgerCoverages
             .AsNoTracking()
-            .Where(c => c.TenantId == tenantId && c.Day >= start && c.Day <= end)
+            .Where(c => c.TenantId == tenantId && c.Day >= previousStart && c.Day <= end)
             .Where(c => clusterId == null || c.ClusterId == clusterId)
             .Select(c => new CoverageRow
             {
@@ -405,8 +566,16 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
         List<LedgerRow> current = [.. rows.Where(r => r.Day >= start)];
         List<LedgerRow> previous = [.. rows.Where(r => r.Day < start)];
 
+        List<CoverageRow> currentCoverage = [.. coverage.Where(c => c.Day >= start)];
+        List<CoverageRow> previousCoverage = [.. coverage.Where(c => c.Day < start)];
+
+        // `openedOn` spans the whole ledger, so it answers for both windows; `now` is passed to
+        // both because a window placed in the future puts today in the EARLIER one.
         Dictionary<DateTime, (decimal Covered, decimal Expected, decimal Nominal)> byDay =
-            ExpectedCoverage(coverage, openedOn, now);
+            ExpectedCoverage(currentCoverage, openedOn, now);
+
+        Dictionary<DateTime, (decimal Covered, decimal Expected, decimal Nominal)> previousByDay =
+            ExpectedCoverage(previousCoverage, openedOn, now);
 
         List<CostHistoryPoint> daily = [];
         // ⚠️ Indexed rather than `for (day = start; day <= end; day = day.AddDays(1))`. That form
@@ -439,7 +608,19 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
 
         decimal coveredHours = byDay.Values.Sum(v => v.Covered);
         decimal expectedHours = byDay.Values.Sum(v => v.Expected);
-        decimal gapHours = coverage.Sum(c => c.GapHours);
+        decimal gapHours = currentCoverage.Sum(c => c.GapHours);
+
+        // The earlier window, on the same construction as the requested one. MeasuredDayFraction
+        // is inlined rather than borrowed from a CostHistoryPoint because the earlier window's
+        // days are not built: nothing ships them, and nothing needs them one at a time.
+        int previousDays = (int)(start - previousStart).TotalDays;
+        decimal previousCoveredHours = previousByDay.Values.Sum(v => v.Covered);
+        decimal previousExpectedHours = previousByDay.Values.Sum(v => v.Expected);
+        decimal previousGapHours = previousCoverage.Sum(c => c.GapHours);
+        decimal previousMeasuredDays = previousByDay.Values
+            .Sum(v => v.Nominal > 0m ? Math.Min(1m, v.Covered / v.Nominal) : 0m);
+        int previousUnmeasuredDays =
+            previousDays - previousByDay.Count(e => e.Value.Expected > 0m);
 
         if (expectedHours > 0m && coveredHours < expectedHours * 0.99m)
         {
@@ -463,6 +644,27 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
                 + $"{daily.Count - unmeasuredDays} days.");
         }
 
+        // ⚠️ Said only when a percentage is actually shown. With nothing measured in the
+        // earlier window ChangeFraction is null and the page prints a dash, which needs no
+        // explaining; with it measured in PART, a rate is extrapolated from that part and the
+        // reader is entitled to know how much of it there was.
+        if (previousMeasuredDays > 0m && previousMeasuredDays < previousDays * 0.99m)
+        {
+            // ⚠️ Formatted invariantly, unlike the two warnings above, and the difference is not
+            // cosmetic: this is the first of them to carry a FRACTIONAL figure, and the list it
+            // joins is returned verbatim in `warnings` of GET /api/v1/cost/history. On a host
+            // running under a Swedish locale — which this installation's own machines do — the
+            // first run of this said "3,0", which a client parsing the sentence reads as thirty.
+            // The integer warnings above are separator-free and so were never exposed to it.
+            warnings.Add(
+                $"The {previousDays} days before this window were measured for only "
+                + previousMeasuredDays.ToString("F1", CultureInfo.InvariantCulture)
+                + " of them, so the change shown against them extrapolates their daily rate "
+                + "from the part that was measured.");
+        }
+
+        decimal measuredDays = daily.Sum(d => d.MeasuredDayFraction);
+
         return new CostHistoryReport
         {
             From = start,
@@ -470,7 +672,7 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
             GroupBy = groupBy,
             Currency = currencies.Count == 1 ? currencies.First() : currencies.Count == 0 ? "USD" : "—",
             Daily = daily,
-            Groups = Group(current, previous, groupBy),
+            Groups = Group(current, previous, groupBy, measuredDays, previousMeasuredDays),
             TotalCost = current.Sum(r => r.Cost),
             PreviousTotalCost = previous.Sum(r => r.Cost),
             UnattributedCost = current.Where(r => r.CustomerId is null).Sum(r => r.Cost),
@@ -480,6 +682,12 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
             CoveredHours = coveredHours,
             ExpectedHours = expectedHours,
             GapHours = gapHours,
+            PreviousCoveredHours = previousCoveredHours,
+            PreviousExpectedHours = previousExpectedHours,
+            PreviousGapHours = previousGapHours,
+            PreviousMeasuredDays = previousMeasuredDays,
+            PreviousUnmeasuredDays = previousUnmeasuredDays,
+            PreviousDays = previousDays,
             Warnings = warnings,
         };
     }
@@ -628,8 +836,19 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
         return byDay;
     }
 
+    /// <summary>
+    /// The breakdown, each line carrying the window-level measured-day counts.
+    ///
+    /// <para>⚠️ The two denominators are passed in rather than derived per line: coverage is
+    /// recorded per cluster-day, so there is no such thing as a customer's or an app's share of
+    /// it. Every line gets the same pair, and uses it to compare rates instead of totals.</para>
+    /// </summary>
     private static IReadOnlyList<CostHistoryGroup> Group(
-        List<LedgerRow> current, List<LedgerRow> previous, CostGroupBy groupBy)
+        List<LedgerRow> current,
+        List<LedgerRow> previous,
+        CostGroupBy groupBy,
+        decimal measuredDays,
+        decimal previousMeasuredDays)
     {
         // A line present in only one of the two windows still has to appear, or a
         // workload that was switched off would simply disappear from the comparison
@@ -646,6 +865,8 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
                 Label = g.Key.Label,
                 Cost = g.Sum(r => r.Cost),
                 PreviousCost = previousCosts.GetValueOrDefault(g.Key),
+                MeasuredDays = measuredDays,
+                PreviousMeasuredDays = previousMeasuredDays,
                 CpuCoreHours = g.Sum(r => r.CpuCoreHours),
                 MemoryGiBHours = g.Sum(r => r.MemoryGiBHours),
                 StorageGiBHours = g.Sum(r => r.StorageGiBHours),
@@ -662,6 +883,8 @@ public class CostLedgerService(IDbContextFactory<CostDbContext> dbFactory)
                     Label = key.Label,
                     Cost = 0m,
                     PreviousCost = cost,
+                    MeasuredDays = measuredDays,
+                    PreviousMeasuredDays = previousMeasuredDays,
                     IsUnattributed = key.IsUnattributed,
                 });
             }

@@ -516,19 +516,20 @@
                 </div>
                 <div class="col-6 col-md-3">
                     <div class="border rounded p-2 h-100">
-                        <div class="text-muted small" title="The same number of days immediately before this window.">
+                        <div class="text-muted small"
+                             title="This window's cost per measured day against the same figure for the @rangeDays days before it. Comparing the two totals instead would report the difference in how much was MEASURED as a difference in how much was spent.">
                             <i class="bi bi-arrow-left-right me-1"></i>vs previous @rangeDays days
                         </div>
-                        <div class="fs-4 fw-semibold @(history.Change > 0m ? "text-danger" : history.Change < 0m ? "text-success" : "")">
-                            @if (history.PreviousTotalCost == 0m)
-                            {
-                                <span class="text-muted">—</span>
-                            }
-                            else
-                            {
-                                @($"{(history.Change > 0m ? "+" : "")}{history.ChangeFraction * 100:N1}%")
-                            }
-                        </div>
+                        @if (history.ChangeFraction is double changeFraction)
+                        {
+                            <div class="fs-4 fw-semibold @(changeFraction > 0d ? "text-danger" : changeFraction < 0d ? "text-success" : "")">
+                                @($"{(changeFraction > 0d ? "+" : "")}{changeFraction * 100:N1}%")
+                            </div>
+                        }
+                        else
+                        {
+                            <div class="fs-4 fw-semibold text-muted" title="@NoComparisonReason">—</div>
+                        }
                     </div>
                 </div>
                 <div class="col-6 col-md-3">
@@ -555,7 +556,11 @@
             <div class="d-flex align-items-center justify-content-between mt-4 mb-1">
                 <h6 class="small text-muted fw-semibold mb-0">@GroupingLabel</h6>
                 <span class="small text-muted">
-                    Change is against the @rangeDays days before this window
+                    Change is the daily rate against the @rangeDays days before this window
+                    @if (!history.PreviousIsComplete && history.PreviousMeasuredDays > 0m)
+                    {
+                        <text>, measured for @history.PreviousMeasuredDays.ToString("N1") of them</text>
+                    }
                 </span>
             </div>
 
@@ -607,13 +612,13 @@
                                     <td class="text-end small">
                                         @if (group.ChangeFraction is double fraction)
                                         {
-                                            <span class="@(group.Change > 0m ? "text-danger" : group.Change < 0m ? "text-success" : "text-muted")">
-                                                @($"{(group.Change > 0m ? "+" : "")}{fraction * 100:N0}%")
+                                            <span class="@(fraction > 0d ? "text-danger" : fraction < 0d ? "text-success" : "text-muted")">
+                                                @($"{(fraction > 0d ? "+" : "")}{fraction * 100:N0}%")
                                             </span>
                                         }
                                         else
                                         {
-                                            <span class="text-muted" title="Nothing to compare against — this did not exist in the previous period.">—</span>
+                                            <span class="text-muted" title="@NoComparisonReason">—</span>
                                         }
                                     </td>
                                 </tr>
@@ -925,6 +930,21 @@
     /// </summary>
     private string HistoryMoney(decimal value) =>
         $"{value.ToString("N2")} {history?.Currency ?? "USD"}";
+
+    /// <summary>
+    /// Why the change is a dash. Three different reasons reach the same glyph, and which one it is
+    /// changes what the reader should do about it — a window older than the ledger is a thing to
+    /// wait out, an unmeasured window now is a thing to investigate.
+    /// </summary>
+    private string NoComparisonReason =>
+        history is null ? "Nothing recorded yet."
+        : history.MeasuredDays <= 0m
+            ? "Nothing in this window was measured, so there is nothing to compare."
+        : history.PreviousMeasuredDays <= 0m
+            ? $"The {rangeDays} days before this window were never measured — the ledger was not "
+              + "running then — so a comparison against them would report the gap in "
+              + "measurement as a change in spending."
+        : "Nothing to compare against: this was not there in the previous period.";
 
     private async Task LoadRatesAsync()
     {
