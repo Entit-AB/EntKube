@@ -729,7 +729,7 @@ public static class PublicApiEndpoints
             return TypedResults.Ok(all.Select(CostMonthResponse.From));
         }).RequireApiScope(ApiScopes.OpsRead);
 
-        api.MapGet("/rollouts", async (
+        api.MapGet("/rollouts", async Task<Ok<IEnumerable<RolloutResponse>>> (
             HttpContext ctx, EntKube.Contracts.Delivery.IDeliveryApi delivery, CancellationToken ct) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
@@ -740,56 +740,34 @@ public static class PublicApiEndpoints
             IReadOnlyList<EntKube.Contracts.Delivery.RolloutSummary> rollouts =
                 await delivery.GetRolloutsAsync(tenantId, limit: 100, ct);
 
-            return Results.Ok(rollouts.Select(r => new
-            {
-                id = r.Id,
-                app = r.AppName,
-                deployment = r.DeploymentName,
-                environment = r.EnvironmentName,
-                cluster = r.ClusterName,
-                status = r.Status.ToString(),
-                startedAt = r.StartedAt,
-                finishedAt = r.FinishedAt,
-                verdict = r.Verdict,
-                triggeredBy = r.TriggeredBy,
-            }));
+            // The shape, and the reason `status` stays a string, live on RolloutResponse so
+            // the mapping can be asserted against the anonymous object it replaced.
+            return TypedResults.Ok(rollouts.Select(RolloutResponse.From));
         }).RequireApiScope(ApiScopes.OpsRead);
 
-        api.MapGet("/disaster-recovery", (HttpContext ctx, DrScanCache cache) =>
+        api.MapGet("/disaster-recovery",
+            Results<Ok<IEnumerable<DrStatusResponse>>, ProblemHttpResult> (
+            HttpContext ctx, DrScanCache cache) =>
         {
             Guid tenantId = ctx.GetApiPrincipal()!.TenantId;
             IReadOnlyList<ClusterDrStatus>? statuses = cache.Get(tenantId);
 
             if (statuses is null)
             {
-                return Results.Problem(
+                return TypedResults.Problem(
                     "No disaster-recovery check has completed yet for this tenant.",
                     statusCode: StatusCodes.Status503ServiceUnavailable);
             }
 
+            // ⚠️ ONE clock for the whole response. DrReadiness judges a backup against `now`, so
+            // reading the time per cluster would compare two clusters on one page to two instants
+            // — and the gap that appears as a backup crosses StaleAfter is exactly the finding
+            // this route exists to report.
             DateTime now = DateTime.UtcNow;
 
-            return Results.Ok(statuses.Select(s => new
-            {
-                clusterId = s.ClusterId,
-                cluster = s.ClusterName,
-                veleroInstalled = s.IsVeleroInstalled,
-                error = s.Error,
-                // "restorable" reflects a clean backup only — a partially-failed backup has
-                // skipped resources and is not something to report as recoverable.
-                restorable = s.LastUsableBackup is not null,
-                lastUsableBackupAt = s.LastUsableBackup?.CompletedAt,
-                lastRestoreAt = s.LastSuccessfulRestore?.CompletedAt,
-                scheduleCount = s.Schedules.Count,
-                gaps = DrReadiness.Evaluate(s, now).Select(g => new
-                {
-                    key = g.Key,
-                    severity = g.Severity.ToString(),
-                    title = g.Title,
-                    detail = g.Detail,
-                    remediation = g.Remediation,
-                }),
-            }));
+            // The shape, the string severities and the restorable/lastUsableBackupAt asymmetry
+            // live on DrStatusResponse.
+            return TypedResults.Ok(statuses.Select(s => DrStatusResponse.From(s, now)));
         }).RequireApiScope(ApiScopes.OpsRead);
 
         // ── Configuration (infrastructure-as-code) ──

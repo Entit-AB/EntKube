@@ -57,11 +57,17 @@ public class CliColumnParityTests(GeneratedOpenApiDocumentFixture fixture)
     /// recorded against the names rather than against a number so a later reader can tell which
     /// commands it was about.</para>
     /// </summary>
-    private static readonly HashSet<string> Unverifiable = new(StringComparer.Ordinal)
-    {
-        "rollouts",
-        "dr",
-    };
+    /// <remarks>
+    /// ⚠️ <b>Empty, and that is the end state rather than a broken measurement.</b> Typing
+    /// <c>GET /rollouts</c> and <c>GET /disaster-recovery</c> removed the last two names, so every
+    /// CLI command that renders a table now has a schema to be checked against. The two facts
+    /// below are consequently vacuous today — they assert that two empty sets agree — and they are
+    /// kept because what they defend is the direction of travel: a command added against an
+    /// untyped route repopulates this list and fails
+    /// <see cref="The_commands_whose_columns_cannot_be_checked_are_the_ones_still_banked"/>
+    /// unless someone writes the name down here on purpose.
+    /// </remarks>
+    private static readonly HashSet<string> Unverifiable = new(StringComparer.Ordinal);
 
     /// <summary>Commands that render a table — the only ones with a column list to check.</summary>
     private const int CommandsWithColumns = 22;
