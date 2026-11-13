@@ -47,7 +47,7 @@ public class VaultSecretSyncTests : IDisposable
     /// <summary>Every namespace the sync ensured exists.</summary>
     private readonly List<string> namespaces = [];
 
-    private Guid ours, theirs, ourCluster, theirCluster, appId;
+    private Guid ours, theirs, ourCluster, theirCluster, appId, prodEnv, testEnv;
 
     public VaultSecretSyncTests()
     {
@@ -102,11 +102,29 @@ public class VaultSecretSyncTests : IDisposable
         ours = Guid.NewGuid();
         theirs = Guid.NewGuid();
 
-        (ourCluster, appId) = await SeedTenantAsync(ours, "ours");
-        (theirCluster, _) = await SeedTenantAsync(theirs, "theirs");
+        (ourCluster, appId, prodEnv) = await SeedTenantAsync(ours, "ours");
+        (theirCluster, _, _) = await SeedTenantAsync(theirs, "theirs");
     }
 
-    private async Task<(Guid ClusterId, Guid AppId)> SeedTenantAsync(Guid tenantId, string label)
+    /// <summary>
+    /// A second environment for our tenant, with no cluster of its own — which is the shape
+    /// that matters here. A sync scoped to it still reaches the production cluster, because a
+    /// shared secret may target any of the app's clusters.
+    /// </summary>
+    private async Task GivenASecondEnvironmentAsync()
+    {
+        testEnv = Guid.NewGuid();
+
+        await using ApplicationDbContext write = testDb.CreateContext();
+        write.Set<Data.Environment>().Add(new Data.Environment
+        {
+            Id = testEnv, TenantId = ours, Name = "test",
+        });
+        await write.SaveChangesAsync();
+    }
+
+    private async Task<(Guid ClusterId, Guid AppId, Guid EnvironmentId)> SeedTenantAsync(
+        Guid tenantId, string label)
     {
         Guid clusterId = Guid.NewGuid();
         Guid envId = Guid.NewGuid();
@@ -133,7 +151,7 @@ public class VaultSecretSyncTests : IDisposable
         await vault.InitializeVaultAsync(tenantId);
         await testDb.SeedKubeconfigAsync(vault, tenantId, clusterId, TestKubeconfig.Valid);
 
-        return (clusterId, app);
+        return (clusterId, app, envId);
     }
 
     /// <summary>
@@ -143,9 +161,10 @@ public class VaultSecretSyncTests : IDisposable
     /// </summary>
     private async Task GivenAnAppSecretAsync(
         Guid tenantId, Guid app, Guid clusterId, string name, string value,
-        string k8sName = "app-secrets", string ns = "billing")
+        string k8sName = "app-secrets", string ns = "billing", Guid? environmentId = null)
     {
-        VaultSecret stored = await vault.SetAppSecretAsync(tenantId, app, name, value);
+        VaultSecret stored = await vault.SetAppSecretAsync(
+            tenantId, app, name, value, environmentId: environmentId);
 
         await using ApplicationDbContext write = testDb.CreateContext();
         VaultSecret row = write.Set<VaultSecret>().First(s => s.Id == stored.Id);
@@ -366,6 +385,233 @@ public class VaultSecretSyncTests : IDisposable
         replaced.Should().BeEmpty();
         result.Success.Should().BeFalse();
         result.Output.Should().Contain("no kubeconfig");
+    }
+
+    // ════════════════════════════════════════════════════════════════
+    //  A sync that can only see one environment's keys
+    // ════════════════════════════════════════════════════════════════
+
+    /// <summary>
+    /// The defect. An operator saves a secret on the <b>test</b> environment page; the sync that
+    /// fires is scoped to test, and a production key disappears from the production cluster.
+    ///
+    /// <para><b>How a test-scoped sync reaches production at all.</b> A shared secret — one with
+    /// no environment binding — is visible from every environment and may target any of the app's
+    /// clusters, so it is written from the test page to whichever cluster its sync config names.
+    /// The cross-environment guard does not cover it, because it has no environment to compare.
+    /// </para>
+    ///
+    /// <para><b>Why the key was deleted.</b> This writer deletes the keys it owned last time and
+    /// no longer holds, which is how a revoked credential stops being readable in the cluster.
+    /// The environment filter was applied in the query, so the scoped sync held a partial picture
+    /// of its own keys — and production's key, which it is not allowed to read, was
+    /// indistinguishable from one that had been revoked.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_sync_scoped_to_one_environment_does_not_delete_another_environments_keys()
+    {
+        await SeedAsync();
+        await GivenASecondEnvironmentAsync();
+
+        // Both feed the same Secret on the production cluster.
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "API_KEY", "sk-live-1234");
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "DB_PASSWORD", "hunter2",
+            environmentId: prodEnv);
+
+        // Both are in the cluster already, recorded as the vault's.
+        ownedKeysAnnotation = "API_KEY,DB_PASSWORD";
+
+        HelmExecutionResult result =
+            await vault.SyncAppSecretsToKubernetesAsync(ours, appId, environmentId: testEnv);
+
+        result.Success.Should().BeTrue(result.Output);
+
+        IReadOnlyDictionary<string, string?> keys = merged.Should().ContainSingle().Subject.Keys;
+
+        keys["API_KEY"].Should().Be("sk-live-1234");
+        keys.Should().NotContainKey("DB_PASSWORD",
+            "a sync that may not read production's key must not mistake it for a revoked one");
+    }
+
+    /// <summary>
+    /// And it is retained by <em>name</em>. The whole point of the environment scope is that the
+    /// test view never handles production's values, so the fix may not be "load them too".
+    /// </summary>
+    [Fact]
+    public async Task A_key_left_to_another_environment_is_never_decrypted()
+    {
+        await SeedAsync();
+        await GivenASecondEnvironmentAsync();
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "API_KEY", "sk-live-1234");
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "DB_PASSWORD", "hunter2",
+            environmentId: prodEnv);
+        ownedKeysAnnotation = "API_KEY,DB_PASSWORD";
+
+        await vault.SyncAppSecretsToKubernetesAsync(ours, appId, environmentId: testEnv);
+
+        // Through the real patch builder, because that is what reaches the cluster: the value
+        // is base64 there, so asserting on the dictionary alone would miss an encoded leak.
+        (_, _, IReadOnlyDictionary<string, string?> keys,
+         IReadOnlyDictionary<string, string>? annotations) = merged.Should().ContainSingle().Subject;
+
+        string patch = KubernetesClientFactory.BuildSecretKeyPatch(keys, annotations);
+
+        patch.Should().NotContain("hunter2")
+            .And.NotContain(Convert.ToBase64String("hunter2"u8.ToArray()));
+    }
+
+    /// <summary>
+    /// The retained key stays recorded as the vault's. Dropping it from the annotation deletes
+    /// nothing today, which is why it would pass the test above — and orphans it: the vault would
+    /// no longer own it, so no later sync would ever remove it, and a revoked credential would
+    /// outlive its revocation.
+    /// </summary>
+    [Fact]
+    public async Task A_key_left_to_another_environment_is_still_claimed_by_the_vault()
+    {
+        await SeedAsync();
+        await GivenASecondEnvironmentAsync();
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "API_KEY", "sk-live-1234");
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "DB_PASSWORD", "hunter2",
+            environmentId: prodEnv);
+        ownedKeysAnnotation = "API_KEY,DB_PASSWORD";
+
+        await vault.SyncAppSecretsToKubernetesAsync(ours, appId, environmentId: testEnv);
+
+        merged.Should().ContainSingle().Subject
+            .Annotations!["entkube.io/keys.vault"].Should().Be("API_KEY,DB_PASSWORD");
+    }
+
+    /// <summary>
+    /// The same defect wearing different clothes, and the reason the fix is not simply "do not
+    /// delete". An environment-bound secret overrides a shared one of the same name — that is the
+    /// documented precedence. Decide it over only the keys this call can see and the shared value
+    /// wins by default, so a test-scoped sync overwrites production's override with it.
+    ///
+    /// <para>Here every key in the target belongs to another environment, so the right answer is
+    /// to leave the Secret alone entirely — and not to ensure its namespace either, which would
+    /// be a cluster change for a sync that writes nothing.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_shared_value_does_not_overwrite_another_environments_override()
+    {
+        await SeedAsync();
+        await GivenASecondEnvironmentAsync();
+
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "DB_PASSWORD", "shared-value");
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "DB_PASSWORD", "production-value",
+            environmentId: prodEnv);
+        ownedKeysAnnotation = "DB_PASSWORD";
+
+        HelmExecutionResult result =
+            await vault.SyncAppSecretsToKubernetesAsync(ours, appId, environmentId: testEnv);
+
+        result.Success.Should().BeTrue(result.Output);
+        merged.Should().BeEmpty("production holds the override for the only key in this Secret");
+        replaced.Should().BeEmpty();
+        namespaces.Should().BeEmpty("a sync that writes nothing has no namespace to ensure");
+        result.Output.Should().Contain("another environment");
+    }
+
+    /// <summary>
+    /// The guard against an over-broad fix. "A scoped sync deletes nothing" would pass every test
+    /// above and silently retire the revocation property for every environment-scoped save — which
+    /// is the path the UI actually uses. A key that no environment holds any more is still deleted.
+    /// </summary>
+    [Fact]
+    public async Task A_scoped_sync_still_deletes_a_key_no_environment_holds()
+    {
+        await SeedAsync();
+        await GivenASecondEnvironmentAsync();
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "API_KEY", "sk-live-1234");
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "DB_PASSWORD", "hunter2",
+            environmentId: prodEnv);
+
+        // OLD_TOKEN was the vault's and is now nobody's.
+        ownedKeysAnnotation = "API_KEY,DB_PASSWORD,OLD_TOKEN";
+
+        await vault.SyncAppSecretsToKubernetesAsync(ours, appId, environmentId: testEnv);
+
+        IReadOnlyDictionary<string, string?> keys = merged.Should().ContainSingle().Subject.Keys;
+
+        keys["OLD_TOKEN"].Should().BeNull("a revoked credential must not survive in the cluster");
+        keys.Should().NotContainKey("DB_PASSWORD", "but production's key is not revoked");
+    }
+
+    /// <summary>
+    /// Retaining is matched to a <b>target</b>, not to an environment. A production key that
+    /// lands somewhere else — another Secret, another namespace, another cluster — has no
+    /// standing in this one, and the vault owning it there is no reason to stop revoking it here.
+    ///
+    /// <para>Three keys, one per clause of that match, because a match that drops any one of them
+    /// reads as "production owns this name somewhere, so leave it" and quietly retires the
+    /// revocation for it.</para>
+    /// </summary>
+    [Fact]
+    public async Task A_key_aimed_at_a_different_target_is_not_retained_in_this_one()
+    {
+        await SeedAsync();
+        await GivenASecondEnvironmentAsync();
+
+        Guid otherCluster = Guid.NewGuid();
+        await using (ApplicationDbContext write = testDb.CreateContext())
+        {
+            write.KubernetesClusters.Add(new KubernetesCluster
+            {
+                Id = otherCluster, TenantId = ours, EnvironmentId = prodEnv,
+                Name = "ours-second-cluster", ApiServerUrl = "https://k8s2.example.com",
+            });
+            await write.SaveChangesAsync();
+        }
+
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "API_KEY", "sk-live-1234");
+
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "OTHER_SECRET", "a",
+            k8sName: "other-secrets", environmentId: prodEnv);
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "OTHER_NAMESPACE", "b",
+            ns: "other-ns", environmentId: prodEnv);
+        await GivenAnAppSecretAsync(ours, appId, otherCluster, "OTHER_CLUSTER", "c",
+            environmentId: prodEnv);
+
+        // All three were the vault's in THIS Secret and are not any more.
+        ownedKeysAnnotation = "API_KEY,OTHER_SECRET,OTHER_NAMESPACE,OTHER_CLUSTER";
+
+        await vault.SyncAppSecretsToKubernetesAsync(ours, appId, environmentId: testEnv);
+
+        IReadOnlyDictionary<string, string?> keys = merged.Should()
+            .ContainSingle("only the in-scope secret's target is written to").Subject.Keys;
+
+        keys["API_KEY"].Should().Be("sk-live-1234");
+        keys["OTHER_SECRET"].Should().BeNull("it lives in another Secret now");
+        keys["OTHER_NAMESPACE"].Should().BeNull("it lives in another namespace now");
+        keys["OTHER_CLUSTER"].Should().BeNull("it lives on another cluster now");
+    }
+
+    /// <summary>
+    /// An unscoped sync sees every environment's keys, so it retains nothing and behaves exactly
+    /// as it did: it writes both values and deletes what the vault has dropped.
+    /// </summary>
+    [Fact]
+    public async Task A_sync_with_no_environment_scope_writes_every_environments_keys()
+    {
+        await SeedAsync();
+        await GivenASecondEnvironmentAsync();
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "API_KEY", "sk-live-1234");
+        await GivenAnAppSecretAsync(ours, appId, ourCluster, "DB_PASSWORD", "hunter2",
+            environmentId: prodEnv);
+        ownedKeysAnnotation = "API_KEY,DB_PASSWORD,OLD_TOKEN";
+
+        HelmExecutionResult result = await vault.SyncAppSecretsToKubernetesAsync(ours, appId);
+
+        result.Success.Should().BeTrue(result.Output);
+
+        (_, _, IReadOnlyDictionary<string, string?> keys,
+         IReadOnlyDictionary<string, string>? annotations) = merged.Should().ContainSingle().Subject;
+
+        keys["API_KEY"].Should().Be("sk-live-1234");
+        keys["DB_PASSWORD"].Should().Be("hunter2");
+        keys["OLD_TOKEN"].Should().BeNull();
+        annotations!["entkube.io/keys.vault"].Should().Be("API_KEY,DB_PASSWORD");
     }
 
     // ════════════════════════════════════════════════════════════════

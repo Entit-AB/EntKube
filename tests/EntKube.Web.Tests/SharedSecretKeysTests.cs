@@ -166,6 +166,91 @@ public class SharedSecretKeysTests
         patches[0].Annotations!["entkube.io/keys.vault"].Should().Be("A,B");
     }
 
+    // ── A writer working from a partial view of its own keys ──────────────────
+
+    /// <summary>
+    /// A retained key is neither written nor deleted. It exists for a caller that cannot see all
+    /// of its own keys on this pass — an environment-scoped vault sync, which may not read
+    /// another environment's values but must not treat them as revoked.
+    /// </summary>
+    [Fact]
+    public async Task A_retained_key_is_neither_written_nor_deleted()
+    {
+        (Mock<IClusterClient> cluster, List<Captured> patches) =
+            Cluster("API_KEY,DB_PASSWORD", owner: "vault");
+
+        await SharedSecretKeys.WriteAsync(
+            cluster.Object, "s", "ns", SharedSecretKeys.Owners.Vault,
+            new Dictionary<string, string?> { ["API_KEY"] = "sk-live" },
+            retain: ["DB_PASSWORD"]);
+
+        patches[0].Keys["API_KEY"].Should().Be("sk-live");
+        patches[0].Keys.Should().NotContainKey("DB_PASSWORD",
+            "a merge patch cannot touch what it does not name");
+    }
+
+    /// <summary>
+    /// ⚠️ The trap this parameter exists to close. The keys dictionary already takes a null, and
+    /// null is the <em>delete</em> — so the obvious reach for "leave this one alone" removes
+    /// exactly the key it meant to protect, and answers 200 OK while doing it.
+    /// </summary>
+    [Fact]
+    public async Task Retaining_a_key_is_not_the_same_as_naming_it_null()
+    {
+        (Mock<IClusterClient> viaNull, List<Captured> nulled) = Cluster(owner: "vault");
+        (Mock<IClusterClient> viaRetain, List<Captured> retained) = Cluster(owner: "vault");
+
+        await SharedSecretKeys.WriteAsync(
+            viaNull.Object, "s", "ns", SharedSecretKeys.Owners.Vault,
+            new Dictionary<string, string?> { ["API_KEY"] = "sk-live", ["DB_PASSWORD"] = null });
+
+        await SharedSecretKeys.WriteAsync(
+            viaRetain.Object, "s", "ns", SharedSecretKeys.Owners.Vault,
+            new Dictionary<string, string?> { ["API_KEY"] = "sk-live" },
+            retain: ["DB_PASSWORD"]);
+
+        nulled[0].Keys["DB_PASSWORD"].Should().BeNull("a null value is the deletion");
+        retained[0].Keys.Should().NotContainKey("DB_PASSWORD");
+    }
+
+    /// <summary>
+    /// A retained key stays claimed. Dropping it from the annotation deletes nothing today and
+    /// orphans it forever: this writer would no longer own it, so no later pass — not even one
+    /// that can see it — would remove it when it is revoked.
+    /// </summary>
+    [Fact]
+    public async Task A_retained_key_stays_recorded_as_this_writers_own()
+    {
+        (Mock<IClusterClient> cluster, List<Captured> patches) =
+            Cluster("API_KEY,DB_PASSWORD", owner: "vault");
+
+        await SharedSecretKeys.WriteAsync(
+            cluster.Object, "s", "ns", SharedSecretKeys.Owners.Vault,
+            new Dictionary<string, string?> { ["API_KEY"] = "sk-live" },
+            retain: ["DB_PASSWORD"]);
+
+        patches[0].Annotations!["entkube.io/keys.vault"].Should().Be("API_KEY,DB_PASSWORD");
+    }
+
+    /// <summary>
+    /// Retaining is not a blanket amnesty: a key this writer owned and nobody retained is still
+    /// deleted, which is the revocation property the ownership annotation exists for.
+    /// </summary>
+    [Fact]
+    public async Task Retaining_one_key_does_not_spare_the_others()
+    {
+        (Mock<IClusterClient> cluster, List<Captured> patches) =
+            Cluster("API_KEY,DB_PASSWORD,OLD_TOKEN", owner: "vault");
+
+        await SharedSecretKeys.WriteAsync(
+            cluster.Object, "s", "ns", SharedSecretKeys.Owners.Vault,
+            new Dictionary<string, string?> { ["API_KEY"] = "sk-live" },
+            retain: ["DB_PASSWORD"]);
+
+        patches[0].Keys["OLD_TOKEN"].Should().BeNull();
+        patches[0].Keys.Should().NotContainKey("DB_PASSWORD");
+    }
+
     /// <summary>
     /// The property the vault's delete-and-recreate existed to get, kept without it: a key
     /// removed from the vault must not survive in the cluster.
