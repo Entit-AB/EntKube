@@ -123,7 +123,9 @@ public sealed record CostHistoryResponse(
     decimal PlatformCost,
     decimal SharedChargedOutCost,
     decimal DailyAverage,
+    decimal PreviousDailyAverage,
     CostCoverageResponse Coverage,
+    CostCoverageResponse PreviousCoverage,
     IReadOnlyList<string> Warnings,
     IEnumerable<CostHistoryDayResponse> Daily,
     IEnumerable<CostHistoryGroupResponse> Groups)
@@ -145,7 +147,12 @@ public sealed record CostHistoryResponse(
             PlatformCost: report.PlatformCost,
             SharedChargedOutCost: report.SharedChargedOutCost,
             DailyAverage: report.DailyAverage,
+            // ⚠️ The figure `changeFraction` is a ratio OF — see its remarks on
+            // CostHistoryReport. It is on the wire because a client that cannot recompute a
+            // percentage cannot check it, and this one is read by billing systems.
+            PreviousDailyAverage: report.PreviousDailyAverage,
             Coverage: CostCoverageResponse.From(report),
+            PreviousCoverage: CostCoverageResponse.FromPrevious(report),
             Warnings: report.Warnings,
             Daily: report.Daily.Select(CostHistoryDayResponse.From),
             Groups: report.Groups.Select(CostHistoryGroupResponse.From));
@@ -156,11 +163,21 @@ public sealed record CostHistoryResponse(
 ///
 /// <para>Carried beside every total deliberately: an under-measured window under-states cost, and
 /// a caller that cannot see the shortfall reads it as a saving.</para>
+///
+/// <para>⚠️ <b>That sentence was true and <see cref="CostHistoryResponse.PreviousTotalCost"/>
+/// was the exception to it.</b> Only one of these shapes used to be emitted, for the requested
+/// window; the earlier window's coverage was not even fetched from the database, so the one total
+/// on this response that nothing could check was the one the <c>changeFraction</c> comparison
+/// divided by — and a caller did read the shortfall as a saving, on every render. There are two
+/// instances now, and <see cref="MeasuredDays"/> is here so a caller can recompute the daily
+/// rates that comparison is between.</para>
 /// </summary>
 public sealed record CostCoverageResponse(
     decimal CoveredHours,
     decimal ExpectedHours,
     decimal GapHours,
+    decimal MeasuredDays,
+    int UnmeasuredDays,
     double Completeness,
     bool Complete)
 {
@@ -169,8 +186,25 @@ public sealed record CostCoverageResponse(
             CoveredHours: report.CoveredHours,
             ExpectedHours: report.ExpectedHours,
             GapHours: report.GapHours,
+            MeasuredDays: report.MeasuredDays,
+            UnmeasuredDays: report.UnmeasuredDays,
             Completeness: report.Completeness,
             Complete: report.IsComplete);
+
+    /// <summary>
+    /// The same shape for the window immediately before the requested one — the window
+    /// <c>previousTotalCost</c> and <c>changeFraction</c> are about.
+    /// </summary>
+    public static CostCoverageResponse FromPrevious(
+        EntKube.Web.Services.Cost.CostHistoryReport report) =>
+        new(
+            CoveredHours: report.PreviousCoveredHours,
+            ExpectedHours: report.PreviousExpectedHours,
+            GapHours: report.PreviousGapHours,
+            MeasuredDays: report.PreviousMeasuredDays,
+            UnmeasuredDays: report.PreviousUnmeasuredDays,
+            Completeness: report.PreviousCompleteness,
+            Complete: report.PreviousIsComplete);
 }
 
 /// <summary>One day of the window.</summary>

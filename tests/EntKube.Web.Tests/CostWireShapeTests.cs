@@ -25,10 +25,18 @@ namespace EntKube.Web.Tests;
 ///
 /// <para>The report below gives every settable figure a DISTINCT value, so a swap between two
 /// same-typed fields changes the JSON. The derived ones follow from them deterministically:
-/// <c>Change</c> is 1000-800, <c>ChangeFraction</c> is 0.25, coverage completeness is 700/900, and
-/// <c>DailyAverage</c> is 1000 divided by the single day's 20/24 of a whole day — which is now
-/// <c>MeasuredDayFraction</c> rather than <c>Completeness</c>, and the two agree here only because
-/// this fixture's day is neither today nor a cluster's opening day.</para>
+/// <c>Change</c> is 1000-800, coverage completeness is 700/900, and <c>DailyAverage</c> is 1000
+/// divided by the single day's 20/24 of a whole day — which is <c>MeasuredDayFraction</c> rather
+/// than <c>Completeness</c>, and the two agree here only because this fixture's day is neither
+/// today nor a cluster's opening day.</para>
+///
+/// <para>⚠️ <b><c>ChangeFraction</c> is no longer 1000/800 — 1, and this class could not have
+/// noticed.</b> It is now a ratio of daily RATES, 1200 against 800/2, because dividing two totals
+/// the ledger measured to different extents reported the difference in measurement as a difference
+/// in spending. Both sides of the comparison below are built from the same report object, so the
+/// derivation can change under this test without moving it: the figure itself is pinned by
+/// literal in <c>CostPreviousWindowTests</c>, and what is pinned HERE is only that the wire
+/// carries whatever the report says.</para>
 /// </summary>
 public class CostWireShapeTests
 {
@@ -49,6 +57,17 @@ public class CostWireShapeTests
         CoveredHours = 700m,
         ExpectedHours = 900m,
         GapHours = 55m,
+
+        // The earlier window, with figures distinct from the requested one's — these used not to
+        // be fetched at all, so a response that silently reused the requested window's coverage
+        // for both would otherwise look right.
+        PreviousCoveredHours = 600m,
+        PreviousExpectedHours = 750m,
+        PreviousGapHours = 66m,
+        PreviousMeasuredDays = 2m,
+        PreviousUnmeasuredDays = 3,
+        PreviousDays = 31,
+
         Warnings = ["one cluster could not be priced"],
         Daily =
         [
@@ -75,6 +94,12 @@ public class CostWireShapeTests
                 Label = "Acme AB",
                 Cost = 300m,
                 PreviousCost = 250m,
+
+                // Window-level, so every line of one report carries the same pair; set to
+                // something other than the report's own so a mix-up between the two shows.
+                MeasuredDays = 3m,
+                PreviousMeasuredDays = 5m,
+
                 CpuCoreHours = 1.5d,
                 MemoryGiBHours = 2.5d,
                 StorageGiBHours = 3.5d,
@@ -104,6 +129,15 @@ public class CostWireShapeTests
         platformCost = report.PlatformCost,
         sharedChargedOutCost = report.SharedChargedOutCost,
         dailyAverage = report.DailyAverage,
+
+        // ⚠️ FROM HERE THE ORACLE IS NOT origin/main's HANDLER. `previousDailyAverage`,
+        // `previousCoverage`, and `measuredDays`/`unmeasuredDays` inside both coverage objects are
+        // ADDITIONS, so no earlier version of the handler can state them. They are written out
+        // here anyway, in position, because this test's job is the key ORDER as well as the names
+        // — a client reading the document generated from this record sees the order — and an
+        // addition dropped into the wrong place is the kind of change nothing else would catch.
+        previousDailyAverage = report.PreviousDailyAverage,
+
         // Coverage travels with every figure: an under-measured window
         // under-states cost, and a caller that cannot see that will read the
         // shortfall as a saving.
@@ -112,8 +146,22 @@ public class CostWireShapeTests
             coveredHours = report.CoveredHours,
             expectedHours = report.ExpectedHours,
             gapHours = report.GapHours,
+            measuredDays = report.MeasuredDays,
+            unmeasuredDays = report.UnmeasuredDays,
             completeness = report.Completeness,
             complete = report.IsComplete,
+        },
+
+        // … including the one total that used to have none beside it.
+        previousCoverage = new
+        {
+            coveredHours = report.PreviousCoveredHours,
+            expectedHours = report.PreviousExpectedHours,
+            gapHours = report.PreviousGapHours,
+            measuredDays = report.PreviousMeasuredDays,
+            unmeasuredDays = report.PreviousUnmeasuredDays,
+            completeness = report.PreviousCompleteness,
+            complete = report.PreviousIsComplete,
         },
         warnings = report.Warnings,
         daily = report.Daily.Select(d => new
@@ -161,10 +209,19 @@ public class CostWireShapeTests
         root.Select(p => p.Key).Should().Equal(
             "from", "to", "currency", "groupBy", "totalCost", "previousTotalCost", "change",
             "changeFraction", "unattributedCost", "multiAppCost", "platformCost",
-            "sharedChargedOutCost", "dailyAverage", "coverage", "warnings", "daily", "groups");
+            "sharedChargedOutCost", "dailyAverage", "previousDailyAverage", "coverage",
+            "previousCoverage", "warnings", "daily", "groups");
 
         root["coverage"]!.AsObject().Select(p => p.Key).Should().Equal(
-            "coveredHours", "expectedHours", "gapHours", "completeness", "complete");
+            "coveredHours", "expectedHours", "gapHours", "measuredDays", "unmeasuredDays",
+            "completeness", "complete");
+
+        // The same shape, so a client reads one parser for both windows — named separately
+        // because an `previousCoverage` that quietly differed from `coverage` would be worse than
+        // not having it.
+        root["previousCoverage"]!.AsObject().Select(p => p.Key).Should().Equal(
+            "coveredHours", "expectedHours", "gapHours", "measuredDays", "unmeasuredDays",
+            "completeness", "complete");
 
         root["daily"]!.AsArray()[0]!.AsObject().Select(p => p.Key).Should().Equal(
             "day", "cost", "coveredHours", "expectedHours", "complete");
@@ -198,9 +255,29 @@ public class CostWireShapeTests
 
         // Derived figures, so a mapping that read the wrong source member would differ.
         subject.Change.Should().Be(200m);
-        subject.ChangeFraction.Should().BeApproximately(0.25d, 1e-12);
         subject.Coverage.Completeness.Should().BeApproximately(700d / 900d, 1e-12);
-        subject.Groups.Single().ChangeFraction.Should().BeApproximately(0.2d, 1e-12);
+
+        // ⚠️ Rates, not totals. 1000 over 20/24 of a day against 800 over two days, and
+        // 300 over three days against 250 over five — so a mapping that still divided the totals
+        // would read 0.25 and 0.2 here, which is what both of these said.
+        subject.PreviousDailyAverage.Should().Be(400m);
+        subject.ChangeFraction.Should().BeApproximately(2d, 1e-9);
+        subject.Groups.Single().ChangeFraction.Should().BeApproximately(1d, 1e-9);
+
+        // ⚠️ `previousCoverage` must read the Previous* members and not the requested
+        // window's. Every figure in the fixture differs between the two windows precisely so that
+        // a FromPrevious copied from From and left unedited shows here rather than passing.
+        subject.PreviousCoverage.CoveredHours.Should().Be(600m);
+        subject.PreviousCoverage.ExpectedHours.Should().Be(750m);
+        subject.PreviousCoverage.GapHours.Should().Be(66m);
+        subject.PreviousCoverage.MeasuredDays.Should().Be(2m);
+        subject.PreviousCoverage.UnmeasuredDays.Should().Be(3);
+        subject.PreviousCoverage.Completeness.Should().BeApproximately(0.8d, 1e-12);
+        subject.PreviousCoverage.Complete.Should().BeFalse();
+
+        subject.Coverage.MeasuredDays.Should().Be(
+            20m / 24m, "the requested window's own figure, not the earlier window's 2");
+        subject.Coverage.UnmeasuredDays.Should().Be(0);
     }
 
     [Fact]
