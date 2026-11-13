@@ -10,7 +10,14 @@ namespace EntKube.Web.Services.Scim;
 public sealed record ScimResult
 {
     public required int Status { get; init; }
-    public JsonNode? Body { get; init; }
+
+    /// <summary>
+    /// The success body, as the record the document describes. ⚠️ It was a
+    /// <see cref="JsonNode"/>, hand-built with literal keys — which is why these seven operations
+    /// were the last on the API with no response schema, and a generated client returned
+    /// <c>object</c> for all of them.
+    /// </summary>
+    public object? Body { get; init; }
     public string? Error { get; init; }
 
     /// <summary>
@@ -21,8 +28,8 @@ public sealed record ScimResult
     /// </summary>
     public string? ScimType { get; init; }
 
-    public static ScimResult Ok(JsonNode body) => new() { Status = 200, Body = body };
-    public static ScimResult Created(JsonNode body) => new() { Status = 201, Body = body };
+    public static ScimResult Ok(object body) => new() { Status = 200, Body = body };
+    public static ScimResult Created(object body) => new() { Status = 201, Body = body };
     public static ScimResult NoContent() => new() { Status = 204 };
     public static ScimResult NotFound(string detail) => new() { Status = 404, Error = detail };
 
@@ -101,24 +108,14 @@ public class ScimUserService(
     /// </summary>
     private static readonly DateTimeOffset Disabled = DateTimeOffset.MaxValue;
 
-    /// <summary>Renders a user as a SCIM resource.</summary>
-    public static JsonObject ToScim(ApplicationUser user) => new()
-    {
-        ["schemas"] = new JsonArray(UserSchema),
-        ["id"] = user.Id,
-        ["userName"] = user.UserName,
-        ["active"] = !IsDisabled(user),
-        ["emails"] = new JsonArray(new JsonObject
-        {
-            ["value"] = user.Email,
-            ["primary"] = true,
-        }),
-        ["meta"] = new JsonObject
-        {
-            ["resourceType"] = "User",
-            ["location"] = $"/scim/v2/Users/{user.Id}",
-        },
-    };
+    /// <summary>
+    /// Renders a user as a SCIM resource.
+    ///
+    /// <para>This was a hand-built <see cref="JsonObject"/> with literal keys. The shape is now
+    /// <see cref="ScimUserResponse"/>, so the document describes it — the hazards that move to
+    /// the record are listed there, and they are not ones a reviewer sees.</para>
+    /// </summary>
+    public static ScimUserResponse ToScim(ApplicationUser user) => ScimUserResponse.From(user);
 
     /// <summary>An account is disabled when a lockout is in force with no realistic end.</summary>
     public static bool IsDisabled(ApplicationUser user) =>
@@ -163,14 +160,15 @@ public class ScimUserService(
             .Take(Math.Clamp(count, 1, 200))
             .ToListAsync(ct);
 
-        return ScimResult.Ok(new JsonObject
-        {
-            ["schemas"] = new JsonArray(ListSchema),
-            ["totalResults"] = total,
-            ["startIndex"] = startIndex,
-            ["itemsPerPage"] = page.Count,
-            ["Resources"] = new JsonArray([.. page.Select(u => (JsonNode)ToScim(u))]),
-        });
+        // ⚠️ Named arguments, not positional. TotalResults, StartIndex and ItemsPerPage are
+        // three adjacent ints: transposing any two compiles, and a connector paging on the result
+        // walks off the end of the directory or re-reads the first page forever.
+        return ScimResult.Ok(new ScimListResponse(
+            Schemas: [ListSchema],
+            TotalResults: total,
+            StartIndex: startIndex,
+            ItemsPerPage: page.Count,
+            Resources: [.. page.Select(ScimUserResponse.From)]));
     }
 
     public async Task<ScimResult> GetAsync(string id, CancellationToken ct)

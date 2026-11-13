@@ -2,6 +2,7 @@ using System.Net;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 using EntKube.Web.Data;
+using Microsoft.AspNetCore.Http;
 using EntKube.Web.Services.Scim;
 using FluentAssertions;
 using Microsoft.AspNetCore.Identity;
@@ -14,6 +15,26 @@ using Microsoft.Extensions.Options;
 using Xunit;
 
 namespace EntKube.Web.Tests;
+
+/// <summary>
+/// A SCIM body as the server writes it.
+///
+/// <para>⚠️ Through <see cref="ScimJsonResult.Serialize"/> — the serializer the endpoints
+/// themselves use — not a <see cref="JsonSerializerOptions"/> of the test's own. These records
+/// carry <c>[JsonPropertyName]</c> and <c>[JsonIgnore]</c> for members whose spelling and
+/// presence a connector depends on, and a test with its own options would keep passing through a
+/// change to the real ones.</para>
+///
+/// <para>This replaces reading keys off a hand-built <c>JsonObject</c>. Every hazard these
+/// assertions exist for — the capital-R <c>Resources</c>, <c>status</c> as a string, an absent
+/// <c>scimType</c> — lives in SERIALISATION, so that is what they now read.</para>
+/// </summary>
+internal static class ScimAsWritten
+{
+    public static string Text(object body) => ScimJsonResult.Serialize(body);
+
+    public static JsonObject Object(object body) => JsonNode.Parse(Text(body))!.AsObject();
+}
 
 /// <summary>
 /// The SCIM wire shape, pinned BEFORE anyone types these routes.
@@ -125,7 +146,7 @@ public class ScimUserResourceWireShapeTests
     [Fact]
     public void The_user_resource_carries_exactly_these_members()
     {
-        JsonObject resource = ScimUserService.ToScim(User());
+        JsonObject resource = ScimAsWritten.Object(ScimUserService.ToScim(User()));
 
         // ⚠️ The exact SET, not "contains". A typed record emits every member it declares,
         // including the ones left null — so a transcription that adds `externalId`, `name` or
@@ -144,7 +165,7 @@ public class ScimUserResourceWireShapeTests
     [Fact]
     public void The_schemas_member_is_an_array_of_the_core_user_urn()
     {
-        JsonObject resource = ScimUserService.ToScim(User());
+        JsonObject resource = ScimAsWritten.Object(ScimUserService.ToScim(User()));
 
         resource["schemas"]!.GetValueKind().Should().Be(JsonValueKind.Array);
         resource["schemas"]!.AsArray().Should().HaveCount(1);
@@ -162,7 +183,7 @@ public class ScimUserResourceWireShapeTests
     [Fact]
     public void Active_is_a_boolean_not_a_string()
     {
-        ScimUserService.ToScim(User())["active"]!.GetValueKind()
+        ScimAsWritten.Object(ScimUserService.ToScim(User()))["active"]!.GetValueKind()
             .Should().Be(JsonValueKind.True);
     }
 
@@ -177,7 +198,7 @@ public class ScimUserResourceWireShapeTests
     [Fact]
     public void Emails_is_a_list_of_objects_with_a_primary_flag()
     {
-        JsonObject resource = ScimUserService.ToScim(User());
+        JsonObject resource = ScimAsWritten.Object(ScimUserService.ToScim(User()));
 
         resource["emails"]!.GetValueKind().Should().Be(JsonValueKind.Array);
         JsonObject first = resource["emails"]!.AsArray()[0]!.AsObject();
@@ -198,7 +219,7 @@ public class ScimUserResourceWireShapeTests
     [Fact]
     public void Meta_is_nested_and_locates_the_resource()
     {
-        JsonObject meta = ScimUserService.ToScim(User())["meta"]!.AsObject();
+        JsonObject meta = ScimAsWritten.Object(ScimUserService.ToScim(User()))["meta"]!.AsObject();
 
         meta.Select(member => member.Key).Should().BeEquivalentTo(["resourceType", "location"]);
         meta["resourceType"]!.GetValue<string>().Should().Be("User");
@@ -215,7 +236,7 @@ public class ScimUserResourceWireShapeTests
     [Fact]
     public void The_serialised_user_resource_spells_userName_this_way()
     {
-        string json = ScimUserService.ToScim(User()).ToJsonString();
+        string json = ScimAsWritten.Text(ScimUserService.ToScim(User()));
 
         json.Should().Contain("\"userName\":\"someone@example.com\"");
         json.Should().NotContain("\"username\":");
@@ -295,7 +316,7 @@ public class ScimListResponseWireShapeTests : IDisposable
         // ⚠️ If a typing change makes ListAsync answer something other than a JsonObject body,
         // this cast is where it is noticed. That is intentional: the point of the file is that the
         // envelope cannot be retyped without a human reading these assertions.
-        return result.Body!.AsObject();
+        return ScimAsWritten.Object(result.Body!);
     }
 
     /// <summary>
@@ -465,7 +486,8 @@ public class ScimErrorEnvelopeWireShapeTests
     [Fact]
     public void The_status_is_a_quoted_string_in_the_text()
     {
-        string json = ScimEndpoints.ErrorBody(ScimResult.NotFound("No user with id 'x'.")).ToJsonString();
+        string json = ScimAsWritten.Text(
+            ScimEndpoints.ErrorBody(ScimResult.NotFound("No user with id 'x'.")));
 
         json.Should().Contain("\"status\":\"404\"");
         json.Should().NotContain("\"status\":404");
@@ -484,8 +506,8 @@ public class ScimErrorEnvelopeWireShapeTests
     [Fact]
     public void A_failure_with_no_keyword_does_not_mention_scimType_at_all()
     {
-        string json = ScimEndpoints.ErrorBody(
-            ScimResult.BadRequest("userName is required.")).ToJsonString();
+        string json = ScimAsWritten.Text(ScimEndpoints.ErrorBody(
+            ScimResult.BadRequest("userName is required.")));
 
         json.Should().NotContain("scimType");
     }
@@ -498,10 +520,10 @@ public class ScimErrorEnvelopeWireShapeTests
     [Fact]
     public void The_error_envelope_carries_exactly_these_members()
     {
-        ScimEndpoints.ErrorBody(ScimResult.BadRequest("userName is required."))
+        ScimAsWritten.Object(ScimEndpoints.ErrorBody(ScimResult.BadRequest("userName is required.")))
             .Select(member => member.Key).Should().BeEquivalentTo(["schemas", "status", "detail"]);
 
-        ScimEndpoints.ErrorBody(ScimResult.Conflict("already exists"))
+        ScimAsWritten.Object(ScimEndpoints.ErrorBody(ScimResult.Conflict("already exists")))
             .Select(member => member.Key).Should().BeEquivalentTo(
                 ["schemas", "status", "detail", "scimType"]);
     }
@@ -515,7 +537,8 @@ public class ScimErrorEnvelopeWireShapeTests
     [Fact]
     public void The_error_envelope_declares_the_error_schema_as_an_array()
     {
-        JsonObject body = ScimEndpoints.ErrorBody(ScimResult.NotFound("No user with id 'x'."));
+        JsonObject body = ScimAsWritten.Object(
+            ScimEndpoints.ErrorBody(ScimResult.NotFound("No user with id 'x'.")));
 
         body["schemas"]!.GetValueKind().Should().Be(JsonValueKind.Array);
         body["schemas"]!.AsArray()[0]!.GetValue<string>()
@@ -686,5 +709,270 @@ public class ScimOverHttpWireShapeTests(GeneratedOpenApiDocumentFixture fixture)
         error["status"]!.GetValueKind().Should().Be(
             JsonValueKind.String, "RFC 7644 §3.12 requires a string, and an int Status would emit 404");
         error["status"]!.GetValue<string>().Should().Be("404");
+    }
+}
+
+/// <summary>
+/// What the SCIM results write, executed directly.
+///
+/// <para>⚠️ <b>The success statuses are here rather than over HTTP on purpose.</b> A real 201 or
+/// 204 means creating and deleting a user, and the shared API host's database is read by
+/// <see cref="ScimOverHttpWireShapeTests.The_list_envelope_carries_capital_R_Resources"/>, which
+/// asserts it is empty. Seeding a user into it would make that assertion pass or fail on test
+/// ORDER. Executing the result against its own <see cref="DefaultHttpContext"/> reads the same
+/// three things — status, media type, bytes — without a database at all.</para>
+/// </summary>
+public class ScimResultWireShapeTests
+{
+    private const string ScimJson = "application/scim+json";
+
+    private static async Task<(int Status, string? ContentType, string Body)> Written(IResult result)
+    {
+        DefaultHttpContext http = new();
+        using MemoryStream buffer = new();
+        http.Response.Body = buffer;
+
+        await result.ExecuteAsync(http);
+
+        buffer.Position = 0;
+        using StreamReader reader = new(buffer);
+        return (http.Response.StatusCode, http.Response.ContentType, await reader.ReadToEndAsync());
+    }
+
+    private static ScimUserResponse AUser() => ScimUserResponse.From(new ApplicationUser
+    {
+        Id = "user-1", UserName = "someone@example.com", Email = "someone@example.com",
+    });
+
+    /// <summary>
+    /// ⚠️ The headline for this change. Every other route on the API gained its schema by
+    /// returning <c>TypedResults.Ok(record)</c>, which answers <c>application/json</c> — and
+    /// <c>ScimEndpoints</c>'s own comment records that some connectors reject it. The media type
+    /// is the thing typing these routes most easily destroys, and it destroys it silently, with
+    /// the body otherwise intact and the status still 200.
+    /// </summary>
+    [Fact]
+    public async Task A_success_is_written_as_scim_json()
+    {
+        (int status, string? contentType, string body) =
+            await Written(ScimOk<ScimUserResponse>.Success(AUser()));
+
+        status.Should().Be(200);
+        contentType.Should().Be(ScimJson, "not application/json, which TypedResults.Ok would write");
+        body.Should().Contain("\"userName\":\"someone@example.com\"");
+    }
+
+    /// <summary>
+    /// A creation answers 201, not 200. The two are separate result types precisely because
+    /// <c>PopulateMetadata</c> is static and cannot read a status off an instance — collapsing
+    /// them would document every creation as a 200 and a generated client would never model the
+    /// 201 it actually receives.
+    /// </summary>
+    [Fact]
+    public async Task A_creation_is_written_as_201_scim_json()
+    {
+        (int status, string? contentType, _) =
+            await Written(ScimCreated<ScimUserResponse>.Success(AUser()));
+
+        status.Should().Be(201);
+        contentType.Should().Be(ScimJson);
+    }
+
+    /// <summary>
+    /// ⚠️ A 204 writes NOTHING, and declares no content type. The result this replaced rendered an
+    /// absent body as the two bytes <c>{}</c>; on a 204 that is a malformed response rather than
+    /// an empty one, and some clients fail the whole deprovisioning run on it.
+    /// </summary>
+    [Fact]
+    public async Task A_deletion_writes_no_body_and_no_content_type()
+    {
+        (int status, string? contentType, string body) = await Written(ScimNoContent.Success());
+
+        status.Should().Be(204);
+        body.Should().BeEmpty();
+        contentType.Should().BeNull("a 204 has no content to describe the type of");
+    }
+
+    /// <summary>
+    /// A failure travels through the same result as its operation's success, so it must still be
+    /// SCIM's error envelope at SCIM's media type — and must carry the failure's own status, not
+    /// the one the result type declares.
+    /// </summary>
+    [Fact]
+    public async Task A_failure_keeps_the_scim_envelope_and_its_own_status()
+    {
+        (int status, string? contentType, string body) = await Written(
+            ScimCreated<ScimUserResponse>.Failure(
+                409, ScimEndpoints.ErrorBody(ScimResult.Conflict("already exists"))));
+
+        status.Should().Be(409, "not the 201 this result type declares as its success");
+        contentType.Should().Be(ScimJson, "a SCIM error is scim+json, not problem+json");
+
+        JsonObject error = JsonNode.Parse(body)!.AsObject();
+        error["status"]!.GetValueKind().Should().Be(JsonValueKind.String);
+        error["status"]!.GetValue<string>().Should().Be("409");
+        error["scimType"]!.GetValue<string>().Should().Be("uniqueness");
+    }
+}
+
+/// <summary>
+/// What the generated document SAYS about SCIM, read out of the real document.
+///
+/// <para>⚠️ <b>Why this exists beside <c>ApiDocumentedResponsesTests</c>.</b> That ratchet counts
+/// operations answering a 2xx with no body schema, and it is now 0 — but it asks only whether a
+/// schema is there, never what media type it is declared under. A handler switched to
+/// <c>TypedResults.Ok(record)</c>, or to <c>TypedResults.Json(record, contentType: …)</c>, would
+/// satisfy the ratchet while the document said <c>application/json</c>. In the first case the
+/// wire changes too and the connectors break; in the second the wire stays right and the
+/// DOCUMENT lies, so a generated client sends the wrong <c>Accept</c> and nothing in this
+/// repository would have noticed. Both are caught here.</para>
+/// </summary>
+[Collection(ApiSurfaceCollection.Name)]
+public class ScimDocumentedResponseTests(GeneratedOpenApiDocumentFixture fixture)
+{
+    private const string ScimJson = "application/scim+json";
+
+    private static IEnumerable<(string Method, string Path, string Code, Microsoft.OpenApi.IOpenApiResponse Response)>
+        ScimResponses(Microsoft.OpenApi.OpenApiDocument document)
+    {
+        foreach ((string path, Microsoft.OpenApi.IOpenApiPathItem item) in document.Paths ?? [])
+        {
+            if (!path.StartsWith("/scim/v2", StringComparison.Ordinal)) continue;
+
+            foreach ((HttpMethod verb, Microsoft.OpenApi.OpenApiOperation operation) in item.Operations ?? [])
+            {
+                foreach ((string code, Microsoft.OpenApi.IOpenApiResponse response) in
+                    operation.Responses ?? [])
+                {
+                    yield return (verb.Method.ToUpperInvariant(), path, code, response);
+                }
+            }
+        }
+    }
+
+    /// <summary>
+    /// ⚠️ The guard the ratchet cannot give. Every SCIM success is declared under
+    /// <c>application/scim+json</c> and nothing else — a declaration of <c>application/json</c>
+    /// beside a wire of <c>application/scim+json</c> is a document that contradicts a tested fact,
+    /// which is exactly how the API's self-description shipped as a 500.
+    /// </summary>
+    [Fact]
+    public void Every_scim_success_is_declared_as_scim_json()
+    {
+        fixture.GenerationFailure.Should().BeNull();
+
+        List<(string Method, string Path, string Code, Microsoft.OpenApi.IOpenApiResponse Response)> successes =
+            [.. ScimResponses(fixture.Document!)
+                .Where(r => r.Code.StartsWith("2", StringComparison.Ordinal))];
+
+        successes.Should().NotBeEmpty("otherwise this says nothing about SCIM at all");
+
+        List<string> wrong = [.. successes
+            .Where(r => r.Response.Content is { Count: > 0 }
+                && !r.Response.Content.Keys.SequenceEqual([ScimJson]))
+            .Select(r => $"{r.Method} {r.Path} {r.Code}: "
+                + string.Join("+", r.Response.Content!.Keys))];
+
+        wrong.Should().BeEmpty(
+            "a connector that rejects application/json must not be told to send it: "
+            + string.Join("; ", wrong));
+    }
+
+    /// <summary>
+    /// The seven operations are all described, and each under the status it actually answers.
+    ///
+    /// <para>⚠️ A creation documented as 200 is a generated client that never models its own 201,
+    /// and a deletion documented as 200-with-no-schema is the undescribed body this whole
+    /// programme was about. Both would pass a count of "operations with a 2xx".</para>
+    /// </summary>
+    [Fact]
+    public void The_creation_answers_201_and_the_deletion_204()
+    {
+        fixture.GenerationFailure.Should().BeNull();
+
+        Dictionary<(string, string), string[]> successes = ScimResponses(fixture.Document!)
+            .Where(r => r.Code.StartsWith("2", StringComparison.Ordinal))
+            .GroupBy(r => (r.Method, r.Path))
+            .ToDictionary(g => g.Key, g => g.Select(r => r.Code).Order().ToArray());
+
+        successes.Should().HaveCount(7, "SCIM is seven operations: " + string.Join(
+            ", ", successes.Keys.Select(k => $"{k.Item1} {k.Item2}")));
+
+        successes[("POST", "/scim/v2/Users")].Should().Equal(["201"]);
+        successes[("DELETE", "/scim/v2/Users/{id}")].Should().Equal(["204"]);
+
+        foreach ((string method, string path) in new[]
+        {
+            ("GET", "/scim/v2/ServiceProviderConfig"), ("GET", "/scim/v2/Users"),
+            ("GET", "/scim/v2/Users/{id}"), ("PUT", "/scim/v2/Users/{id}"),
+            ("PATCH", "/scim/v2/Users/{id}"),
+        })
+        {
+            successes[(method, path)].Should().Equal(["200"], $"{method} {path} answers 200");
+        }
+    }
+
+    /// <summary>
+    /// ⚠️ And the 204 declares no body at all. Declaring one — even an empty schema — is how a
+    /// deletion gets counted as "describes a success body" without describing anything, which is
+    /// the loophole <c>BodylessSuccesses</c> is pinned to keep shut.
+    /// </summary>
+    [Fact]
+    public void The_deletion_declares_no_body()
+    {
+        fixture.GenerationFailure.Should().BeNull();
+
+        Microsoft.OpenApi.IOpenApiResponse deletion = ScimResponses(fixture.Document!)
+            .Single(r => r is { Method: "DELETE", Code: "204" }).Response;
+
+        (deletion.Content is null || deletion.Content.Count == 0).Should().BeTrue(
+            "a 204 carries nothing, so there is nothing to describe");
+    }
+}
+
+/// <summary>
+/// Every SCIM verb answers with SCIM's media type, over real HTTP.
+///
+/// <para>⚠️ Through FAILURES, deliberately. A real 201 or 204 means creating and deleting a user
+/// in the shared API host, whose database
+/// <see cref="ScimOverHttpWireShapeTests.The_list_envelope_carries_capital_R_Resources"/> asserts
+/// is empty — so a success here would make that test pass or fail on ORDER. A failure exercises
+/// the same result type on the same route and proves the route is wired to it, which is what
+/// would break if one of these handlers were converted back to <c>TypedResults</c> or left
+/// answering <c>ProblemDetails</c>.</para>
+/// </summary>
+[Collection(ApiSurfaceCollection.Name)]
+public class ScimEveryVerbWireShapeTests(GeneratedOpenApiDocumentFixture fixture)
+{
+    private const string ScimJson = "application/scim+json";
+    private const string Scope = "scim:provision";
+
+    public static TheoryData<string, string, string?, HttpStatusCode> Verbs() => new()
+    {
+        // A body-less POST is refused before it reaches the store, so nothing is written.
+        { "POST", "/scim/v2/Users", null, HttpStatusCode.BadRequest },
+        { "PUT", "/scim/v2/Users/nobody", """{"userName":"x"}""", HttpStatusCode.NotFound },
+        { "PATCH", "/scim/v2/Users/nobody", """{"Operations":[]}""", HttpStatusCode.NotFound },
+        { "DELETE", "/scim/v2/Users/nobody", null, HttpStatusCode.NotFound },
+    };
+
+    [Theory]
+    [MemberData(nameof(Verbs))]
+    public async Task Every_verb_answers_the_scim_envelope(
+        string method, string url, string? json, HttpStatusCode expected)
+    {
+        (HttpStatusCode status, string? mediaType, string body) =
+            await fixture.SendForResponseAsync(method, url, Scope, json);
+
+        status.Should().Be(expected);
+        mediaType.Should().Be(ScimJson, $"{method} {url} must answer SCIM's media type");
+
+        JsonObject error = JsonNode.Parse(body)!.AsObject();
+
+        error["schemas"]!.AsArray()[0]!.GetValue<string>().Should().Be(
+            "urn:ietf:params:scim:api:messages:2.0:Error");
+        error["status"]!.GetValueKind().Should().Be(
+            JsonValueKind.String, "RFC 7644 §3.12 requires a string");
+        error["status"]!.GetValue<string>().Should().Be(((int)expected).ToString());
     }
 }

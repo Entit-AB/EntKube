@@ -177,10 +177,15 @@ public sealed class GeneratedOpenApiDocumentFixture : IDisposable
     /// how the self-description shipped as a 500 with a green source test beside it.</para>
     /// </summary>
     public async Task<(HttpStatusCode Status, string? MediaType, string Body)> SendForResponseAsync(
-        string method, string url, string scope)
+        string method, string url, string scope, string? json = null)
     {
         using HttpRequestMessage request = new(new HttpMethod(method), url);
         request.Headers.Authorization = new AuthenticationHeaderValue("Bearer", TokenPerScope[scope]);
+
+        if (json is not null)
+        {
+            request.Content = new StringContent(json, System.Text.Encoding.UTF8, "application/json");
+        }
 
         using HttpResponseMessage response = await _client.SendAsync(request);
 
