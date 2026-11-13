@@ -2769,6 +2769,16 @@ public class VaultService(
     /// Regardless of the entry point, an environment-bound secret is only ever
     /// written to a cluster belonging to its own environment — cross-environment
     /// targets are refused so e.g. a prod secret can never land on a test cluster.
+    ///
+    /// <para>⚠️ <b>A scoped sync still has to account for the keys it cannot see.</b> A
+    /// shared secret may target a cluster in any environment, so a sync scoped to test
+    /// does reach a production cluster — and the Secret it writes there may also be fed
+    /// by production-bound secrets this call is not allowed to read. This writer deletes
+    /// the keys it owned last time and no longer holds, so a partial picture of its own
+    /// keys reads as a revocation: saving a test secret deleted a production one. Those
+    /// keys are therefore <em>retained</em> — named to the writer, neither written nor
+    /// deleted, and left recorded as the vault's so the sync that can see them keeps the
+    /// right to remove them.</para>
     /// </summary>
     public async Task<HelmExecutionResult> SyncAppSecretsToKubernetesAsync(
         Guid tenantId, Guid appId, CancellationToken ct = default, Guid? environmentId = null)
@@ -2776,13 +2786,29 @@ public class VaultService(
         using SecretsDbContext db = dbFactory.CreateDbContext();
 
         // Load ALL sync-enabled secrets — including those missing a cluster reference,
-        // so we can report them clearly instead of silently skipping. When scoped to
-        // an environment, only that environment's secrets and shared secrets apply.
-        List<VaultSecret> allSecrets = await db.Set<VaultSecret>()
+        // so we can report them clearly instead of silently skipping, and including the
+        // ones this call's environment is not allowed to write.
+        //
+        // ⚠️ The environment filter is applied below rather than here, and that is the
+        // whole point. A Kubernetes Secret is fed by every vault secret aimed at it,
+        // whatever environment each belongs to, and this writer deletes the keys it
+        // owned last time and no longer holds. Filtering in the query hands an
+        // environment-scoped sync a partial picture of its OWN keys, and the keys it
+        // cannot see read as keys it has dropped — so saving a test secret deleted a
+        // production one. The out-of-scope rows are needed by NAME only; no value of
+        // theirs is decrypted here.
+        List<VaultSecret> everySecret = await db.Set<VaultSecret>()
             .Include(s => s.KubernetesCluster)
-            .Where(s => s.AppId == appId && s.SyncToKubernetes
-                && (environmentId == null || s.EnvironmentId == null || s.EnvironmentId == environmentId))
+            .Where(s => s.AppId == appId && s.SyncToKubernetes)
             .ToListAsync(ct);
+
+        // What this call may write: shared secrets, plus the ones bound to this
+        // environment. An unscoped sync sees everything, so it retains nothing and
+        // behaves exactly as before.
+        bool InScope(VaultSecret s) =>
+            environmentId == null || s.EnvironmentId == null || s.EnvironmentId == environmentId;
+
+        List<VaultSecret> allSecrets = everySecret.Where(InScope).ToList();
 
         if (allSecrets.Count == 0)
         {
@@ -2818,9 +2844,18 @@ public class VaultService(
         // Only process secrets that are fully configured AND whose target cluster
         // is in the secret's environment (shared secrets — null EnvironmentId — may
         // target any of the app's clusters).
-        List<VaultSecret> actionable = allSecrets
-            .Where(s => s.KubernetesClusterId != null && !string.IsNullOrWhiteSpace(s.KubernetesSecretName)
-                && (s.EnvironmentId == null || s.KubernetesCluster?.EnvironmentId == s.EnvironmentId))
+        bool Actionable(VaultSecret s) =>
+            s.KubernetesClusterId != null && !string.IsNullOrWhiteSpace(s.KubernetesSecretName)
+            && (s.EnvironmentId == null || s.KubernetesCluster?.EnvironmentId == s.EnvironmentId);
+
+        List<VaultSecret> actionable = allSecrets.Where(Actionable).ToList();
+
+        // The same test over the rows this call may not write: what a sync with no
+        // environment scope would have put into these same Secrets. Used only to decide
+        // which key names to leave alone — never decrypted, never reported, and empty
+        // whenever this sync has no environment scope.
+        List<VaultSecret> actionableElsewhere = everySecret
+            .Where(s => !InScope(s) && Actionable(s))
             .ToList();
 
         if (actionable.Count == 0)
@@ -2891,28 +2926,62 @@ public class VaultService(
                     string k8sSecretName = group.Key.SecretName;
                     string ns = group.Key.Namespace;
 
-                    await clusterAccess.EnsureNamespaceAsync(ns, ct);
+                    // Every vault secret aimed at THIS Secret, including the ones this
+                    // call's environment may not write. They are here to be named, not
+                    // read.
+                    List<VaultSecret> aimedHere = actionableElsewhere
+                        .Where(s => s.SecretType == VaultSecretType.Opaque
+                            && s.KubernetesClusterId == clusterGroup.Key
+                            && s.KubernetesSecretName == k8sSecretName
+                            && (s.KubernetesNamespace ?? "default") == ns)
+                        .Concat(group)
+                        .ToList();
 
-                    // Decrypt each secret value. If a shared and an environment-bound
-                    // secret share the same key name in this target, the environment
-                    // -bound value wins (an explicit per-environment override).
-                    IEnumerable<VaultSecret> effective = group
-                        .GroupBy(s => s.Name)
-                        .Select(g => g.OrderByDescending(s => s.EnvironmentId.HasValue).First());
+                    // If a shared and an environment-bound secret share the same key name
+                    // in this target, the environment-bound value wins (an explicit
+                    // per-environment override). ⚠️ That is decided over every
+                    // environment's secrets, not just this call's — otherwise a
+                    // test-scoped sync writes the shared value over production's
+                    // override, which is the same defect as the deletion below wearing
+                    // different clothes.
+                    List<VaultSecret> effective = aimedHere
+                        .GroupBy(s => s.Name, StringComparer.Ordinal)
+                        .Select(g => g.OrderByDescending(s => s.EnvironmentId.HasValue).First())
+                        .ToList();
 
+                    // Split into the keys that are this call's to write and the keys that
+                    // are not. A retained key is neither written nor deleted, and stays
+                    // recorded as the vault's, so the sync that CAN see it keeps the right
+                    // to remove it when it is revoked.
                     Dictionary<string, string> values = [];
+                    List<string> retained = [];
 
                     foreach (VaultSecret vaultSecret in effective)
                     {
-                        values[vaultSecret.Name] =
-                            encryption.Decrypt(dataKey, vaultSecret.EncryptedValue, vaultSecret.Nonce);
+                        if (InScope(vaultSecret))
+                        {
+                            values[vaultSecret.Name] =
+                                encryption.Decrypt(dataKey, vaultSecret.EncryptedValue, vaultSecret.Nonce);
+                        }
+                        else
+                        {
+                            retained.Add(vaultSecret.Name);
+                        }
                     }
 
                     if (values.Count == 0)
                     {
-                        results.Add($"  (skipped '{k8sSecretName}/{ns}' — no decryptable values)");
+                        // Nothing failed and nothing needs doing: every key in this target
+                        // is another environment's. Leaving it untouched is the answer, and
+                        // ensuring its namespace would be a cluster change for no reason.
+                        results.Add(retained.Count > 0
+                            ? $"✓ Secret '{k8sSecretName}' in '{ns}' on '{cluster!.Name}' left untouched"
+                              + $" — all {retained.Count} of its vault key(s) belong to another environment"
+                            : $"  (skipped '{k8sSecretName}/{ns}' — no decryptable values)");
                         continue;
                     }
+
+                    await clusterAccess.EnsureNamespaceAsync(ns, ct);
 
                     try
                     {
@@ -2933,11 +3002,14 @@ public class VaultService(
                             EntKube.Web.Services.Clusters.SharedSecretKeys.Owners.Vault,
                             values.ToDictionary(v => v.Key, v => (string?)v.Value),
                             $"Sync {values.Count} secret key(s) into '{k8sSecretName}' in {ns}",
-                            ct);
+                            ct, retain: retained);
 
                         results.Add(
                             $"✓ Secret '{k8sSecretName}' synced to '{ns}' on '{cluster!.Name}'"
-                            + $" ({values.Count} keys)");
+                            + $" ({values.Count} keys)"
+                            + (retained.Count > 0
+                                ? $", leaving {retained.Count} key(s) to another environment's sync"
+                                : string.Empty));
                     }
                     catch (OperationCanceledException)
                     {

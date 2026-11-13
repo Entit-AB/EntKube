@@ -32,7 +32,8 @@ public static class SharedSecretKeys
 
     /// <summary>
     /// Sets this writer's keys, and deletes the ones it set last time but no longer has.
-    /// Keys belonging to other writers are left exactly as they are.
+    /// Keys belonging to other writers are left exactly as they are, and so are this writer's
+    /// own keys named in <paramref name="retain"/>.
     /// </summary>
     /// <param name="owner">
     /// Short, stable name for the writer — "vault", "cache", "messaging", and so on. It keys the
@@ -43,11 +44,24 @@ public static class SharedSecretKeys
     /// with configuration (a queue name that has been cleared, say); those are not recorded as
     /// owned.
     /// </param>
+    /// <param name="retain">
+    /// Keys this writer still owns but is not writing on this pass, because the caller is working
+    /// from a partial view of its own keys — an environment-scoped vault sync is the case this
+    /// exists for. They are neither patched nor deleted, and they stay in the ownership
+    /// annotation, so the caller that CAN see them keeps the right to remove them later.
+    ///
+    /// <para>⚠️ Not the same as passing them with a null value: null is the delete, so the
+    /// obvious reach for "leave this one alone" removes exactly the key it meant to protect.</para>
+    /// </param>
     public static async Task WriteAsync(
         IClusterClient cluster, string secretName, string ns, string owner,
         IReadOnlyDictionary<string, string?> keys, string? summary = null,
-        CancellationToken ct = default)
+        CancellationToken ct = default, IReadOnlyCollection<string>? retain = null)
     {
+        HashSet<string> retaining = retain is null
+            ? []
+            : new HashSet<string>(retain, StringComparer.Ordinal);
+
         IReadOnlyCollection<string> ownedBefore =
             await ReadOwnedAsync(cluster, secretName, ns, owner, ct);
 
@@ -58,15 +72,21 @@ public static class SharedSecretKeys
         // the delete-and-recreate this replaces was there to get.
         foreach (string dropped in ownedBefore)
         {
-            if (!patch.ContainsKey(dropped))
+            if (!patch.ContainsKey(dropped) && !retaining.Contains(dropped))
             {
                 patch[dropped] = null;
             }
         }
 
+        // Retained keys stay claimed. Dropping them from the annotation would not delete
+        // anything now, but it would orphan them: this writer would no longer own them, so
+        // nothing would ever delete them again — which is how a revoked credential outlives
+        // its revocation.
         List<string> ownedNow = keys
             .Where(k => k.Value is not null)
             .Select(k => k.Key)
+            .Concat(retaining)
+            .Distinct(StringComparer.Ordinal)
             .Order()
             .ToList();
 
