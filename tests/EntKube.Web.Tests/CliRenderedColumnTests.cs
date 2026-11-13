@@ -634,6 +634,94 @@ public class CliRenderedColumnTests
     }
 
     /// <summary>
+    /// ⚠️ <b>The fixture's rollout is FINISHED and carries a verdict</b>, because the
+    /// <c>VERDICT</c> column reads a field that is null for every release still inside its
+    /// analysis window — the most common row on the route. So this fact proves the column
+    /// resolves; it does not prove an operator watching a release in flight sees anything there,
+    /// and they do not. The same goes for <c>finishedAt</c>, which this command happens not to
+    /// render.
+    /// </summary>
+    [Fact]
+    public void The_rollouts_render_every_column()
+    {
+        EntKube.Contracts.Delivery.RolloutSummary rollout = new(
+            Id: Guid.Parse("50110000-0000-0000-0000-00000000000a"),
+            AppName: "billing",
+            DeploymentName: "billing-api-prod",
+            EnvironmentName: "prod",
+            ClusterName: "prod-north",
+            Status: EntKube.Contracts.Delivery.RolloutVerdictStatus.RolledBack,
+            StartedAt: new DateTime(2026, 11, 12, 6, 0, 0, DateTimeKind.Utc),
+            FinishedAt: new DateTime(2026, 11, 12, 6, 12, 0, DateTimeKind.Utc),
+            Verdict: "error rate 4.1% over the window, threshold 1%",
+            TriggeredBy: "nils@entit.se");
+
+        EveryColumnRenders(
+            Command("rollouts"),
+            JsonSerializer.Serialize(
+                new[] { RolloutResponse.From(rollout) }, AsTheApiSerialises));
+    }
+
+    /// <summary>
+    /// ⚠️ <b><c>LAST BACKUP</c> renders only because this fixture's usable backup has a
+    /// <c>CompletedAt</c>.</b> <c>VeleroBackup.IsUsable</c> does not require one, so a cluster can
+    /// answer <c>restorable: true</c> with <c>lastUsableBackupAt: null</c> — and this command
+    /// would then print a dash in that column beside a <c>RESTORABLE</c> of True. That
+    /// combination is reachable in production and is NOT what this fact measures; it is named in
+    /// <see cref="DrStatusResponse"/> and pinned in <c>RolloutDrWireShapeTests</c>.
+    ///
+    /// <para>The backup is <c>Completed</c> with no errors on purpose: a <c>PartiallyFailed</c>
+    /// one carries a completion time too, and would make <c>RESTORABLE</c> render <c>False</c>
+    /// while every other column stayed green.</para>
+    /// </summary>
+    [Fact]
+    public void The_disaster_recovery_posture_renders_every_column()
+    {
+        DateTime now = new(2026, 11, 12, 6, 0, 0, DateTimeKind.Utc);
+
+        EntKube.Web.Services.Dr.ClusterDrStatus status = new()
+        {
+            ClusterId = Guid.Parse("c0000000-0000-0000-0000-00000000000c"),
+            ClusterName = "prod-north",
+            IsVeleroInstalled = true,
+            Schedules =
+            [
+                new()
+                {
+                    Name = "daily",
+                    Cron = "0 2 * * *",
+                    LastBackupAt = now.AddHours(-4),
+                },
+            ],
+            Backups =
+            [
+                new()
+                {
+                    Name = "daily-20261112",
+                    Phase = EntKube.Web.Services.Dr.VeleroPhase.Completed,
+                    StartedAt = now.AddHours(-4),
+                    CompletedAt = now.AddHours(-4).AddMinutes(11),
+                },
+            ],
+            Restores =
+            [
+                new()
+                {
+                    Name = "drill-20261001",
+                    BackupName = "daily-20261001",
+                    Phase = EntKube.Web.Services.Dr.VeleroPhase.Completed,
+                    CompletedAt = now.AddDays(-42),
+                },
+            ],
+        };
+
+        EveryColumnRenders(
+            Command("dr"),
+            JsonSerializer.Serialize(
+                new[] { DrStatusResponse.From(status, now) }, AsTheApiSerialises));
+    }
+
+    /// <summary>
     /// ⚠️ The measure. The facts above are exactly the commands
     /// <see cref="CliColumnParityTests"/> can check against a schema, and they must stay in step:
     /// if a route gains a response type and no rendering fact is added for its command, this fails
@@ -650,6 +738,7 @@ public class CliRenderedColumnTests
             "advisor", "incidents", "error-budgets",
             "upgrades", "drift", "supply-chain",
             "vms list",
+            "rollouts", "dr",
         ];
 
         IEnumerable<string> describable =

@@ -2426,6 +2426,69 @@ Item 8 is no longer blocked on a question, only on work, and the work has an ord
 4. Then generate the clients — at which point the two ratchets that count this debt both read 0,
    and the CLI's rendering is verifiable for every command rather than twenty of twenty-two.
 
+### 6.10 The last two non-SCIM routes are typed, and what remains is only SCIM (2026-11-13)
+
+`GET /rollouts` and `GET /disaster-recovery` were the final two operations in
+`PublicApiEndpoints.cs` with no described success body. Typing them takes
+`ApiDocumentedResponsesTests.UndescribedSuccessBodies` from **9 to 7**, and the remaining seven are
+**entirely SCIM** — which is the state §6.9 step 3 described: everything that can be typed by
+transcription has been, and what is left is the part that has to be done deliberately.
+
+| | before | after |
+|---|---|---|
+| `UndescribedSuccessBodies` | 9 | **7** (all SCIM) |
+| `CliColumnParityTests.Unverifiable` | `{rollouts, dr}` | **empty** |
+| commands with a rendering fact | 20 of 22 | **22 of 22** |
+
+#### Both routes publish an enum whose ordinal-0 member is the consequential one
+
+This is the third group in a row where that was true, and it is no longer a coincidence worth
+noting per route — it is what these enums are for. `RolloutVerdictStatus.Watching` is 0: the state
+of every release still inside its analysis window, which is the row a client polling for an outcome
+reads most often. `DrSeverity.Critical` is 0: *"there is no usable backup; a cluster loss right now
+is unrecoverable"*. Typing either member as its enum rather than as `string` would publish a `0` on
+exactly the value that matters, and a client sorting by it would put the worst findings first by
+accident rather than by meaning.
+
+⚠️ `ApiRolloutStatusTests` already pinned the seven status strings against a hard-coded list, which
+is why that half was safe. Its two sibling facts are **not** that: they compare the contract enum to
+the *entity* enum and to the blueprint enum, so a rename applied to both declarations keeps them
+green. That is the eighth instance of the enum-parity shape this file has recorded, and the rule
+holds — **a published enum needs a literal, not a comparison between two declarations.**
+
+#### `restorable` is not "a backup finished", and the field beside it disagrees with it
+
+`restorable` is `LastUsableBackup is not null`, and `VeleroBackup.IsUsable` excludes
+`PartiallyFailed` on purpose: Velero stamps those with a completion time although they skipped
+resources, so anything asking merely "did it finish" reports an unrestorable cluster as protected.
+That is the error this subsystem is most likely to discover **during a restore**.
+
+⚠️ And the pair is not consistent. `IsUsable` requires a clean `Completed` phase and no errors; it
+does **not** require a `CompletedAt`. So `restorable: true` with `lastUsableBackupAt: null` is
+reachable, and a client inferring protection from the timestamp rather than from the flag reads a
+protected cluster as unprotected — the CLI prints a dash under `LAST BACKUP` beside a `RESTORABLE`
+of True. Reproduced as shipped, named on the record and pinned by a fact, rather than quietly
+"fixed" inside a typing change.
+
+#### One clock per response, and why the record takes it as an argument
+
+`DrReadiness.Evaluate` judges staleness against a `now`, so `DrStatusResponse.From` takes the
+instant rather than reading `DateTime.UtcNow` itself. A version that read the clock per cluster
+would compile, would pass every byte comparison in the wire-shape test, and would compare two
+clusters on one page to two different instants — with `StaleAfter` potentially between them, on the
+one finding the route exists to report. The fact that pins it asserts the gap set **differs**
+between two supplied instants, which a hard-coded `UtcNow` cannot satisfy.
+
+#### Still undeclared, and the list has grown by one
+
+`/disaster-recovery` answers **503** when no scan has completed for the tenant, and the document
+declares it nowhere. That joins `/sync`'s 422, `/restart`'s 400 and 422, `GET /cost`'s 503 and the
+six VM routes. The union return type is correct and deliberate — §6.9 established that
+`ProblemHttpResult` as a union member contributes no response to the document, so this is silence,
+not a false claim — but it is now **five routes and six statuses**, and the decision to add an
+explicit `.ProducesProblem` per route is still owed to every group at once rather than to whichever
+two happen to be in a change.
+
 ## 7. What not to do
 
 - **Don't split the database** beyond Support and Telemetry. 287 cross-entity navigations

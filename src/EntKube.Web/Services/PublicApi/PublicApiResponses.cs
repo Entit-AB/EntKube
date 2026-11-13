@@ -1657,3 +1657,146 @@ public sealed record SupplyChainImageResponse(
             DigestPinned: image.IsDigestPinned,
             Workloads: image.Workloads);
 }
+
+/// <summary>
+/// One watched release and the verdict its analysis window reached.
+///
+/// <para>⚠️ <b><c>status</c> is a string, not the enum.</b> <c>RolloutVerdictStatus.Watching</c> is
+/// ordinal <b>0</b>, so typing this member as the enum would publish <c>"status": 0</c> for every
+/// release still inside its window — the most common value on the route, and the one a client
+/// polling for an outcome reads. The handler called <c>.ToString()</c>; this keeps that.
+/// <c>ApiRolloutStatusTests</c> pins the seven strings themselves against a hard-coded list, which
+/// matters because the two sibling tests beside it compare the contract enum to the <em>entity</em>
+/// enum and so agree happily on a rename applied to both.</para>
+///
+/// <para>⚠️ <b>Seven adjacent strings.</b> <c>App</c>, <c>Deployment</c>, <c>Environment</c>,
+/// <c>Cluster</c>, <c>Status</c>, <c>Verdict</c> and <c>TriggeredBy</c> all carry text, so any
+/// positional swap compiles and publishes a cluster name as a verdict. Constructed by name below
+/// for that reason.</para>
+///
+/// <para><c>finishedAt</c> is null while the window is still open and <c>verdict</c> is null until
+/// the analyser reaches a sentence, so a row can legitimately carry <c>Watching</c> with both
+/// absent. That is not a missing value to retry for.</para>
+/// </summary>
+public sealed record RolloutResponse(
+    Guid Id,
+    string App,
+    string Deployment,
+    string Environment,
+    string Cluster,
+    string Status,
+    DateTime StartedAt,
+    DateTime? FinishedAt,
+    string? Verdict,
+    string? TriggeredBy)
+{
+    public static RolloutResponse From(EntKube.Contracts.Delivery.RolloutSummary rollout) =>
+        new(
+            Id: rollout.Id,
+            App: rollout.AppName,
+            Deployment: rollout.DeploymentName,
+            Environment: rollout.EnvironmentName,
+            Cluster: rollout.ClusterName,
+            // ⚠️ By NAME: Watching is ordinal 0.
+            Status: rollout.Status.ToString(),
+            StartedAt: rollout.StartedAt,
+            FinishedAt: rollout.FinishedAt,
+            Verdict: rollout.Verdict,
+            TriggeredBy: rollout.TriggeredBy);
+}
+
+/// <summary>
+/// One cluster's disaster-recovery posture: whether a restore is possible, when it was last
+/// possible, and what stands between the cluster and that being true.
+///
+/// <para>⚠️ <b><c>restorable</c> is NOT "a backup finished".</b> It is
+/// <c>LastUsableBackup is not null</c>, and <c>VeleroBackup.IsUsable</c> excludes
+/// <c>PartiallyFailed</c> deliberately — Velero stamps those with a completion time although they
+/// skipped resources, so anything that merely asks "did it finish" reports an unrestorable backup
+/// as protection. The distinction is the whole point of the field.</para>
+///
+/// <para>⚠️ <b><c>restorable: true</c> with <c>lastUsableBackupAt: null</c> is reachable.</b>
+/// <c>IsUsable</c> requires a clean <c>Completed</c> phase and no errors; it does not require a
+/// <c>CompletedAt</c>. A client that infers protection from the timestamp rather than from the
+/// flag therefore reads a protected cluster as unprotected, and the CLI's <c>LAST BACKUP</c>
+/// column renders a dash beside a <c>RESTORABLE</c> of yes. Reproduced as shipped.</para>
+///
+/// <para>⚠️ <b><c>gaps</c> is computed, not stored</b> — <c>DrReadiness.Evaluate</c> is run
+/// against a clock, so two reads of the same cached scan differ as a backup ages past
+/// <c>StaleAfter</c>. That is why <see cref="From"/> takes the instant as an argument rather than
+/// reading <c>DateTime.UtcNow</c> itself: one timestamp must serve the whole page, or two clusters
+/// in one response are judged against two different "now"s.</para>
+///
+/// <para><c>ClusterDrStatus</c> also carries <c>Backups</c>, <c>Restores</c>,
+/// <c>StorageLocations</c> and the <c>Schedules</c> themselves; only the schedule <em>count</em>
+/// has ever been on the wire. An operator asking which schedule is paused has to open the UI.</para>
+/// </summary>
+public sealed record DrStatusResponse(
+    Guid ClusterId,
+    string Cluster,
+    bool VeleroInstalled,
+    string? Error,
+    bool Restorable,
+    DateTime? LastUsableBackupAt,
+    DateTime? LastRestoreAt,
+    int ScheduleCount,
+    IEnumerable<DrGapResponse> Gaps)
+{
+    /// <summary>
+    /// ⚠️ <b>Named arguments, and here two <c>bool</c>s sit beside each other on opposite
+    /// meanings.</b> <c>VeleroInstalled</c> says the machinery is present; <c>Restorable</c> says
+    /// it has produced something usable. A cluster with Velero installed and no clean backup is
+    /// the normal first state, so swapping the two reports an unprotected cluster as protected —
+    /// and both orderings compile.
+    /// </summary>
+    /// <param name="now">
+    /// The instant every gap on the response is judged against. Passed in so one request's
+    /// clusters are compared to one clock.
+    /// </param>
+    public static DrStatusResponse From(
+        EntKube.Web.Services.Dr.ClusterDrStatus status, DateTime now) =>
+        new(
+            ClusterId: status.ClusterId,
+            Cluster: status.ClusterName,
+            VeleroInstalled: status.IsVeleroInstalled,
+            Error: status.Error,
+            // "restorable" reflects a clean backup only — a partially-failed backup has
+            // skipped resources and is not something to report as recoverable.
+            Restorable: status.LastUsableBackup is not null,
+            LastUsableBackupAt: status.LastUsableBackup?.CompletedAt,
+            LastRestoreAt: status.LastSuccessfulRestore?.CompletedAt,
+            ScheduleCount: status.Schedules.Count,
+            Gaps: EntKube.Web.Services.Dr.DrReadiness.Evaluate(status, now)
+                .Select(DrGapResponse.From));
+}
+
+/// <summary>
+/// One thing wrong with a cluster's disaster-recovery posture.
+///
+/// <para>⚠️ <b><c>severity</c> is a string, not the enum, and <c>DrSeverity.Critical</c> is
+/// ordinal <b>0</b></b> — "there is no usable backup; a cluster loss right now is
+/// unrecoverable". Publishing the number would put <c>0</c> on the single most consequential
+/// finding this API can report, where a reader scanning for trouble expects a word and a sorter
+/// would place it first by accident rather than by meaning.</para>
+///
+/// <para>⚠️ <b>Five adjacent strings.</b> <c>Key</c>, <c>Severity</c>, <c>Title</c>,
+/// <c>Detail</c> and <c>Remediation</c>, so every positional mistake compiles. <c>Key</c> is the
+/// stable identity the advisor snoozes against, which makes a swap between it and <c>Title</c>
+/// quietly un-snooze every finding.</para>
+/// </summary>
+public sealed record DrGapResponse(
+    string Key,
+    string Severity,
+    string Title,
+    string Detail,
+    string? Remediation)
+{
+    public static DrGapResponse From(EntKube.Web.Services.Dr.DrGap gap) =>
+        new(
+            Key: gap.Key,
+            // ⚠️ By NAME: Critical is ordinal 0.
+            Severity: gap.Severity.ToString(),
+            Title: gap.Title,
+            Detail: gap.Detail,
+            Remediation: gap.Remediation);
+}
