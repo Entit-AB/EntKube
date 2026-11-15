@@ -33,9 +33,15 @@ public class CliEndpointParityTests(GeneratedOpenApiDocumentFixture fixture)
     /// <summary>
     /// Named exemptions, not silent gaps.
     ///
-    /// <para><c>PUT /api/v1/cost-rates/{clusterId}</c> takes a <c>CostRateInput</c> body and the
-    /// shared API client deliberately has no body-carrying verb, so reaching it needs request-body
-    /// support in the CLI designed alongside the command — a larger change than the command.</para>
+    /// <para><c>PUT /api/v1/cost-rates/{clusterId}</c> takes a <c>CostRateInput</c> body. What the
+    /// CLI lacks is a way for an operator to SUPPLY one — six prices, a currency and two flags,
+    /// as flags or as a file — and designing that is a larger change than the command.</para>
+    ///
+    /// <para>⚠️ <b>This reason was rewritten once more, and for the same kind of mistake.</b> It
+    /// used to say "the shared API client deliberately has no body-carrying verb", which stopped
+    /// being true when <c>EntKubeApiClient</c> gained <c>SendJsonAsync</c> for the generated
+    /// client — and nothing went red, because a ratchet counts exemptions and never reads them.
+    /// The transport was never the real obstacle anyway; the operator interface is.</para>
     ///
     /// <para>⚠️ <b>The reason first written here was wrong, in the reassuring direction.</b> It
     /// said a bodyless PUT would be read as "no fields supplied", turning a partial update into a
@@ -50,8 +56,11 @@ public class CliEndpointParityTests(GeneratedOpenApiDocumentFixture fixture)
     /// <para>The seven <c>/scim/v2</c> operations came into view when this ratchet moved off its
     /// regex and onto the router. They are exempt for a reason that is not "not yet":
     /// <c>scim:provision</c> is its own scope because the token holding it is handed to a directory
-    /// connector, and a general-purpose operator CLI is not that connector. Three of them need a
-    /// request body besides.</para>
+    /// connector, and a general-purpose operator CLI is not that connector.</para>
+    ///
+    /// <para>⚠️ "Three of them need a request body besides" used to follow, and is gone rather
+    /// than corrected: it was a second reason resting on a capability the client now has, and the
+    /// scope argument above never needed it.</para>
     /// </summary>
     private static readonly HashSet<string> NoCommandYet = new(StringComparer.Ordinal)
     {

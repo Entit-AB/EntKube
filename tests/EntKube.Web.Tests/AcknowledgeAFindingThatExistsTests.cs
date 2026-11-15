@@ -274,10 +274,11 @@ public sealed class AcknowledgeAFindingThatExistsTests : IDisposable
     /// <summary>
     /// The document says the route can refuse, so a generated client handles it.
     ///
-    /// <para>⚠️ The 404 only. Typing the 200 would move <c>UndescribedSuccessBodies</c> and pull in
-    /// the three companion ratchet edits that come with it (docs/decomposition.md §6.9), which
-    /// belongs to the typing programme rather than to this fix — and <c>.Produces</c> for a status
-    /// with no body adds no 2xx entry, so every banked count stays where it is.</para>
+    /// <para>⚠️ The 404 only, <b>when this was written</b>: typing the 200 would have moved
+    /// <c>UndescribedSuccessBodies</c> and pulled in the three companion ratchet edits that came
+    /// with it (docs/decomposition.md §6.9), which belonged to the typing programme rather than to
+    /// this fix. That programme has since finished — the 200 is typed and the count is 0 — so this
+    /// paragraph is why the scope was drawn there at the time, not a claim about today.</para>
     /// </summary>
     [Fact]
     public void The_document_declares_the_refusal()
