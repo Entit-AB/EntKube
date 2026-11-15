@@ -80,9 +80,19 @@ public abstract class ScimJsonResult : IResult
         public Type? Type => type;
         public int StatusCode => statusCode;
 
-        // ⚠️ A 204 declares NO content type. An entry naming a media type while carrying no type
-        // is inconsistent, and the description layer drops it silently — which left the deletion
-        // documented as answering only its two ways of failing.
+        // ⚠️ A 204 declares no content type — and this comment used to claim that was the fix
+        // for the deletion being documented as answering only its two ways of failing. It is not.
+        //
+        // Measured by mutation rather than reasoned about. With `Type` set to `typeof(void)`,
+        // putting the media type back changes the generated document not at all: the description
+        // layer ignores a content type on a response that carries no body, so that mutation is a
+        // no-op and not one test fails. What actually discarded the 204 was `Type` being NULL,
+        // which drops the entry outright — restoring that null fails five tests, one of them
+        // `UndescribedSuccessBodies`, because the deletion goes straight back to undescribed.
+        //
+        // The distinction is kept anyway, as a defence rather than the fix: an entry that says
+        // "no body" while naming a media type is self-contradictory even where it is inert, and
+        // inert in this framework version is not a promise about the next one.
         public IEnumerable<string> ContentTypes => hasBody ? [ContentType] : [];
     }
 }
