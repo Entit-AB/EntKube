@@ -121,7 +121,7 @@ public class ScimUserMappingTests
     [Fact]
     public void Renders_a_user_as_a_scim_resource()
     {
-        JsonObject resource = ScimUserService.ToScim(User());
+        JsonObject resource = ScimAsWritten.Object(ScimUserService.ToScim(User()));
 
         resource["id"]!.GetValue<string>().Should().Be("user-1");
         resource["userName"]!.GetValue<string>().Should().Be("someone@example.com");
@@ -133,7 +133,7 @@ public class ScimUserMappingTests
     [Fact]
     public void A_far_future_lockout_renders_as_inactive()
     {
-        ScimUserService.ToScim(User(DateTimeOffset.MaxValue))["active"]!
+        ScimAsWritten.Object(ScimUserService.ToScim(User(DateTimeOffset.MaxValue)))["active"]!
             .GetValue<bool>().Should().BeFalse();
     }
 
@@ -143,14 +143,14 @@ public class ScimUserMappingTests
         // Someone locked out for fifteen minutes after mistyping their password has not
         // been removed from the directory, and reporting them as inactive would make the
         // IdP believe a deprovision it never issued had taken effect.
-        ScimUserService.ToScim(User(DateTimeOffset.UtcNow.AddMinutes(15)))["active"]!
+        ScimAsWritten.Object(ScimUserService.ToScim(User(DateTimeOffset.UtcNow.AddMinutes(15))))["active"]!
             .GetValue<bool>().Should().BeTrue();
     }
 
     [Fact]
     public void A_past_lockout_renders_as_active()
     {
-        ScimUserService.ToScim(User(DateTimeOffset.UtcNow.AddDays(-1)))["active"]!
+        ScimAsWritten.Object(ScimUserService.ToScim(User(DateTimeOffset.UtcNow.AddDays(-1))))["active"]!
             .GetValue<bool>().Should().BeTrue();
     }
 
@@ -398,8 +398,8 @@ public class ScimErrorBodyTests
     [Fact]
     public void A_refusal_carries_its_scim_keyword()
     {
-        JsonObject body = ScimEndpoints.ErrorBody(
-            ScimResult.BadRequest("A replace of 'active' requires a value.", ScimTypes.InvalidValue));
+        JsonObject body = ScimAsWritten.Object(ScimEndpoints.ErrorBody(
+            ScimResult.BadRequest("A replace of 'active' requires a value.", ScimTypes.InvalidValue)));
 
         body["schemas"]!.AsArray()[0]!.GetValue<string>().Should().Be(ScimUserService.ErrorSchema);
         body["scimType"]!.GetValue<string>().Should().Be("invalidValue");
@@ -414,7 +414,8 @@ public class ScimErrorBodyTests
     [Fact]
     public void The_status_is_a_string_not_a_number()
     {
-        JsonObject body = ScimEndpoints.ErrorBody(ScimResult.NotFound("No user with id 'x'."));
+        JsonObject body = ScimAsWritten.Object(
+            ScimEndpoints.ErrorBody(ScimResult.NotFound("No user with id 'x'.")));
 
         body["status"]!.GetValue<string>().Should().Be("404");
         body["status"]!.GetValueKind().Should().Be(System.Text.Json.JsonValueKind.String);
@@ -424,7 +425,7 @@ public class ScimErrorBodyTests
     [Fact]
     public void A_conflict_is_reported_as_uniqueness_by_default()
     {
-        ScimEndpoints.ErrorBody(ScimResult.Conflict("already exists"))["scimType"]!
+        ScimAsWritten.Object(ScimEndpoints.ErrorBody(ScimResult.Conflict("already exists")))["scimType"]!
             .GetValue<string>().Should().Be("uniqueness");
     }
 
@@ -435,7 +436,7 @@ public class ScimErrorBodyTests
     [Fact]
     public void A_failure_with_no_keyword_omits_the_member_entirely()
     {
-        ScimEndpoints.ErrorBody(ScimResult.BadRequest("userName is required."))
+        ScimAsWritten.Object(ScimEndpoints.ErrorBody(ScimResult.BadRequest("userName is required.")))
             .ContainsKey("scimType").Should().BeFalse();
     }
 }

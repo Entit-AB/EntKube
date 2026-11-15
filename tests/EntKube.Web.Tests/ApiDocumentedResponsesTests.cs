@@ -28,13 +28,26 @@ namespace EntKube.Web.Tests;
 public class ApiDocumentedResponsesTests(GeneratedOpenApiDocumentFixture fixture)
 {
     /// <summary>
-    /// Operations answering a 2xx with no schema for it. Lower this as handlers are typed; it
-    /// reaching 0 is the precondition for generating the clients.
+    /// Operations answering a 2xx with no schema for it.
+    ///
+    /// <para><b>This is 0, and it is the end of the programme it measured.</b> Every operation on
+    /// the API now describes the body it answers with, so a generated client has a named type per
+    /// response and <c>docs/decomposition.md</c> item 8 is unblocked. The assertion stays, and it
+    /// is now a floor rather than a ceiling: the number may not RISE. A route that ships
+    /// answering a shape nothing can describe puts the generated clients back to returning
+    /// <c>object</c> for it, and that is the regression this now exists to catch.</para>
     /// </summary>
-    private const int UndescribedSuccessBodies = 7;
+    private const int UndescribedSuccessBodies = 0;
 
-    /// <summary>Operations whose success is a 204 and so has nothing to describe.</summary>
-    private const int BodylessSuccesses = 1;
+    /// <summary>
+    /// Operations whose success is a 204 and so has nothing to describe: the public API's
+    /// deletion, and SCIM's.
+    ///
+    /// <para>⚠️ Pinned precisely because a 204 is the one excuse from describing a body. Left
+    /// unpinned, the count above could be driven to 0 by declaring success bodyless rather than
+    /// by describing it.</para>
+    /// </summary>
+    private const int BodylessSuccesses = 2;
 
     /// <param name="StatedScope">
     /// Null when the document says any live token suffices — the case where the filter has

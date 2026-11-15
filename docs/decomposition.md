@@ -2489,6 +2489,79 @@ not a false claim — but it is now **five routes and six statuses**, and the de
 explicit `.ProducesProblem` per route is still owed to every group at once rather than to whichever
 two happen to be in a change.
 
+### 6.11 `UndescribedSuccessBodies` is 0 — SCIM typed, item 8 unblocked (2026-11-14)
+
+The seven SCIM operations are typed, and every operation on the API now describes the body it
+answers with. A client generated from the document returns a named type for every call instead of
+`object`, which is the thing item 8 was waiting for.
+
+| | before | after |
+|---|---|---|
+| `UndescribedSuccessBodies` | 7 (all SCIM) | **0** |
+| `BodylessSuccesses` | 1 | 2 (the SCIM deletion joins the public API's) |
+| operations with a named `$ref` success schema | 36 of 43 | **43 of 43**, less the two 204s |
+
+#### What typing SCIM actually cost, as opposed to what §6.9 predicted
+
+§6.9 predicted four hazards and they were all real: capital-R `Resources`, `status` as a string,
+`scimType` absent rather than null, and no member declared that is not meant to be emitted. Each
+is now carried by an **attribute on the record** rather than by a convention, because a convention
+is what a later reader changes without seeing what it was holding.
+
+The fifth hazard is the one §6.9 named but did not cost out: **the media type**. It is worse than
+"use `TypedResults.Json` instead of `TypedResults.Ok`", because there are two distinct failures
+and the obvious fix only closes one.
+
+| attempt | the wire | the document |
+|---|---|---|
+| `TypedResults.Ok(record)` | `application/json` — connectors reject it | `application/json` |
+| `TypedResults.Json(record, contentType: scim)` | `application/scim+json` ✓ | **`application/json`** — it is hardcoded in `JsonHttpResult<T>.PopulateMetadata` |
+| `ScimOk<T>` / `ScimCreated<T>` / `ScimNoContent` | `application/scim+json` ✓ | `application/scim+json` ✓ |
+
+⚠️ The middle row is the trap, and it would have passed every ratchet in the repository. The
+document would have told a generated client to send `Accept: application/json` to a route that
+answers `application/scim+json`, and **`UndescribedSuccessBodies` cannot see it** — that count
+asks whether a schema is present, never what media type it is declared under. `ScimDocumentedResponseTests.Every_scim_success_is_declared_as_scim_json` is the assertion that
+closes it, and it is new: nothing in this repository compared a declared media type to a written
+one before.
+
+⚠️ **Three result types, not one, because `PopulateMetadata` is `static`.** It cannot read a status
+off an instance, so a single `ScimJson<T>` would have to declare one status for all seven
+operations — documenting every creation as 200 and the deletion as a 200 with no schema. The
+second of those is the undescribed body this whole programme was about, arriving back through the
+fix for it.
+
+⚠️ **A 204 must declare no content type.** A metadata entry naming a media type while carrying no
+type is inconsistent and the description layer drops it **silently** — which left the deletion
+documented as answering only its two ways of failing, and was only visible because
+`UndescribedSuccessBodies` refused to reach 0.
+
+#### The pre-pin paid for itself, and so did reading the serializer rather than the object
+
+`ScimWireShapeTests` was written in §6.9 before the change it guards. Of eleven mutations applied
+to the finished work, ten were caught by tests and the eleventh — `status` as an `int` — does not
+compile in its naive form and is caught by eight tests in the form that does. No hazard §6.9
+predicted got through.
+
+⚠️ The existing assertions had to change in one respect, and it made them stronger: they read keys
+off the hand-built `JsonObject`, and now read what **the server's own serializer** writes. Every
+hazard above lives in serialisation, not in an object's in-memory keys — and a test serialising
+with its own `JsonSerializerOptions` would keep passing through a change to the real ones, which is
+where the camelCase that renames `Resources` comes from in the first place.
+
+#### What is next, and what is still not declared
+
+Item 8 proper: generate `EntKube.ApiClient`, the CLI and the MCP server from the document instead
+of hand-maintaining three clients.
+
+⚠️ **Error responses are still undeclared per route.** `401` and `403` are declared centrally in
+`RequireApiScope`, so every operation carries them. But the `503` on `GET /cost` and
+`GET /disaster-recovery`, the `422` on `/sync`, the `400` and `422` on `/restart`, the VM routes
+and SCIM's own envelope are described nowhere, and the ten `ProblemHttpResult` union members
+contribute **nothing** to the document. A generated client needs error shapes as much as success
+shapes, so this is the next piece of item 8 rather than a separate concern — and it has now been
+deferred five times.
+
 ## 7. What not to do
 
 - **Don't split the database** beyond Support and Telemetry. 287 cross-entity navigations
